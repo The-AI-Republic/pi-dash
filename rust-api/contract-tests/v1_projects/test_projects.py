@@ -295,25 +295,26 @@ def test_patch_archived_400(seed):
     http.delete(seed["keys"][KEY], f"{base(seed)}/{created['id']}/archive/", expect=204)
 
 
-def test_patch_timezone_pytz_2024_1_membership(seed, conn):
-    # PIDASHCONV-1389: the v1 project timezone ChoiceField must match
-    # pytz 2024.1 exactly (db/models/project.py:122). Asia/Choibalsan is
-    # accepted (200 + stored); America/Coyhaique is rejected (400).
+def test_patch_timezone_pytz_2025_2_membership(seed, conn):
+    # PIDASHCONV-1389 / PDASHOSS01-331: the v1 project timezone ChoiceField
+    # must match pytz 2025.2 exactly (db/models/project.py:122).
+    # America/Coyhaique is accepted (200 + stored); Asia/Choibalsan, which
+    # left common_timezones, is rejected (400).
     tag = db.new_tag()
     created = http.post(seed["keys"][KEY], base(seed) + "/",
                         json={"name": f"CT Tz {tag}",
                               "identifier": f"T{tag.upper()}"[:12]}, expect=201).json()
     url = f"{base(seed)}/{created['id']}/"
     r = http.patch(seed["keys"][KEY], url,
-                   json={"timezone": "Asia/Choibalsan"}, expect=200).json()
-    assert r["timezone"] == "Asia/Choibalsan"
+                   json={"timezone": "America/Coyhaique"}, expect=200).json()
+    assert r["timezone"] == "America/Coyhaique"
     saved = db.fetch_one(conn, "SELECT timezone FROM projects WHERE id = %s", (created["id"],))
-    assert saved == {"timezone": "Asia/Choibalsan"}
+    assert saved == {"timezone": "America/Coyhaique"}
     r = http.patch(seed["keys"][KEY], url,
-                   json={"timezone": "America/Coyhaique"}, expect=400)
-    assert r.json() == {"timezone": ['"America/Coyhaique" is not a valid choice.']}
+                   json={"timezone": "Asia/Choibalsan"}, expect=400)
+    assert r.json() == {"timezone": ['"Asia/Choibalsan" is not a valid choice.']}
     saved = db.fetch_one(conn, "SELECT timezone FROM projects WHERE id = %s", (created["id"],))
-    assert saved == {"timezone": "Asia/Choibalsan"}
+    assert saved == {"timezone": "America/Coyhaique"}
 
 
 def test_delete(seed, conn):

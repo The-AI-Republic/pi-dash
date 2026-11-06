@@ -3148,6 +3148,7 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "America/Chihuahua",
     "America/Ciudad_Juarez",
     "America/Costa_Rica",
+    "America/Coyhaique",
     "America/Creston",
     "America/Cuiaba",
     "America/Curacao",
@@ -3281,7 +3282,6 @@ pub const PYTZ_COMMON_TIMEZONES: &[&str] = &[
     "Asia/Bishkek",
     "Asia/Brunei",
     "Asia/Chita",
-    "Asia/Choibalsan",
     "Asia/Colombo",
     "Asia/Damascus",
     "Asia/Dhaka",
@@ -7527,9 +7527,9 @@ mod tests {
     /// pre-transition offset, pytz never raises. Oracle pytz 2026.4 over
     /// every fold/gap midnight 1990-2035 across `common_timezones` (1126
     /// rows, 0 mismatches); this table pins the review cases plus a
-    /// stratified sample (the scratch-oracle pytz 2024.1 disagrees on 20
-    /// rows where its tzdata predates IANA revisions — Asuncion permanent
-    /// -03, Mongolia 1990s — current pytz agrees with the port on all).
+    /// stratified sample (the old pytz 2024.1 disagreed on 20 rows where
+    /// its tzdata predates IANA revisions — Asuncion permanent -03,
+    /// Mongolia 1990s; Django now pins pytz 2025.2, PDASHOSS01-331).
     #[test]
     fn project_midnight_pytz_parity() {
         for (zone, day, expected) in [
