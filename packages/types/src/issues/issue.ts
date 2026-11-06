@@ -157,6 +157,8 @@ export type TIssueAgentRunSummary = {
   assigned_at: string | null;
   started_at: string | null;
   ended_at: string | null;
+  cancel_requested_at?: string | null;
+  cancel_reason?: string;
   done_payload: Record<string, unknown> | null;
   error: string;
   error_code: string;

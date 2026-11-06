@@ -174,6 +174,22 @@ export function getRunView(
   now: number,
   t: TranslationFn
 ): AgentStatusView {
+  // Cloud runs stay RUNNING while a cancel is pending (the worker holds
+  // capacity until it finalizes), so they show "Stopping" when the stamp
+  // is present even though the status has not yet moved to cancel_requested.
+  const isCloudCancelling = run.status === "running" && run.cancel_requested_at != null;
+  if (isCloudCancelling) {
+    const liveDetail = getLiveDetail(run, now, t);
+    const runnerDetail = run.runner_name ? t("Runner: {name}", { name: run.runner_name }) : liveDetail;
+    return {
+      title: t("Stopping the AI agent"),
+      detail: runnerDetail ?? t("Waiting for the runner to confirm cancellation."),
+      badge: t("Stopping"),
+      badgeVariant: "warning" as const,
+      icon: LoaderCircle,
+      iconClassName: "animate-spin text-warning-primary",
+    };
+  }
   const liveDetail = getLiveDetail(run, now, t);
   const runnerDetail = run.runner_name ? t("Runner: {name}", { name: run.runner_name }) : null;
   const nextTick = formatUntil(ticker?.next_run_at, now, t);
@@ -436,7 +452,9 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   const activeRun = status?.active_run;
   const activeRunStatus = activeRun?.status;
   const hasActiveAgentRun = Boolean(activeRunStatus && ACTIVE_RUN_STATUSES.has(activeRunStatus));
-  const canAbortActiveRun = hasActiveAgentRun && activeRunStatus !== "cancel_requested";
+  const isCancelling =
+    activeRunStatus === "cancel_requested" || (activeRun?.cancel_requested_at != null && activeRunStatus === "running");
+  const canAbortActiveRun = hasActiveAgentRun && !isCancelling;
   const view = useMemo(() => getAgentStatusView(issue, now, t), [issue, now, t]);
   const canReTick = Boolean(ticker?.can_re_tick);
   const { reTick, isSubmitting: isReTicking } = useReTick();

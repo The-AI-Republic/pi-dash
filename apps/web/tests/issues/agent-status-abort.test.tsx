@@ -77,7 +77,10 @@ import { IssueAgentStatusPanel } from "../../core/components/issues/issue-detail
 
 const ISSUE_OPS = { fetch: vi.fn() };
 
-function makeIssue(status: string): TIssue {
+function makeIssue(
+  status: string,
+  extra: { cancel_requested_at?: string | null; executor_kind?: string } = {}
+): TIssue {
   return {
     id: "issue-1",
     agent_status: {
@@ -85,12 +88,15 @@ function makeIssue(status: string): TIssue {
       active_run: {
         id: "run-1",
         status,
+        executor_kind: extra.executor_kind ?? "local_runner",
         runner: "runner-1",
         runner_name: "workx_claude01",
         created_at: "2026-07-21T00:00:00Z",
         assigned_at: null,
         started_at: null,
         ended_at: null,
+        cancel_requested_at: extra.cancel_requested_at ?? null,
+        cancel_reason: "",
         done_payload: null,
         error: "",
         error_diagnostic: null,
@@ -148,5 +154,17 @@ describe("IssueAgentStatusPanel abort run", () => {
   it("hides the abort button once the run is terminal", () => {
     renderPanel(makeIssue("cancelled"));
     expect(screen.queryByText("Abort run")).toBeNull();
+  });
+
+  it("cloud RUNNING with a cancel stamp shows Stopping and hides Abort", () => {
+    renderPanel(makeIssue("running", { cancel_requested_at: "2026-07-21T00:00:05Z", executor_kind: "cloud_agent" }));
+    expect(screen.getByText("Stopping")).toBeTruthy();
+    expect(screen.queryByText("Abort run")).toBeNull();
+  });
+
+  it("cloud RUNNING without a stamp still shows Working and Abort", () => {
+    renderPanel(makeIssue("running", { executor_kind: "cloud_agent" }));
+    expect(screen.getByText("Working")).toBeTruthy();
+    expect(screen.getByText("Abort run")).toBeTruthy();
   });
 });
