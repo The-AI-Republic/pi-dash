@@ -432,7 +432,9 @@ fn command_token(
 fn is_token_fatal(e: &TransportError) -> bool {
     matches!(
         e,
-        TransportError::MachineTokenRevoked | TransportError::MembershipRevoked
+        TransportError::MachineTokenRevoked
+            | TransportError::MachineTokenExpired
+            | TransportError::MembershipRevoked
     )
 }
 
@@ -588,6 +590,7 @@ mod tests {
     /// whose polls return no messages. Records `(method path, bearer)`.
     async fn fake_machine_cloud(
         revoked: &'static [&'static str],
+        error_code: &'static str,
     ) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -649,7 +652,7 @@ mod tests {
                             if revoked.contains(&bearer.as_str()) {
                                 (
                                     "401 Unauthorized",
-                                    r#"{"error":"machine_token_revoked"}"#.to_string(),
+                                    serde_json::json!({"detail": error_code}).to_string(),
                                 )
                             } else {
                                 (
@@ -691,7 +694,16 @@ mod tests {
 
     #[tokio::test]
     async fn session_reopens_with_another_workspace_token_when_one_is_revoked() {
-        let (url, seen) = fake_machine_cloud(&["mt_acme"]).await;
+        assert_session_reopens("machine_token_revoked").await;
+    }
+
+    #[tokio::test]
+    async fn session_reopens_with_another_workspace_token_when_one_is_expired() {
+        assert_session_reopens("machine_token_expired").await;
+    }
+
+    async fn assert_session_reopens(error_code: &'static str) {
+        let (url, seen) = fake_machine_cloud(&["mt_acme"], error_code).await;
         let tmp = tempfile::tempdir().unwrap();
         let paths = crate::util::paths::Paths {
             config_dir: tmp.path().join("config"),
@@ -754,7 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_waits_for_a_sign_in_when_every_token_is_revoked() {
-        let (url, seen) = fake_machine_cloud(&["mt_acme"]).await;
+        let (url, seen) = fake_machine_cloud(&["mt_acme"], "machine_token_revoked").await;
         let tmp = tempfile::tempdir().unwrap();
         let paths = crate::util::paths::Paths {
             config_dir: tmp.path().join("config"),
