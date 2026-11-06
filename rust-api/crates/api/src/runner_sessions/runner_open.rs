@@ -77,8 +77,10 @@
 //! # Ported bugs (translate, don't redesign; also listed in the PR)
 //!
 //! * BUG-open-hello-reaps (`session_service.py:142-147`): `apply_hello`
-//!   ends with `reap_stale_busy_runs(exclude_redeliverable=True)`,
-//!   so every session open may fail stale `RUNNING` runs.
+//!   runs `reap_stale_busy_runs(exclude_redeliverable=True)`,
+//!   so every session open may fail stale `RUNNING` runs. It then
+//!   reconciles a stale `busy` runner back to `online` when the hello
+//!   reports nothing in flight (`:149-164`, PDASHOSS01-231).
 //! * BUG-open-barrier-always-empty (`:246-254` with the open-path
 //!   exclusion): the stopped-cancel scans run but `CANCEL_REQUESTED`
 //!   is never reapable here, so the barrier write and the project-move
@@ -141,6 +143,7 @@ use pidash_services::runner_runs::chat as chat_kernel;
 use pidash_services::runner_runs::chat::ChatEffect;
 use pidash_services::runner_runs::finalization;
 use pidash_services::runner_runs::LifecycleEffect;
+use pidash_services::runner_sessions::drain as drain_kernel;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
@@ -1011,6 +1014,30 @@ async fn execute_reap_open(
     Ok(())
 }
 
+/// The `apply_hello` stale-busy reconcile (`session_service.py:149-164`,
+/// PDASHOSS01-231), after the reaper: when the hello reports no
+/// `in_flight_run`, flip a `busy` runner with no busy-status run back
+/// to `online` and log the release. No drain is queued — dispatch
+/// still waits for the session's first poll.
+async fn execute_release_on_open(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    body: &Map<String, Value>,
+) -> Result<(), TxnFail> {
+    if !session_kernel::should_release_on_open(body.get("in_flight_run")) {
+        return Ok(());
+    }
+    let released = sqlx::query(drain_kernel::RELEASE_RUNNER_IF_IDLE_SQL)
+        .bind(runner_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(TxnFail::from)?;
+    if released.rows_affected() > 0 {
+        tracing::info!("{}", session_kernel::release_on_open_log(&runner_id));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Chat release (`release_active_chats_for_runner`, `chat.py:451-480`)
 // ---------------------------------------------------------------------------
@@ -1345,6 +1372,7 @@ async fn open_transaction(
     execute_hello(&mut tx, runner, body).await?;
     let mut effects = OpenEffects::default();
     execute_reap_open(&mut tx, runner.id, body, &mut effects).await?;
+    execute_release_on_open(&mut tx, runner.id, body).await?;
     execute_chat_release(&mut tx, runner.id, &mut effects.chat).await?;
     tx.commit().await.map_err(TxnFail::from)?;
     Ok((OpenTxnOutcome { old_session_id }, effects))

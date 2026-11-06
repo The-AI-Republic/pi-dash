@@ -108,6 +108,51 @@ def test_daemon_runner_session_open_rejects_project_mismatch(machine_client, mac
     assert response.json()["expected"]
 
 
+# -- stale-busy reconcile on session open (PDASHOSS01-231) ----------------
+
+def _set_runner_status(seeder, runner_id: str, status: str) -> None:
+    seeder.db.execute("UPDATE runner SET status = %s WHERE id = %s", (status, runner_id))
+
+
+def _runner_status(seeder, runner_id: str) -> str:
+    return seeder.db.fetchval("SELECT status FROM runner WHERE id = %s", (runner_id,))
+
+
+def test_daemon_runner_session_open_releases_stale_busy(machine_client, machine_flow, seeder):
+    # A daemon restarted mid-run reopens with nothing in flight and no
+    # busy-status run left: the stale ``busy`` row flips back to online.
+    _set_runner_status(seeder, machine_flow["runner_id"], "busy")
+    _open_runner_session(machine_client, machine_flow["runner_id"])
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "online"
+
+
+def test_daemon_runner_session_open_keeps_busy_with_reported_in_flight(
+    machine_client, machine_flow, seeder
+):
+    _set_runner_status(seeder, machine_flow["runner_id"], "busy")
+    _open_runner_session(
+        machine_client, machine_flow["runner_id"], in_flight_run=str(uuid.uuid4())
+    )
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "busy"
+
+
+def test_daemon_runner_session_open_keeps_busy_with_redeliverable_run(
+    machine_client, machine_flow, daemon_run, seeder
+):
+    # An ASSIGNED run awaiting redelivery still occupies the runner.
+    _set_runner_status(seeder, machine_flow["runner_id"], "busy")
+    _open_runner_session(machine_client, machine_flow["runner_id"])
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "busy"
+
+
+def test_daemon_runner_session_open_never_resurrects_offline(
+    machine_client, machine_flow, seeder
+):
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _open_runner_session(machine_client, machine_flow["runner_id"])
+    assert _runner_status(seeder, machine_flow["runner_id"]) == "offline"
+
+
 def test_daemon_runner_session_delete_shape(machine_client, machine_flow):
     opened = _open_runner_session(machine_client, machine_flow["runner_id"])
     response = machine_client.delete(
