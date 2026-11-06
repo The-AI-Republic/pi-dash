@@ -223,30 +223,37 @@ impl EngineManager {
         let Some(api) = self.api.as_ref() else {
             return;
         };
-        let Some((_, machine_token)) = self.tokens.session_candidates().into_iter().next() else {
-            tracing::debug!("engine profile not fetched: no workspace is signed in");
-            return;
-        };
-        let profile = match api.profile(&machine_token).await {
-            Ok(p) => p,
-            Err(EngineApiError::Refused {
-                reason_code,
-                status,
-                ..
-            }) => {
-                tracing::warn!(status, %reason_code, "engine profile refused");
-                EngineProfile {
-                    available: false,
-                    lane: String::new(),
-                    base_url: String::new(),
-                    model: String::new(),
-                    reason_code,
-                    engine_sign_in_state: None,
-                }
-            }
-            Err(e) => {
-                tracing::warn!("engine profile fetch failed: {e}");
+        let mut candidates = self.tokens.session_candidates().into_iter();
+        let profile = loop {
+            let Some((_, machine_token)) = candidates.next() else {
+                tracing::debug!("engine profile not fetched: no workspace is signed in");
                 return;
+            };
+            match api.profile(&machine_token).await {
+                Ok(p) => break p,
+                Err(e) if e.is_workspace_auth_failure() => {
+                    self.tokens.mark_revoked(&machine_token);
+                    continue;
+                }
+                Err(EngineApiError::Refused {
+                    reason_code,
+                    status,
+                    ..
+                }) => {
+                    tracing::warn!(status, %reason_code, "engine profile refused");
+                    break EngineProfile {
+                        available: false,
+                        lane: String::new(),
+                        base_url: String::new(),
+                        model: String::new(),
+                        reason_code,
+                        engine_sign_in_state: None,
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!("engine profile fetch failed: {e}");
+                    return;
+                }
             }
         };
         self.apply_profile(profile);
@@ -739,6 +746,33 @@ mod tests {
         let err = m.model_token().await.unwrap_err();
         assert_eq!(err.reason_code, reason::ENGINE_SIGN_IN_REQUIRED);
         assert_eq!(m.status().sign_in_state, EngineSignInState::Expired);
+    }
+
+    #[tokio::test]
+    async fn profile_uses_another_workspace_when_the_first_token_is_rejected() {
+        for code in [
+            "machine_token_expired",
+            "machine_token_revoked",
+            "membership_revoked",
+        ] {
+            let handler: Handler = Arc::new(move |req| {
+                if req.bearer() == Some("mt_acme") {
+                    (401, serde_json::json!({"detail": code}).to_string())
+                } else {
+                    assert_eq!(req.bearer(), Some("mt_beta"));
+                    (200, profile_json(true, ""))
+                }
+            });
+            let server = test_server::start(handler).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = cli(chrono::Duration::days(10));
+            config.set_workspace_token("beta", "mt_beta", false);
+            let m = manager(&server.url, tmp.path(), config);
+            m.refresh_profile().await;
+            assert_eq!(m.status().state, EngineState::Available, "{code}");
+            assert_eq!(m.tokens.token_for(Some("acme")), None);
+            assert_eq!(m.tokens.token_for(Some("beta")).as_deref(), Some("mt_beta"));
+        }
     }
 
     #[test]
