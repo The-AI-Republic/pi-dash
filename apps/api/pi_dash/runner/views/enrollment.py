@@ -474,7 +474,10 @@ class RunnerReviveEndpoint(APIView):
 
 
 class RunnerSelfRevokeEndpoint(APIView):
-    """``DELETE /api/v1/runner/runners/<rid>/`` — runner self-deletion.
+    """Runner self-management with the runner's machine credential.
+
+    ``POST`` revokes the runner and retains its history (the engine's
+    "Remove from project"). ``DELETE`` keeps the existing self-deletion.
 
     The web UI's `RunnerDetailEndpoint.delete` covers operator-driven
     teardown via session auth; this is the symmetric machine-token path
@@ -486,6 +489,19 @@ class RunnerSelfRevokeEndpoint(APIView):
     authentication_classes = [RunnerAccessTokenAuthentication]
     permission_classes: list = []
     throttle_classes: list = []
+
+    def post(self, request, runner_id):
+        auth_runner = getattr(request, "auth_runner", None)
+        if auth_runner is None or str(auth_runner.pk) != str(runner_id):
+            return Response({"error": "runner_id_mismatch"}, status=status.HTTP_403_FORBIDDEN)
+        with transaction.atomic():
+            runner = Runner.objects.select_for_update().filter(pk=runner_id).first()
+            if runner is None:
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+            runner.revoke(reason="user_revoke")
+        send_to_runner(runner_id, {"type": "revoke", "reason": "user_revoke"})
+        close_runner_session(runner_id)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def delete(self, request, runner_id):
         auth_runner = getattr(request, "auth_runner", None)
