@@ -89,12 +89,33 @@ const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
 /// 200 `{"ok": true}` (`device.py:500,507,510-511`).
 const OK_TRUE_BODY: &str = r#"{"ok":true}"#;
 
-/// Register the three device-session routes. Nothing else: sibling paths
-/// stay unmatched and proxy to Django.
+/// Register the device-session routes. Nothing else: sibling paths stay
+/// unmatched and proxy to Django.
+///
+/// Parked (PIDESKAPP-206): `machine-token/` and `revoke/` proxy every
+/// method to Django. Django's `DeviceMachineTokenEndpoint` now issues the
+/// built-in engine's `ec_` credential with the machine token, and
+/// `DeviceCodeRevokeEndpoint` locks the `DevMachine` row and, when it
+/// revokes the machine's last live `mt_`, signs the engine out
+/// (`revoke_engine_credential`: credential revoked, state `signed_out`,
+/// automatic pause `engine_sign_in_required`, pins released). The Rust
+/// handlers do neither, so a full `pidash auth logout` through Rust would
+/// leave the engine `active`. [`ported_routes`] keeps them compiled and
+/// tested; mount it once the engine-credential domain is ported.
 pub fn routes() -> Router<AppState> {
-    use axum::routing::{get, post};
+    use super::device_flow::proxied_all;
+    use axum::routing::get;
     Router::new()
         .route(WORKSPACES_PATH, owned_get(get(get_workspaces)))
+        .route(MACHINE_TOKEN_PATH, proxied_all())
+        .route(REVOKE_PATH, proxied_all())
+}
+
+/// The Rust-owned `machine-token/` and `revoke/` routes, not mounted while
+/// [`routes`] is parked (PIDESKAPP-206).
+pub fn ported_routes() -> Router<AppState> {
+    use axum::routing::post;
+    Router::new()
         .route(MACHINE_TOKEN_PATH, owned_post(post(post_machine_token)))
         .route(REVOKE_PATH, owned_post(post(post_revoke)))
 }

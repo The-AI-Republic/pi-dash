@@ -364,11 +364,10 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
 def can_register_another(user_id, workspace_id) -> bool:
     """Enforce the per-user runner cap.
 
-    Desktop-bundled runners are provisioned by Pi Dash, one per project the
-    user opens, and are capped separately by
-    ``MANAGED_RUNNER_MAX_PER_USER_PROJECT``. Counting them here would let the
-    desktop silently consume a user's allowance for machines they installed
-    themselves.
+    Built-in engine runners are not counted: there is at most one per
+    machine and project (built_engine_as_runner §5), and counting them would
+    let turning the engine on consume a user's allowance for runners they
+    set up themselves.
     """
     return count_active(user_id, workspace_id) < Runner.MAX_PER_USER
 

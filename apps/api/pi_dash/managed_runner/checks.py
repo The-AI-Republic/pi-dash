@@ -30,10 +30,6 @@ def managed_runner_configuration_check(app_configs, **kwargs):
                 id="managed.W001",
             )
         )
-    if settings.MANAGED_RUNNER_MAX_PER_USER_PROJECT < 1:
-        errors.append(
-            Error("MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1", id="managed.E003")
-        )
     if settings.MANAGED_RUNNER_QUEUED_MAX_AGE_SECS <= 0:
         errors.append(
             Error("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive", id="managed.E004")

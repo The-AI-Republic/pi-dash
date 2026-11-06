@@ -95,11 +95,35 @@ use pidash_compat::response::{error_body, json_response};
 /// Register the three owned device-flow POSTs. Sibling methods stay
 /// unmatched and proxy to Django through the fallback (notably Django's
 /// own 405s, e.g. `GET device/start/`).
+///
+/// Parked (PIDESKAPP-206): the three device-flow paths proxy every method
+/// to Django. Django's views gained the built-in engine's `scope = engine`
+/// grants, the silent/interactive approval rules and engine-credential
+/// issuance on redemption (`device.py`, design
+/// `.ai_design/built_engine_as_runner/design.md` §4.3), and the Rust port
+/// has none of it; serving these POSTs from Rust would drop engine
+/// sign-in. [`ported_routes`] keeps the Rust handlers compiled and tested
+/// for when the engine-credential domain is ported; mount it then.
 pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/auth/device/start/", proxied_all())
+        .route("/api/v1/auth/device/approve/", proxied_all())
+        .route("/api/v1/auth/device/token/", proxied_all())
+}
+
+/// The Rust-owned device-flow routes, not mounted while [`routes`] is
+/// parked (PIDESKAPP-206). Re-mount once the engine scope, approval rules
+/// and engine-credential issuance are ported.
+pub fn ported_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/auth/device/start/", owned_start())
         .route("/api/v1/auth/device/approve/", owned_approve())
         .route("/api/v1/auth/device/token/", owned_token())
+}
+
+/// Every method proxies to Django (the parked device paths).
+pub(crate) fn proxied_all() -> axum::routing::MethodRouter<AppState> {
+    axum::routing::any(crate::edge::proxy)
 }
 
 /// `device/start/`: POST is owned; everything else proxies.

@@ -4,6 +4,7 @@
 
 import logging
 import uuid
+from datetime import timedelta
 from typing import Optional
 
 from django.conf import settings
@@ -33,6 +34,10 @@ KNOWN_REVOKE_REASONS = frozenset(
         "dev_machine_revoked",
         "self_revoked",
         "user_revoke",
+        # The runner's machine was merged into another and this row lost the
+        # collision (built_engine_as_runner §13). Not in the daemon's
+        # local-cleanup set: the source daemon is gone.
+        "dev_machine_merged",
     }
 )
 # Matches RunnerSession / Runner.revoked_reason max_length.
@@ -239,6 +244,32 @@ class EngineAutoPauseReason(models.TextChoices):
     ENGINE_DISABLED = "engine_disabled", "Engine disabled on this instance"
 
 
+class EngineSignInState(models.TextChoices):
+    """The built-in engine's sign-in state for one machine (design §4.3).
+
+    ``DevMachine.engine_sign_in_state`` stores ``never`` / ``active`` /
+    ``signed_out`` / ``revoked``. ``expiring`` and ``expired`` are derived
+    from ``engine_credential_expires_at`` at read time (see
+    :meth:`DevMachine.current_engine_sign_in_state`), so a credential that
+    runs out needs no write to change state.
+    """
+
+    NEVER = "never", "Never signed in"
+    ACTIVE = "active", "Signed in"
+    EXPIRING = "expiring", "Expiring soon"
+    EXPIRED = "expired", "Expired"
+    SIGNED_OUT = "signed_out", "Signed out"
+    REVOKED = "revoked", "Revoked"
+
+
+#: A live engine credential within this window of its expiry is ``expiring``.
+ENGINE_CREDENTIAL_EXPIRING_WINDOW = timedelta(days=3)
+#: Fixed engine-credential lifetime from issue, whatever its use (PO-18).
+ENGINE_CREDENTIAL_TTL = timedelta(days=14)
+#: Daemon credential (``MachineToken``) idle lifetime, renewed on each use.
+MACHINE_TOKEN_IDLE_TTL = timedelta(days=60)
+
+
 class AgentRunStatus(models.TextChoices):
     QUEUED = "queued", "Queued"
     ASSIGNED = "assigned", "Assigned"
@@ -411,6 +442,33 @@ class DevMachine(models.Model):
     # "Teammates can start runs on my issues": when on, this machine's engine
     # runners follow the ordinary-runner usage rule instead of owner-only.
     engine_team_runs = models.BooleanField(default=False)
+    # Engine sign-in (design §4.3). Stored: never / active / signed_out /
+    # revoked; ``expiring`` / ``expired`` are derived from the live
+    # credential's expiry, mirrored here so lists need no extra query.
+    # Written only by ``services.engine_credentials``, in the same
+    # transaction as the ``EngineCredential`` row it describes.
+    engine_sign_in_state = models.CharField(
+        max_length=16,
+        choices=EngineSignInState.choices,
+        default=EngineSignInState.NEVER,
+    )
+    engine_credential_expires_at = models.DateTimeField(null=True, blank=True)
+    # The engine state the daemon last reported in its machine-session
+    # heartbeat (``{"state": ..., "reason_code": ...}``), for display and
+    # the automatic pause reasons (design §8).
+    engine_state = models.JSONField(default=dict, blank=True)
+    engine_state_reported_at = models.DateTimeField(null=True, blank=True)
+    # Set when this machine was merged into another (design §13): the
+    # source is revoked and points at the machine that took its runners.
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="merged_from",
+    )
+    # What the merge did, so a retry answers with the same result.
+    merge_result = models.JSONField(default=dict, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -439,6 +497,34 @@ class DevMachine(models.Model):
     def engine_paused(self) -> bool:
         """True when this machine's built-in engine takes no new work."""
         return bool(self.engine_paused_by_owner or self.engine_auto_pause_reason)
+
+    @property
+    def is_legacy_desktop(self) -> bool:
+        """A per-workspace machine created by a desktop build from before the
+        engine moved into the CLI (design §2, §5). Its engine needs no engine
+        credential and gets model tokens from the desktop-session endpoint."""
+        return self.provisioning == RunnerProvisioning.DESKTOP_BUNDLED
+
+    def current_engine_sign_in_state(self, now=None) -> str:
+        """The engine sign-in state, with ``expiring`` / ``expired`` derived."""
+        stored = self.engine_sign_in_state or EngineSignInState.NEVER
+        if stored != EngineSignInState.ACTIVE:
+            return stored
+        expires_at = self.engine_credential_expires_at
+        if expires_at is None:
+            return EngineSignInState.ACTIVE
+        now = now or timezone.now()
+        if expires_at <= now:
+            return EngineSignInState.EXPIRED
+        if expires_at - now <= ENGINE_CREDENTIAL_EXPIRING_WINDOW:
+            return EngineSignInState.EXPIRING
+        return EngineSignInState.ACTIVE
+
+    def has_live_engine_credential(self, now=None) -> bool:
+        return self.current_engine_sign_in_state(now) in (
+            EngineSignInState.ACTIVE,
+            EngineSignInState.EXPIRING,
+        )
 
 
 class RunnerQuerySet(models.QuerySet):
@@ -897,6 +983,16 @@ class MachineSession(models.Model):
     dev_machine = models.ForeignKey(
         "DevMachine", on_delete=models.CASCADE, related_name="sessions"
     )
+    # The token (of any workspace on the machine) the session was opened
+    # with. Revoking or expiring that token ends the session (design §4.9);
+    # polls may present any live token of the same machine.
+    machine_token = models.ForeignKey(
+        "MachineToken",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="machine_sessions",
+    )
     protocol_version = models.PositiveIntegerField(default=4)
     created_at = models.DateTimeField(auto_now_add=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
@@ -997,6 +1093,10 @@ class MachineToken(models.Model):
     is_service = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
+    # 60 days without use (design §4.3, PO-18); every authenticated use
+    # pushes it out again (``services.tokens.touch_machine_token``). The
+    # database default covers writers that bypass the model (the Rust API).
+    expires_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -1019,11 +1119,84 @@ class MachineToken(models.Model):
             models.Index(fields=["dev_machine", "revoked_at"], name="machine_token_dev_rev_idx"),
         ]
 
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.expires_at is None:
+            self.expires_at = timezone.now() + MACHINE_TOKEN_IDLE_TTL
+        super().save(*args, **kwargs)
+
+    def is_expired(self, now=None) -> bool:
+        if self.expires_at is None:
+            return False
+        return self.expires_at <= (now or timezone.now())
+
     def revoke(self) -> None:
         if self.revoked_at is not None:
             return
         self.revoked_at = timezone.now()
         self.save(update_fields=["revoked_at"])
+
+
+class EngineCredentialRevokeReason(models.TextChoices):
+    SUPERSEDED = "superseded", "Replaced by a newer credential"
+    SIGNED_OUT = "signed_out", "Signed out by the user"
+    MACHINE_REMOVED = "machine_removed", "Computer removed"
+    MACHINE_MERGED = "machine_merged", "Computer merged into another"
+    USER_SIGNED_OUT = "user_signed_out", "User signed out of all sessions"
+    ADMIN = "admin", "Revoked by an administrator"
+
+
+class EngineCredential(models.Model):
+    """Per-machine credential whose only use is obtaining model tokens.
+
+    Issued with the daemon credential by ``pidash auth login`` or alone by
+    ``pidash login --engine`` (design §4.3). It cannot authenticate the
+    daemon, its runners or CLI commands. The raw value (``ec_…``) is shown
+    once; only its hash is stored. Fixed 14-day lifetime from issue.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="engine_credentials",
+    )
+    dev_machine = models.ForeignKey(
+        DevMachine,
+        on_delete=models.CASCADE,
+        related_name="engine_credentials",
+    )
+    token_hash = models.CharField(max_length=128, unique=True)
+    fingerprint = models.CharField(max_length=16, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(
+        max_length=32,
+        choices=EngineCredentialRevokeReason.choices,
+        blank=True,
+        default="",
+    )
+
+    class Meta:
+        db_table = "engine_credential"
+        ordering = ("-created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dev_machine"],
+                condition=models.Q(revoked_at__isnull=True),
+                name="engine_credential_one_live_per_machine",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "revoked_at"], name="engine_cred_user_rev_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"engine credential {self.fingerprint} ({self.dev_machine_id})"
+
+    def is_expired(self, now=None) -> bool:
+        return self.expires_at <= (now or timezone.now())
 
 
 class AgentRun(models.Model):
