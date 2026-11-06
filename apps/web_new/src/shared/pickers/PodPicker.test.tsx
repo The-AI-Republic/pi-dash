@@ -219,64 +219,38 @@ afterEach(() => {
 });
 
 describe("PodPicker", () => {
-  it("fetches lazily and lists agents plus pods with tags and reasons", async () => {
+  it("fetches lazily and lists pods and runners, never an executor row", async () => {
     const { queryClient, calls } = harness();
     renderPicker({}, queryClient);
     expect(calls).toEqual([]);
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    expect(await screen.findByRole("option", { name: "Pi Dash Cloud Agent" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Any runner in ACME-Backend" })).toBeInTheDocument();
     const texts = optionTexts();
-    expect(texts).toHaveLength(4);
-    expect(texts[0]).toContain("Pi Dash Cloud Agent");
-    expect(texts[0]?.length).toBeGreaterThan("Pi Dash Cloud Agent".length);
-    expect(texts[1]).toContain("Pi Dash Agent (desktop)");
-    expect(texts[2]).toContain("ACME-Backend");
-    expect(texts[2]).toMatch(/default/i);
-    expect(texts[3]).toContain("ACME-Tier");
-    expect(texts[3]).not.toMatch(/default/i);
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toContain("ACME-Backend");
+    expect(texts[0]).toMatch(/default/i);
+    expect(texts[1]).toContain("ACME-Tier");
+    expect(texts[1]).not.toMatch(/default/i);
+    expect(texts.some((text) => /cloud agent|pi dash agent/i.test(text))).toBe(false);
     expect(calls.some((url) => url.includes("/api/runners/pods/"))).toBe(true);
-    expect(calls.some((url) => url.endsWith(`/projects/${PROJECT}/`))).toBe(true);
+    // The executor options are no longer read: there is nothing to offer.
+    expect(calls.some((url) => url.endsWith(`/projects/${PROJECT}/`))).toBe(false);
     const runnersCall = calls.find((url) => new URL(url).pathname === "/api/runners/");
     expect(runnersCall).toBeDefined();
     expect(new URL(runnersCall ?? "").searchParams.get("assignable_for")).toBe("new");
   });
 
-  it("disables unavailable agents and keeps them unselectable", async () => {
+  it("picks pods", async () => {
     const { queryClient } = harness();
-    const onChange = vi.fn();
-    renderPicker({ onChange }, queryClient);
-    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    const cloud = await screen.findByRole("option", { name: "Pi Dash Cloud Agent" });
-    const desktop = screen.getByRole("option", { name: "Pi Dash Agent (desktop)" });
-    expect(cloud).toBeDisabled();
-    expect(desktop).toBeDisabled();
-    expect(cloud.textContent).toContain("No model is configured");
-    expect(cloud.textContent).not.toContain("built-in");
-    fireEvent.click(cloud);
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it("picks pods and available agents", async () => {
-    const available = projectRow({
-      agent_executor_options: [
-        { kind: "cloud_agent", available: true, reason_code: "" },
-        { kind: "managed_runner", available: true, reason_code: "" },
-      ],
-    });
-    const { queryClient } = harness({}, { body: available });
     const onChange = vi.fn();
     renderPicker({ onChange }, queryClient);
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     fireEvent.click(await screen.findByRole("option", { name: "Any runner in ACME-Tier" }));
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange).toHaveBeenCalledWith({ type: "pod", podId: POD_TIER });
-    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    fireEvent.click(await screen.findByRole("option", { name: "Pi Dash Cloud Agent" }));
-    expect(onChange).toHaveBeenCalledTimes(2);
-    expect(onChange).toHaveBeenCalledWith({ type: "agent", executor: "cloud_agent" });
   });
 
-  it("searches pods and agents", async () => {
+  it("searches pods", async () => {
     const { queryClient } = harness();
     const user = userEvent.setup();
     renderPicker({}, queryClient);
@@ -284,7 +258,7 @@ describe("PodPicker", () => {
     await screen.findByRole("option", { name: "Any runner in ACME-Tier" });
     await user.type(screen.getByRole("combobox", { name: "Search execution targets" }), "tier");
     expect(optionTexts().some((text) => text.includes("ACME-Tier"))).toBe(true);
-    expect(optionTexts().some((text) => /cloud agent/i.test(text))).toBe(false);
+    expect(optionTexts().some((text) => text.includes("ACME-Backend"))).toBe(false);
     await user.clear(screen.getByRole("combobox", { name: "Search execution targets" }));
     await user.type(screen.getByRole("combobox", { name: "Search execution targets" }), "default");
     expect(optionTexts().some((text) => text.includes("ACME-Backend"))).toBe(true);
@@ -296,7 +270,7 @@ describe("PodPicker", () => {
 
   it("names the selection on the trigger", async () => {
     const { queryClient } = harness();
-    const { rerender } = render(
+    render(
       <QueryClientProvider client={queryClient}>
         <PodPicker
           workspaceSlug="acme"
@@ -310,22 +284,11 @@ describe("PodPicker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     await screen.findByRole("option", { name: "Any runner in ACME-Tier" });
     expect(screen.getByRole("button", { name: "ACME-Tier" })).toBeInTheDocument();
-    rerender(
-      <QueryClientProvider client={queryClient}>
-        <PodPicker
-          workspaceSlug="acme"
-          projectId={PROJECT}
-          value={{ type: "agent", executor: "cloud_agent" } satisfies ExecutionSelection}
-          onChange={() => {}}
-        />
-      </QueryClientProvider>
-    );
-    expect(screen.getByRole("button", { name: "Pi Dash Cloud Agent" })).toBeInTheDocument();
   });
 
-  it("falls back for unknown pods and local-only executors", async () => {
+  it("falls back for unknown pods", async () => {
     const { queryClient } = harness();
-    const { rerender } = render(
+    render(
       <QueryClientProvider client={queryClient}>
         <PodPicker
           workspaceSlug="acme"
@@ -338,17 +301,6 @@ describe("PodPicker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     await screen.findByRole("option", { name: "Any runner in ACME-Tier" });
     expect(screen.getByRole("button", { name: "Unknown pod" })).toBeInTheDocument();
-    rerender(
-      <QueryClientProvider client={queryClient}>
-        <PodPicker
-          workspaceSlug="acme"
-          projectId={PROJECT}
-          value={{ type: "agent", executor: "local_runner" } satisfies ExecutionSelection}
-          onChange={() => {}}
-        />
-      </QueryClientProvider>
-    );
-    expect(screen.getByRole("button", { name: "Select target" })).toBeInTheDocument();
   });
 
   it("supports icon-only and custom triggers", () => {
@@ -380,13 +332,14 @@ describe("PodPicker", () => {
         <PodPicker
           workspaceSlug="acme"
           projectId={PROJECT}
-          value={{ type: "agent", executor: "managed_runner" } satisfies ExecutionSelection}
+          value={{ type: "pod", podId: POD_TIER } satisfies ExecutionSelection}
           onChange={() => {}}
           iconOnly
+          preload
         />
       </QueryClientProvider>
     );
-    expect(screen.getByRole("button", { name: "Pi Dash Agent (desktop)" }).querySelector("svg")).not.toBeNull();
+    expect((await screen.findByRole("button", { name: "ACME-Tier" })).querySelector("svg")).not.toBeNull();
   });
 
   it("follows a controlled open state", async () => {
@@ -430,23 +383,9 @@ describe("PodPicker", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Loading execution targets");
   });
 
-  it("stays loading while the project read lags behind pods", async () => {
-    const { queryClient } = harness({}, { hang: true });
-    renderPicker({}, queryClient);
-    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    expect(await screen.findByRole("status")).toHaveTextContent("Loading execution targets");
-  });
-
   it("shows the error row when either read fails", async () => {
     const podsFail = harness({ status: 500 }, {});
     renderPicker({}, podsFail.queryClient);
-    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load execution targets.");
-  });
-
-  it("shows the error row when the project read fails", async () => {
-    const { queryClient } = harness({}, { status: 500 });
-    renderPicker({}, queryClient);
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load execution targets.");
   });
@@ -457,14 +396,6 @@ describe("PodPicker", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "ACME-Tier" })).toBeInTheDocument();
     expect(calls.some((url) => url.includes("/api/runners/pods/"))).toBe(true);
-    expect(calls.some((url) => url.endsWith(`/projects/${PROJECT}/`))).toBe(true);
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-  });
-
-  it("names a preloaded agent without reading pods for its label", async () => {
-    const { queryClient } = harness();
-    renderPicker({ value: { type: "agent", executor: "cloud_agent" }, preload: true }, queryClient);
-    expect(await screen.findByRole("button", { name: "Pi Dash Cloud Agent" })).toBeInTheDocument();
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
@@ -494,6 +425,29 @@ describe("PodPicker", () => {
     expect(mac.textContent).toContain("assignee");
     fireEvent.click(mac);
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("hides engine runners and names each runner's machine and state", async () => {
+    const engine = runnerRow({
+      id: RUNNER_MAC,
+      name: "builtin-mbp-acme-ACME",
+      provisioning: "desktop_bundled",
+      status: "offline",
+      last_heartbeat_at: null,
+      dev_machine_detail: { id: "66666666-6666-4666-8666-666666666666", label: "Work laptop", host_label: "rich-mbp" },
+      assignable: true,
+    });
+    const own = runnerRow({
+      assignable: true,
+      dev_machine_detail: { id: "77777777-7777-4777-8777-777777777777", label: "", host_label: "gpu-host" },
+    });
+    const { queryClient } = harness({}, {}, { body: [own, engine] });
+    renderPicker({}, queryClient);
+    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
+    const ownRow = await screen.findByRole("option", { name: /gpu-box/ });
+    expect(screen.queryByRole("option", { name: /builtin-mbp|Built-in engine/ })).not.toBeInTheDocument();
+    expect(ownRow.textContent).toContain("gpu-host");
+    expect(ownRow.textContent).toContain("online · idle");
   });
 
   it("picks a runner with its pod", async () => {

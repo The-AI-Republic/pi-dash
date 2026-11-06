@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenarios (NEWFRONT-389): execution target and automated-run
-// policy on the General tab — the picker offers the runner families with
-// unavailable ones disabled, the master switch leaves budget and cadence
+// policy on the General tab — no default execution target is offered
+// (Runner is the only executor, built-in engine design §6), the master switch leaves budget and cadence
 // visible but inert while off, the budget validates as whole numbers with
 // a remembering no-cap toggle, and the cadence picker carries presets plus
 // a custom marker. Rows: PSET-009.
@@ -11,9 +11,7 @@ import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
   serverCleanupProject,
-  serverCreateIssueFull,
   serverCreateProjectWithFlags,
-  serverIssueRecord,
   serverPatchProject,
   serverProjectRecord,
   signInSession,
@@ -31,56 +29,35 @@ async function throwawayProject(seed: { workspaceSlug: string }, session: string
 }
 
 test(
-  specTitle(["PSET-009"], "execution target switches persist; unavailable families stay disabled"),
+  specTitle(["PSET-009"], "no default execution target is offered; the project stays on runners"),
   { tag: specTags(["PSET-009"]) },
   async ({ driver, seed }) => {
     const tag = `NF389 exec ${Date.now()}`;
     const session = await signInSession(seed.email, seed.password);
     const projectId = await throwawayProject(seed, session, tag);
     try {
-      const before = await serverProjectRecord(seed.workspaceSlug, projectId, session);
-      const options = (before["agent_executor_options"] as { kind: string; available: boolean }[] | null) ?? [];
-      const current = String(before["default_agent_executor"] ?? "local_runner");
-      const alternative = options.find((option) => option.available && option.kind !== current)?.kind ?? null;
-      // An issue created before the switch keeps its executor afterwards.
-      const issue = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} issue`, session);
-      const issueBefore = await serverIssueRecord(seed.workspaceSlug, projectId, issue.id, session);
-
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
 
-      await test.step("unavailable families cannot be picked", async () => {
-        expect(await driver.settingsGeneralExecutorValue()).toBe(current);
-        // Local runner is the unconditional default fallback: it stays
-        // selectable even while the stack reports no_local_runner. The
-        // provisioned families gate on availability instead.
-        expect(await driver.settingsGeneralExecutorOptionDisabled("local_runner")).toBe(false);
-        // The family availability arrives with the details fetch, just
-        // after first paint; poll until the picker reflects it.
-        for (const option of options) {
-          if (option.kind !== "local_runner" && !option.available) {
-            await expect
-              .poll(() => driver.settingsGeneralExecutorOptionDisabled(option.kind), { timeout: 30_000 })
-              .toBe(true);
-          }
-        }
+      await test.step("the executor choice is gone", async () => {
+        // Runner is the only executor (built-in engine design §6): the
+        // Cloud Agent and built-in agent are no longer choices, so the tab
+        // renders no default execution-target control.
+        expect(await driver.settingsGeneralExecutorPresent()).toBe(false);
       });
 
-      if (alternative !== null) {
-        await test.step("switching target persists for new runs only", async () => {
-          await driver.settingsGeneralSetExecutor(alternative);
-          await driver.settingsGeneralSave();
-          await expect
-            .poll(
-              async () =>
-                String((await serverProjectRecord(seed.workspaceSlug, projectId, session))["default_agent_executor"]),
-              { timeout: 30_000 }
-            )
-            .toBe(alternative);
-          const issueAfter = await serverIssueRecord(seed.workspaceSlug, projectId, issue.id, session);
-          expect(issueAfter["agent_executor"] ?? null).toBe(issueBefore["agent_executor"] ?? null);
-        });
-      }
+      await test.step("a save keeps the project on runners", async () => {
+        await driver.settingsGeneralFill("description", `${tag} touch`);
+        await driver.settingsGeneralSave();
+        await expect
+          .poll(
+            async () => String((await serverProjectRecord(seed.workspaceSlug, projectId, session))["description"]),
+            { timeout: 30_000 }
+          )
+          .toBe(`${tag} touch`);
+        const after = await serverProjectRecord(seed.workspaceSlug, projectId, session);
+        expect(String(after["default_agent_executor"] ?? "local_runner")).toBe("local_runner");
+      });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
     }

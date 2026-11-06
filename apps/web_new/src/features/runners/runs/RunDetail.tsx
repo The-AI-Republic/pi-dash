@@ -55,9 +55,18 @@ export interface RunDetailProps {
   onCancel: (run: AgentRun) => Promise<boolean>;
   /** Scheduler base path for the back-link; null hides the row. */
   schedulerHref: (run: AgentRun) => string | null;
+  /** Executor badge text from the run's runner; the kind label when absent. */
+  executorText?: ((run: AgentRun) => string) | undefined;
 }
 
-export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: RunDetailProps): React.ReactElement {
+export function RunDetail({
+  state,
+  run,
+  cancelling,
+  onCancel,
+  schedulerHref,
+  executorText,
+}: RunDetailProps): React.ReactElement {
   const [cancelOpen, setCancelOpen] = React.useState(false);
   if (state === "none") {
     return (
@@ -95,7 +104,9 @@ export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: R
               <RunStatusBadge status={run.status} />
             </span>
             <span data-testid="run-executor">
-              <Badge tone={executorTone(run.executor_kind)}>{executorLabel(run.executor_kind)}</Badge>
+              <Badge tone={executorTone(run.executor_kind)}>
+                {executorText === undefined ? executorLabel(run.executor_kind) : executorText(run)}
+              </Badge>
             </span>
           </div>
         </div>

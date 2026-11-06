@@ -890,10 +890,10 @@ def _resolve_pod_for_issue(issue: Issue):
 
 def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None):
     """Resolve a current human execution principal; bots never own tool authority."""
-    from pi_dash.core.agent_execution import AgentExecutorKind, effective_executor_for_issue
+    from pi_dash.core.agent_execution import MACHINE_EXECUTORS, effective_executor_for_issue
 
     effective = effective_executor_for_issue(issue)
-    if effective == AgentExecutorKind.LOCAL_RUNNER:
+    if effective in MACHINE_EXECUTORS:
         if actor is not None:
             return actor
         if triggered_by in _MACHINE_TRIGGERS:
@@ -935,17 +935,6 @@ def _resolve_creator_for_trigger(issue: Issue, *, triggered_by: str, actor=None)
         # dispatch_scheduler_run's candidate filter).
         if not user_has_llm_config(candidate):
             continue
-        # A managed run additionally executes on the *creator's own machine*,
-        # so a candidate with no desktop enrolled for this project could never
-        # serve it — picking them would create a run that waits forever for a
-        # laptop that does not exist. Note the system-user fallback above is
-        # deliberately not reachable here: a bot has neither a desktop nor a
-        # provider.
-        if effective == AgentExecutorKind.MANAGED_RUNNER:
-            from pi_dash.managed_runner.policy import enrolled_managed_runners
-
-            if not enrolled_managed_runners(issue.project, candidate).exists():
-                continue
         if check_project_role(
             candidate,
             issue.workspace.slug,
@@ -971,7 +960,6 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
     from pi_dash.core.agent_execution import (
         AgentExecutorKind,
         effective_executor_for_issue,
-        managed_runner_is_enabled,
         user_has_llm_config,
     )
 
@@ -989,42 +977,19 @@ def preflight_eligibility_or_bounce(issue: Issue, *, run_creator, pod, triggered
         _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
         return False
 
-    if effective == AgentExecutorKind.MANAGED_RUNNER:
-        # Structural gates only. "Your laptop is closed right now" is not one
-        # of them: the run is created and waits visibly (see
-        # ``cloud_agent.creation._managed_execution_fields``), because bouncing
-        # an issue back to Backlog every time a lid closes would be hostile and
-        # would disarm the ticker for work that is merely paused.
-        from pi_dash.managed_runner.errors import ManagedRunnerReason
-        from pi_dash.managed_runner.policy import enrolled_managed_runners, managed_llm_profile
-
-        if run_creator is None:
-            _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-managed-runner")
-            return False
-        if not managed_runner_is_enabled():
-            _bounce_issue_no_eligible_runner(
-                issue, triggered_by=triggered_by, reason=ManagedRunnerReason.DISABLED
-            )
-            return False
-        profile = managed_llm_profile(run_creator)
-        if not profile.available:
-            _bounce_issue_no_eligible_runner(
-                issue,
-                triggered_by=triggered_by,
-                reason=profile.reason_code or ManagedRunnerReason.LLM_CONFIG_MISSING,
-            )
-            return False
-        if not enrolled_managed_runners(issue.project, run_creator).exists():
-            _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-managed-runner")
-            return False
-        return True
-
+    # Every other executor value is a runner (design ``built_engine_as_runner``
+    # §6; a stale ``managed_runner`` value is the legacy spelling of one). The
+    # engine usage rule depends on whether a person or the clock started the
+    # run, so the structural check is told which (§8). "The runner is offline
+    # right now" is never a reason to bounce: the run waits in the pod.
+    from pi_dash.runner.models import HUMAN_TRIGGERS
     from pi_dash.runner.services.matcher import (
         pod_has_runner_for_issue_principal,
     )
 
     creator_id = getattr(run_creator, "id", None)
-    if pod_has_runner_for_issue_principal(pod, issue, creator_id):
+    human = triggered_by in HUMAN_TRIGGERS
+    if pod_has_runner_for_issue_principal(pod, issue, creator_id, human=human):
         return True
     _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by)
     return False
@@ -1182,10 +1147,6 @@ def dispatch_continuation_run(
             # usable LLM config — bounce loudly instead of letting the
             # ticker fire forever with zero user-visible signal.
             _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-llm-config")
-        elif effective == AgentExecutorKind.MANAGED_RUNNER:
-            # A managed run belongs to one person's desktop, so "no creator"
-            # means nobody could ever serve it — structural, bounce loudly.
-            _bounce_issue_no_eligible_runner(issue, triggered_by=triggered_by, reason="no-managed-runner")
         return None
 
     pod = _resolve_pod_for_issue(issue)
@@ -1289,8 +1250,6 @@ def dispatch_run_ai_run_with_reason(issue: Issue, *, actor) -> tuple[Optional[Ag
         effective = effective_executor_for_issue(issue)
         if effective == AgentExecutorKind.CLOUD_AGENT:
             _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-llm-config")
-        elif effective == AgentExecutorKind.MANAGED_RUNNER:
-            _bounce_issue_no_eligible_runner(issue, triggered_by=TRIGGER_RUN_AI, reason="no-managed-runner")
         return None, RUN_AI_NO_ELIGIBLE_RUNNER
 
     pod = _resolve_pod_for_issue(issue)

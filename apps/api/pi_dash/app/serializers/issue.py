@@ -269,56 +269,13 @@ class IssueCreateSerializer(BaseSerializer):
                     )
 
         # ``agent_executor`` is the per-issue execution-target override; NULL
-        # inherits the project default. Cloud Agent and pods are mutually
-        # exclusive targets, so the UI presents them as one "Runs on" choice
-        # and this is the matching server-side guard.
-        if "agent_executor" in attrs:
-            executor = attrs["agent_executor"]  # None clears the override
-            if executor is not None:
-                from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
+        # inherits the project default. Runner is the only executor
+        # (built_engine_as_runner §6): older clients' ``managed_runner`` /
+        # ``cloud_agent`` are stored as ``local_runner``, pod-level, and a
+        # change of executor under a live run is refused.
+        from pi_dash.runner.services.issue_assignment import normalize_issue_executor
 
-                if executor not in AgentExecutorKind.values:
-                    raise serializers.ValidationError({"agent_executor": "unknown agent executor"})
-                # Refuse a target that could never dispatch, rather than
-                # accepting it and failing invisibly at run creation.
-                if executor == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
-                    raise serializers.ValidationError(
-                        {"agent_executor": "Pi Dash Cloud Agent is not available on this instance"}
-                    )
-                if executor == AgentExecutorKind.MANAGED_RUNNER:
-                    # Pinning to the desktop is viewer-specific: the check is
-                    # "can the person making this request run it on their own
-                    # machine", which is exactly what the picker showed them.
-                    from pi_dash.managed_runner.errors import ManagedRunnerReason
-                    from pi_dash.managed_runner.policy import managed_runner_availability
-
-                    project = self.instance.project if self.instance is not None else attrs.get("project")
-                    if project is None:
-                        from pi_dash.db.models import Project
-
-                        project = Project.objects.filter(pk=self.context.get("project_id")).first()
-                    if project is None:
-                        raise serializers.ValidationError({"agent_executor": "A project is required for desktop runs"})
-                    viewer = getattr(self.context.get("request"), "user", None)
-                    available, reason = managed_runner_availability(project, viewer)
-                    # A desktop that has not enrolled this project yet fixes
-                    # itself the moment the app opens it, so accept the pin
-                    # rather than blocking on a race the client will resolve.
-                    if not available and reason != ManagedRunnerReason.NO_RUNNER_FOR_PROJECT:
-                        raise serializers.ValidationError(
-                            {"agent_executor": _MANAGED_UNAVAILABLE_DETAIL.get(reason, reason)}
-                        )
-            # Same mid-flight rule as the pod: ``AgentRun.executor_kind`` is
-            # snapshotted at creation, so switching targets under a live run
-            # would silently apply only to the next dispatch.
-            if (
-                self.instance is not None
-                and str(executor) != str(self.instance.agent_executor)
-                and self.instance.has_active_run
-            ):
-                raise serializers.ValidationError(
-                    {"agent_executor": "cannot change the execution target while the issue has an active run"}
-                )
+        normalize_issue_executor(attrs, instance=self.instance)
 
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:

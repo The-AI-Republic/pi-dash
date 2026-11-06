@@ -23,6 +23,48 @@ export interface IDevMachineMini {
   id: string;
   host_label: string;
   label: string;
+  /** Built-in engine controls (see ``IDevMachineEngineControls``). */
+  engine_paused_by_owner?: boolean;
+  engine_auto_pause_reason?: TEngineAutoPauseReason;
+  engine_team_runs?: boolean;
+  engine_sign_in_state?: TEngineSignInState;
+  engine_credential_expires_at?: string | null;
+}
+
+/** The built-in engine's sign-in on one machine. ``expiring`` is within
+ * three days of the engine credential's 14-day expiry. */
+export type TEngineSignInState = "never" | "active" | "expiring" | "expired" | "signed_out" | "revoked";
+
+/** The engine state the daemon last reported in its machine heartbeat. */
+export interface IDevMachineEngineState {
+  state?: "available" | "signed_out" | "expiring" | "unavailable" | string;
+  reason_code?: string;
+  sign_in_state?: TEngineSignInState | string;
+  credential_expires_at?: string;
+}
+
+/** Why the server paused a machine's built-in engine on its own; ``""``
+ * when it is not auto-paused. */
+export type TEngineAutoPauseReason =
+  | ""
+  | "engine_sign_in_required"
+  | "gateway_session_revoked"
+  | "wallet_empty"
+  | "profile_unavailable"
+  | "engine_disabled";
+
+/** Whether a runner takes pod work ("Pod work: off" = ``pinned_only``). Engines start ``pinned_only``. */
+export type TRunnerPodDispatch = "pinned_only" | "pod_member";
+
+/** Owner-only ``PATCH /api/runners/dev-machines/<mid>/`` body. */
+export interface IDevMachineEngineControls {
+  workspace: string;
+  /** The owner's "Pause the built-in engine" switch. */
+  engine_paused_by_owner?: boolean;
+  /** "Teammates can start runs on my issues". */
+  engine_team_runs?: boolean;
+  /** The machine's name; empty resets it to the hostname. */
+  label?: string;
 }
 
 export interface IPod {
@@ -84,6 +126,19 @@ export interface IDevMachine {
   /** True when the machine's control session polled recently, i.e. the
    * daemon can execute cloud-pushed commands (create runner) right now. */
   control_online: boolean;
+  /** ``desktop_bundled`` marks a legacy per-workspace desktop machine. */
+  provisioning?: "manual" | "desktop_bundled";
+  engine_paused_by_owner?: boolean;
+  engine_auto_pause_reason?: TEngineAutoPauseReason;
+  /** Either the owner's switch or an automatic reason pauses the engine. */
+  engine_paused?: boolean;
+  engine_team_runs?: boolean;
+  engine_sign_in_state?: TEngineSignInState;
+  engine_credential_expires_at?: string | null;
+  engine_state?: IDevMachineEngineState;
+  engine_state_reported_at?: string | null;
+  /** Set when this machine was merged into another (it is then revoked). */
+  merged_into?: string | null;
   last_seen_at: string | null;
   last_heartbeat_at: string | null;
   revoked_at: string | null;
@@ -131,6 +186,20 @@ export interface IRunner {
   owner: string | null;
   pod: string;
   pod_detail: IPodMini | null;
+  /** ``desktop_bundled`` = built-in engine runner. */
+  provisioning?: "manual" | "desktop_bundled";
+  /** Whether the runner takes pod work (owner-only PATCH). */
+  pod_dispatch?: TRunnerPodDispatch;
+  /** True for a built-in engine runner. */
+  is_engine?: boolean;
+  /** An engine runner whose machine's engine is paused. */
+  engine_paused?: boolean;
+  /** Per-runner operator pause (``paused_at`` set). */
+  dispatch_paused?: boolean;
+  /** The machine name shown as "Built-in engine · <machine>". */
+  machine_display_name?: string;
+  /** Dev machine id. */
+  dev_machine?: string | null;
   /** Dev machine this runner runs on. ``null`` on legacy runners. */
   dev_machine_detail: IDevMachineMini | null;
   /** Connection that owns this runner. Required post-refactor. */

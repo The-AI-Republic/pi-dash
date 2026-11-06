@@ -112,6 +112,10 @@ class DevMachineSerializer(serializers.ModelSerializer):
     # right now. Annotated by the list endpoint; defaults False when the
     # queryset didn't annotate it.
     control_online = serializers.BooleanField(read_only=True, default=False)
+    # ``never`` / ``active`` / ``expiring`` / ``expired`` / ``signed_out`` /
+    # ``revoked`` (built_engine_as_runner §4.3), with expiry derived now.
+    engine_sign_in_state = serializers.SerializerMethodField()
+    engine_paused = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = DevMachine
@@ -120,9 +124,22 @@ class DevMachineSerializer(serializers.ModelSerializer):
             "host_label",
             "label",
             "visibility",
+            # ``desktop_bundled`` marks a legacy per-workspace desktop machine.
+            "provisioning",
             "runner_count",
             "online_runner_count",
             "control_online",
+            # Built-in engine controls and state (built_engine_as_runner §8,
+            # §11). Machines are private, so only the owner ever sees these.
+            "engine_paused_by_owner",
+            "engine_auto_pause_reason",
+            "engine_paused",
+            "engine_team_runs",
+            "engine_sign_in_state",
+            "engine_credential_expires_at",
+            "engine_state",
+            "engine_state_reported_at",
+            "merged_into",
             "last_seen_at",
             "last_heartbeat_at",
             "revoked_at",
@@ -130,6 +147,9 @@ class DevMachineSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_engine_sign_in_state(self, obj) -> str:
+        return obj.current_engine_sign_in_state()
 
 
 class PodMiniSerializer(serializers.ModelSerializer):
@@ -151,8 +171,22 @@ class DevMachineMiniSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DevMachine
-        fields = ["id", "host_label", "label"]
+        fields = [
+            "id",
+            "host_label",
+            "label",
+            "engine_paused_by_owner",
+            "engine_auto_pause_reason",
+            "engine_team_runs",
+            "engine_sign_in_state",
+            "engine_credential_expires_at",
+        ]
         read_only_fields = fields
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["engine_sign_in_state"] = instance.current_engine_sign_in_state()
+        return data
 
 
 class RunnerSerializer(serializers.ModelSerializer):
@@ -163,6 +197,14 @@ class RunnerSerializer(serializers.ModelSerializer):
     # Optional one-to-one observability snapshot. ``None`` when the row
     # doesn't exist yet (pre-flag runner that has never reported).
     live_state = RunnerLiveStateSerializer(read_only=True)
+    # Built-in engine runner (``provisioning = desktop_bundled``), and whether
+    # its machine's engine is paused (built_engine_as_runner §8, §11).
+    is_engine = serializers.BooleanField(read_only=True)
+    engine_paused = serializers.BooleanField(read_only=True)
+    # Per-runner operator pause (``paused_at`` set), any runner kind.
+    dispatch_paused = serializers.SerializerMethodField()
+    # "Built-in engine · <machine>" is rendered from this.
+    machine_display_name = serializers.CharField(read_only=True)
 
     class Meta:
         model = Runner
@@ -171,10 +213,17 @@ class RunnerSerializer(serializers.ModelSerializer):
             "name",
             "status",
             "host_label",
+            "is_engine",
+            "engine_paused",
+            "dispatch_paused",
+            "machine_display_name",
             # Read-only: derived from the enrolling machine. Exposed so admin
             # and support tooling can answer "is this the bundled desktop
             # runner or one the user installed?" without a second query.
             "provisioning",
+            # Whether the runner takes pod work (built_engine_as_runner §7).
+            # Changed through the owner-only PATCH.
+            "pod_dispatch",
             "os",
             "arch",
             "runner_version",
@@ -203,6 +252,7 @@ class RunnerSerializer(serializers.ModelSerializer):
             # Never client-settable: a runner must not be able to claim it is
             # Pi Dash-managed and thereby become eligible for pinned work.
             "provisioning",
+            "pod_dispatch",
             "os",
             "arch",
             "runner_version",
@@ -224,6 +274,9 @@ class RunnerSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+    def get_dispatch_paused(self, obj) -> bool:
+        return obj.paused_at is not None
 
 
 class RunnerEnrollRequestSerializer(serializers.Serializer):

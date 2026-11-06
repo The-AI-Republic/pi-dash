@@ -23,6 +23,7 @@ from pi_dash.runner.views import (
     ApprovalDecideEndpoint,
     ApprovalListEndpoint,
     DevMachineDeleteEndpoint,
+    DevMachineEngineSignOutEndpoint,
     DevMachineListEndpoint,
     DevMachineRevokeEndpoint,
     DevMachineRotateEndpoint,
@@ -65,6 +66,11 @@ urlpatterns = [
         "dev-machines/<uuid:machine_id>/create-runner/<uuid:request_id>/",
         MachineCreateRunnerStatusEndpoint.as_view(),
         name="dev-machine-create-runner-status",
+    ),
+    path(
+        "dev-machines/<uuid:machine_id>/engine-sign-out/",
+        DevMachineEngineSignOutEndpoint.as_view(),
+        name="dev-machine-engine-sign-out",
     ),
     # Hard-delete a dev-machine connection (destructive counterpart to
     # revoke). Bare ``<machine_id>/`` — the action routes above carry an

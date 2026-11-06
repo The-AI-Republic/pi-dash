@@ -33,11 +33,13 @@ from pi_dash.prompting.composer import build_first_turn
 from pi_dash.prompting.recipes import RecipeNotFound
 from pi_dash.prompting.registry import PromptRegistryError
 from pi_dash.prompting.renderer import PromptRenderError
+from pi_dash.runner.services.dispatch_rules import locality_pin_allowed, runner_may_take
 from pi_dash.runner.models import (
     AgentRun,
     AgentRunStatus,
     AUTOMATIC_ISSUE_TRIGGERS,
     AgentRunTrigger,
+    HUMAN_TRIGGERS,
     Pod,
     Runner,
     RunnerStatus,
@@ -451,7 +453,7 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
     """
     from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields, lock_cloud_creation_capacity
 
-    pinned_runner = _pinned_runner_for(parent, pod)
+    pinned_runner = _pinned_runner_for(parent, pod, creator=creator, trigger=trigger, issue=issue)
     try:
         execution = execution_fields(
             project=issue.project,
@@ -526,7 +528,9 @@ def _create_continuation_run(*, issue: Issue, parent: AgentRun, creator, pod, tr
     return ContinuationOutcome(created_run=run, reason="created")
 
 
-def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Optional[Runner]:
+def _pinned_runner_for(
+    parent: AgentRun, target_pod: Optional[Pod] = None, *, creator, trigger, issue
+) -> Optional[Runner]:
     """Return the runner to pin a follow-up to, or None.
 
     Prefer the parent's runner when it's still eligible. The motivation is
@@ -542,6 +546,10 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     A BUSY runner is alive and stays eligible; the pinned run waits for it.
     A paused runner is not: it takes no new work until resumed, so a pin to it
     would park the run exactly like a pin to a gone runner.
+
+    A built-in engine gets a locality pin only while it is a ``pod_member``
+    and its machine's engine is not paused; otherwise the follow-up is
+    created unpinned in the pod (``built_engine_as_runner`` design §7).
     """
     from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
 
@@ -557,6 +565,15 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     if runner.last_heartbeat_at is None or runner.last_heartbeat_at < timezone.now() - HEARTBEAT_GRACE:
         return None
     if target_pod is not None and runner.pod_id != target_pod.id:
+        return None
+    if not locality_pin_allowed(runner):
+        return None
+    # The next run may have a different principal or trigger from its parent.
+    # A teammate's click must not inherit a pin to an owner-only engine:
+    # the engine would reject it and the pin would block every other runner.
+    if runner.is_engine and not runner_may_take(
+        runner, created_by_id=getattr(creator, "id", None), human=trigger in HUMAN_TRIGGERS, issue=issue
+    ):
         return None
     return runner
 
@@ -667,11 +684,7 @@ def complete_project_move_handoff(run_id) -> Optional[AgentRun]:
         # Issue moves lock issue → run. Use the same order here so a second
         # project move racing the cancellation acknowledgement cannot
         # deadlock this callback.
-        work_item_id = (
-            AgentRun.objects.filter(pk=run_id)
-            .values_list("work_item_id", flat=True)
-            .first()
-        )
+        work_item_id = AgentRun.objects.filter(pk=run_id).values_list("work_item_id", flat=True).first()
         if work_item_id is None:
             return None
 
@@ -684,12 +697,7 @@ def complete_project_move_handoff(run_id) -> Optional[AgentRun]:
         if issue is None:
             return None
 
-        source = (
-            AgentRun.objects.select_for_update(of=("self",))
-            .select_related("created_by")
-            .filter(pk=run_id)
-            .first()
-        )
+        source = AgentRun.objects.select_for_update(of=("self",)).select_related("created_by").filter(pk=run_id).first()
         if source is None or not source.is_terminal:
             return None
 
@@ -794,7 +802,7 @@ def _create_and_dispatch_run(
         # session continuity.
         pinned_runner = None
         if not fresh_session and effective_parent is not None:
-            pinned_runner = _pinned_runner_for(effective_parent, pod)
+            pinned_runner = _pinned_runner_for(effective_parent, pod, creator=creator, trigger=trigger, issue=issue)
         pinned_runner = execution.pop("pinned_runner", pinned_runner)
         run = AgentRun.objects.create(
             workspace=issue.workspace,
