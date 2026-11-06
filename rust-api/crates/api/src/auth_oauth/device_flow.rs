@@ -888,9 +888,7 @@ async fn post_approve(
                         now,
                     );
                 let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                    &db,
-                    machine.id,
-                    now,
+                    &db, machine.id, now,
                 )
                 .await
                 .unwrap_or(false);
@@ -1203,9 +1201,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 now,
             );
             let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                &db_conn,
-                machine.id,
-                now,
+                &db_conn, machine.id, now,
             )
             .await
             .unwrap_or(false);
