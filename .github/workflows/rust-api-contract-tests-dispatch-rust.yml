@@ -1,0 +1,207 @@
+name: rust-api-contract-tests-dispatch-rust
+
+# NEWPIDASH-54: Rust-side lane for the cloud-agent dispatch oracle
+# (tenant isolation, concurrency, budgets, safety + assistant-turn
+# credential isolation).
+#
+# Mirrors the worker-plane job in rust-api-contract-tests.yml, except
+# the Django worker (and beat) stay STOPPED and `pidash-api worker`
+# serves rust_job_queue instead. The dispatch suites are backend-
+# branched: they publish through the live worker's channel (Celery
+# inspect answered -> Celery wire, else rust_job_queue rows), so the
+# same files run against Django in the worker-plane oracle job and
+# against Rust here. Every assertion below is black-box (rows +
+# recorded stub traffic); no Django import is needed by these tests.
+#
+# The SSRF cases run in a separate step under a guard-ON worker with
+# PIDASH_N54_SSRF_GUARD=1: the SSRF guard (ASSISTANT_BLOCK_PRIVATE_URLS)
+# is process-level on both backends, and the rest of the suite needs
+# it off so the 127.0.0.1 stubs are reachable. Without that env
+# variable the test skips.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - "apps/api/**"
+      - ".github/workflows/rust-api-contract-tests-dispatch-rust.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dispatch-rust-oracle:
+    name: dispatch oracle vs Rust worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:15.7-alpine
+        env:
+          POSTGRES_USER: pi_dash
+          POSTGRES_PASSWORD: pi_dash
+          POSTGRES_DB: pi_dash
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: pi_dash.settings.local
+      POSTGRES_USER: pi_dash
+      POSTGRES_PASSWORD: pi_dash
+      POSTGRES_DB: pi_dash
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      WEB_URL: http://localhost
+      APP_BASE_URL: http://localhost
+      EMAIL_BACKEND: django.core.mail.backends.smtp.EmailBackend
+      EMAIL_HOST: localhost
+      EMAIL_PORT: "1025"
+      EMAIL_USE_TLS: "0"
+      EMAIL_USE_SSL: "0"
+      EMAIL_FROM: Pi Dash Contract <contract@example.com>
+      HARD_DELETE_AFTER_DAYS: "0"
+      UNUPLOADED_ASSET_DELETE_DAYS: "0"
+      USE_MINIO: "1"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      AWS_S3_BUCKET_NAME: pi-dash-contract
+      BASE_URL: http://localhost:8000
+      DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
+      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
+      CONTRACT_TASK_TIMEOUT: "60"
+      SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_DJANGO_SECRET_KEY: "contract-tests-fixed-secret"
+      # BYOK Fernet (committed test-only key, ephemeral CI database).
+      ASSISTANT_CRYPTO_BACKEND: fernet
+      ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # Cloud agent on, writes on; + short model/tool timeouts so the
+      # provider-timeout cases take ~16s, matching the local stack.
+      CLOUD_AGENT_ENABLED: "true"
+      CLOUD_AGENT_WRITES_ENABLED: "true"
+      ASSISTANT_BLOCK_PRIVATE_URLS: "False"
+      CLOUD_AGENT_BLOCK_PRIVATE_URLS: "False"
+      CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS: "5"
+      CLOUD_AGENT_TOOL_TIMEOUT_SECONDS: "5"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements/base.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "django-debug-toolbar==4.3.0"
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
+      - name: Build Rust worker
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Start Rust worker (Django worker stays stopped)
+        working-directory: rust-api
+        run: |
+          nohup ./target/debug/pidash-api worker --concurrency 24 \
+            > /tmp/contract-dispatch-rust-worker.log 2>&1 &
+          for i in $(seq 1 30); do
+            grep -q "worker + scheduler loops started" /tmp/contract-dispatch-rust-worker.log && break
+            sleep 2
+          done
+          grep -q "worker + scheduler loops started" /tmp/contract-dispatch-rust-worker.log
+
+      - name: Run dispatch oracle vs Rust
+        working-directory: rust-api/contract-tests
+        # The API install puts pytest-django in this interpreter; the
+        # dispatch oracle never touches Django.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django dispatch/test_beat_schedule.py dispatch/test_celery_wire.py dispatch/test_empty_tool_result.py dispatch/test_provider_http_error.py dispatch/test_provider_body_read_error.py dispatch/test_reasoning_output.py dispatch/test_transition_completion_comment.py dispatch/test_multi_tenant.py dispatch/test_concurrency.py dispatch/test_budgets.py dispatch/test_safety.py assistant/test_turn_isolation.py -v
+
+      - name: SSRF step under a guard-on worker
+        working-directory: rust-api/contract-tests
+        run: |
+          pkill -f "pidash-api worker" || true
+          sleep 2
+          # The guard is read at worker start on both backends, so the
+          # SSRF cases need their own guard-ON worker; the main selection
+          # runs above needs it off for the 127.0.0.1 stubs.
+          ASSISTANT_BLOCK_PRIVATE_URLS=True CLOUD_AGENT_BLOCK_PRIVATE_URLS=True \
+          nohup ../target/debug/pidash-api worker --concurrency 4 \
+            > /tmp/contract-dispatch-rust-worker-guard.log 2>&1 &
+          trap 'pkill -f "pidash-api worker" || true' EXIT
+          for i in $(seq 1 30); do
+            grep -q "worker + scheduler loops started" /tmp/contract-dispatch-rust-worker-guard.log && break
+            sleep 2
+          done
+          grep -q "worker + scheduler loops started" /tmp/contract-dispatch-rust-worker-guard.log
+          ASSISTANT_BLOCK_PRIVATE_URLS=True CLOUD_AGENT_BLOCK_PRIVATE_URLS=True \
+          PIDASH_N54_SSRF_GUARD=1 \
+          env -u DJANGO_SETTINGS_MODULE pytest -p no:django -v \
+            dispatch/test_safety.py::test_ssrf_blocks_internal_base_url_per_tenant
+
+      - name: Upload worker log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-dispatch-rust-worker-log
+          path: /tmp/contract-dispatch-rust-worker*.log

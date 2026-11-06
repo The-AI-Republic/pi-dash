@@ -824,3 +824,62 @@ Known oracle limits (pinned, not skipped): full dispatch-True run creation
 needs an eligible runner (owned by the D-13+ runner gates);
 `done_signal.py` has zero production callers and is excluded.
 (PIDASHCONV-75 orchestration engine oracle)
+
+## Domain: dispatch (NEWPIDASH-54 multi-tenant validation)
+
+`dispatch/` is the cloud-agent task oracle (PIDASHCONV-22, D-11): every
+test seeds its own world straight into Postgres and publishes jobs
+through the live worker's channel (`_harness` auto-detects: Celery wire
+when a Django worker answers inspect, else `rust_job_queue` rows for
+`pidash-api worker`). The same modules run against Django (oracle) and
+the Rust binary unchanged; whichever leg diverges is a parity defect.
+
+NEWPIDASH-54 additions (multi-tenant, one worker, stub providers):
+
+- `test_multi_tenant.py` — tenant isolation + BYOK credentials on the
+  OpenAI lane (per-tenant keys, cross-workspace refusal, rotation,
+  deletion → `llm_config_missing`). The Anthropic lane pins
+  `api.anthropic.com` on both stacks with no base URL, so it is pinned
+  by provider-failure parity + cross-tenant non-contamination only.
+- `test_concurrency.py` — 20 runs across 10 tenants (per-run
+  history/usage/output separation + key isolation), the isolated
+  no-stall ordering proof, per-tenant provider-failure isolation with
+  retry counts (429/5xx/timeout → 3 attempts, malformed → 1), a
+  row-locked write tool blocked past `tool_timeout` that still runs
+  to completion, the single-active-run DB constraint per issue, and
+  per-tenant scan backpressure / stale-sweep parity.
+- `test_budgets.py` — per-run counting: request limit and input-token
+  limit trip `iteration_limit` only on the limited tenant (and on the
+  limited tenant's next run — counting restarts per run), invalid
+  output retries 3 times (`retries=2`) and ends `provider_error`,
+  the 3-write budget lets exactly 3 writes succeed.
+- `test_safety.py` — prompt-injection boundary (refused exactly as
+  Django refuses), toolsets OSS parity (`extra_toolsets=True` is inert
+  in OSS), and the SSRF cases. The SSRF cases need a **guard-on**
+  worker stack (`ASSISTANT_BLOCK_PRIVATE_URLS=True` on both backends,
+  read at worker start) and skip unless `PIDASH_N54_SSRF_GUARD=1` is
+  set; the rest of the suite needs the guard off for the 127.0.0.1
+  stubs.
+
+Worker concurrency must be raised on both legs (`--concurrency 24` on
+Celery prefork and on `pidash-api worker`) or the no-stall ordering
+is unobservable by construction; the CI lanes below define it. The
+stack also sets `CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS=5` /
+`CLOUD_AGENT_TOOL_TIMEOUT_SECONDS=5` so the provider-timeout cases
+take ~16s per leg.
+
+CI lanes:
+
+- Django half: the worker-plane oracle job in
+  `.github/workflows/rust-api-contract-tests.yml` runs `dispatch/`
+  (minus `test_create_project_issue_transition.py` — pre-existing
+  failure on main, `found:` on NEWPIDASH-1) plus
+  `assistant/test_turn_isolation.py`; the stall ordering test is
+  deselected there (the solo worker serialises claims).
+- Rust half: `.github/workflows/rust-api-contract-tests-dispatch-rust.yml`
+  boots `pidash-api worker --concurrency 24` and runs the
+  backend-branched dispatch modules plus `test_turn_isolation.py`;
+  the SSRF step then boots a second, guard-on worker and runs
+  `test_safety.py::test_ssrf_blocks_internal_base_url_per_tenant`
+  with `PIDASH_N54_SSRF_GUARD=1`.
+  (NEWPIDASH-54)
