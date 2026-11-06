@@ -15,3 +15,4 @@ pi_dash.bgtasks.user_deactivation_email_task
 pi_dash.bgtasks.user_email_update_task
 pi_dash.bgtasks.webhook_task
 pi_dash.bgtasks.workspace_invitation_task
+pi_dash.managed_runner.tasks

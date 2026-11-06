@@ -17,9 +17,9 @@ so they are pinned here as data with source references. What the execution
 suites prove is the other half of "firing": each scheduled (task, no-args)
 publication resolves to the pinned behavior — the scan/sweep tests publish
 exactly what beat would (bare task name, empty args, ``celery`` queue) and
-observe the effect, while the expire test pins the unregistered-task
-dead letter. This mapping fails the moment a name, cadence, or behavior
-drifts on either backend.
+observe the effect (the expire sweep included, registered on the Django
+worker since PDASHOSS01-224). This mapping fails the moment a name,
+cadence, or behavior drifts on either backend.
 """
 
 import pytest
