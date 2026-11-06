@@ -6,10 +6,9 @@
 //! [`LiveCreationStore`] implements the services-side seam traits over
 //! one insertion [`Transaction`][pidash_db::tx::Transaction]:
 //!
-//! * every `*_SQL` const from
-//!   [`pidash_services::orchestration::creation`] is executed verbatim
-//!   via `sqlx::query` (no `query!` macros — there is no build-time
-//!   database);
+//! * every store query is built with SeaORM on the insertion
+//!   transaction through [`TxConn`][pidash_db::orm_tx::TxConn]
+//!   (no `query!` macros — there is no build-time database);
 //! * the three `cloud_agent.creation` calls delegate to the merged
 //!   [`crate::dispatch`] functions (`execution_fields` on its own
 //!   short transaction, like the inner atomic at `creation.py:55-70`;
@@ -39,12 +38,25 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DbErr, EntityTrait, FromQueryResult,
+    JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
+};
+use sea_query::{Asterisk, Expr, Func, Query, SimpleExpr};
 use serde_json::Value;
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::entity::{
+    agent_run, agent_run_event, git_code_review_links, git_repositories, git_repository_bindings,
+    issue_agent_ticker, issue_assignees, issue_comments, issue_labels, issue_relations, issues,
+    labels, pod, projects, prompt_section_override, runner, states, users, workspaces,
+};
+use pidash_db::orchestration::runs::ACTIVE_STATUSES;
+use pidash_db::orm_tx::{self, TxConn};
+use pidash_db::runner_runs::agent_run as run_bag;
 use pidash_db::tx::Transaction;
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile, UserFlags,
@@ -53,24 +65,10 @@ use pidash_services::extensions::CloudAgentToolsetsSeam;
 #[cfg(test)]
 use pidash_services::extensions::NoExtraToolsets;
 use pidash_services::orchestration::creation::{
-    active_run_sql, latest_prior_run_sql, run_insert_returning_sql, run_lock_sql, run_select_sql,
-    user_id_for_run, ASSIGNED_POD_SELECT_SQL, BUNDLE_ANCESTOR_HOP_SQL, BUNDLE_ASSIGNEES_SQL,
-    BUNDLE_CHILDREN_SQL, BUNDLE_CODE_REVIEWS_SQL, BUNDLE_COMMENTS_SQL, BUNDLE_DONE_PAYLOAD_SQL,
-    BUNDLE_LABELS_SQL, BUNDLE_OVERRIDES_SQL, BUNDLE_PARENT_COLS_SQL, BUNDLE_PARENT_DESCRIPTION_SQL,
-    BUNDLE_PRIOR_RUN_COUNT_SQL, BUNDLE_PROJECT_IDENTIFIER_SQL, BUNDLE_PROJECT_STATES_SQL,
-    BUNDLE_RELATIONS_SQL, BUNDLE_RELATION_TARGETS_SQL, BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL,
-    BUNDLE_TICKER_SQL, BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, ISSUE_LOCK_SQL,
-    ISSUE_SELECT_SQL, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL,
-    RUN_CONFIG_UPDATE_SQL, STATE_SELECT_SQL, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL,
-    TERMINAL_EVENT_SEQ_SQL, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
-    WORK_ITEM_ID_SELECT_SQL,
-};
-use pidash_services::orchestration::creation::{
-    finalize_error_details_patch, finalize_lock_sql, finalize_update_sql, map_run_view,
-    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, ExecutionError,
-    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
-    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RunView, RunnerSelectRow,
-    RunnerView, StateView, TickerBudget,
+    state_name_group, user_id_for_run, AdmissionError as ServiceAdmissionError, CreationError,
+    CreationSeam, ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
+    RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
@@ -229,53 +227,289 @@ pub enum CreationJobsError {
 }
 
 // ---------------------------------------------------------------------------
-// Row mappers
+// Row mappers (SeaORM fetch rows, decoded by name)
 // ---------------------------------------------------------------------------
 
-/// Map one [`ISSUE_SELECT_SQL`] row.
-#[allow(clippy::type_complexity)]
-fn map_issue(row: &PgRow) -> Result<IssueView, sqlx::Error> {
-    Ok(IssueView {
-        id: row.try_get("id")?,
-        workspace_id: row.try_get("workspace_id")?,
-        project_id: row.try_get("project_id")?,
-        state_id: row.try_get("state_id")?,
-        parent_id: row.try_get("parent_id")?,
-        created_by_id: row.try_get("created_by_id")?,
-        assigned_pod_id: row.try_get("assigned_pod_id")?,
-        agent_executor: row.try_get("agent_executor")?,
-        git_work_branch: row.try_get("git_work_branch")?,
-        workpad: row.try_get("workpad")?,
-        name: row.try_get("name")?,
-        description_stripped: row.try_get("description_stripped")?,
-        priority: row.try_get("priority")?,
-        sequence_id: row.try_get("sequence_id")?,
-        target_date: row.try_get("target_date")?,
+/// Map a SeaORM failure onto the store error, keeping the sqlx text the
+/// old readers produced.
+fn sea_db(error: DbErr) -> CreationError {
+    CreationError::Db(orm_tx::into_sqlx(error).to_string())
+}
+
+/// The store error for a missed `fetch_one` (the old row readers errored
+/// when the row was absent instead of returning `None`).
+fn row_missing() -> CreationError {
+    CreationError::Db(sqlx::Error::RowNotFound.to_string())
+}
+
+/// The `ISSUE_SELECT_SQL` projection, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct IssueRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    state_id: Option<Uuid>,
+    parent_id: Option<Uuid>,
+    created_by_id: Option<Uuid>,
+    assigned_pod_id: Option<Uuid>,
+    agent_executor: Option<String>,
+    git_work_branch: String,
+    workpad: String,
+    name: String,
+    description_stripped: Option<String>,
+    priority: String,
+    sequence_id: i32,
+    target_date: Option<chrono::NaiveDate>,
+}
+
+impl From<IssueRow> for IssueView {
+    fn from(row: IssueRow) -> Self {
+        Self {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            project_id: Some(row.project_id),
+            state_id: row.state_id,
+            parent_id: row.parent_id,
+            created_by_id: row.created_by_id,
+            assigned_pod_id: row.assigned_pod_id,
+            agent_executor: row.agent_executor,
+            git_work_branch: Some(row.git_work_branch),
+            workpad: Some(row.workpad),
+            name: Some(row.name),
+            description_stripped: row.description_stripped,
+            priority: Some(row.priority),
+            sequence_id: row.sequence_id,
+            target_date: row.target_date,
+        }
+    }
+}
+
+/// The `PROJECT_SELECT_SQL` projection, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct ProjectRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    identifier: String,
+    name: String,
+    description: String,
+    repo_url: String,
+    base_branch: String,
+    default_agent_executor: String,
+    project_lead_id: Option<Uuid>,
+    default_assignee_id: Option<Uuid>,
+    agent_default_max_ticks: i32,
+    agent_default_interval_seconds: i32,
+    agent_review_default_interval_seconds: i32,
+    agent_test_default_interval_seconds: i32,
+}
+
+impl From<ProjectRow> for ProjectView {
+    fn from(row: ProjectRow) -> Self {
+        Self {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            identifier: row.identifier,
+            name: row.name,
+            description: Some(row.description),
+            repo_url: Some(row.repo_url),
+            base_branch: Some(row.base_branch),
+            default_agent_executor: row.default_agent_executor,
+            project_lead_id: row.project_lead_id,
+            default_assignee_id: row.default_assignee_id,
+            pool: i64::from(row.agent_default_max_ticks),
+            interval_impl: i64::from(row.agent_default_interval_seconds),
+            interval_review: i64::from(row.agent_review_default_interval_seconds),
+            interval_test: i64::from(row.agent_test_default_interval_seconds),
+        }
+    }
+}
+
+/// The consumed `agent_run` projection (`RUN_VIEW_COLUMNS`), decoded by
+/// name.
+#[derive(Debug, FromQueryResult)]
+struct RunRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    created_by_id: Uuid,
+    pod_id: Uuid,
+    runner_id: Option<Uuid>,
+    pinned_runner_id: Option<Uuid>,
+    parent_run_id: Option<Uuid>,
+    work_item_id: Option<Uuid>,
+    status: String,
+    trigger: String,
+    executor_kind: String,
+    phase_kind: String,
+    run_config: Value,
+    tool_plan: Value,
+    error_details: Value,
+    prompt: String,
+    prompt_manifest: Option<Value>,
+    ended_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+}
+
+fn issue_columns() -> Vec<issues::Column> {
+    vec![
+        issues::Column::Id,
+        issues::Column::WorkspaceId,
+        issues::Column::ProjectId,
+        issues::Column::StateId,
+        issues::Column::ParentId,
+        issues::Column::CreatedById,
+        issues::Column::AssignedPodId,
+        issues::Column::AgentExecutor,
+        issues::Column::GitWorkBranch,
+        issues::Column::Workpad,
+        issues::Column::Name,
+        issues::Column::DescriptionStripped,
+        issues::Column::Priority,
+        issues::Column::SequenceId,
+        issues::Column::TargetDate,
+    ]
+}
+
+fn project_columns() -> Vec<projects::Column> {
+    vec![
+        projects::Column::Id,
+        projects::Column::WorkspaceId,
+        projects::Column::Identifier,
+        projects::Column::Name,
+        projects::Column::Description,
+        projects::Column::RepoUrl,
+        projects::Column::BaseBranch,
+        projects::Column::DefaultAgentExecutor,
+        projects::Column::ProjectLeadId,
+        projects::Column::DefaultAssigneeId,
+        projects::Column::AgentDefaultMaxTicks,
+        projects::Column::AgentDefaultIntervalSeconds,
+        projects::Column::AgentReviewDefaultIntervalSeconds,
+        projects::Column::AgentTestDefaultIntervalSeconds,
+    ]
+}
+
+fn run_columns() -> Vec<agent_run::Column> {
+    vec![
+        agent_run::Column::Id,
+        agent_run::Column::WorkspaceId,
+        agent_run::Column::CreatedById,
+        agent_run::Column::PodId,
+        agent_run::Column::RunnerId,
+        agent_run::Column::PinnedRunnerId,
+        agent_run::Column::ParentRunId,
+        agent_run::Column::WorkItemId,
+        agent_run::Column::Status,
+        agent_run::Column::Trigger,
+        agent_run::Column::ExecutorKind,
+        agent_run::Column::PhaseKind,
+        agent_run::Column::RunConfig,
+        agent_run::Column::ToolPlan,
+        agent_run::Column::ErrorDetails,
+        agent_run::Column::Prompt,
+        agent_run::Column::PromptManifest,
+        agent_run::Column::EndedAt,
+    ]
+}
+
+/// Unknown stored statuses/executors are unreachable through the checks
+/// but keep the old strict decode (a decode failure, not a silent map).
+fn map_run_row(row: RunRow) -> Result<RunView, CreationError> {
+    let status = AgentRunStatus::from_value(&row.status)
+        .ok_or_else(|| CreationError::Db(format!("unknown agent_run.status {:?}", row.status)))?;
+    let executor_kind = AgentExecutorKind::from_value(&row.executor_kind).ok_or_else(|| {
+        CreationError::Db(format!(
+            "unknown agent_run.executor_kind {:?}",
+            row.executor_kind
+        ))
+    })?;
+    Ok(RunView {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        created_by_id: row.created_by_id,
+        pod_id: row.pod_id,
+        runner_id: row.runner_id,
+        pinned_runner_id: row.pinned_runner_id,
+        parent_run_id: row.parent_run_id,
+        work_item_id: row.work_item_id,
+        status,
+        trigger: row.trigger,
+        executor_kind,
+        phase_kind: row.phase_kind,
+        run_config: row.run_config,
+        tool_plan: row.tool_plan,
+        error_details: row.error_details,
+        prompt: row.prompt,
+        prompt_manifest: row.prompt_manifest,
+        ended_at: row.ended_at.map(|at| at.with_timezone(&Utc)),
     })
 }
 
-/// Map one [`PROJECT_SELECT_SQL`] row.
-fn map_project(row: &PgRow) -> Result<ProjectView, sqlx::Error> {
-    let pool: i32 = row.try_get("agent_default_max_ticks")?;
-    let interval_impl: i32 = row.try_get("agent_default_interval_seconds")?;
-    let interval_review: i32 = row.try_get("agent_review_default_interval_seconds")?;
-    let interval_test: i32 = row.try_get("agent_test_default_interval_seconds")?;
-    Ok(ProjectView {
-        id: row.try_get("id")?,
-        workspace_id: row.try_get("workspace_id")?,
-        identifier: row.try_get("identifier")?,
-        name: row.try_get("name")?,
-        description: row.try_get("description")?,
-        repo_url: row.try_get("repo_url")?,
-        base_branch: row.try_get("base_branch")?,
-        default_agent_executor: row.try_get("default_agent_executor")?,
-        project_lead_id: row.try_get("project_lead_id")?,
-        default_assignee_id: row.try_get("default_assignee_id")?,
-        pool: i64::from(pool),
-        interval_impl: i64::from(interval_impl),
-        interval_review: i64::from(interval_review),
-        interval_test: i64::from(interval_test),
+/// Map an inserted full row onto the view (the `RETURNING` projection of
+/// the old insert, same strict status/executor decode).
+fn map_run_model(model: agent_run::Model) -> Result<RunView, CreationError> {
+    let status = AgentRunStatus::from_value(&model.status)
+        .ok_or_else(|| CreationError::Db(format!("unknown agent_run.status {:?}", model.status)))?;
+    let executor_kind = AgentExecutorKind::from_value(&model.executor_kind).ok_or_else(|| {
+        CreationError::Db(format!(
+            "unknown agent_run.executor_kind {:?}",
+            model.executor_kind
+        ))
+    })?;
+    Ok(RunView {
+        id: model.id,
+        workspace_id: model.workspace_id,
+        created_by_id: model.created_by_id,
+        pod_id: model.pod_id,
+        runner_id: model.runner_id,
+        pinned_runner_id: model.pinned_runner_id,
+        parent_run_id: model.parent_run_id,
+        work_item_id: model.work_item_id,
+        status,
+        trigger: model.trigger,
+        executor_kind,
+        phase_kind: model.phase_kind,
+        run_config: model.run_config,
+        tool_plan: model.tool_plan,
+        error_details: model.error_details,
+        prompt: model.prompt,
+        prompt_manifest: model.prompt_manifest,
+        ended_at: model.ended_at.map(|at| at.with_timezone(&Utc)),
     })
+}
+
+/// The `RUNNER_SELECT_SQL` projection, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct RunnerRow {
+    id: Uuid,
+    pod_id: Uuid,
+    status: String,
+    last_heartbeat_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    paused_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+}
+
+impl From<RunnerRow> for RunnerView {
+    fn from(row: RunnerRow) -> Self {
+        Self {
+            id: row.id,
+            pod_id: row.pod_id,
+            status: row.status,
+            last_heartbeat_at: row.last_heartbeat_at.map(|at| at.with_timezone(&Utc)),
+            paused_at: row.paused_at.map(|at| at.with_timezone(&Utc)),
+        }
+    }
+}
+
+/// The `users.is_active/is_bot` flags, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct UserFlagsRow {
+    is_active: bool,
+    is_bot: bool,
+}
+
+/// The `pod` projections, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct PodRow {
+    id: Uuid,
+    project_id: Uuid,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,139 +523,214 @@ where
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
-        let row = sqlx::query(ISSUE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_one(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        map_issue(&row).map_err(Self::db)
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            issues::Entity::find()
+                .select_only()
+                .columns(issue_columns())
+                .filter(issues::Column::Id.eq(issue_id))
+                .into_model::<IssueRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        row.map(IssueView::from).ok_or_else(row_missing)
     }
 
     async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
-        let row = sqlx::query(PROJECT_SELECT_SQL)
-            .bind(project_id)
-            .fetch_one(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        map_project(&row).map_err(Self::db)
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            projects::Entity::find()
+                .select_only()
+                .columns(project_columns())
+                .filter(projects::Column::Id.eq(project_id))
+                .into_model::<ProjectRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        row.map(ProjectView::from).ok_or_else(row_missing)
     }
 
     async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
         let Some(state_id) = state_id else {
             return Ok(None);
         };
-        let row: Option<(Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-            .bind(state_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        match row {
-            Some((id, name, group)) => Ok(Some(StateView { id, name, group })),
+        let found = {
+            let conn = TxConn::new(self.tx.inner());
+            state_name_group(&conn, state_id).await.map_err(sea_db)?
+        };
+        match found {
+            Some((name, group)) => Ok(Some(StateView {
+                id: state_id,
+                name,
+                group,
+            })),
             None => Err(CreationError::MissingRow(format!("no state {state_id}"))),
         }
     }
 
     async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        let row = sqlx::query(&latest_prior_run_sql())
-            .bind(issue_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        row.map(|row| map_run_view(&row))
-            .transpose()
-            .map_err(Self::db)
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            agent_run::Entity::find()
+                .select_only()
+                .columns(run_columns())
+                .filter(agent_run::Column::WorkItemId.eq(issue_id))
+                .order_by_desc(agent_run::Column::CreatedAt)
+                .limit(1)
+                .into_model::<RunRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        row.map(map_run_row).transpose()
     }
 
     async fn active_run_for(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        let row = sqlx::query(&active_run_sql())
-            .bind(issue_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        row.map(|row| map_run_view(&row))
-            .transpose()
-            .map_err(Self::db)
+        let statuses: Vec<&str> = ACTIVE_STATUSES.iter().map(|s| s.value()).collect();
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            agent_run::Entity::find()
+                .select_only()
+                .columns(run_columns())
+                .filter(agent_run::Column::WorkItemId.eq(issue_id))
+                .filter(agent_run::Column::Status.is_in(statuses))
+                .order_by_desc(agent_run::Column::CreatedAt)
+                .limit(1)
+                .into_model::<RunRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        row.map(map_run_row).transpose()
     }
 
     async fn run(&mut self, run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        let row = sqlx::query(&run_select_sql())
-            .bind(run_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        row.map(|row| map_run_view(&row))
-            .transpose()
-            .map_err(Self::db)
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            agent_run::Entity::find()
+                .select_only()
+                .columns(run_columns())
+                .filter(agent_run::Column::Id.eq(run_id))
+                .into_model::<RunRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        row.map(map_run_row).transpose()
     }
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        let row: Option<RunnerSelectRow> = sqlx::query_as(RUNNER_SELECT_SQL)
-            .bind(runner_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        Ok(row.map(
-            |(id, pod_id, status, last_heartbeat_at, paused_at)| RunnerView {
-                id,
-                pod_id,
-                status,
-                last_heartbeat_at,
-                paused_at,
-            },
-        ))
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            runner::Entity::find()
+                .select_only()
+                .columns([
+                    runner::Column::Id,
+                    runner::Column::PodId,
+                    runner::Column::Status,
+                    runner::Column::LastHeartbeatAt,
+                    runner::Column::PausedAt,
+                ])
+                .filter(runner::Column::Id.eq(runner_id))
+                .into_model::<RunnerRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        Ok(row.map(RunnerView::from))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        let row: Option<(Uuid, Uuid)> = sqlx::query_as(ASSIGNED_POD_SELECT_SQL)
-            .bind(pod_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        Ok(row.map(|(id, project_id)| PodView { id, project_id }))
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            pod::Entity::find()
+                .select_only()
+                .columns([pod::Column::Id, pod::Column::ProjectId])
+                .filter(pod::Column::Id.eq(pod_id))
+                .filter(pod::Column::DeletedAt.is_null())
+                .into_model::<PodRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        Ok(row.map(|row| PodView {
+            id: row.id,
+            project_id: row.project_id,
+        }))
     }
 
     async fn default_pod_for_project(
         &mut self,
         project_id: Uuid,
     ) -> Result<Option<PodView>, CreationError> {
-        let row: Option<(Uuid, Uuid)> = sqlx::query_as(DEFAULT_POD_SELECT_SQL)
-            .bind(project_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        Ok(row.map(|(id, project_id)| PodView { id, project_id }))
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            pod::Entity::find()
+                .select_only()
+                .columns([pod::Column::Id, pod::Column::ProjectId])
+                .filter(pod::Column::ProjectId.eq(project_id))
+                .filter(pod::Column::IsDefault.eq(true))
+                .filter(pod::Column::DeletedAt.is_null())
+                .order_by_asc(pod::Column::Id)
+                .limit(1)
+                .into_model::<PodRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        Ok(row.map(|row| PodView {
+            id: row.id,
+            project_id: row.project_id,
+        }))
     }
 
     async fn resume_parent_run_id(
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Option<Uuid>,)> = sqlx::query_as(TICKER_RESUME_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        Ok(row.and_then(|row| row.0))
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            issue_agent_ticker::Entity::find()
+                .select_only()
+                .column(issue_agent_ticker::Column::ResumeParentRunId)
+                .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+                .into_tuple::<Option<Uuid>>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        Ok(row.flatten())
     }
 
     async fn work_item_id_for_run(&mut self, run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Option<Uuid>,)> = sqlx::query_as(WORK_ITEM_ID_SELECT_SQL)
-            .bind(run_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        Ok(row.and_then(|row| row.0))
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            agent_run::Entity::find()
+                .select_only()
+                .column(agent_run::Column::WorkItemId)
+                .filter(agent_run::Column::Id.eq(run_id))
+                .into_tuple::<Option<Uuid>>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        Ok(row.flatten())
     }
 
     async fn lock_issue_for_handoff(
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<LockedIssue>, CreationError> {
-        let locked: Option<(Uuid,)> = sqlx::query_as(ISSUE_LOCK_SQL)
-            .bind(issue_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
+        let locked = {
+            let conn = TxConn::new(self.tx.inner());
+            issues::Entity::find_by_id(issue_id)
+                .lock_exclusive()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
         if locked.is_none() {
             return Ok(None);
         }
@@ -442,48 +751,90 @@ where
         &mut self,
         run_id: Uuid,
     ) -> Result<Option<RunView>, CreationError> {
-        let row = sqlx::query(&run_lock_sql())
-            .bind(run_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        row.map(|row| map_run_view(&row))
-            .transpose()
-            .map_err(Self::db)
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            agent_run::Entity::find()
+                .select_only()
+                .columns(run_columns())
+                .filter(agent_run::Column::Id.eq(run_id))
+                .lock_exclusive()
+                .into_model::<RunRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        row.map(map_run_row).transpose()
     }
 
     async fn user_flags(&mut self, user_id: Uuid) -> Result<UserFlags, CreationError> {
-        let row: (bool, bool) = sqlx::query_as(USER_FLAGS_SELECT_SQL)
-            .bind(user_id)
-            .fetch_one(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
+        let row = {
+            let conn = TxConn::new(self.tx.inner());
+            users::Entity::find()
+                .select_only()
+                .columns([users::Column::IsActive, users::Column::IsBot])
+                .filter(users::Column::Id.eq(user_id))
+                .into_model::<UserFlagsRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
+        let row = row.ok_or_else(row_missing)?;
         Ok(UserFlags {
-            is_active: row.0,
-            is_bot: row.1,
+            is_active: row.is_active,
+            is_bot: row.is_bot,
         })
     }
 
     async fn insert_run(&mut self, row: &NewAgentRun) -> Result<RunView, CreationError> {
-        let inserted = sqlx::query(&run_insert_returning_sql())
-            .bind(row.id)
-            .bind(row.workspace_id)
-            .bind(row.created_by_id)
-            .bind(row.pod_id)
-            .bind(row.pinned_runner_id)
-            .bind(row.work_item_id)
-            .bind(row.parent_run_id)
-            .bind(row.executor_kind.value())
-            .bind(&row.error_details)
-            .bind(&row.tool_plan)
-            .bind(&row.trigger)
-            .bind(&row.phase_kind)
-            .bind(&row.run_config)
-            .bind(row.now)
-            .fetch_one(&mut **self.tx.inner())
-            .await
-            .map_err(Self::db)?;
-        map_run_view(&inserted).map_err(Self::db)
+        let now: sea_orm::prelude::DateTimeWithTimeZone = row.now.into();
+        let model = agent_run::ActiveModel {
+            id: Set(row.id),
+            status: Set("queued".to_owned()),
+            prompt: Set(String::new()),
+            run_config: Set(row.run_config.clone()),
+            required_capabilities: Set(serde_json::json!([])),
+            thread_id: Set(String::new()),
+            lease_expires_at: Set(None),
+            done_payload: Set(None),
+            created_at: Set(now),
+            assigned_at: Set(None),
+            started_at: Set(None),
+            ended_at: Set(None),
+            owner_id: Set(None),
+            workspace_id: Set(row.workspace_id),
+            runner_id: Set(None),
+            work_item_id: Set(Some(row.work_item_id)),
+            parent_run_id: Set(row.parent_run_id),
+            pod_id: Set(row.pod_id),
+            created_by_id: Set(row.created_by_id),
+            pinned_runner_id: Set(row.pinned_runner_id),
+            scheduler_binding_id: Set(None),
+            llm_model: Set(String::new()),
+            trigger: Set(row.trigger.clone()),
+            prompt_manifest: Set(None),
+            executor_kind: Set(row.executor_kind.value().to_owned()),
+            dispatch_attempts: Set(0),
+            cancel_requested_at: Set(None),
+            cancel_reason: Set(String::new()),
+            tool_plan: Set(row.tool_plan.clone()),
+            terminal_hooks_applied_at: Set(None),
+            terminal_capacity_released_at: Set(None),
+            phase_kind: Set(row.phase_kind.clone()),
+            agent_metadata: Set(serde_json::json!({})),
+            usage: Set(serde_json::json!({})),
+            // Generated columns (the `JSONKey*Field`s): left out of the
+            // insert, exactly like the old `RUN_INSERT_SQL`.
+            input_tokens: ActiveValue::NotSet,
+            output_tokens: ActiveValue::NotSet,
+            total_tokens: ActiveValue::NotSet,
+            error_details: Set(row.error_details.clone()),
+            refusal_category: ActiveValue::NotSet,
+        };
+        let inserted = {
+            let conn = TxConn::new(self.tx.inner());
+            model.insert(&conn).await.map_err(sea_db)?
+        };
+        map_run_model(inserted)
     }
 
     async fn save_prompt(
@@ -492,23 +843,28 @@ where
         prompt: &str,
         manifest: &Value,
     ) -> Result<(), CreationError> {
-        sqlx::query(PROMPT_UPDATE_SQL)
-            .bind(prompt)
-            .bind(manifest)
-            .bind(run_id)
-            .execute(&mut **self.tx.inner())
+        let conn = TxConn::new(self.tx.inner());
+        agent_run::Entity::update_many()
+            .col_expr(agent_run::Column::Prompt, Expr::value(prompt.to_owned()))
+            .col_expr(
+                agent_run::Column::PromptManifest,
+                Expr::value(manifest.clone()),
+            )
+            .filter(agent_run::Column::Id.eq(run_id))
+            .exec(&conn)
             .await
-            .map_err(Self::db)?;
+            .map_err(sea_db)?;
         Ok(())
     }
 
     async fn save_run_config(&mut self, run_id: Uuid, config: &Value) -> Result<(), CreationError> {
-        sqlx::query(RUN_CONFIG_UPDATE_SQL)
-            .bind(config)
-            .bind(run_id)
-            .execute(&mut **self.tx.inner())
+        let conn = TxConn::new(self.tx.inner());
+        agent_run::Entity::update_many()
+            .col_expr(agent_run::Column::RunConfig, Expr::value(config.clone()))
+            .filter(agent_run::Column::Id.eq(run_id))
+            .exec(&conn)
             .await
-            .map_err(Self::db)?;
+            .map_err(sea_db)?;
         Ok(())
     }
 
@@ -676,96 +1032,163 @@ fn map_admission_error(error: DeferredAdmissionError) -> ServiceAdmissionError {
 // Render-bundle loader (mirrors the api prompt-preview fetch side)
 // ---------------------------------------------------------------------------
 
-fn db(error: sqlx::Error) -> CreationError {
-    CreationError::Db(error.to_string())
+/// `issue.labels`: the M2M join through the label's live default manager,
+/// newest first. Soft-deleted links still render (no link-table guard).
+#[derive(Debug, FromQueryResult)]
+struct LabelNameRow {
+    name: String,
+}
+
+fn labels_query(issue_id: Uuid) -> sea_orm::Select<issue_labels::Entity> {
+    issue_labels::Entity::find()
+        .select_only()
+        .column_as(labels::Column::Name, "name")
+        .join(JoinType::InnerJoin, issue_labels::Relation::Labels.def())
+        .filter(issue_labels::Column::IssueId.eq(issue_id))
+        .filter(labels::Column::DeletedAt.is_null())
+        .order_by_desc(labels::Column::CreatedAt)
 }
 
 async fn bundle_labels(
     tx: &mut Transaction<'_>,
     issue_id: Uuid,
 ) -> Result<Vec<String>, CreationError> {
-    sqlx::query_scalar(BUNDLE_LABELS_SQL)
-        .bind(issue_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        labels_query(issue_id)
+            .into_model::<LabelNameRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
+    Ok(rows.into_iter().map(|row| row.name).collect())
+}
+
+/// `issue.assignees`: display name / email pairs, newest user first.
+#[derive(Debug, FromQueryResult)]
+struct AssigneeRow {
+    display_name: String,
+    email: Option<String>,
+}
+
+fn assignees_query(issue_id: Uuid) -> sea_orm::Select<issue_assignees::Entity> {
+    issue_assignees::Entity::find()
+        .select_only()
+        .column_as(users::Column::DisplayName, "display_name")
+        .column_as(users::Column::Email, "email")
+        .join(JoinType::InnerJoin, issue_assignees::Relation::Users3.def())
+        .filter(issue_assignees::Column::IssueId.eq(issue_id))
+        .order_by_desc(users::Column::CreatedAt)
 }
 
 async fn bundle_assignees(
     tx: &mut Transaction<'_>,
     issue_id: Uuid,
 ) -> Result<Vec<String>, CreationError> {
-    let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(BUNDLE_ASSIGNEES_SQL)
-        .bind(issue_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        assignees_query(issue_id)
+            .into_model::<AssigneeRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     Ok(rows
         .into_iter()
-        .map(|(display, email)| context::assignee_display(display.as_deref(), email.as_deref()))
+        .map(|row| context::assignee_display(Some(&row.display_name), row.email.as_deref()))
         .collect())
+}
+
+/// `State.objects.filter(project=…)`: triage excluded, `sequence` order.
+#[derive(Debug, FromQueryResult)]
+struct ProjectStateRow {
+    name: String,
+    group: String,
+    description: String,
 }
 
 async fn bundle_project_states(
     tx: &mut Transaction<'_>,
     project_id: Uuid,
 ) -> Result<Vec<context::ProjectStateView>, CreationError> {
-    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(BUNDLE_PROJECT_STATES_SQL)
-        .bind(project_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        states::Entity::find()
+            .select_only()
+            .columns([
+                states::Column::Name,
+                states::Column::Group,
+                states::Column::Description,
+            ])
+            .filter(states::Column::ProjectId.eq(project_id))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .order_by_asc(states::Column::Sequence)
+            .into_model::<ProjectStateRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     Ok(rows
         .into_iter()
-        .map(|(name, group, description)| context::ProjectStateView {
-            name,
-            group,
-            description,
+        .map(|row| context::ProjectStateView {
+            name: row.name,
+            group: row.group,
+            description: Some(row.description),
         })
         .collect())
 }
 
-type ChildCols = (Uuid, Option<String>, i32, String, Option<String>);
-type TargetCols = (
-    Uuid,
-    Option<String>,
-    i32,
-    String,
-    Option<String>,
-    Option<String>,
-);
-type CommentCols = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<bool>,
-);
-type ReviewCols = (String, Option<String>, String, bool, bool, String, String);
-type ParentCols = (Option<String>, Option<Uuid>, Option<String>, i64);
+/// Direct children: live, non-triage, non-archived, non-draft, oldest
+/// first. Joined columns are aliased so every output name is unique.
+#[derive(Debug, FromQueryResult)]
+struct ChildRow {
+    issue_name: String,
+    issue_sequence_id: i32,
+    project_identifier: String,
+    state_name: Option<String>,
+}
+
+fn children_query(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .column_as(issues::Column::Name, "issue_name")
+        .column_as(issues::Column::SequenceId, "issue_sequence_id")
+        .column_as(projects::Column::Identifier, "project_identifier")
+        .column_as(states::Column::Name, "state_name")
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .filter(issues::Column::ParentId.eq(issue_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .order_by_asc(issues::Column::CreatedAt)
+}
 
 async fn bundle_children(
     tx: &mut Transaction<'_>,
     issue_id: Uuid,
 ) -> Result<Vec<context::IssueRef>, CreationError> {
-    let rows: Vec<ChildCols> = sqlx::query_as(BUNDLE_CHILDREN_SQL)
-        .bind(issue_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        children_query(issue_id)
+            .into_model::<ChildRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     Ok(rows
         .into_iter()
-        .map(
-            |(_, name, sequence, project_identifier, state)| context::IssueRef {
-                identifier: context::issue_identifier(&project_identifier, i64::from(sequence)),
-                title: name.unwrap_or_default(),
-                state: state.unwrap_or_default(),
-            },
-        )
+        .map(|row| context::IssueRef {
+            identifier: context::issue_identifier(
+                &row.project_identifier,
+                i64::from(row.issue_sequence_id),
+            ),
+            title: row.issue_name,
+            state: row.state_name.unwrap_or_default(),
+        })
         .collect())
 }
 
@@ -780,35 +1203,70 @@ async fn bundle_relations(
     ),
     CreationError,
 > {
-    let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(BUNDLE_RELATIONS_SQL)
-        .bind(issue_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        issue_relations::Entity::find()
+            .select_only()
+            .columns([
+                issue_relations::Column::IssueId,
+                issue_relations::Column::RelatedIssueId,
+                issue_relations::Column::RelationType,
+            ])
+            .filter(
+                Condition::any()
+                    .add(issue_relations::Column::IssueId.eq(issue_id))
+                    .add(issue_relations::Column::RelatedIssueId.eq(issue_id)),
+            )
+            .filter(issue_relations::Column::DeletedAt.is_null())
+            .order_by_desc(issue_relations::Column::CreatedAt)
+            .into_model::<RelationRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     // The other end of each row, deduplicated, self-links dropped.
     let mut other_ids: Vec<Uuid> = Vec::new();
     let mut seen_ids = HashSet::new();
-    for (left, right, _) in &rows {
-        let other = if left == &issue_id { *right } else { *left };
+    for row in &rows {
+        let other = if row.issue_id == issue_id {
+            row.related_issue_id
+        } else {
+            row.issue_id
+        };
         if other != issue_id && seen_ids.insert(other) {
             other_ids.push(other);
         }
     }
-    let targets: Vec<TargetCols> = if other_ids.is_empty() {
+    let targets: Vec<TargetRow> = if other_ids.is_empty() {
         Vec::new()
     } else {
-        sqlx::query_as(BUNDLE_RELATION_TARGETS_SQL)
-            .bind(&other_ids)
-            .fetch_all(&mut **tx.inner())
+        let conn = TxConn::new(tx.inner());
+        issues::Entity::find()
+            .select_only()
+            .column_as(issues::Column::Id, "issue_id")
+            .column_as(issues::Column::Name, "issue_name")
+            .column_as(issues::Column::SequenceId, "issue_sequence_id")
+            .column_as(projects::Column::Identifier, "project_identifier")
+            .column_as(states::Column::Name, "state_name")
+            .column_as(states::Column::Group, "state_group")
+            .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+            .join(JoinType::LeftJoin, issues::Relation::States.def())
+            .filter(issues::Column::Id.is_in(other_ids))
+            .filter(issues::Column::DeletedAt.is_null())
+            .into_model::<TargetRow>()
+            .all(&conn)
             .await
-            .map_err(db)?
+            .map_err(sea_db)?
     };
     let mut refs = HashMap::new();
     let mut directional_refs = HashMap::new();
-    for (id, name, sequence, project_identifier, state, group) in targets {
-        let key = id.to_string();
-        let title = name.unwrap_or_default();
-        let state_name = state.unwrap_or_default();
+    for target in targets {
+        let key = target.issue_id.to_string();
+        let title = target.issue_name;
+        let state_name = target.state_name.unwrap_or_default();
+        let sequence = target.issue_sequence_id;
+        let project_identifier = target.project_identifier;
+        let group = target.state_group;
         refs.insert(
             key.clone(),
             context::IssueRef {
@@ -829,97 +1287,199 @@ async fn bundle_relations(
     }
     let relation_rows = rows
         .into_iter()
-        .map(|(left, right, relation_type)| context::RelationRow {
-            issue_id: left.to_string(),
-            related_issue_id: right.to_string(),
-            relation_type,
+        .map(|row| context::RelationRow {
+            issue_id: row.issue_id.to_string(),
+            related_issue_id: row.related_issue_id.to_string(),
+            relation_type: row.relation_type,
         })
         .collect();
     Ok((relation_rows, refs, directional_refs))
+}
+
+/// Relation rows, both directions, newest first.
+#[derive(Debug, FromQueryResult)]
+struct RelationRow {
+    issue_id: Uuid,
+    related_issue_id: Uuid,
+    relation_type: String,
+}
+
+/// Relation targets: live issues with their own project's identifier.
+#[derive(Debug, FromQueryResult)]
+struct TargetRow {
+    issue_id: Uuid,
+    issue_name: String,
+    issue_sequence_id: i32,
+    project_identifier: String,
+    state_name: Option<String>,
+    state_group: Option<String>,
+}
+
+/// Unfolded comments, chronological, with the actor's columns from a
+/// LEFT join (all `None` when the actor is gone).
+#[derive(Debug, FromQueryResult)]
+struct CommentRow {
+    stripped: String,
+    speaker_type: String,
+    speaker_label: String,
+    run_id: Option<Uuid>,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    display_name: Option<String>,
+    email: Option<String>,
+    username: Option<String>,
+    is_bot: Option<bool>,
+    labels: Vec<String>,
+}
+
+fn comments_query(issue_id: Uuid) -> sea_orm::Select<issue_comments::Entity> {
+    issue_comments::Entity::find()
+        .select_only()
+        .column_as(issue_comments::Column::CommentStripped, "stripped")
+        .column_as(issue_comments::Column::SpeakerType, "speaker_type")
+        .column_as(issue_comments::Column::SpeakerLabel, "speaker_label")
+        .column_as(issue_comments::Column::SpeakerAgentRunId, "run_id")
+        .column_as(issue_comments::Column::CreatedAt, "created_at")
+        .column_as(users::Column::DisplayName, "display_name")
+        .column_as(users::Column::Email, "email")
+        .column_as(users::Column::Username, "username")
+        .column_as(users::Column::IsBot, "is_bot")
+        .column_as(issue_comments::Column::Labels, "labels")
+        .join(JoinType::LeftJoin, issue_comments::Relation::Users3.def())
+        .filter(issue_comments::Column::IssueId.eq(issue_id))
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .order_by_asc(issue_comments::Column::CreatedAt)
 }
 
 async fn bundle_comments(
     tx: &mut Transaction<'_>,
     issue_id: Uuid,
 ) -> Result<Vec<context::CommentView>, CreationError> {
-    let rows: Vec<CommentCols> = sqlx::query_as(BUNDLE_COMMENTS_SQL)
-        .bind(issue_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        comments_query(issue_id)
+            .into_model::<CommentRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     Ok(rows
         .into_iter()
-        .map(
-            |(
-                stripped,
-                speaker_type,
-                speaker_label,
-                run_id,
-                created_at,
-                display,
-                email,
-                username,
-                is_bot,
-            )| {
-                let actor = match (&display, &email, &username, &is_bot) {
-                    (None, None, None, None) => None,
-                    _ => Some(context::ActorView {
-                        display_name: display,
-                        email,
-                        username,
-                        is_bot: is_bot.unwrap_or(false),
-                    }),
-                };
-                context::CommentView {
-                    body: stripped.unwrap_or_default(),
-                    speaker_type: speaker_type.unwrap_or_default(),
-                    speaker_label,
-                    actor,
-                    created_at_iso: created_at.map(render_isoformat),
-                    run_id: run_id.map(|id| id.to_string()),
-                }
-            },
-        )
+        // `fold`-labeled rows excluded (`labels @> ARRAY['fold']`).
+        .filter(|row| !row.labels.iter().any(|label| label == "fold"))
+        .map(|row| {
+            let actor = match (&row.display_name, &row.email, &row.username, &row.is_bot) {
+                (None, None, None, None) => None,
+                (display, email, username, is_bot) => Some(context::ActorView {
+                    display_name: display.clone(),
+                    email: email.clone(),
+                    username: username.clone(),
+                    is_bot: is_bot.unwrap_or(false),
+                }),
+            };
+            context::CommentView {
+                body: row.stripped,
+                speaker_type: row.speaker_type,
+                speaker_label: Some(row.speaker_label),
+                actor,
+                created_at_iso: Some(render_isoformat(row.created_at.with_timezone(&Utc))),
+                run_id: row.run_id.map(|id| id.to_string()),
+            }
+        })
         .collect())
+}
+
+/// Attached review links, newest first.
+#[derive(Debug, FromQueryResult)]
+struct ReviewRow {
+    url: String,
+    title: String,
+    state: String,
+    merged: bool,
+    draft: bool,
+    provider: String,
+    external_iid: String,
 }
 
 async fn bundle_reviews(
     tx: &mut Transaction<'_>,
     issue_id: Uuid,
 ) -> Result<Vec<context::CodeReviewView>, CreationError> {
-    let rows: Vec<ReviewCols> = sqlx::query_as(BUNDLE_CODE_REVIEWS_SQL)
-        .bind(issue_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        git_code_review_links::Entity::find()
+            .select_only()
+            .columns([
+                git_code_review_links::Column::Url,
+                git_code_review_links::Column::Title,
+                git_code_review_links::Column::State,
+                git_code_review_links::Column::Merged,
+                git_code_review_links::Column::Draft,
+                git_code_review_links::Column::Provider,
+                git_code_review_links::Column::ExternalIid,
+            ])
+            .filter(git_code_review_links::Column::IssueId.eq(issue_id))
+            .filter(git_code_review_links::Column::DeletedAt.is_null())
+            .order_by_desc(git_code_review_links::Column::CreatedAt)
+            .into_model::<ReviewRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     Ok(rows
         .into_iter()
-        .map(
-            |(url, title, state, merged, draft, provider, external_iid)| context::CodeReviewView {
-                url,
-                title,
-                state,
-                merged,
-                draft,
-                provider,
-                external_iid,
-            },
-        )
+        .map(|row| context::CodeReviewView {
+            url: row.url,
+            title: Some(row.title),
+            state: row.state,
+            merged: row.merged,
+            draft: row.draft,
+            provider: row.provider,
+            external_iid: row.external_iid,
+        })
         .collect())
+}
+
+/// The first bound remote: oldest live binding.
+#[derive(Debug, FromQueryResult)]
+struct RemoteRow {
+    provider: String,
+    host_url: String,
+    full_name: String,
+}
+
+fn remote_query(project_id: Uuid) -> sea_orm::Select<git_repository_bindings::Entity> {
+    git_repository_bindings::Entity::find()
+        .select_only()
+        .column_as(git_repositories::Column::Provider, "provider")
+        .column_as(git_repositories::Column::HostUrl, "host_url")
+        .column_as(git_repositories::Column::FullName, "full_name")
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::GitRepositories.def(),
+        )
+        .filter(git_repository_bindings::Column::ProjectId.eq(project_id))
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .filter(git_repositories::Column::DeletedAt.is_null())
+        .order_by_asc(git_repository_bindings::Column::CreatedAt)
+        .limit(1)
 }
 
 async fn bundle_remote(
     tx: &mut Transaction<'_>,
     project_id: Uuid,
 ) -> Result<(Option<context::RemoteView>, Option<context::AdapterNames>), CreationError> {
-    let row: Option<(String, String, String)> = sqlx::query_as(BUNDLE_REMOTE_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await
-        .map_err(db)?;
-    let Some((provider, host_url, full_name)) = row else {
+    let row = {
+        let conn = TxConn::new(tx.inner());
+        remote_query(project_id)
+            .into_model::<RemoteRow>()
+            .one(&conn)
+            .await
+            .map_err(sea_db)?
+    };
+    let Some(row) = row else {
         return Ok((None, None));
     };
+    let (provider, host_url, full_name) = (row.provider, row.host_url, row.full_name);
     let adapter = match provider.to_lowercase().as_str() {
         "github" => Some(context::AdapterNames {
             display_name: "GitHub".to_owned(),
@@ -969,34 +1529,82 @@ async fn bundle_ancestors(
         if chain.len() >= 50 || !seen.insert(id) {
             break;
         }
-        let row: Option<(Option<String>, Option<Uuid>, Option<Uuid>)> =
-            sqlx::query_as(BUNDLE_ANCESTOR_HOP_SQL)
-                .bind(id)
-                .fetch_optional(&mut **tx.inner())
+        let row = {
+            let conn = TxConn::new(tx.inner());
+            issues::Entity::find()
+                .select_only()
+                .columns([
+                    issues::Column::Name,
+                    issues::Column::ProjectId,
+                    issues::Column::ParentId,
+                ])
+                .filter(issues::Column::Id.eq(id))
+                .into_model::<AncestorHopRow>()
+                .one(&conn)
                 .await
-                .map_err(db)?;
-        let Some((name, project_id, parent_id)) = row else {
+                .map_err(sea_db)?
+        };
+        let Some(row) = row else {
             break;
         };
-        let project_identifier = match project_id {
-            Some(pid) => {
-                let row: Option<(String,)> = sqlx::query_as(BUNDLE_PROJECT_IDENTIFIER_SQL)
-                    .bind(pid)
-                    .fetch_optional(&mut **tx.inner())
-                    .await
-                    .map_err(db)?;
-                row.map(|row| row.0).unwrap_or_default()
-            }
-            None => String::new(),
+        let identifier = {
+            let conn = TxConn::new(tx.inner());
+            projects::Entity::find()
+                .select_only()
+                .column(projects::Column::Identifier)
+                .filter(projects::Column::Id.eq(row.project_id))
+                .into_model::<IdentifierRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
         };
+        let project_identifier = identifier.map(|row| row.identifier).unwrap_or_default();
         chain.push(ChainNode {
             id,
             project_identifier,
-            title: name.unwrap_or_default(),
+            title: row.name,
         });
+        let parent_id = row.parent_id;
         next = parent_id;
     }
     Ok(chain)
+}
+
+/// One ancestor-chain hop: `name, project_id, parent_id` with no
+/// soft-delete filtering.
+#[derive(Debug, FromQueryResult)]
+struct AncestorHopRow {
+    name: String,
+    project_id: Uuid,
+    parent_id: Option<Uuid>,
+}
+
+/// Chain-node project identifier.
+#[derive(Debug, FromQueryResult)]
+struct IdentifierRow {
+    identifier: String,
+}
+
+/// The direct parent's inlined columns with its live comment count as
+/// one correlated subquery (stays one statement).
+#[derive(Debug, FromQueryResult)]
+struct ParentColsRow {
+    name: String,
+    state_id: Option<Uuid>,
+    git_work_branch: String,
+    comments_count: i64,
+}
+
+fn parent_query(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Name,
+            issues::Column::StateId,
+            issues::Column::GitWorkBranch,
+        ])
+        .expr_as(parent_comment_count(), "comments_count")
+        .filter(issues::Column::Id.eq(issue_id))
 }
 
 /// The `parent` block plus the `lineage` trail (`context.py:582-604`).
@@ -1007,45 +1615,47 @@ async fn bundle_parent_and_lineage(
     let parent = match ancestors.get(1) {
         None => None,
         Some(node) => {
-            let row: Option<ParentCols> = sqlx::query_as(BUNDLE_PARENT_COLS_SQL)
-                .bind(node.id)
-                .fetch_optional(&mut **tx.inner())
-                .await
-                .map_err(db)?;
+            let row = {
+                let conn = TxConn::new(tx.inner());
+                parent_query(node.id)
+                    .into_model::<ParentColsRow>()
+                    .one(&conn)
+                    .await
+                    .map_err(sea_db)?
+            };
             match row {
                 None => None,
-                Some((name, state_id, work_branch, comments_count)) => {
-                    let state_name = match state_id {
+                Some(row) => {
+                    let state_name = match row.state_id {
                         Some(id) => {
-                            let row: Option<(Uuid, String, String)> =
-                                sqlx::query_as(STATE_SELECT_SQL)
-                                    .bind(id)
-                                    .fetch_optional(&mut **tx.inner())
-                                    .await
-                                    .map_err(db)?;
-                            row.map(|row| row.1)
+                            let conn = TxConn::new(tx.inner());
+                            state_name_group(&conn, id)
+                                .await
+                                .map_err(sea_db)?
+                                .map(|(name, _group)| name)
                         }
                         None => None,
                     };
-                    let description: Option<(Option<String>,)> =
-                        sqlx::query_as(BUNDLE_PARENT_DESCRIPTION_SQL)
-                            .bind(node.id)
-                            .fetch_optional(&mut **tx.inner())
+                    let description = {
+                        let conn = TxConn::new(tx.inner());
+                        issues::Entity::find()
+                            .select_only()
+                            .column(issues::Column::DescriptionStripped)
+                            .filter(issues::Column::Id.eq(node.id))
+                            .into_tuple::<Option<String>>()
+                            .one(&conn)
                             .await
-                            .map_err(db)?;
-                    let sequence: Option<(i32,)> = sqlx::query_as(BUNDLE_SEQUENCE_SQL)
-                        .bind(node.id)
-                        .fetch_optional(&mut **tx.inner())
-                        .await
-                        .map_err(db)?;
-                    let sequence = sequence.map(|row| i64::from(row.0)).unwrap_or_default();
+                            .map_err(sea_db)?
+                    }
+                    .flatten();
+                    let sequence = issue_sequence(tx, node.id).await?;
                     Some(context::ParentView {
                         identifier: context::issue_identifier(&node.project_identifier, sequence),
-                        title: name,
+                        title: Some(row.name),
                         state_name,
-                        work_branch,
-                        description_stripped: description.and_then(|row| row.0),
-                        comments_count,
+                        work_branch: Some(row.git_work_branch),
+                        description_stripped: description,
+                        comments_count: row.comments_count,
                     })
                 }
             }
@@ -1056,12 +1666,7 @@ async fn bundle_parent_and_lineage(
     let lineage = if ancestors.len() > 2 {
         let mut nodes = Vec::new();
         for node in ancestors {
-            let sequence: Option<(i32,)> = sqlx::query_as(BUNDLE_SEQUENCE_SQL)
-                .bind(node.id)
-                .fetch_optional(&mut **tx.inner())
-                .await
-                .map_err(db)?;
-            let sequence = sequence.map(|row| i64::from(row.0)).unwrap_or_default();
+            let sequence = issue_sequence(tx, node.id).await?;
             nodes.push(context::LineageNode {
                 identifier: context::issue_identifier(&node.project_identifier, sequence),
                 title: node.title.clone(),
@@ -1074,16 +1679,61 @@ async fn bundle_parent_and_lineage(
     Ok((parent, lineage))
 }
 
+/// `(SELECT COUNT(*) FROM issue_comments c WHERE c.issue_id =
+/// issues.id AND c.deleted_at IS NULL)` as one correlated scalar
+/// subquery on the outer `issues.id`.
+fn parent_comment_count() -> SimpleExpr {
+    let subquery = Query::select()
+        .expr(Func::count(Expr::col(Asterisk)))
+        .from(issue_comments::Entity)
+        .and_where(
+            Expr::col((issue_comments::Entity, issue_comments::Column::IssueId))
+                .equals((issues::Entity, issues::Column::Id)),
+        )
+        .and_where(Expr::col((issue_comments::Entity, issue_comments::Column::DeletedAt)).is_null())
+        .to_owned();
+    SimpleExpr::SubQuery(None, Box::new(subquery.into_sub_query_statement()))
+}
+
+async fn issue_sequence(tx: &mut Transaction<'_>, issue_id: Uuid) -> Result<i64, CreationError> {
+    let row = {
+        let conn = TxConn::new(tx.inner());
+        issues::Entity::find()
+            .select_only()
+            .column(issues::Column::SequenceId)
+            .filter(issues::Column::Id.eq(issue_id))
+            .into_tuple::<i32>()
+            .one(&conn)
+            .await
+            .map_err(sea_db)?
+    };
+    Ok(row.map(i64::from).unwrap_or_default())
+}
+
 async fn bundle_done_payload(
     tx: &mut Transaction<'_>,
     run_id: Uuid,
 ) -> Result<Option<Value>, CreationError> {
-    let row: Option<(Option<Value>,)> = sqlx::query_as(BUNDLE_DONE_PAYLOAD_SQL)
-        .bind(run_id)
-        .fetch_optional(&mut **tx.inner())
+    let conn = TxConn::new(tx.inner());
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::DonePayload)
+        .filter(agent_run::Column::Id.eq(run_id))
+        .into_tuple::<Option<Value>>()
+        .one(&conn)
         .await
-        .map_err(db)?;
-    Ok(row.and_then(|row| row.0))
+        .map_err(sea_db)
+        .map(|row| row.flatten())
+}
+
+/// Active overrides for the compose index: the workspace rows plus, when
+/// a user applies, their rows.
+#[derive(Debug, FromQueryResult)]
+struct OverrideRow {
+    section_key: String,
+    body: String,
+    version: i32,
+    user_id: Option<Uuid>,
 }
 
 pub(crate) async fn bundle_overrides(
@@ -1091,25 +1741,57 @@ pub(crate) async fn bundle_overrides(
     workspace_id: Uuid,
     user_id: Option<Uuid>,
 ) -> Result<Vec<composer::OverrideRow>, CreationError> {
-    let rows: Vec<(String, String, i32, Option<Uuid>)> = sqlx::query_as(BUNDLE_OVERRIDES_SQL)
-        .bind(workspace_id)
-        .bind(user_id)
-        .fetch_all(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let rows = {
+        let conn = TxConn::new(tx.inner());
+        let user_filter = match user_id {
+            Some(user) => Condition::any()
+                .add(prompt_section_override::Column::UserId.is_null())
+                .add(prompt_section_override::Column::UserId.eq(user)),
+            None => Condition::any().add(prompt_section_override::Column::UserId.is_null()),
+        };
+        prompt_section_override::Entity::find()
+            .select_only()
+            .columns([
+                prompt_section_override::Column::SectionKey,
+                prompt_section_override::Column::Body,
+                prompt_section_override::Column::Version,
+                prompt_section_override::Column::UserId,
+            ])
+            .filter(prompt_section_override::Column::IsActive.eq(true))
+            .filter(prompt_section_override::Column::WorkspaceId.eq(workspace_id))
+            .filter(user_filter)
+            .into_model::<OverrideRow>()
+            .all(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     Ok(rows
         .into_iter()
-        .map(
-            |(section_key, body, version, user_id)| composer::OverrideRow {
-                workspace_id: workspace_id.to_string(),
-                section_key,
-                body,
-                version: i64::from(version),
-                is_active: true,
-                user_id: user_id.map(|id| id.to_string()),
-            },
-        )
+        .map(|row| composer::OverrideRow {
+            workspace_id: workspace_id.to_string(),
+            section_key: row.section_key,
+            body: row.body,
+            version: i64::from(row.version),
+            is_active: true,
+            user_id: row.user_id.map(|id| id.to_string()),
+        })
         .collect())
+}
+
+/// The workspace slug + name.
+#[derive(Debug, FromQueryResult)]
+struct WorkspaceRow {
+    slug: String,
+    name: String,
+}
+
+/// The ticker budget row.
+#[derive(Debug, FromQueryResult)]
+struct TickerRow {
+    used: i32,
+    waited: i32,
+    granted: i32,
+    enabled: bool,
 }
 
 /// Preload every prompt input for the new run (the `BUNDLE_*_SQL`
@@ -1123,37 +1805,55 @@ async fn load_render_bundle(
     trigger: &str,
     created_by_id: Uuid,
 ) -> Result<RenderBundle, CreationError> {
-    let row = sqlx::query(ISSUE_SELECT_SQL)
-        .bind(issue_id)
-        .fetch_one(&mut **tx.inner())
-        .await
-        .map_err(db)?;
-    let issue = map_issue(&row).map_err(db)?;
+    let issue_row = {
+        let conn = TxConn::new(tx.inner());
+        issues::Entity::find()
+            .select_only()
+            .columns(issue_columns())
+            .filter(issues::Column::Id.eq(issue_id))
+            .into_model::<IssueRow>()
+            .one(&conn)
+            .await
+            .map_err(sea_db)?
+    };
+    let issue = IssueView::from(issue_row.ok_or_else(row_missing)?);
     let project_id = issue
         .project_id
         .ok_or_else(|| CreationError::MissingRow("issue has no project".to_owned()))?;
-    let row = sqlx::query(PROJECT_SELECT_SQL)
-        .bind(project_id)
-        .fetch_one(&mut **tx.inner())
-        .await
-        .map_err(db)?;
-    let project = map_project(&row).map_err(db)?;
+    let project_row = {
+        let conn = TxConn::new(tx.inner());
+        projects::Entity::find()
+            .select_only()
+            .columns(project_columns())
+            .filter(projects::Column::Id.eq(project_id))
+            .into_model::<ProjectRow>()
+            .one(&conn)
+            .await
+            .map_err(sea_db)?
+    };
+    let project = ProjectView::from(project_row.ok_or_else(row_missing)?);
     let state = match issue.state_id {
         Some(id) => {
-            let row: Option<(Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-                .bind(id)
-                .fetch_optional(&mut **tx.inner())
+            let conn = TxConn::new(tx.inner());
+            state_name_group(&conn, id)
                 .await
-                .map_err(db)?;
-            row.map(|(id, name, group)| StateView { id, name, group })
+                .map_err(sea_db)?
+                .map(|(name, group)| StateView { id, name, group })
         }
         None => None,
     };
-    let workspace: (String, String) = sqlx::query_as(BUNDLE_WORKSPACE_SQL)
-        .bind(issue.workspace_id)
-        .fetch_one(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let workspace = {
+        let conn = TxConn::new(tx.inner());
+        workspaces::Entity::find()
+            .select_only()
+            .columns([workspaces::Column::Slug, workspaces::Column::Name])
+            .filter(workspaces::Column::Id.eq(issue.workspace_id))
+            .into_model::<WorkspaceRow>()
+            .one(&conn)
+            .await
+            .map_err(sea_db)?
+    }
+    .ok_or_else(row_missing)?;
     let labels = bundle_labels(tx, issue_id).await?;
     let assignees = bundle_assignees(tx, issue_id).await?;
     let project_states = bundle_project_states(tx, project_id).await?;
@@ -1164,17 +1864,31 @@ async fn load_render_bundle(
     let (remote, adapter) = bundle_remote(tx, project_id).await?;
     let ancestors = bundle_ancestors(tx, &issue, &project.identifier).await?;
     let (parent, lineage) = bundle_parent_and_lineage(tx, &ancestors).await?;
-    let prior_run_count: i64 = sqlx::query_scalar(BUNDLE_PRIOR_RUN_COUNT_SQL)
-        .bind(issue_id)
-        .bind(run_id)
-        .fetch_one(&mut **tx.inner())
-        .await
-        .map_err(db)?;
-    let ticker: Option<(i32, i32, i32, bool)> = sqlx::query_as(BUNDLE_TICKER_SQL)
-        .bind(issue_id)
-        .fetch_optional(&mut **tx.inner())
-        .await
-        .map_err(db)?;
+    let prior_run_count = {
+        let conn = TxConn::new(tx.inner());
+        agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(issue_id))
+            .filter(agent_run::Column::Id.ne(run_id))
+            .count(&conn)
+            .await
+            .map_err(sea_db)?
+    };
+    let ticker = {
+        let conn = TxConn::new(tx.inner());
+        issue_agent_ticker::Entity::find()
+            .select_only()
+            .columns([
+                issue_agent_ticker::Column::Used,
+                issue_agent_ticker::Column::Waited,
+                issue_agent_ticker::Column::Granted,
+                issue_agent_ticker::Column::Enabled,
+            ])
+            .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+            .into_model::<TickerRow>()
+            .one(&conn)
+            .await
+            .map_err(sea_db)?
+    };
     let direct_parent_payload = match parent_run_id {
         Some(id) => bundle_done_payload(tx, id).await?,
         None => None,
@@ -1184,12 +1898,19 @@ async fn load_render_bundle(
     // payload itself (PIDASHCONV-1232).
     let has_parent_run = parent_run_id.is_some();
     let ticker_parent_payload = {
-        let resume: Option<(Option<Uuid>,)> = sqlx::query_as(TICKER_RESUME_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(&mut **tx.inner())
-            .await
-            .map_err(db)?;
-        match resume.and_then(|row| row.0) {
+        let resume = {
+            let conn = TxConn::new(tx.inner());
+            issue_agent_ticker::Entity::find()
+                .select_only()
+                .column(issue_agent_ticker::Column::ResumeParentRunId)
+                .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+                .into_tuple::<Option<Uuid>>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        }
+        .flatten();
+        match resume {
             Some(id) => bundle_done_payload(tx, id).await?,
             None => None,
         }
@@ -1202,8 +1923,8 @@ async fn load_render_bundle(
     Ok(RenderBundle {
         issue,
         project,
-        workspace_slug: workspace.0,
-        workspace_name: workspace.1,
+        workspace_slug: workspace.slug,
+        workspace_name: workspace.name,
         state,
         labels,
         assignees,
@@ -1218,12 +1939,12 @@ async fn load_render_bundle(
         adapter,
         parent,
         lineage,
-        prior_run_count,
-        ticker: ticker.map(|(used, waited, granted, enabled)| TickerBudget {
-            used: i64::from(used),
-            waited: i64::from(waited),
-            granted: i64::from(granted),
-            enabled,
+        prior_run_count: i64::try_from(prior_run_count).unwrap_or(i64::MAX),
+        ticker: ticker.map(|row| TickerBudget {
+            used: i64::from(row.used),
+            waited: i64::from(row.waited),
+            granted: i64::from(row.granted),
+            enabled: row.enabled,
         }),
         direct_parent_payload,
         has_parent_run,
@@ -1252,63 +1973,115 @@ where
         // First-writer-wins: an already-terminal row skips the write
         // (`finalize_agent_run` returns False) and the caller
         // refreshes anyway.
-        let locked = sqlx::query(&finalize_lock_sql())
-            .bind(run_id)
-            .fetch_optional(&mut **self.tx.inner())
-            .await
-            .map_err(db)?;
+        let terminal: Vec<&str> = [
+            AgentRunStatus::Completed,
+            AgentRunStatus::Failed,
+            AgentRunStatus::Cancelled,
+            AgentRunStatus::Blocked,
+            AgentRunStatus::Refused,
+        ]
+        .iter()
+        .map(|status| status.value())
+        .collect();
+        let locked = {
+            let conn = TxConn::new(self.tx.inner());
+            agent_run::Entity::find()
+                .select_only()
+                .columns(run_columns())
+                .filter(agent_run::Column::Id.eq(run_id))
+                .filter(agent_run::Column::Status.is_not_in(terminal))
+                .lock_exclusive()
+                .into_model::<RunRow>()
+                .one(&conn)
+                .await
+                .map_err(sea_db)?
+        };
         if locked.is_none() {
-            let row = sqlx::query(&run_select_sql())
-                .bind(run_id)
-                .fetch_one(&mut **self.tx.inner())
-                .await
-                .map_err(db)?;
-            return map_run_view(&row).map_err(db);
+            return self.run(run_id).await?.ok_or_else(row_missing);
         }
-        sqlx::query(&finalize_update_sql())
-            .bind(now)
-            .bind(finalize_error_details_patch(error_code, error))
-            .bind(run_id)
-            .execute(&mut **self.tx.inner())
-            .await
-            .map_err(db)?;
-        let locked = locked
-            .map(|row| map_run_view(&row))
-            .transpose()
-            .map_err(db)?;
-        if locked.is_some_and(|run| run.executor_kind == AgentExecutorKind::CloudAgent) {
-            let exists: bool = sqlx::query_scalar(TERMINAL_EVENT_EXISTS_SQL)
-                .bind(run_id)
-                .fetch_one(&mut **self.tx.inner())
+        let locked_row = locked.expect("checked");
+        // The folded patch merges in Rust over the locked row (`merge_error_details`).
+        let patch_text = |value: &str| {
+            if value.is_empty() {
+                Value::Null
+            } else {
+                Value::String(value.to_owned())
+            }
+        };
+        let merged = run_bag::merge_error_details(
+            &locked_row.error_details,
+            &[
+                ("error_code", patch_text(error_code)),
+                ("error", patch_text(error)),
+            ],
+        );
+        let locked = map_run_row(locked_row)?;
+        {
+            let conn = TxConn::new(self.tx.inner());
+            let ended_at: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+            agent_run::Entity::update_many()
+                .col_expr(agent_run::Column::Status, Expr::value("failed"))
+                .col_expr(agent_run::Column::EndedAt, Expr::value(ended_at))
+                .col_expr(
+                    agent_run::Column::TerminalHooksAppliedAt,
+                    Expr::value(Option::<sea_orm::prelude::DateTimeWithTimeZone>::None),
+                )
+                .col_expr(
+                    agent_run::Column::TerminalCapacityReleasedAt,
+                    Expr::value(Option::<sea_orm::prelude::DateTimeWithTimeZone>::None),
+                )
+                .col_expr(agent_run::Column::ErrorDetails, Expr::value(merged))
+                .filter(agent_run::Column::Id.eq(run_id))
+                .exec(&conn)
                 .await
-                .map_err(db)?;
+                .map_err(sea_db)?;
+        }
+        if locked.executor_kind == AgentExecutorKind::CloudAgent {
+            let exists = {
+                let conn = TxConn::new(self.tx.inner());
+                agent_run_event::Entity::find()
+                    .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+                    .filter(agent_run_event::Column::Kind.eq("terminal"))
+                    .count(&conn)
+                    .await
+                    .map_err(sea_db)?
+                    > 0
+            };
             if !exists {
-                let seq: i32 = sqlx::query_scalar(TERMINAL_EVENT_SEQ_SQL)
-                    .bind(run_id)
-                    .fetch_one(&mut **self.tx.inner())
-                    .await
-                    .map_err(db)?;
+                let seq = {
+                    let conn = TxConn::new(self.tx.inner());
+                    agent_run_event::Entity::find()
+                        .select_only()
+                        .column(agent_run_event::Column::Seq)
+                        .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+                        .order_by_desc(agent_run_event::Column::Seq)
+                        .limit(1)
+                        .into_tuple::<i32>()
+                        .one(&conn)
+                        .await
+                        .map_err(sea_db)?
+                        .unwrap_or(0)
+                        + 1
+                };
                 let payload = serde_json::json!({"status": "failed", "error_code": error_code});
-                sqlx::query(TERMINAL_EVENT_INSERT_SQL)
-                    .bind(run_id)
-                    .bind(seq)
-                    .bind(&payload)
-                    .bind(now)
-                    .execute(&mut **self.tx.inner())
-                    .await
-                    .map_err(db)?;
+                let created_at: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+                let event = agent_run_event::ActiveModel {
+                    id: ActiveValue::NotSet,
+                    agent_run_id: Set(run_id),
+                    seq: Set(seq),
+                    kind: Set("terminal".to_owned()),
+                    payload: Set(payload),
+                    created_at: Set(created_at),
+                };
+                let conn = TxConn::new(self.tx.inner());
+                event.insert(&conn).await.map_err(sea_db)?;
             }
         }
         // The `on_commit` lambda (`_publish_effects`): captured, never
         // executed — the celery delay + terminal hooks are D-15's
         // pipeline.
         self.terminal_effects.push(run_id);
-        let row = sqlx::query(&run_select_sql())
-            .bind(run_id)
-            .fetch_one(&mut **self.tx.inner())
-            .await
-            .map_err(db)?;
-        map_run_view(&row).map_err(db)
+        self.run(run_id).await?.ok_or_else(row_missing)
     }
 }
 
@@ -3293,5 +4066,332 @@ mod tests {
         let (tx, _, _, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
         cleanup(&pool, graph, &[id], &[], &[], &[], &[], &[]).await;
+    }
+
+    // -- offline: the migrated statements ------------------------------------
+
+    #[test]
+    fn statement_shapes_pin_joins_filters_order_and_aliases() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let issue = Uuid::new_v4();
+        let labels = labels_query(issue).build(DbBackend::Postgres).to_string();
+        assert!(labels.contains("INNER JOIN"), "{labels}");
+        assert!(
+            labels.contains("\"labels\".\"deleted_at\" IS NULL"),
+            "{labels}"
+        );
+        assert!(labels.contains("DESC"), "{labels}");
+        assert!(labels.contains("AS \"name\""), "{labels}");
+
+        let assignees = assignees_query(issue)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(assignees.contains("INNER JOIN"), "{assignees}");
+        assert!(assignees.contains("AS \"display_name\""), "{assignees}");
+        assert!(assignees.contains("DESC"), "{assignees}");
+
+        let children = children_query(issue).build(DbBackend::Postgres).to_string();
+        assert!(
+            children.contains("INNER JOIN") && children.contains("LEFT JOIN"),
+            "{children}"
+        );
+        assert!(children.contains("<> 'triage'"), "{children}");
+        assert!(children.contains("AS \"state_name\""), "{children}");
+        assert!(children.contains("ASC"), "{children}");
+
+        let comments = comments_query(issue).build(DbBackend::Postgres).to_string();
+        assert!(comments.contains("LEFT JOIN"), "{comments}");
+        assert!(comments.contains("AS \"labels\""), "{comments}");
+        assert!(comments.contains("ASC"), "{comments}");
+
+        let remote = remote_query(issue).build(DbBackend::Postgres).to_string();
+        assert!(remote.contains("INNER JOIN"), "{remote}");
+        assert!(remote.contains("LIMIT 1"), "{remote}");
+
+        let parent = parent_query(issue).build(DbBackend::Postgres).to_string();
+        assert!(parent.contains("COUNT(*)"), "{parent}");
+        assert!(parent.contains("AS \"comments_count\""), "{parent}");
+    }
+
+    // -- live: new SeaORM queries over temp-table shadows ---------------------
+
+    async fn shadow_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping temp-table test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.issues')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping temp-table test: the database is not migrated");
+            return None;
+        }
+        Some(pool)
+    }
+
+    async fn shadow_tables(tx: &mut Transaction<'_>, tables: &[&str]) {
+        for table in tables {
+            let ddl = format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            );
+            sqlx::query(&ddl)
+                .execute(&mut **tx.inner())
+                .await
+                .expect("temp table");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_shadow_issue(
+        tx: &mut Transaction<'_>,
+        project: Uuid,
+        parent: Uuid,
+        id: Uuid,
+        name: &str,
+        state: Option<Uuid>,
+        archived: bool,
+        draft: bool,
+        created: DateTime<Utc>,
+    ) {
+        let archived_at: Option<chrono::NaiveDate> = archived.then(|| created.date_naive());
+        sqlx::query("INSERT INTO issues (id, name, sequence_id, project_id, parent_id, state_id, deleted_at, archived_at, is_draft, created_at, updated_at) VALUES ($1, $2, 1, $3, $4, $5, NULL, $6, $7, $8, $8)")
+            .bind(id).bind(name).bind(project).bind(parent).bind(state)
+            .bind(archived_at)
+            .bind(draft).bind(created)
+            .execute(&mut **tx.inner()).await.expect("issue");
+    }
+
+    #[tokio::test]
+    async fn live_labels_join_scopes_and_orders() {
+        let Some(pool) = shadow_pool().await else {
+            return;
+        };
+        let mut tx = Transaction::begin(&pool).await.expect("tx");
+        shadow_tables(&mut tx, &["issue_labels", "labels"]).await;
+        let issue = Uuid::new_v4();
+        let (older, newer, deleted) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let early = now();
+        let late = now() + chrono::Duration::hours(1);
+        let stamps = [early, late, late + chrono::Duration::hours(1)];
+        for (id, name, stamp, deleted_at) in [
+            (older, "older", stamps[0], None),
+            (newer, "newer", stamps[1], None),
+            (deleted, "gone", stamps[2], Some(stamps[2])),
+        ] {
+            sqlx::query("INSERT INTO labels (id, name, created_at, updated_at, deleted_at) VALUES ($1, $2, $3, $3, $4)")
+                .bind(id).bind(name).bind(stamp).bind(deleted_at)
+                .execute(&mut **tx.inner()).await.expect("label");
+        }
+        // The soft-deleted link still renders; the deleted label does not.
+        sqlx::query("INSERT INTO issue_labels (id, issue_id, label_id, created_at, updated_at, deleted_at) VALUES ($1, $2, $3, $4, $4, $5)")
+            .bind(Uuid::new_v4()).bind(issue).bind(older).bind(early).bind(Some(early))
+            .execute(&mut **tx.inner()).await.expect("link");
+        sqlx::query("INSERT INTO issue_labels (id, issue_id, label_id, created_at, updated_at, deleted_at) VALUES ($1, $2, $3, $4, $4, NULL)")
+            .bind(Uuid::new_v4()).bind(issue).bind(newer).bind(late)
+            .execute(&mut **tx.inner()).await.expect("link");
+        sqlx::query("INSERT INTO issue_labels (id, issue_id, label_id, created_at, updated_at, deleted_at) VALUES ($1, $2, $3, $4, $4, NULL)")
+            .bind(Uuid::new_v4()).bind(issue).bind(deleted).bind(stamps[2])
+            .execute(&mut **tx.inner()).await.expect("link");
+        let names = bundle_labels(&mut tx, issue).await.expect("labels");
+        assert_eq!(names, vec!["newer".to_owned(), "older".to_owned()]);
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_children_excludes_triage_stateless_draft_archived() {
+        let Some(pool) = shadow_pool().await else {
+            return;
+        };
+        let mut tx = Transaction::begin(&pool).await.expect("tx");
+        shadow_tables(&mut tx, &["issues", "projects", "states"]).await;
+        let project = Uuid::new_v4();
+        let parent = Uuid::new_v4();
+        let todo = Uuid::new_v4();
+        let triage = Uuid::new_v4();
+        let at = now();
+        sqlx::query("INSERT INTO projects (id, identifier, archived_at) VALUES ($1, 'T', NULL)")
+            .bind(project)
+            .execute(&mut **tx.inner())
+            .await
+            .expect("project");
+        for (id, name, group) in [(todo, "To do", "todo"), (triage, "Triage", "triage")] {
+            sqlx::query("INSERT INTO states (id, name, \"group\") VALUES ($1, $2, $3)")
+                .bind(id)
+                .bind(name)
+                .bind(group)
+                .execute(&mut **tx.inner())
+                .await
+                .expect("state");
+        }
+        seed_shadow_issue(
+            &mut tx, project, parent, parent, "parent", None, false, false, at,
+        )
+        .await;
+        seed_shadow_issue(
+            &mut tx,
+            project,
+            parent,
+            Uuid::new_v4(),
+            "kept",
+            Some(todo),
+            false,
+            false,
+            at + chrono::Duration::minutes(1),
+        )
+        .await;
+        seed_shadow_issue(
+            &mut tx,
+            project,
+            parent,
+            Uuid::new_v4(),
+            "triage",
+            Some(triage),
+            false,
+            false,
+            at + chrono::Duration::minutes(2),
+        )
+        .await;
+        seed_shadow_issue(
+            &mut tx,
+            project,
+            parent,
+            Uuid::new_v4(),
+            "stateless",
+            None,
+            false,
+            false,
+            at + chrono::Duration::minutes(3),
+        )
+        .await;
+        seed_shadow_issue(
+            &mut tx,
+            project,
+            parent,
+            Uuid::new_v4(),
+            "draft",
+            Some(todo),
+            false,
+            true,
+            at + chrono::Duration::minutes(4),
+        )
+        .await;
+        seed_shadow_issue(
+            &mut tx,
+            project,
+            parent,
+            Uuid::new_v4(),
+            "archived",
+            Some(todo),
+            true,
+            false,
+            at + chrono::Duration::minutes(5),
+        )
+        .await;
+        let children = bundle_children(&mut tx, parent).await.expect("children");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].title, "kept");
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_comments_excludes_fold_and_keeps_order() {
+        let Some(pool) = shadow_pool().await else {
+            return;
+        };
+        let mut tx = Transaction::begin(&pool).await.expect("tx");
+        shadow_tables(&mut tx, &["issue_comments", "users"]).await;
+        let issue = Uuid::new_v4();
+        let at = now();
+        for (body, labels, minutes) in [
+            ("first", vec!["note"], 1),
+            ("folded", vec!["fold"], 2),
+            ("third", Vec::<&str>::new(), 3),
+        ] {
+            sqlx::query("INSERT INTO issue_comments (id, comment_stripped, speaker_type, speaker_label, issue_id, labels, created_at, updated_at) VALUES ($1, $2, 'human', '', $3, $4, $5, $5)")
+                .bind(Uuid::new_v4()).bind(body).bind(issue).bind(labels)
+                .bind(at + chrono::Duration::minutes(minutes))
+                .execute(&mut **tx.inner()).await.expect("comment");
+        }
+        let comments = bundle_comments(&mut tx, issue).await.expect("comments");
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].body, "first");
+        assert_eq!(comments[1].body, "third");
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_overrides_scope_to_workspace_and_user() {
+        let Some(pool) = shadow_pool().await else {
+            return;
+        };
+        let mut tx = Transaction::begin(&pool).await.expect("tx");
+        shadow_tables(&mut tx, &["prompt_section_override"]).await;
+        let (workspace, user, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for (key, owner, active) in [
+            ("ws", None, true),
+            ("user", Some(user), true),
+            ("other", Some(other), true),
+            ("off", None, false),
+        ] {
+            sqlx::query("INSERT INTO prompt_section_override (id, section_key, body, is_active, version, workspace_id, user_id) VALUES ($1, $2, 'b', $3, 1, $4, $5)")
+                .bind(Uuid::new_v4()).bind(key).bind(active).bind(workspace).bind(owner)
+                .execute(&mut **tx.inner()).await.expect("override");
+        }
+        let scoped = bundle_overrides(&mut tx, workspace, Some(user))
+            .await
+            .expect("overrides");
+        let mut keys: Vec<&str> = scoped.iter().map(|row| row.section_key.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["user", "ws"]);
+        let anon = bundle_overrides(&mut tx, workspace, None)
+            .await
+            .expect("overrides");
+        assert_eq!(anon.len(), 1);
+        assert_eq!(anon[0].section_key, "ws");
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_parent_counts_only_live_comments() {
+        let Some(pool) = shadow_pool().await else {
+            return;
+        };
+        let mut tx = Transaction::begin(&pool).await.expect("tx");
+        shadow_tables(&mut tx, &["issues", "issue_comments"]).await;
+        let parent = Uuid::new_v4();
+        sqlx::query("INSERT INTO issues (id, name, sequence_id, project_id, state_id, git_work_branch, description_stripped, created_at, updated_at) VALUES ($1, 'parent', 7, $2, NULL, 'br', NULL, $3, $3)")
+            .bind(parent).bind(Uuid::new_v4()).bind(now())
+            .execute(&mut **tx.inner()).await.expect("parent issue");
+        for (body, deleted) in [("live", None), ("gone", Some(now()))] {
+            sqlx::query("INSERT INTO issue_comments (id, comment_stripped, speaker_type, speaker_label, issue_id, labels, created_at, updated_at, deleted_at) VALUES ($1, $2, 'human', '', $3, '{}', $4, $4, $5)")
+                .bind(Uuid::new_v4()).bind(body).bind(parent).bind(now()).bind(deleted)
+                .execute(&mut **tx.inner()).await.expect("comment");
+        }
+        let ancestors = vec![
+            ChainNode {
+                id: Uuid::new_v4(),
+                project_identifier: "T".to_owned(),
+                title: "leaf".to_owned(),
+            },
+            ChainNode {
+                id: parent,
+                project_identifier: "T".to_owned(),
+                title: "parent".to_owned(),
+            },
+        ];
+        let (view, _lineage) = bundle_parent_and_lineage(&mut tx, &ancestors)
+            .await
+            .expect("parent");
+        let view = view.expect("parent view");
+        assert_eq!(view.comments_count, 1);
+        tx.rollback().await.expect("rollback");
     }
 }
