@@ -286,10 +286,12 @@ pub async fn check_chat_send_throttle(state: &AppState, user_id: &Uuid) -> ChatS
             CHAT_SEND_REQUESTS,
             CHAT_SEND_WINDOW_SECS,
         );
-        // `'%d' % wait`: truncation toward zero; a `None` wait sends
-        // no header (DRF skips falsy `exc.wait`).
-        let retry_after_secs = wait
-            .map(|wait| format!("{}", wait.trunc() as i64))
+        // `Throttled.__init__` ceils the wait (`exceptions.py:237`)
+        // before the handler renders `Retry-After: '%d' % wait`,
+        // skipping falsy waits (`views.py:90-91`); a `None` wait
+        // sends no header.
+        let retry_after_secs = crate::runner_enroll::throttle::retry_after_secs(wait)
+            .map(|secs| secs.to_string())
             .unwrap_or_default();
         return ChatSendVerdict::Deny { retry_after_secs };
     }
