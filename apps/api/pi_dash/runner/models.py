@@ -227,6 +227,22 @@ class RunnerPodDispatch(models.TextChoices):
     POD_MEMBER = "pod_member", "Pod work on"
 
 
+class PinKind(models.TextChoices):
+    """Why a queued run is pinned (dedicated-runner design §6.4).
+
+    ``LOCALITY`` is a best-effort session-continuity hint set by the system;
+    it may be dropped at any time. ``DEDICATED`` means the issue has a
+    dedicated runner: a user choice, never dropped by the system without a
+    rule in the design (and since H-13, never released to the pod at all).
+    The kind is stamped at creation from the issue's assignment; it is
+    rewritten only by the re-point step (§13.2). Managed runs keep their
+    own ``executor_kind`` marker and get no third kind.
+    """
+
+    LOCALITY = "locality", "Locality hint"
+    DEDICATED = "dedicated", "Dedicated runner"
+
+
 class EngineAutoPauseReason(models.TextChoices):
     """Why the server paused a machine's built-in engine on its own.
 
@@ -1249,6 +1265,15 @@ class AgentRun(models.Model):
         blank=True,
         related_name="pinned_agent_runs",
     )
+    # Why the run is pinned (design §6.4). Meaningful only while
+    # ``pinned_runner`` is set; an unpinned run keeps the default. Existing
+    # rows default to ``locality``, which is what every non-managed pin is
+    # today — no backfill.
+    pin_kind = models.CharField(
+        max_length=16,
+        choices=PinKind.choices,
+        default=PinKind.LOCALITY,
+    )
     work_item = models.ForeignKey(
         "db.Issue",
         on_delete=models.SET_NULL,
@@ -1413,6 +1438,10 @@ class AgentRun(models.Model):
                 fields=["status", "terminal_capacity_released_at", "ended_at"],
                 name="agent_run_term_capacity_idx",
             ),
+            # Last-served lookup for the matcher's alternation (design
+            # §6.5/§10.2): the runner's most recent assigned run. Built
+            # concurrently in runner 0039.
+            models.Index(fields=["runner", "-assigned_at"], name="agent_run_runner_assigned_idx"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -1450,6 +1479,12 @@ class AgentRun(models.Model):
                     )
                 ),
                 name="agent_run_one_active_per_work_item",
+            ),
+            # I5 (design §6.2/§6.5): only machine (local) runs carry a
+            # dedicated pin; Cloud Agent runs have no runner at all.
+            models.CheckConstraint(
+                check=models.Q(pin_kind=PinKind.LOCALITY) | models.Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER),
+                name="agent_run_dedicated_pin_is_local",
             ),
         ]
 
