@@ -776,6 +776,8 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/{request_id}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/revoke/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/rotate/",
@@ -1052,6 +1054,12 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/poll",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/credential/revoke/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/model-token/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/profile/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/health/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/machine-tokens/",
@@ -1394,6 +1402,9 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "runner.mark_offline_runners",
+    },
+    TaskRow {
+        name: "runner.pause_engines_with_expired_credentials",
     },
     TaskRow {
         name: "runner.reconcile_agent_run_terminal_effects",
@@ -1961,6 +1972,7 @@ mod tests {
             pool.clone(),
             runner_seams,
         );
+        pidash_jobs::runner_runs::register_engine_pause_tasks(&mut registry, pool.clone());
         // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
         // the same calls the worker builder makes — real register over the
         // lazy pool, no forward override (handlers never run here).
@@ -2134,7 +2146,7 @@ mod tests {
         );
         assert_eq!(
             pidash_jobs::runner_runs::TASK_NAMES.len(),
-            13,
+            14,
             "runner_runs group drifted"
         );
         assert_eq!(
@@ -2147,7 +2159,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 78, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
@@ -2174,7 +2186,7 @@ mod tests {
             .get("schedule")
             .and_then(|v| v.as_array())
             .expect("schedule");
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 29);
         let find = |name: &str| {
             schedule
                 .iter()

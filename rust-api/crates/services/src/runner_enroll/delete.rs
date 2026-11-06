@@ -470,6 +470,16 @@ pub trait RunnerDeleteStore: RevokeStore {
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError>;
 
+    /// D2a: revoke the machine's engine credential
+    /// (`crate::domain::engine_credential::revoke_engine_credential`,
+    /// `machine_removed`): the cascade step Django runs between the
+    /// token revoke and the runner frames (`runner_delete.py:138`).
+    async fn revoke_machine_engine_credential(
+        &mut self,
+        machine_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), RevokeError>;
+
     /// D2: locked machine runners, in
     /// listed order.
     async fn lock_machine_runners(
@@ -678,6 +688,9 @@ pub async fn delete_dev_machine<S: RunnerDeleteStore>(
     revoke_clock: &mut impl FnMut() -> DateTime<Utc>,
 ) -> Result<DeleteMachineOutcome, RevokeError> {
     store.revoke_machine_tokens(machine_id, now).await?;
+    store
+        .revoke_machine_engine_credential(machine_id, now)
+        .await?;
     let runners = store.lock_machine_runners(machine_id).await?;
     let active: Vec<LockedRunner> = runners
         .iter()
@@ -809,6 +822,7 @@ mod tests {
         Cleanup(Uuid),
         // machine reads
         RevokeTokens(Uuid),
+        RevokeEngineCredential(Uuid),
         LockRunners(Uuid),
         // collector
         FetchRunner(Uuid),
@@ -961,6 +975,15 @@ mod tests {
             _now: DateTime<Utc>,
         ) -> Result<(), RevokeError> {
             self.calls.push(Call::RevokeTokens(machine_id));
+            Ok(())
+        }
+
+        async fn revoke_machine_engine_credential(
+            &mut self,
+            machine_id: Uuid,
+            _now: DateTime<Utc>,
+        ) -> Result<(), RevokeError> {
+            self.calls.push(Call::RevokeEngineCredential(machine_id));
             Ok(())
         }
 
@@ -1252,6 +1275,7 @@ mod tests {
             store.calls,
             vec![
                 Call::RevokeTokens(uuid(5)),
+                Call::RevokeEngineCredential(uuid(5)),
                 Call::LockRunners(uuid(5)),
                 Call::RevokeFrame(live, "dev machine deleted".to_string()),
                 Call::Mark(live),
@@ -1308,7 +1332,7 @@ mod tests {
         assert_eq!(outcome.revoke_reason, "runner_removed");
         assert_eq!(outcome.revokes[0].1.stored_reason, "runner_removed");
         assert!(matches!(
-            store.calls[2],
+            store.calls[3],
             Call::RemoveFrame(_, ref reason) if reason == "dev machine deleted"
         ));
     }

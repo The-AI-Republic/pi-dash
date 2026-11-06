@@ -867,6 +867,19 @@ pub async fn dev_machine_revoke(
     {
         return server_error();
     }
+    // The engine credential goes with the machine (`:207`, #2910):
+    // revoking the machine signs the engine out with it.
+    if pidash_services::domain::engine_credential::revoke_engine_credential(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        "machine_removed",
+        now,
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
     // Locked active-runner list (`:199`).
     let runner_rows =
         match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
@@ -933,6 +946,130 @@ pub async fn dev_machine_revoke(
     match serialize_machine(&pool, &machine, user_id, workspace_id, stamped).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/runners/dev-machines/<mid>/engine-sign-out/`
+// (`machines.py:231-257`, #2910)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/runners/dev-machines/<machine_id>/engine-sign-out/`
+/// (`machines.py:231-257`): revoke the machine's engine credential only
+/// (state `signed_out`). The machine must be the caller's; an optional
+/// workspace must contain it. Both misses answer the same 404. The
+/// answer is the M5 serialization when a workspace is in scope, else
+/// the plain serializer body.
+pub async fn dev_machine_engine_sign_out(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let body_ws = match body_workspace(&data) {
+        Ok(body_ws) => body_ws,
+        Err(response) => return response,
+    };
+    let query_ws = crate::license::query_last(&params, "workspace");
+    let workspace_raw = manage_reads::request_workspace_id(body_ws.as_deref(), query_ws.as_deref());
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    };
+    // The machine must be the caller's (`machines.py:244`).
+    let Some(machine) = machine else {
+        return not_found();
+    };
+    if machine.owner_id != user_id {
+        return not_found();
+    }
+    let workspace_id = if workspace_raw.is_empty() {
+        None
+    } else {
+        let workspace_id = match parse_uuid(&workspace_raw) {
+            Ok(workspace_id) => workspace_id,
+            Err(_) => return server_error(),
+        };
+        match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
+            Ok(true) => Some(workspace_id),
+            Ok(false) => return not_found(),
+            Err(response) => return response,
+        }
+    };
+    if pidash_services::domain::engine_credential::revoke_engine_credential(
+        &TxConn::new(&mut tx),
+        machine_id,
+        "signed_out",
+        now_micros(),
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
+    // `refresh_from_db`: re-read the row so the render sees the
+    // sign-in state's new value.
+    let Some(machine) = (match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    }) else {
+        return not_found();
+    };
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    match workspace_id {
+        Some(workspace_id) => {
+            match serialize_machine(&pool, &machine, user_id, workspace_id, None).await {
+                Ok(body) => json_response(StatusCode::OK, body),
+                Err(response) => response,
+            }
+        }
+        None => {
+            // `DevMachineSerializer(machine).data` on the refreshed
+            // instance: the embedded annotations are absent, so the
+            // count/heartbeat keys are omitted (DRF `SkipField`) and
+            // `control_online` defaults false — the fallback render.
+            MachineRender {
+                id: machine.id.to_string(),
+                host_label: machine.host_label.clone(),
+                label: machine.label.clone(),
+                visibility: i64::from(machine.visibility),
+                runner_count: None,
+                online_runner_count: None,
+                control_online: None,
+                last_seen_at: machine
+                    .last_seen_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime),
+                last_heartbeat_at: None,
+                revoked_at: machine
+                    .revoked_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime),
+                created_at: crate::serializer::render_datetime(&machine.created_at),
+                updated_at: crate::serializer::render_datetime(&machine.updated_at),
+            }
+            .to_json()
+            .map(|body| json_response(StatusCode::OK, body))
+            .unwrap_or_else(|response| response)
+        }
     }
 }
 
@@ -2463,6 +2600,10 @@ pub fn web_routes() -> Router<AppState> {
     use axum::routing::post;
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     Router::new()
+        .route(
+            "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
+            owned(post(dev_machine_engine_sign_out), POST_ONLY),
+        )
         .route(
             "/api/runners/dev-machines/{machine_id}/revoke/",
             owned(post(dev_machine_revoke), POST_ONLY),

@@ -423,6 +423,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         ctx.pools.primary().clone(),
         runner_seams,
     );
+    crate::runner_runs::register_engine_pause_tasks(registry, ctx.pools.primary().clone());
     // D-11 execution tasks (PIDASHCONV-832; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). All
     // four handlers execute here on live seams

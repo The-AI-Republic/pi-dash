@@ -322,6 +322,7 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::runner_runs::daemon_routes())
             .merge(crate::runner_enroll::teardown::daemon_routes())
             .merge(crate::runner_sessions::routes())
+            .merge(crate::runner_engine::routes())
             .merge(crate::runner_enroll::enroll::daemon_routes())
             .merge(crate::runner_enroll::delete_cmds::daemon_routes())
             .merge(crate::runner_enroll::desktop::routes())
