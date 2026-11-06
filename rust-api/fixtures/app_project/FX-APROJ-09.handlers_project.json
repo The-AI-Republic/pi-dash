@@ -1548,6 +1548,12 @@
         "error": "You cannot add a user with role higher than the workspace role"
       }
     },
+    "patch_ws_admin_target_403": {
+      "status": 403,
+      "body": {
+        "error": "You cannot update the role of a workspace admin"
+      }
+    },
     "destroy_member": {
       "status": 204,
       "body": ""
@@ -1758,7 +1764,8 @@
   },
   "members_notes": [
     "member_list/retrieve-guest pass fields= to the role serializer; it is ignored (DynamicBaseSerializer bug) so the full 6-key shape renders (see FX-APROJ-02).",
-    "Self-patch guard (member.py:216) fires for ANY field, not just role: patching your own comment 400s (see patch_self_comment_400).",
+    "Self-patch guard (member.py:222) fires for ANY field, not just role: patching your own comment 400s (see patch_self_comment_400).",
+    "The role guards bypass reads the REQUESTER's workspace role (PDASHOSS01-328); the target's only denies: a workspace admin target answers patch_ws_admin_target_403 to anyone else, and the workspace-guest 400 caps every requester. Live cases: contract-tests/app_project/test_member_role.py.",
     "destroy by a project non-admin 403s at the [ADMIN] decorator; the in-view higher-role check (member.py:290) is reachable via the ws-admin override and returns 400 (not 403)."
   ],
   "invites": {
