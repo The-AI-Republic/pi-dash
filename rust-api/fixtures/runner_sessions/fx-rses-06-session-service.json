@@ -33,56 +33,16 @@
     "engine_truncated_len": 64
   },
   "_agent_capabilities": {
-    "missing_kind_keeps_list": [
-      [
-        "agent:old"
-      ],
-      false
-    ],
-    "missing_kind_non_list": [
-      [],
-      false
-    ],
-    "valid_new": [
-      [
-        "agent:claude_code"
-      ],
-      true
-    ],
-    "valid_same_no_change": [
-      [
-        "agent:claude_code"
-      ],
-      false
-    ],
-    "invalid_upper": [
-      [
-        "agent:old"
-      ],
-      false
-    ],
-    "invalid_dash": [
-      [],
-      false
-    ],
-    "invalid_empty": [
-      [],
-      false
-    ],
-    "invalid_non_string": [
-      [],
-      false
-    ],
-    "too_long_33": [
-      [],
-      false
-    ],
-    "max_32_ok": [
-      [
-        "agent:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      ],
-      true
-    ]
+    "missing_kind_keeps_list": [["agent:old"], false],
+    "missing_kind_non_list": [[], false],
+    "valid_new": [["agent:claude_code"], true],
+    "valid_same_no_change": [["agent:claude_code"], false],
+    "invalid_upper": [["agent:old"], false],
+    "invalid_dash": [[], false],
+    "invalid_empty": [[], false],
+    "invalid_non_string": [[], false],
+    "too_long_33": [[], false],
+    "max_32_ok": [["agent:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], true]
   },
   "apply_hello": {
     "sql": [
@@ -99,9 +59,7 @@
         "working_dir": "/home/u/proj",
         "codex_version": "codex-v9"
       },
-      "capabilities": [
-        "agent:muse_code"
-      ],
+      "capabilities": ["agent:muse_code"],
       "last_heartbeat_at": "2026-10-03T00:29:19.269669+00:00",
       "status": "offline"
     }
@@ -114,9 +72,7 @@
       "SELECT \"agent_run\".\"id\", \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-03 00:28:19.329575+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '4a790c25081944fdb9276c08dab10fd1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC"
     ],
     "os": "keepme",
-    "capabilities": [
-      "agent:x"
-    ]
+    "capabilities": ["agent:x"]
   },
   "reap_poll_path": {
     "sql": [
@@ -524,7 +480,7 @@
     "value": "CT00003",
     "expected": "CT00003",
     "sql": [
-      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\", \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"runner\" INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") WHERE \"runner\".\"id\" = '1ad15e53f6da4da4a6319dd0796dec2f'::uuid ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1"
+      "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"pod_dispatch\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\", \"pod\".\"id\", \"pod\".\"workspace_id\", \"pod\".\"project_id\", \"pod\".\"name\", \"pod\".\"description\", \"pod\".\"created_by_id\", \"pod\".\"is_default\", \"pod\".\"deleted_at\", \"pod\".\"created_at\", \"pod\".\"updated_at\", \"projects\".\"created_at\", \"projects\".\"updated_at\", \"projects\".\"created_by_id\", \"projects\".\"updated_by_id\", \"projects\".\"deleted_at\", \"projects\".\"id\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"description_text\", \"projects\".\"description_html\", \"projects\".\"network\", \"projects\".\"workspace_id\", \"projects\".\"identifier\", \"projects\".\"default_assignee_id\", \"projects\".\"project_lead_id\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"module_view\", \"projects\".\"cycle_view\", \"projects\".\"issue_views_view\", \"projects\".\"page_view\", \"projects\".\"intake_view\", \"projects\".\"is_time_tracking_enabled\", \"projects\".\"is_issue_type_enabled\", \"projects\".\"is_default\", \"projects\".\"guest_view_all_features\", \"projects\".\"members_can_edit_states\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"estimate_id\", \"projects\".\"archive_in\", \"projects\".\"close_in\", \"projects\".\"logo_props\", \"projects\".\"default_state_id\", \"projects\".\"archived_at\", \"projects\".\"timezone\", \"projects\".\"external_source\", \"projects\".\"external_id\", \"projects\".\"repo_url\", \"projects\".\"base_branch\", \"projects\".\"agent_default_interval_seconds\", \"projects\".\"agent_default_max_ticks\", \"projects\".\"agent_review_default_interval_seconds\", \"projects\".\"agent_test_default_interval_seconds\", \"projects\".\"agent_ticking_enabled\", \"projects\".\"default_agent_executor\" FROM \"runner\" INNER JOIN \"pod\" ON (\"runner\".\"pod_id\" = \"pod\".\"id\") INNER JOIN \"projects\" ON (\"pod\".\"project_id\" = \"projects\".\"id\") WHERE \"runner\".\"id\" = '1ad15e53f6da4da4a6319dd0796dec2f'::uuid ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1"
     ],
     "podless": null
   },
