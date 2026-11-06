@@ -937,16 +937,19 @@ async fn creator_universe(
     Ok(ids)
 }
 
-/// Live `PodRunnerMatcher` over the merged D-14 guards helpers
-/// (`runner/services/matcher.py:375-412`): the managed narrow branch or
-/// the general owner-set branch, with the same no-query short-circuits.
+/// Live `PodRunnerMatcher`: the single SeaORM implementation shared
+/// with jobs (alias kept for the v1 actions call sites).
 pub struct LiveMatcher {
-    pool: PgPool,
+    inner: pidash_services::runner_sessions::SeaOrmPodMatcher,
 }
 
 impl LiveMatcher {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            inner: pidash_services::runner_sessions::SeaOrmPodMatcher::new(
+                pidash_db::pool::sea_orm_connection(&pool),
+            ),
+        }
     }
 }
 
@@ -956,6 +959,7 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
         pod_id: Uuid,
         issue_id: Uuid,
         creator_id: Option<Uuid>,
+        human: bool,
     ) -> Pin<
         Box<
             dyn Future<
@@ -964,66 +968,8 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
                 + '_,
         >,
     > {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            use pidash_services::orchestration::dispatch::DispatchError;
-            use pidash_services::runner_sessions::guards as g;
-            let db = |e: sqlx::Error| DispatchError::Db(e.to_string());
-            let issue: Option<(Option<String>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-                r#"SELECT "agent_executor", "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#,
-            )
-            .bind(issue_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(db)?;
-            let Some((agent_executor, created_by_id, project_id)) = issue else {
-                return Ok(false);
-            };
-            let project_id = project_id.ok_or_else(|| {
-                DispatchError::Store(
-                    pidash_services::orchestration::creation::CreationError::MissingRow(
-                        "issue has no project".to_owned(),
-                    ),
-                )
-            })?;
-            let default_executor: Option<String> = sqlx::query_scalar(
-                r#"SELECT "default_agent_executor" FROM "projects" WHERE "id" = $1"#,
-            )
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(db)?
-            .flatten();
-            let default_executor = default_executor.unwrap_or_default();
-            if g::is_managed_runner_issue(agent_executor.as_deref(), &default_executor) {
-                let Some(creator) = creator_id else {
-                    return Ok(false);
-                };
-                let hit: Option<(i32,)> = sqlx::query_as(g::POD_HAS_RUNNER_MANAGED_SQL)
-                    .bind(creator)
-                    .bind(pod_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .map_err(db)?;
-                return Ok(hit.is_some());
-            }
-            let assignees: Vec<Uuid> = sqlx::query_scalar(g::ISSUE_ASSIGNEE_IDS_SQL)
-                .bind(issue_id)
-                .fetch_all(&pool)
-                .await
-                .map_err(db)?;
-            let owners = g::eligible_owner_ids(creator_id, created_by_id, &assignees);
-            let Some(sql) = g::pod_has_runner_general_sql(owners.len()) else {
-                return Ok(false);
-            };
-            let mut query = sqlx::query_as::<_, (i32,)>(&sql);
-            for owner in &owners {
-                query = query.bind(owner);
-            }
-            query = query.bind(pod_id);
-            let hit: Option<(i32,)> = query.fetch_optional(&pool).await.map_err(db)?;
-            Ok(hit.is_some())
-        })
+        self.inner
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human)
     }
 }
 

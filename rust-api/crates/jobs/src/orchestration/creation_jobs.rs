@@ -361,12 +361,24 @@ where
             .await
             .map_err(Self::db)?;
         Ok(row.map(
-            |(id, pod_id, status, last_heartbeat_at, paused_at)| RunnerView {
+            |(
                 id,
                 pod_id,
                 status,
                 last_heartbeat_at,
                 paused_at,
+                provisioning,
+                pod_dispatch,
+                engine_paused,
+            )| RunnerView {
+                id,
+                pod_id,
+                status,
+                last_heartbeat_at,
+                paused_at,
+                provisioning,
+                pod_dispatch,
+                engine_paused,
             },
         ))
     }

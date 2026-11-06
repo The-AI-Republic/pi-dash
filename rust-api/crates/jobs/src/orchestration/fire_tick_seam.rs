@@ -615,23 +615,6 @@ where
         })
     }
 
-    async fn enrolled_managed_exists(
-        &mut self,
-        project_id: Uuid,
-        user_id: Uuid,
-        workspace_id: Uuid,
-    ) -> Result<bool, DispatchError> {
-        sqlx::query_scalar(
-            pidash_services::dispatch::admission::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
-        )
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&mut **self.dispatch_tx().inner())
-        .await
-        .map_err(db)
-    }
-
     fn managed_runner_enabled(&self) -> bool {
         self.dispatch_managed_runner_enabled()
     }
@@ -1373,6 +1356,7 @@ mod tests {
             _pod_id: Uuid,
             _issue_id: Uuid,
             _creator_id: Option<Uuid>,
+            _human: bool,
         ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
             let answer = self.answer;
             Box::pin(async move { Ok(answer) })

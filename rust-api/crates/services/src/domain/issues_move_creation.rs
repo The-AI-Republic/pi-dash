@@ -240,14 +240,25 @@ impl CreationSeam for SeaHandoffStore<'_> {
         .await?;
         match row {
             Some(row) => {
-                let (id, pod_id, status, last_heartbeat_at, paused_at): RunnerSelectRow =
-                    row.try_get_many_by_index().map_err(Self::db)?;
+                let (
+                    id,
+                    pod_id,
+                    status,
+                    last_heartbeat_at,
+                    paused_at,
+                    provisioning,
+                    pod_dispatch,
+                    engine_paused,
+                ): RunnerSelectRow = row.try_get_many_by_index().map_err(Self::db)?;
                 Ok(Some(RunnerView {
                     id,
                     pod_id,
                     status,
                     last_heartbeat_at,
                     paused_at,
+                    provisioning,
+                    pod_dispatch,
+                    engine_paused,
                 }))
             }
             None => Ok(None),
