@@ -1189,14 +1189,24 @@ struct MachineRender {
 
 impl MachineRender {
     fn to_json(&self) -> Result<String, Response> {
+        let engine_state = serde_json::json!({});
         let row = shapes::DevMachineRow {
             id: &self.id,
             host_label: &self.host_label,
             label: &self.label,
             visibility: self.visibility,
+            provisioning: "manual",
             runner_count: self.runner_count,
             online_runner_count: self.online_runner_count,
             control_online: self.control_online,
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
+            engine_sign_in_state: "never",
+            engine_credential_expires_at: None,
+            engine_state: &engine_state,
+            engine_state_reported_at: None,
+            merged_into: None,
             last_seen_at: self.last_seen_at.as_deref(),
             last_heartbeat_at: self
                 .last_heartbeat_at
@@ -1482,6 +1492,11 @@ impl RunnerRender {
                     id: &detail.id,
                     host_label: &detail.host_label,
                     label: &detail.label,
+                    engine_paused_by_owner: false,
+                    engine_auto_pause_reason: "",
+                    engine_team_runs: false,
+                    engine_sign_in_state: "never",
+                    engine_credential_expires_at: None,
                 });
         let live_state = self.live_state.as_ref().map(|live| shapes::LiveStateRow {
             observed_run_id: live.observed_run_id.as_deref(),
@@ -1503,7 +1518,12 @@ impl RunnerRender {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
+            is_engine: false,
+            engine_paused: false,
+            dispatch_paused: false,
+            machine_display_name: &self.host_label,
             provisioning: &self.provisioning,
+            pod_dispatch: "pod_member",
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,

@@ -792,6 +792,11 @@ impl RunnerDetailOwned {
                 id: &detail.id,
                 host_label: &detail.host_label,
                 label: &detail.label,
+                engine_paused_by_owner: false,
+                engine_auto_pause_reason: "",
+                engine_team_runs: false,
+                engine_sign_in_state: "never",
+                engine_credential_expires_at: None,
             }
         })
     }
@@ -833,7 +838,12 @@ impl RunnerDetailOwned {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
+            is_engine: false,
+            engine_paused: false,
+            dispatch_paused: false,
+            machine_display_name: &self.host_label,
             provisioning: &self.provisioning,
+            pod_dispatch: "pod_member",
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
