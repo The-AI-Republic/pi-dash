@@ -275,7 +275,10 @@ def test_web_machine_patch_owner_only_engine_fields(user_client, daemon_world, m
     assert listing.status_code == 200
     row = [m for m in listing.json() if m["id"] == machine_id][0]
     assert body == row
-    # Teammate (member, not owner) gets 403.
+    # Teammate (member, not owner) is outside _machine_is_in_workspace_scope
+    # (which includes can_view_dev_machine) and reads 404, like Django
+    # test_machine_patch_is_owner_only_and_engine_fields_only; the locked
+    # owner 403 is Django's second gate for a probe-passing non-owner.
     teammate = seeder.create_user()
     seeder.create_member(ws, teammate["id"])
     from _harness.auth import login_session
@@ -283,8 +286,8 @@ def test_web_machine_patch_owner_only_engine_fields(user_client, daemon_world, m
     with api_client(user_client.base_url) as other:
         login_session(other, email=teammate["email"], password=teammate["password"])
         denied = web_patch(other, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": False})
-    assert denied.status_code == 403
-    assert denied.json() == {"error": "forbidden"}
+    assert denied.status_code == 404
+    assert denied.json() == {"error": "not found"}
 
 
 def test_web_machine_patch_other_workspace_is_404(user_client, seeder, daemon_world, machine_flow):
