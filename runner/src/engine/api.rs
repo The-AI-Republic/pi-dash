@@ -9,12 +9,14 @@
 //! | `GET /api/v1/runner/engine/profile/` | `Authorization: Bearer <mt_>` | — | [`EngineProfile`] |
 //! | `POST /api/v1/runner/engine/model-token/` | `Authorization: Bearer <ec_>` | `{}` | [`ModelTokenResponse`]; errors `{"reason_code", "detail"?}` |
 //! | `POST /api/v1/runner/engine/credential/revoke/` | `Authorization: Bearer <mt_>` | `{}` | 2xx (401 = already gone) |
-//! | `PATCH /api/v1/runner/dev-machines/<id>/` | `Authorization: Bearer <mt_>` | `{"engine_paused_by_owner": bool}` | 2xx |
+//! | `GET /api/v1/runner/dev-machines/<id>/` | `Authorization: Bearer <mt_>` | — | [`MachinePayload`]: the pause state and this machine's runner rows in the token's workspace (revoked rows included) |
+//! | `PATCH /api/v1/runner/dev-machines/<id>/` | `Authorization: Bearer <mt_>` | `{"engine_paused_by_owner": bool}` | 2xx, ideally with the [`MachinePayload`] |
 //! | `POST /api/v1/runner/runners/` (engine runner) | `X-Api-Key: <mt_>` | the usual body plus `"agent_kind": "engine"`; `name` is not sent | the usual enrol response |
 //!
 //! The machine session's poll body (`POST …/dev-machines/<id>/sessions/<sid>/poll`)
 //! carries the machine-level `engine_state` (see
-//! `crate::cloud::protocol::MachinePollBody`).
+//! `crate::cloud::protocol::MachinePollBody`). The session's `welcome` may
+//! carry the pause fields of [`MachinePayload`]; the daemon caches them.
 
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
@@ -122,6 +124,79 @@ pub struct EngineProfile {
 pub struct ModelTokenResponse {
     pub token: String,
     pub expires_at: DateTime<Utc>,
+}
+
+/// The dev machine as the server returns it to its daemon:
+/// `GET`/`PATCH /api/v1/runner/dev-machines/<id>/` and, for the pause
+/// fields, the machine session's `welcome`. Every field is optional so a
+/// partial body (an older server, a welcome frame) still parses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachinePayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_paused_by_owner: Option<bool>,
+    /// Empty or absent: not paused automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_auto_pause_reason: Option<String>,
+    /// This machine's runner rows in the token's workspace, revoked rows
+    /// included, so the daemon can reconcile its blocks (design §5).
+    /// `None` when the body does not list them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runners: Option<Vec<MachineRunnerRow>>,
+}
+
+impl MachinePayload {
+    /// The pause state, when the body carries it.
+    pub fn pause(&self) -> Option<EnginePause> {
+        let paused_by_owner = self.engine_paused_by_owner?;
+        Some(EnginePause {
+            paused_by_owner,
+            auto_pause_reason: self
+                .engine_auto_pause_reason
+                .clone()
+                .filter(|r| !r.trim().is_empty()),
+        })
+    }
+}
+
+/// The machine's engine pause state (design §8): the owner's switch and the
+/// server's automatic reason, kept apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnginePause {
+    pub paused_by_owner: bool,
+    pub auto_pause_reason: Option<String>,
+}
+
+/// One runner row in [`MachinePayload::runners`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineRunnerRow {
+    pub id: Uuid,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub workspace_slug: String,
+    #[serde(default)]
+    pub project_identifier: String,
+    /// `"engine"` for a built-in engine runner.
+    #[serde(default)]
+    pub agent_kind: String,
+    /// `desktop_bundled` marks an engine runner too (the stored value kept
+    /// for compatibility, design §5).
+    #[serde(default)]
+    pub provisioning: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub status: String,
+}
+
+impl MachineRunnerRow {
+    pub fn is_engine(&self) -> bool {
+        self.agent_kind == ENGINE_AGENT_KIND || self.provisioning == "desktop_bundled"
+    }
+
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some() || self.status == "revoked"
+    }
 }
 
 /// An engine call the server refused.
@@ -292,13 +367,15 @@ impl EngineApi {
         Self::empty(resp).await
     }
 
-    /// `pidash engine pause` / `resume`.
+    /// `pidash engine pause` / `resume`. Returns the machine as the server
+    /// answered it; a 2xx with no parseable body yields a payload holding
+    /// only the switch that was set.
     pub async fn set_paused(
         &self,
         machine_token: &str,
         dev_machine_id: Uuid,
         paused: bool,
-    ) -> Result<(), EngineApiError> {
+    ) -> Result<MachinePayload, EngineApiError> {
         let resp = self
             .http
             .patch(self.url(&dev_machine_path(dev_machine_id)))
@@ -307,7 +384,32 @@ impl EngineApi {
             .send()
             .await
             .map_err(|e| EngineApiError::Other(e.to_string()))?;
-        Self::empty(resp).await
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(refused(status, &body));
+        }
+        let mut payload: MachinePayload = serde_json::from_str(&body).unwrap_or_default();
+        if payload.engine_paused_by_owner.is_none() {
+            payload.engine_paused_by_owner = Some(paused);
+        }
+        Ok(payload)
+    }
+
+    /// The machine with its pause state and runner rows (reconcile).
+    pub async fn machine(
+        &self,
+        machine_token: &str,
+        dev_machine_id: Uuid,
+    ) -> Result<MachinePayload, EngineApiError> {
+        let resp = self
+            .http
+            .get(self.url(&dev_machine_path(dev_machine_id)))
+            .bearer_auth(machine_token)
+            .send()
+            .await
+            .map_err(|e| EngineApiError::Other(e.to_string()))?;
+        Self::json(resp).await
     }
 
     /// Start an engine-only device grant.
@@ -399,6 +501,38 @@ mod tests {
             r#"{"error":"authorization_pending"}"#,
         );
         assert_eq!(e.reason_code(), Some("authorization_pending"));
+    }
+
+    #[test]
+    fn machine_payload_parses_pause_and_runner_rows() {
+        let p: MachinePayload = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000009","engine_paused_by_owner":false,
+                "engine_auto_pause_reason":"wallet_empty",
+                "runners":[{"id":"00000000-0000-0000-0000-000000000001","name":"builtin-h-acme-web",
+                  "workspace_slug":"acme","project_identifier":"WEB","provisioning":"desktop_bundled",
+                  "revoked_at":"2026-11-04T10:00:00Z"},
+                  {"id":"00000000-0000-0000-0000-000000000002","agent_kind":"codex","provisioning":"manual"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            p.pause(),
+            Some(EnginePause {
+                paused_by_owner: false,
+                auto_pause_reason: Some(reason::WALLET_EMPTY.into())
+            })
+        );
+        let rows = p.runners.unwrap();
+        assert!(rows[0].is_engine() && rows[0].is_revoked());
+        assert!(!rows[1].is_engine() && !rows[1].is_revoked());
+        // A welcome frame without the fields carries no pause state.
+        let w: MachinePayload =
+            serde_json::from_str(r#"{"type":"welcome","dev_machine_id":null}"#).unwrap();
+        assert_eq!(w.pause(), None);
+        let empty_reason: MachinePayload = serde_json::from_str(
+            r#"{"engine_paused_by_owner":true,"engine_auto_pause_reason":""}"#,
+        )
+        .unwrap();
+        assert_eq!(empty_reason.pause().unwrap().auto_pause_reason, None);
     }
 
     #[test]

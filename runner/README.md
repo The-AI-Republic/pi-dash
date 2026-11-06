@@ -282,13 +282,13 @@ would use.
 
 The daemon resolves the engine once at start and keeps that path.
 `pidash update` installs the new release's engine version directory beside the
-old one before replacing `pidash`, so runs in flight keep their binary; older
-versions are left for the daemon to remove once no run uses them. It skips the
-archive download when the new release pins an engine version that is already
-installed (it reads the release tag's `runner/ENGINE_VERSION` first). A
-`pidash` from before the engine shipped has no such step, so when the daemon
-starts on an installer-managed install and finds no engine, it installs it in
-the background (retried at each start until it succeeds).
+old one before replacing `pidash`, so runs in flight keep their binary. It
+skips the download when the new release pins an engine version already
+installed. If an installer-managed daemon starts without an engine, it
+installs it in the background, retrying with backoff until it succeeds.
+The daemon removes older engine versions once no run or chat turn is in
+flight (and, on Linux, no process still executes a binary from them),
+retrying cleanup every 10 minutes.
 
 For development, point the daemon at another build in `config.toml`:
 
@@ -324,11 +324,27 @@ pidash config set engine-task-root ~/pidash-tasks   # or `default`
   config it writes there from the server's model profile (fetched at start,
   on every sign-in and every 15 minutes). The server names engine runners.
 - **Folders.** Each project gets `<task root>/<workspace>/<project>/`, with a
-  numeric suffix when that folder is taken or not empty. The task root
-  defaults to `<data dir>/engine/workdirs`; changing it moves nothing.
+  numeric suffix when that folder is taken or not empty — whether the engine
+  is turned on from the CLI, the app (`EngineRunnerAdd`) or the web ("Add
+  runner", machine control's `create_runner`). The task root defaults to
+  `<data dir>/engine/workdirs`; changing it moves nothing.
+- **Reconcile.** At start and every 10 minutes the daemon reads its dev
+  machine from the server: engine blocks whose runner row was revoked
+  ("Remove from project") are removed (their folders are kept), and live
+  engine runner rows of this machine with no block are re-added with a newly
+  allocated folder.
 - **`pidash status`** and the IPC `Hello` / `EngineStatus` report the
-  machine-level engine state; the daemon also reports it to the server in the
+  machine-level engine state, including whether the owner paused it and the
+  server's automatic pause reason (cached from the machine session's welcome,
+  the reconcile and `pidash engine pause` / `resume`, which go through the
+  daemon when it runs). The daemon also reports its state to the server in the
   machine session's heartbeat (`engine_state`).
+- **Local chat** (the app's "This computer" contact) runs on the daemon's own
+  engine profile: a `Chat*` IPC request with no `runner` selector and an
+  absolute `cwd` uses the engine binary, the account's `CODEX_HOME` and the
+  engine credential, with no project runner and no busy flag shared with runs.
+  It works with zero or many runners, and a folder inside any runner's working
+  dir is refused. With a `runner` selector, chat runs on that runner as before.
 
 ### Where credentials are stored
 

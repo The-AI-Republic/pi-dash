@@ -119,7 +119,38 @@ pub async fn fetch_model_token(paths: &Paths) -> Result<String> {
     }
 }
 
+/// Set the pause switch: through the daemon when it runs (so it caches the
+/// new state for `Hello` and `pidash engine status`), else straight to the
+/// server.
 async fn set_paused(paths: &Paths, paused: bool) -> Result<()> {
+    use crate::ipc::protocol::{Request, Response};
+    let via_daemon = match crate::ipc::client::Client::connect(paths.ipc_socket_path()).await {
+        Ok(mut client) => match client.call(Request::EngineSetPaused { paused }).await? {
+            Response::EngineStatus(st) => Some(st),
+            // A daemon from before `EngineSetPaused` cannot parse it.
+            Response::Error(e) if e.code == 400 => None,
+            Response::Error(e) => anyhow::bail!("{}", e.message),
+            other => anyhow::bail!("unexpected daemon response: {other:?}"),
+        },
+        Err(_) => None,
+    };
+    if via_daemon.is_none() {
+        set_paused_direct(paths, paused).await?;
+    }
+    if paused {
+        println!(
+            "Paused the built-in engine on this computer. Its runners take no new work until `pidash engine resume`."
+        );
+    } else {
+        println!("Resumed the built-in engine on this computer.");
+    }
+    if let Some(reason) = via_daemon.and_then(|st| st.auto_pause_reason) {
+        println!("The server also paused it automatically: {reason}.");
+    }
+    Ok(())
+}
+
+async fn set_paused_direct(paths: &Paths, paused: bool) -> Result<()> {
     let cfg = crate::config::file::load_config_opt(paths)?.ok_or_else(|| {
         anyhow::anyhow!("this computer is not signed in; run `pidash auth login`")
     })?;
@@ -141,13 +172,6 @@ async fn set_paused(paths: &Paths, paused: bool) -> Result<()> {
     api.set_paused(&token, machine_id, paused)
         .await
         .map_err(|e| anyhow::anyhow!("the server did not change the engine pause: {e}"))?;
-    if paused {
-        println!(
-            "Paused the built-in engine on this computer. Its runners take no new work until `pidash engine resume`."
-        );
-    } else {
-        println!("Resumed the built-in engine on this computer.");
-    }
     Ok(())
 }
 
@@ -195,7 +219,23 @@ pub fn describe_status(st: &crate::ipc::protocol::EngineStatusInfo) -> String {
         .as_deref()
         .map(|m| format!(", model {m}"))
         .unwrap_or_default();
-    format!("engine: {state}{model}")
+    format!("engine: {state}{model}{}", describe_pause(st))
+}
+
+/// The pause part of [`describe_status`]: empty when not paused or unknown.
+fn describe_pause(st: &crate::ipc::protocol::EngineStatusInfo) -> String {
+    let mut parts = Vec::new();
+    if st.paused_by_owner == Some(true) {
+        parts.push("paused by you — `pidash engine resume` to resume".to_string());
+    }
+    if let Some(reason) = &st.auto_pause_reason {
+        parts.push(format!("paused automatically ({reason})"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", parts.join("; "))
+    }
 }
 
 async fn install(args: InstallArgs) -> Result<()> {
@@ -236,4 +276,36 @@ fn path(paths: &Paths) -> Result<()> {
     let resolved = engine::locate::resolve(&section)?;
     println!("{}", resolved.binary.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use super::*;
+    use crate::ipc::protocol::{EngineSignInState, EngineState, EngineStatusInfo};
+
+    #[test]
+    fn status_line_says_who_paused_the_engine() {
+        let mut st = EngineStatusInfo {
+            state: EngineState::Available,
+            reason_code: None,
+            sign_in_state: EngineSignInState::Active,
+            credential_expires_at: None,
+            model: Some("gpt-5.5".into()),
+            binary: None,
+            profile_fetched_at: None,
+            paused_by_owner: Some(false),
+            auto_pause_reason: None,
+            pause_checked_at: Some(chrono::Utc::now()),
+        };
+        assert_eq!(describe_status(&st), "engine: available, model gpt-5.5");
+        st.paused_by_owner = Some(true);
+        assert!(describe_status(&st).contains("paused by you"));
+        st.paused_by_owner = Some(false);
+        st.auto_pause_reason = Some("wallet_empty".into());
+        assert!(
+            describe_status(&st).ends_with("paused automatically (wallet_empty)"),
+            "{}",
+            describe_status(&st)
+        );
+    }
 }
