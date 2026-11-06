@@ -13,147 +13,99 @@
     },
     "ampersand": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "plus": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "comma": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "colon": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "semicolon": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "dollar": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "caret": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "lbrace": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "rbrace": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "star": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "equals": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "question": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "at": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "hash": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "pipe": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "squote": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "lt": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "gt": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "dot": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "lparen": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "rparen": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "percent": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "bang": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "dash": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "underscore_ok": {
       "ok": true,
@@ -165,9 +117,7 @@
     },
     "dup_same_workspace": {
       "ok": false,
-      "detail": [
-        "PROJECT_NAME_ALREADY_EXIST"
-      ]
+      "detail": ["PROJECT_NAME_ALREADY_EXIST"]
     },
     "self_exclude_on_update": {
       "ok": true,
@@ -189,27 +139,19 @@
     },
     "special": {
       "ok": false,
-      "detail": [
-        "PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "dot": {
       "ok": false,
-      "detail": [
-        "PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "dash": {
       "ok": false,
-      "detail": [
-        "PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "detail": ["PROJECT_IDENTIFIER_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "dup_same_workspace": {
       "ok": false,
-      "detail": [
-        "PROJECT_IDENTIFIER_ALREADY_EXIST"
-      ]
+      "detail": ["PROJECT_IDENTIFIER_ALREADY_EXIST"]
     },
     "self_exclude_on_update": {
       "ok": true,
@@ -242,9 +184,7 @@
     "is_default_unset_guard": {
       "ok": false,
       "exc": "ValidationError",
-      "detail": [
-        "Default project cannot be unset without assigning another default project."
-      ]
+      "detail": ["Default project cannot be unset without assigning another default project."]
     },
     "is_default_unset_other_ok": {
       "ok": true,
@@ -292,9 +232,7 @@
     "over_10MB": {
       "is_valid": false,
       "errors": {
-        "error": [
-          "html content is not valid"
-        ]
+        "error": ["html content is not valid"]
       }
     },
     "exactly_10MB": {
@@ -304,22 +242,14 @@
   },
   "is_valid_envelopes": {
     "dup_name": {
-      "name": [
-        "PROJECT_NAME_ALREADY_EXIST"
-      ]
+      "name": ["PROJECT_NAME_ALREADY_EXIST"]
     },
     "special_name": {
-      "name": [
-        "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-      ]
+      "name": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
     },
     "empty": {
-      "name": [
-        "This field is required."
-      ],
-      "identifier": [
-        "This field is required."
-      ]
+      "name": ["This field is required."],
+      "identifier": ["This field is required."]
     }
   },
   "create": {
@@ -412,17 +342,20 @@
         {
           "kind": "cloud_agent",
           "available": false,
-          "reason_code": "cloud_agent_unavailable"
+          "reason_code": "cloud_agent_unavailable",
+          "deprecated": true
         },
         {
           "kind": "local_runner",
           "available": false,
-          "reason_code": "no_local_runner"
+          "reason_code": "no_local_runner",
+          "deprecated": false
         },
         {
           "kind": "managed_runner",
           "available": false,
-          "reason_code": "managed_runner_disabled"
+          "reason_code": "managed_runner_disabled",
+          "deprecated": true
         }
       ],
       "created_at": "2026-10-02T22:13:27.197846Z",
@@ -479,9 +412,7 @@
       "sort_order": 65535.0,
       "member_role": 20,
       "anchor": null,
-      "members": [
-        "c5545f98-21b6-4fac-88e7-af418831335d"
-      ],
+      "members": ["c5545f98-21b6-4fac-88e7-af418831335d"],
       "cover_image_url": null,
       "inbox_view": false,
       "next_work_item_sequence": 1,
@@ -489,17 +420,20 @@
         {
           "kind": "cloud_agent",
           "available": false,
-          "reason_code": "cloud_agent_unavailable"
+          "reason_code": "cloud_agent_unavailable",
+          "deprecated": true
         },
         {
           "kind": "local_runner",
           "available": false,
-          "reason_code": "no_local_runner"
+          "reason_code": "no_local_runner",
+          "deprecated": false
         },
         {
           "kind": "managed_runner",
           "available": false,
-          "reason_code": "managed_runner_disabled"
+          "reason_code": "managed_runner_disabled",
+          "deprecated": true
         }
       ],
       "created_at": "2026-10-02T22:12:41.558592Z",
@@ -605,9 +539,7 @@
       "estimate",
       "default_state"
     ],
-    "members": [
-      "c5545f98-21b6-4fac-88e7-af418831335d"
-    ],
+    "members": ["c5545f98-21b6-4fac-88e7-af418831335d"],
     "next_seq_empty": 1,
     "inbox_view": false,
     "intake_view": false,
@@ -616,51 +548,60 @@
       {
         "kind": "cloud_agent",
         "available": false,
-        "reason_code": "cloud_agent_unavailable"
+        "reason_code": "cloud_agent_unavailable",
+        "deprecated": true
       },
       {
         "kind": "local_runner",
         "available": false,
-        "reason_code": "no_local_runner"
+        "reason_code": "no_local_runner",
+        "deprecated": false
       },
       {
         "kind": "managed_runner",
         "available": false,
-        "reason_code": "managed_runner_disabled"
+        "reason_code": "managed_runner_disabled",
+        "deprecated": true
       }
     ],
     "agent_options_authenticated": [
       {
         "kind": "cloud_agent",
         "available": false,
-        "reason_code": "cloud_agent_unavailable"
+        "reason_code": "cloud_agent_unavailable",
+        "deprecated": true
       },
       {
         "kind": "local_runner",
         "available": false,
-        "reason_code": "no_local_runner"
+        "reason_code": "no_local_runner",
+        "deprecated": false
       },
       {
         "kind": "managed_runner",
         "available": false,
-        "reason_code": "managed_runner_disabled"
+        "reason_code": "managed_runner_disabled",
+        "deprecated": true
       }
     ],
     "agent_options_no_request": [
       {
         "kind": "cloud_agent",
         "available": false,
-        "reason_code": "cloud_agent_unavailable"
+        "reason_code": "cloud_agent_unavailable",
+        "deprecated": true
       },
       {
         "kind": "local_runner",
         "available": false,
-        "reason_code": "no_local_runner"
+        "reason_code": "no_local_runner",
+        "deprecated": false
       },
       {
         "kind": "managed_runner",
         "available": false,
-        "reason_code": "managed_runner_disabled"
+        "reason_code": "managed_runner_disabled",
+        "deprecated": true
       }
     ]
   },
@@ -699,17 +640,20 @@
         {
           "kind": "cloud_agent",
           "available": false,
-          "reason_code": "cloud_agent_unavailable"
+          "reason_code": "cloud_agent_unavailable",
+          "deprecated": true
         },
         {
           "kind": "local_runner",
           "available": false,
-          "reason_code": "no_local_runner"
+          "reason_code": "no_local_runner",
+          "deprecated": false
         },
         {
           "kind": "managed_runner",
           "available": false,
-          "reason_code": "managed_runner_disabled"
+          "reason_code": "managed_runner_disabled",
+          "deprecated": true
         }
       ],
       "created_at": "2026-10-02T22:12:41.558592Z",

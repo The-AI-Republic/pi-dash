@@ -311,7 +311,10 @@ SESSIONS = (
             "machine_session": ["last_seen_at", "revoked_at"],
             # Evidence: mt_ auth stamps last_used_at on every
             # authenticated request (request 16).
-            "machine_token": ["last_used_at"],
+            # expires_at is minted as now+60d on both backends
+            # (runner/models.py save + Rust tokens mint, PIDESKAPP-122);
+            # the replay sees two instants ms apart (NEWPIDASH-58).
+            "machine_token": ["last_used_at", "expires_at"],
             # Evidence: the complete transition stamps ended_at +
             # terminal_*_at with now() per backend (request 19).
             "agent_run": [

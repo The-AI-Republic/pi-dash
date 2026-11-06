@@ -5,11 +5,11 @@ Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
 | bucket                   | pairs |
 | ------------------------ | ----- |
 | covered                  | 496   |
-| proxied by design        | 95    |
+| proxied by design        | 94    |
 | debug toolbar (dev-only) | 0     |
-| missing with fix issue   | 2     |
+| missing with fix issue   | 0     |
 | excluded with reason     | 0     |
-| owned, no session yet    | 0     |
+| owned, no session yet    | 3     |
 
 ## Covered
 
@@ -537,7 +537,6 @@ Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
 - `PATCH /api/runners/chat/sessions/{}/events/` (runner_web)
 - `POST /api/runners/chat/sessions/{}/events/` (runner_web)
 - `PUT /api/runners/chat/sessions/{}/events/` (runner_web)
-- `PATCH /api/runners/dev-machines/{}/` (runner_web)
 - `DELETE /api/users/api-tokens/` (app)
 - `PATCH /api/users/api-tokens/` (app)
 - `POST /api/users/api-tokens/{}/` (app)
@@ -614,8 +613,7 @@ Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
 
 ## Missing with fix issue
 
-- `PATCH /api/v1/runner/dev-machines/{}/` (runner) — NEWPIDASH-52: dev-machine identity patch pending
-- `POST /api/v1/runner/dev-machines/{}/merge-into/` (runner) — NEWPIDASH-52: dev-machine merge pending
+(none)
 
 ## Excluded
 
@@ -623,4 +621,6 @@ Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
 
 ## Owned, no session yet
 
-(none)
+- `PATCH /api/runners/dev-machines/{}/` (runner_web) — NEWPIDASH-52: web machine-controls PATCH landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner_web corpus session.
+- `PATCH /api/v1/runner/dev-machines/{}/` (runner) — NEWPIDASH-52: daemon machine PATCH landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.
+- `POST /api/v1/runner/dev-machines/{}/merge-into/` (runner) — NEWPIDASH-52: daemon merge-into landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.

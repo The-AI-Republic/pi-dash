@@ -714,7 +714,12 @@ pub struct RunnerDetailOwned {
     pub name: String,
     pub status: String,
     pub host_label: String,
+    pub is_engine: bool,
+    pub engine_paused: bool,
+    pub dispatch_paused: bool,
+    pub machine_display_name: String,
     pub provisioning: String,
+    pub pod_dispatch: String,
     pub os: String,
     pub arch: String,
     pub runner_version: String,
@@ -750,6 +755,11 @@ pub struct DevMachineMiniOwned {
     pub id: String,
     pub host_label: String,
     pub label: String,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: String,
+    pub engine_credential_expires_at: Option<String>,
 }
 
 pub struct LiveStateOwned {
@@ -792,6 +802,11 @@ impl RunnerDetailOwned {
                 id: &detail.id,
                 host_label: &detail.host_label,
                 label: &detail.label,
+                engine_paused_by_owner: detail.engine_paused_by_owner,
+                engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                engine_team_runs: detail.engine_team_runs,
+                engine_sign_in_state: &detail.engine_sign_in_state,
+                engine_credential_expires_at: detail.engine_credential_expires_at.as_deref(),
             }
         })
     }
@@ -833,7 +848,12 @@ impl RunnerDetailOwned {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
+            is_engine: self.is_engine,
+            engine_paused: self.engine_paused,
+            dispatch_paused: self.dispatch_paused,
+            machine_display_name: &self.machine_display_name,
             provisioning: &self.provisioning,
+            pod_dispatch: &self.pod_dispatch,
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
@@ -869,14 +889,14 @@ pub async fn fetch_runner_detail(
 ) -> Result<RunnerDetailOwned, Response> {
     use pidash_services::runner_runs::shape::drf_datetime;
     use sqlx::Row;
-    // Twenty-three columns exceed sqlx's 16-tuple `FromRow`: decode by
+    // Twenty-four columns exceed sqlx's 16-tuple `FromRow`: decode by
     // position. Order: id, name, status, host_label, provisioning,
-    // os, arch, runner_version, dev_metadata, protocol_version,
-    // capabilities, last_heartbeat_at, owner, dev_machine,
-    // visibility, pod, enrolled_at, revoked_at, revoked_reason,
-    // created_at, updated_at, paused_at, paused_by_id.
+    // pod_dispatch, os, arch, runner_version, dev_metadata,
+    // protocol_version, capabilities, ra last_heartbeat_at, owner,
+    // dev_machine, visibility, pod, enrolled_at, revoked_at,
+    // revoked_reason, created_at, updated_at, paused_at, paused_by_id.
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "name", "status", "host_label", "provisioning", "os", "arch",
+        r#"SELECT "id", "name", "status", "host_label", "provisioning", "pod_dispatch", "os", "arch",
               "runner_version", "dev_metadata", "protocol_version", "capabilities",
               "last_heartbeat_at", "owner_id", "dev_machine_id", "visibility", "pod_id",
               "enrolled_at", "revoked_at", "revoked_reason", "created_at", "updated_at",
@@ -907,23 +927,58 @@ pub async fn fetch_runner_detail(
         row.try_get::<DateTime<Utc>, usize>(idx)
             .map_err(|_| server_error())
     };
-    let dev_machine_id = get_opt_uuid(13)?;
-    let pod_id = get_uuid(15)?;
+    let dev_machine_id = get_opt_uuid(14)?;
+    let pod_id = get_uuid(16)?;
     let dev_machine_detail = match dev_machine_id {
         Some(dev_machine_id) => {
-            let mini: Option<(Uuid, String, String)> = sqlx::query_as(
-                r#"SELECT "id", "host_label", "label" FROM "dev_machine" WHERE "id" = $1"#,
+            type MiniRow = (
+                Uuid,
+                String,
+                String,
+                bool,
+                String,
+                bool,
+                String,
+                Option<DateTime<Utc>>,
+            );
+            let mini: Option<MiniRow> = sqlx::query_as(
+                r#"SELECT "id", "host_label", "label", "engine_paused_by_owner",
+                      "engine_auto_pause_reason", "engine_team_runs", "engine_sign_in_state",
+                      "engine_credential_expires_at"
+                   FROM "dev_machine" WHERE "id" = $1"#,
             )
             .bind(dev_machine_id)
             .fetch_optional(pool)
             .await
             .map_err(|_| server_error())?;
             match mini {
-                Some((id, host_label, label)) => Some(DevMachineMiniOwned {
-                    id: id.to_string(),
+                Some((
+                    id,
                     host_label,
                     label,
-                }),
+                    paused,
+                    pause_reason,
+                    team_runs,
+                    stored_state,
+                    expires_at,
+                )) => {
+                    let derived =
+                        pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                            &stored_state,
+                            expires_at,
+                            Utc::now(),
+                        );
+                    Some(DevMachineMiniOwned {
+                        id: id.to_string(),
+                        host_label,
+                        label,
+                        engine_paused_by_owner: paused,
+                        engine_auto_pause_reason: pause_reason,
+                        engine_team_runs: team_runs,
+                        engine_sign_in_state: derived,
+                        engine_credential_expires_at: expires_at.map(|dt| drf_datetime(&dt)),
+                    })
+                }
                 None => return Err(server_error()),
             }
         }
@@ -973,28 +1028,60 @@ pub async fn fetch_runner_detail(
     let status = get_string(2)?;
     let host_label = get_string(3)?;
     let provisioning = get_string(4)?;
-    let os = get_string(5)?;
-    let arch = get_string(6)?;
-    let runner_version = get_string(7)?;
-    let dev_metadata: Value = row.try_get(8).map_err(|_| server_error())?;
-    let protocol_version: i32 = row.try_get(9).map_err(|_| server_error())?;
-    let capabilities: Value = row.try_get(10).map_err(|_| server_error())?;
-    let last_heartbeat_at = get_opt_moment(11)?;
-    let owner = get_uuid(12)?;
-    let visibility: i16 = row.try_get(14).map_err(|_| server_error())?;
-    let enrolled_at = get_opt_moment(16)?;
-    let revoked_at = get_opt_moment(17)?;
-    let revoked_reason = get_string(18)?;
-    let created_at = get_moment(19)?;
-    let updated_at = get_moment(20)?;
-    let paused_at = get_opt_moment(21)?;
-    let paused_by_id = get_opt_uuid(22)?;
+    let pod_dispatch = get_string(5)?;
+    let os = get_string(6)?;
+    let arch = get_string(7)?;
+    let runner_version = get_string(8)?;
+    let dev_metadata: Value = row.try_get(9).map_err(|_| server_error())?;
+    let protocol_version: i32 = row.try_get(10).map_err(|_| server_error())?;
+    let capabilities: Value = row.try_get(11).map_err(|_| server_error())?;
+    let last_heartbeat_at = get_opt_moment(12)?;
+    let owner = get_uuid(13)?;
+    let visibility: i16 = row.try_get(15).map_err(|_| server_error())?;
+    let enrolled_at = get_opt_moment(17)?;
+    let revoked_at = get_opt_moment(18)?;
+    let revoked_reason = get_string(19)?;
+    let created_at = get_moment(20)?;
+    let updated_at = get_moment(21)?;
+    let paused_at = get_opt_moment(22)?;
+    let paused_by_id = get_opt_uuid(23)?;
+    let is_engine = provisioning == "desktop_bundled";
+    let engine_paused = match &dev_machine_detail {
+        Some(machine) if is_engine => {
+            machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty()
+        }
+        _ => false,
+    };
+    let machine_display_name = match &dev_machine_detail {
+        Some(machine) => {
+            if !machine.label.is_empty() {
+                machine.label.clone()
+            } else if !machine.host_label.is_empty() {
+                machine.host_label.clone()
+            } else {
+                "This computer".to_owned()
+            }
+        }
+        None => {
+            if !host_label.is_empty() {
+                host_label.clone()
+            } else {
+                name.clone()
+            }
+        }
+    };
+    let dispatch_paused = paused_at.is_some();
     Ok(RunnerDetailOwned {
         id: id.to_string(),
         name,
         status,
         host_label,
+        is_engine,
+        engine_paused,
+        dispatch_paused,
+        machine_display_name,
         provisioning,
+        pod_dispatch,
         os,
         arch,
         runner_version,

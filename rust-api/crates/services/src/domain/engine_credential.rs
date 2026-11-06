@@ -28,7 +28,7 @@ use pidash_db::entity::{dev_machine, engine_credential, users};
 use pidash_db::orm_tx::into_sqlx;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use uuid::Uuid;
 
@@ -721,6 +721,42 @@ pub fn instance_can_serve_engine(
     profile: &crate::extensions::AgentModelProfile,
 ) -> bool {
     engine_profile_for_user(managed_enabled, profile).0
+}
+
+/// Default `profile.reason_code` for the `_engine_refusal` body
+/// (`engine_credentials.py` OSS leg) when no BYOK-specific code applies.
+pub fn engine_profile_reason_code() -> &'static str {
+    "llm_config_missing"
+}
+
+/// Whether `user_id` holds a BYOK key (`agent_model_profile_for_user`
+/// CE leg, `model_provider.py:110-113`): the `assistant_user_llm_config`
+/// row exists and its encrypted bytes are non-empty (`has_api_key`).
+pub async fn user_has_byok_key(db: &impl ConnectionTrait, user_id: Uuid) -> Result<bool, DbErr> {
+    use pidash_db::entity::assistant_user_llm_config;
+
+    let row = assistant_user_llm_config::Entity::find()
+        .filter(assistant_user_llm_config::Column::UserId.eq(user_id))
+        .one(db)
+        .await?;
+    Ok(row
+        .map(|row| pidash_db::assistant::models::has_secret(&row.api_key_encrypted))
+        .unwrap_or(false))
+}
+
+/// `profile.reason_code` for the `_engine_refusal` body
+/// (`engine_credentials.py` via `agent_model_profile_for_user`):
+/// `byok_not_supported_on_desktop` when the user holds a BYOK key,
+/// else `llm_config_missing`.
+pub async fn engine_profile_reason_code_for_user(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+) -> Result<&'static str, DbErr> {
+    if user_has_byok_key(db, user_id).await? {
+        Ok("byok_not_supported_on_desktop")
+    } else {
+        Ok(engine_profile_reason_code())
+    }
 }
 
 #[cfg(test)]

@@ -282,7 +282,10 @@ SESSIONS = (
             ],
             # Evidence: rotate revokes the machine's tokens with
             # now() per backend (request 52).
-            "machine_token": ["last_used_at", "revoked_at"],
+            # expires_at is minted as now+60d on both backends
+            # (runner/models.py save + Rust tokens mint, PIDESKAPP-122);
+            # the replay sees two instants ms apart (NEWPIDASH-58).
+            "machine_token": ["last_used_at", "revoked_at", "expires_at"],
             "agent_run_approval": ["requested_at"],
             # Evidence: chat-approval decide stamps decided_at with
             # now() per backend (the persisted half of the offline
