@@ -777,21 +777,16 @@ export function WorkItemCreateDialog({
         ? stateOptionGate(projectId, baseline?.form.stateId ?? null)
         : creationStateGate(projectId);
   // A new item starts on the project's default pod, as the old create
-  // form did (NEWPIDASH-23): once the pods and the project's default
-  // executor load, an empty target takes the default pod (else the first
-  // pod). The reads key on the project, so a project switch or a Create
+  // form did (NEWPIDASH-23): once the pods load, an empty target takes
+  // the default pod (else the first pod). The reads key on the project, so a project switch or a Create
   // more reset, which both clear the target, fill it again from the new
   // project. An edit keeps the row's own target.
   const creating = open && !editing;
   const targetReads = creating && projectId !== "";
   const pods = usePickerPods(workspaceSlug, projectId, targetReads);
-  const targetProject = usePickerProject(workspaceSlug, projectId, targetReads);
   const seededExecution = React.useMemo(
-    () =>
-      creating && pods.data !== undefined && targetProject.data !== undefined
-        ? defaultExecutionSelection(pods.data, targetProject.data.default_agent_executor)
-        : null,
-    [creating, pods.data, targetProject.data]
+    () => (creating && pods.data !== undefined ? defaultExecutionSelection(pods.data) : null),
+    [creating, pods.data]
   );
   React.useEffect(() => {
     if (seededExecution === null) return;

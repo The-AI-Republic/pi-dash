@@ -10785,12 +10785,12 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralTimezoneText(): Promise<string>;
   /** Creation-timestamp line as rendered. */
   settingsGeneralCreatedText(): Promise<string>;
-  /** Selected execution-target value. */
-  settingsGeneralExecutorValue(): Promise<string>;
-  /** Whether an execution-target option is disabled. */
-  settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean>;
-  /** Pick an execution target. */
-  settingsGeneralSetExecutor(value: string): Promise<void>;
+  /**
+   * Whether the tab still renders a default execution-target control.
+   * Runner is the only executor (built-in engine design §6), so both apps
+   * answer false once the form has rendered.
+   */
+  settingsGeneralExecutorPresent(): Promise<boolean>;
   /** Whether the automated-run master switch is on. */
   settingsGeneralTickingOn(): Promise<boolean>;
   /** Flip the automated-run master switch. */

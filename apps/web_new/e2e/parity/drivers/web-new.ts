@@ -14863,7 +14863,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async devMachinesOpenDelete(name: string): Promise<void> {
-    await this.devMachinesOpenAction(name, "Delete");
+    // The rebuild labels the delete action "Remove this computer".
+    await this.devMachinesOpenAction(name, "Remove this computer");
   }
 
   private devMachinesDialog(): Locator {
@@ -51791,39 +51792,11 @@ export class WebNewDriver implements ParityDriver {
     return ((await created.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
   /** Executor kinds to the labels the target picker shows (mirrors EXECUTOR_OPTIONS). */
-  private static readonly generalExecutorLabels: Record<string, string> = {
-    local_runner: "Local runner",
-    cloud_agent: "Cloud agent",
-    managed_runner: "Desktop agent",
-  };
-
-  private generalExecutorListbox() {
-    return this.page.getByRole("listbox", { name: "Default execution target" });
-  }
-
-  async settingsGeneralExecutorValue(): Promise<string> {
-    // The trigger reads the label; the contract wants the kind.
-    const shown = this.page.getByTestId("general-executor").first();
-    await shown.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    const label = ((await shown.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
-    const entries = Object.entries(WebNewDriver.generalExecutorLabels);
-    return entries.find(([, shown2]) => shown2 === label)?.[0] ?? label;
-  }
-  async settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean> {
-    const label = WebNewDriver.generalExecutorLabels[value] ?? value;
-    await this.page.getByTestId("general-executor-trigger").click({ timeout: WebNewDriver.WAIT_MS });
-    const option = this.generalExecutorListbox().getByRole("option", { name: label });
-    await option.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
-    const disabled = await option.isDisabled();
-    await this.page.keyboard.press("Escape");
-    await this.generalExecutorListbox().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
-    return disabled;
-  }
-  async settingsGeneralSetExecutor(value: string): Promise<void> {
-    const label = WebNewDriver.generalExecutorLabels[value] ?? value;
-    await this.page.getByTestId("general-executor-trigger").click({ timeout: WebNewDriver.WAIT_MS });
-    await this.generalExecutorListbox().getByRole("option", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
-    await this.generalExecutorListbox().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  async settingsGeneralExecutorPresent(): Promise<boolean> {
+    // The ticking switch renders with the form, so once it shows, an
+    // executor control would have rendered too.
+    await this.page.getByTestId("general-ticking").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await this.page.getByTestId("general-executor-trigger").count()) > 0;
   }
   async settingsGeneralTickingOn(): Promise<boolean> {
     const toggle = this.page.getByTestId("general-ticking");

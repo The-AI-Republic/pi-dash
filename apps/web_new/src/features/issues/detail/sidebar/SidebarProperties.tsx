@@ -21,7 +21,7 @@ import {
   PodPicker,
   PriorityPicker,
   StatePicker,
-  executionTargetLabel,
+  EXECUTION_TARGET_LABEL,
   executionTargetPatch,
   usePickerStates,
   usePickerWorkspaceMembers,
@@ -48,22 +48,15 @@ export const PROPERTY_SAVE_FAILED_TITLE = "Couldn't update the work item";
 const ROW_VARIANT: ButtonVariant = "ghost";
 
 /**
- * The issue's current execution target. The per-issue override wins;
- * a null override inherits the project's default executor, exactly as
- * the server resolves it (`issue.agent_executor or
- * project.default_agent_executor`), so the row states where a run will
- * actually go. An agent target renders as that agent; a local target
- * renders the pinned runner, else the pinned pod, and no pin means
- * the project's default pod.
+ * The issue's current execution target. Runner is the only executor
+ * (built-in engine design §6), so a legacy executor value on the issue
+ * or the project never renders as an agent: the row shows the pinned
+ * runner, else the pinned pod, and no pin means the project's default
+ * pod.
  */
 export function selectExecutionSelection(
-  issue: Pick<Issue, "agent_executor" | "assigned_pod_id" | "assigned_runner_id">,
-  project: Pick<SidebarProject, "default_agent_executor">
+  issue: Pick<Issue, "assigned_pod_id" | "assigned_runner_id">
 ): ExecutionSelection | null {
-  const executor = issue.agent_executor ?? project.default_agent_executor;
-  if (executor === "cloud_agent" || executor === "managed_runner") {
-    return { type: "agent", executor };
-  }
   const runnerId = issue.assigned_runner_id ?? null;
   if (runnerId !== null) return { type: "runner", runnerId, podId: issue.assigned_pod_id ?? "" };
   const podId = issue.assigned_pod_id ?? null;
@@ -103,7 +96,7 @@ export function SidebarProperties({
   // The directory read names the creator; until it lands, the row shows a
   // neutral placeholder rather than an "unknown" verdict.
   const creatorPending = issue.created_by !== null && directory.isPending;
-  const selection = selectExecutionSelection(issue, project);
+  const selection = selectExecutionSelection(issue);
 
   // The overdue highlight reads the state's group, so the project states
   // load with the panel rather than waiting for the state picker.
@@ -138,7 +131,7 @@ export function SidebarProperties({
           onChange={(ids) => update.mutate({ assignee_ids: ids })}
         />
       </SidebarRow>
-      <SidebarRow label={executionTargetLabel(project.agent_executor_options)}>
+      <SidebarRow label={EXECUTION_TARGET_LABEL}>
         <PodPicker
           workspaceSlug={workspaceSlug}
           projectId={projectId}

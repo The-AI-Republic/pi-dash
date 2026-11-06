@@ -12,7 +12,6 @@ import { createAppClient, resetAppClient } from "../../../../core/api/client.js"
 import { edition } from "../../../../core/edition/index.js";
 import { resetRegisteredStores } from "../../../../core/session/index.js";
 import { setSessionClient } from "../../../../core/session/queries.js";
-import { agentReasonMessage } from "../../../../shared/lib/agentReasons.js";
 import { pickerKeys } from "../../../../shared/pickers/index.js";
 import { notifyError } from "../../../../shared/shell/index.js";
 import { pickerStatesQueryOptions } from "../../../../shared/pickers/reference.js";
@@ -520,57 +519,36 @@ describe("SidebarRow", () => {
 });
 
 describe("selectExecutionSelection", () => {
-  const localProject = { default_agent_executor: "local_runner" };
-
-  it("pins cloud and managed agents over the pod", () => {
-    expect(selectExecutionSelection(issueFixture({ agent_executor: "cloud_agent" }), localProject)).toEqual({
-      type: "agent",
-      executor: "cloud_agent",
+  it("never renders a legacy executor as an agent row", () => {
+    expect(selectExecutionSelection(issueFixture({ agent_executor: "cloud_agent" }))).toEqual({
+      type: "pod",
+      podId: POD_A,
     });
-    expect(selectExecutionSelection(issueFixture({ agent_executor: "managed_runner" }), localProject)).toEqual({
-      type: "agent",
-      executor: "managed_runner",
-    });
+    expect(
+      selectExecutionSelection(issueFixture({ agent_executor: "managed_runner", assigned_pod_id: null }))
+    ).toBeNull();
   });
 
-  it("reads the pod for the local executor and nothing for an unpinned local item", () => {
-    expect(selectExecutionSelection(issueFixture(), localProject)).toEqual({ type: "pod", podId: POD_A });
-    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: null }), localProject)).toBeNull();
-    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: undefined }), localProject)).toBeNull();
+  it("reads the pod and nothing for an unpinned item", () => {
+    expect(selectExecutionSelection(issueFixture())).toEqual({ type: "pod", podId: POD_A });
+    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: null }))).toBeNull();
+    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: undefined }))).toBeNull();
   });
 
   it("reads the pinned runner over the pod", () => {
-    expect(
-      selectExecutionSelection(issueFixture({ assigned_pod_id: POD_A, assigned_runner_id: "runner-1" }), localProject)
-    ).toEqual({ type: "runner", runnerId: "runner-1", podId: POD_A });
+    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: POD_A, assigned_runner_id: "runner-1" }))).toEqual({
+      type: "runner",
+      runnerId: "runner-1",
+      podId: POD_A,
+    });
   });
 
   it("keeps a runner without a pod readable with an empty pod", () => {
-    expect(
-      selectExecutionSelection(issueFixture({ assigned_pod_id: null, assigned_runner_id: "runner-1" }), localProject)
-    ).toEqual({ type: "runner", runnerId: "runner-1", podId: "" });
-  });
-
-  it("inherits a cloud project default when the issue pins no executor", () => {
-    expect(
-      selectExecutionSelection(issueFixture({ agent_executor: null }), { default_agent_executor: "cloud_agent" })
-    ).toEqual({ type: "agent", executor: "cloud_agent" });
-  });
-
-  it("inherits a managed project default when the issue pins no executor", () => {
-    expect(
-      selectExecutionSelection(issueFixture({ agent_executor: null, assigned_pod_id: null }), {
-        default_agent_executor: "managed_runner",
-      })
-    ).toEqual({ type: "agent", executor: "managed_runner" });
-  });
-
-  it("keeps an explicit issue override over the project default", () => {
-    expect(
-      selectExecutionSelection(issueFixture({ agent_executor: "local_runner", assigned_pod_id: POD_B }), {
-        default_agent_executor: "cloud_agent",
-      })
-    ).toEqual({ type: "pod", podId: POD_B });
+    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: null, assigned_runner_id: "runner-1" }))).toEqual({
+      type: "runner",
+      runnerId: "runner-1",
+      podId: "",
+    });
   });
 });
 
@@ -851,7 +829,7 @@ describe("SidebarProperties", () => {
     await waitFor(() => expect(row("Created by")).toHaveTextContent("Ada L"));
   });
 
-  it("labels the execution row Pod when the project offers no cloud agent", async () => {
+  it("labels the execution row Runs on whatever the project's executor options", async () => {
     const { queryClient } = harness();
     wrap(
       <SidebarProperties
@@ -865,8 +843,8 @@ describe("SidebarProperties", () => {
       />,
       queryClient
     );
-    expect(screen.getByText("Pod")).toBeInTheDocument();
-    expect(screen.queryByText("Runs on")).not.toBeInTheDocument();
+    expect(screen.getByText("Runs on")).toBeInTheDocument();
+    expect(screen.queryByText("Pod")).not.toBeInTheDocument();
   });
 
   it("renders every control disabled for guests, archived and synced items", () => {
@@ -1113,42 +1091,22 @@ describe("SidebarProperties", () => {
     expect(writes[0]!.body).toEqual({ priority: "low" });
   });
 
-  it("shows the inherited cloud target for an issue with no executor override", async () => {
+  it("shows the issue's pod even when the project's legacy default is an agent", async () => {
     const project = projectFixture({ default_agent_executor: "cloud_agent" });
     const { queryClient } = harness({ project });
     wrap(
       <SidebarProperties
         workspaceSlug={SLUG}
         projectId={PROJECT}
-        issue={issueFixture({ agent_executor: null })}
+        issue={issueFixture({ agent_executor: "managed_runner" })}
         project={project}
         editable
       />,
       queryClient
     );
-    // The trigger names the inherited agent, not the pod the issue
-    // happens to carry.
-    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("Pi Dash Cloud Agent"));
-    expect(within(row("Runs on")).queryByText("WEB_pod_a")).not.toBeInTheDocument();
-  });
-
-  it("shows the inherited managed target for an issue with no executor override", async () => {
-    const project = projectFixture({
-      agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
-      default_agent_executor: "managed_runner",
-    });
-    const { queryClient } = harness({ project });
-    wrap(
-      <SidebarProperties
-        workspaceSlug={SLUG}
-        projectId={PROJECT}
-        issue={issueFixture({ agent_executor: null, assigned_pod_id: null })}
-        project={project}
-        editable
-      />,
-      queryClient
-    );
-    await waitFor(() => expect(within(row("Pod")).getByRole("button")).toHaveTextContent("Pi Dash Agent (desktop)"));
+    // Runner is the only executor: a legacy value never renders an agent.
+    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("WEB_pod_a"));
+    expect(screen.queryByText(/Pi Dash Cloud Agent|Pi Dash Agent/)).not.toBeInTheDocument();
   });
 
   it("names the current state before the picker opens", async () => {
@@ -1219,35 +1177,14 @@ describe("SidebarProperties", () => {
     );
     fireEvent.click(within(row("Runs on")).getByRole("button"));
     await screen.findByRole("option", { name: /WEB_pod_b/ });
-    // Unavailable agent rows carry their reason and never activate.
-    const cloud = screen.getByRole("option", { name: /Pi Dash Cloud Agent/ });
-    expect(cloud).toBeDisabled();
-    expect(cloud).toHaveTextContent(agentReasonMessage("cloud_agent_unavailable"));
+    // No executor rows: Runner is the only executor.
+    expect(screen.queryByRole("option", { name: /Pi Dash Cloud Agent/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("option", { name: /WEB_pod_b/ }));
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0]!.body).toEqual({
       assigned_pod_id: POD_B,
       assigned_runner_id: null,
       agent_executor: "local_runner",
-    });
-  });
-
-  it("patches a managed-agent pick to the executor with no pod", async () => {
-    const project = projectFixture({
-      agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
-    });
-    const { queryClient, writes } = harness({ project });
-    wrap(
-      <SidebarProperties workspaceSlug={SLUG} projectId={PROJECT} issue={issueFixture()} project={project} editable />,
-      queryClient
-    );
-    fireEvent.click(within(row("Pod")).getByRole("button"));
-    fireEvent.click(await screen.findByRole("option", { name: /Pi Dash Agent \(desktop\)/ }));
-    await waitFor(() => expect(writes).toHaveLength(1));
-    expect(writes[0]!.body).toEqual({
-      assigned_pod_id: null,
-      assigned_runner_id: null,
-      agent_executor: "managed_runner",
     });
   });
 

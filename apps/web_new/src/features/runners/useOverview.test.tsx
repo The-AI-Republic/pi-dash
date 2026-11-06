@@ -15,6 +15,7 @@ const allowed = { value: true };
 const view = { projectId: "p-1" as string | undefined };
 const deleteMutate = vi.fn(async () => undefined);
 const revokeMutate = vi.fn(async () => undefined);
+const updateMutate = vi.fn(async (_input: unknown) => undefined);
 const useRunners = vi.fn();
 const podsState = {
   data: [{ id: "p-1", name: "WEB_alpha" }] as unknown as Pod[] | undefined,
@@ -47,7 +48,9 @@ vi.mock("./api/queries.js", () => ({
 vi.mock("./api/mutations.js", () => ({
   useDeleteRunner: () => ({ mutateAsync: deleteMutate }),
   useRevokeRunner: () => ({ mutateAsync: revokeMutate }),
+  useUpdateRunner: () => ({ mutateAsync: updateMutate }),
 }));
+vi.mock("../../core/session/index.js", () => ({ useMe: () => ({ data: { id: "user-1" } }) }));
 
 const { useRunnersOverview } = await import("./useOverview.js");
 

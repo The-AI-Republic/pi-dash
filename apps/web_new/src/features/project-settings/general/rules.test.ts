@@ -26,7 +26,6 @@ import {
   EMBLEM_SIZE_MESSAGE,
   EMBLEM_TYPE_MESSAGE,
   emblemFileError,
-  executorChoices,
   generalConflictError,
   generalFormFrom,
   reseatGeneralForm,
@@ -126,7 +125,6 @@ describe("generalFormFrom", () => {
       timezone: "Europe/Lisbon",
       baseBranch: "develop",
       repoUrl: "https://github.com/acme/site",
-      executor: "cloud_agent",
       ticking: true,
       budget: "7",
       noCap: false,
@@ -144,7 +142,7 @@ describe("generalFormFrom", () => {
     expect(form.cadence).toBe(CUSTOM_CADENCE_VALUE);
   });
 
-  it("normalizes visibility, an empty executor and a custom cadence", () => {
+  it("normalizes visibility and a custom cadence", () => {
     const form = generalFormFrom({
       ...STORED,
       network: 5,
@@ -152,7 +150,6 @@ describe("generalFormFrom", () => {
       agent_default_interval_seconds: 14_400,
     });
     expect(form.network).toBe(0);
-    expect(form.executor).toBe("local_runner");
     expect(form.cadence).toBe(CUSTOM_CADENCE_VALUE);
   });
 });
@@ -280,11 +277,12 @@ describe("buildGeneralPayload", () => {
       timezone: "Europe/Lisbon",
       base_branch: "develop",
       logo_props: STORED.logo_props,
-      default_agent_executor: "cloud_agent",
       agent_ticking_enabled: true,
       agent_default_max_ticks: 7,
     });
     expect("repo_url" in payload).toBe(false);
+    // Runner is the only executor: the tab never writes one.
+    expect("default_agent_executor" in payload).toBe(false);
   });
 
   it("leaves per-stage cadence out unless the picker moved", () => {
@@ -411,20 +409,6 @@ describe("repositoryBoundState", () => {
         repository: { clone_url_http: "https://git.test/acme/site.git" },
       })
     ).toBe("https://github.com/acme/site.git");
-  });
-});
-
-describe("executorChoices", () => {
-  it("disables only families the instance reports unavailable", () => {
-    expect(executorChoices([{ kind: "cloud_agent", available: true }])).toEqual([
-      { kind: "local_runner", label: "Local runner", disabled: false },
-      { kind: "cloud_agent", label: "Cloud agent", disabled: false },
-      { kind: "managed_runner", label: "Desktop agent", disabled: true },
-    ]);
-  });
-
-  it("keeps the local runner enabled even when the options disagree", () => {
-    expect(executorChoices([{ kind: "local_runner", available: false }])[0]?.disabled).toBe(false);
   });
 });
 
