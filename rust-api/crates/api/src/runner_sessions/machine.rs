@@ -806,10 +806,7 @@ pub async fn machine_session_poll(
     match opened_token_id {
         Ok(Some(token_id)) => {
             let sea = pidash_db::pool::sea_orm_connection(&pool);
-            let opened = match machine_token::Entity::find_by_id(token_id)
-                .one(&sea)
-                .await
-            {
+            let opened = match machine_token::Entity::find_by_id(token_id).one(&sea).await {
                 Ok(opened) => opened,
                 Err(_) => return server_error(),
             };
@@ -834,13 +831,8 @@ pub async fn machine_session_poll(
                             pidash_db::entity::machine_session::Column::RevokedReason,
                             sea_orm::sea_query::Expr::value(reason),
                         )
-                        .filter(
-                            pidash_db::entity::machine_session::Column::Id.eq(sid),
-                        )
-                        .filter(
-                            pidash_db::entity::machine_session::Column::RevokedAt
-                                .is_null(),
-                        )
+                        .filter(pidash_db::entity::machine_session::Column::Id.eq(sid))
+                        .filter(pidash_db::entity::machine_session::Column::RevokedAt.is_null())
                         .exec(&sea)
                         .await;
                     if revoked.is_err() {
@@ -882,7 +874,10 @@ pub async fn machine_session_poll(
     if let Some(Value::Object(report)) = body.get("engine_state") {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
         if let Err(error) = pidash_services::domain::engine_state::record_engine_state_report(
-            &sea, dev_machine_id, report, now,
+            &sea,
+            dev_machine_id,
+            report,
+            now,
         )
         .await
         {
@@ -1210,10 +1205,7 @@ mod tests {
             opened_with_eviction_reason(None, Some(now), now),
             Some(REASON_MACHINE_TOKEN_EXPIRED)
         );
-        assert_eq!(
-            opened_with_eviction_reason(None, Some(future), now),
-            None
-        );
+        assert_eq!(opened_with_eviction_reason(None, Some(future), now), None);
         assert_eq!(opened_with_eviction_reason(None, None, now), None);
     }
 }

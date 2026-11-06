@@ -27,7 +27,9 @@ use chrono::{DateTime, Utc};
 use pidash_db::entity::{dev_machine, engine_credential, users};
 use pidash_db::orm_tx::into_sqlx;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use uuid::Uuid;
 
 /// The engine credential's `ec_` prefix (`ENGINE_CREDENTIAL_PREFIX`).
@@ -264,7 +266,10 @@ impl std::fmt::Display for IssueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotMachineOwner => {
-                write!(f, "engine credentials are issued only to the machine's owner")
+                write!(
+                    f,
+                    "engine credentials are issued only to the machine's owner"
+                )
             }
             Self::SilentRenewalRefused => write!(f, "engine_credentials silently refused"),
             Self::Database(error) => write!(f, "database: {error}"),
@@ -397,7 +402,10 @@ pub async fn issue_engine_credential(
     silent: bool,
     now: DateTime<Utc>,
 ) -> Result<IssuedEngineCredential, IssueError> {
-    let Some(machine) = read_machine(db, machine_id).await.map_err(IssueError::Database)? else {
+    let Some(machine) = read_machine(db, machine_id)
+        .await
+        .map_err(IssueError::Database)?
+    else {
         // Django's `select_for_update().get(...)` raises DoesNotExist on
         // an absent machine; there is no wire code to mirror, so refuse
         // like a non-owner rather than inventing one.
@@ -461,9 +469,16 @@ pub async fn issue_engine_credential(
     // (`set_engine_auto_pause_reason(machine, NONE)` in Django, no keep /
     // only_from: it clears whatever the row holds).
     if machine.engine_auto_pause_reason == PAUSE_ENGINE_SIGN_IN_REQUIRED {
-        crate::domain::engine_state::set_engine_auto_pause_reason(db, machine_id, PAUSE_NONE, &[], None, now)
-            .await
-            .map_err(|error| IssueError::Database(error.into_sqlx()))?;
+        crate::domain::engine_state::set_engine_auto_pause_reason(
+            db,
+            machine_id,
+            PAUSE_NONE,
+            &[],
+            None,
+            now,
+        )
+        .await
+        .map_err(|error| IssueError::Database(error.into_sqlx()))?;
     }
     tracing::info!(
         user_id = %user_id,
@@ -503,7 +518,10 @@ pub async fn revoke_engine_credential(
     };
     let revoked = engine_credential::Entity::update_many()
         .col_expr(engine_credential::Column::RevokedAt, Expr::value(at(now)))
-        .col_expr(engine_credential::Column::RevokedReason, Expr::value(reason))
+        .col_expr(
+            engine_credential::Column::RevokedReason,
+            Expr::value(reason),
+        )
         .filter(engine_credential::Column::DevMachineId.eq(machine_id))
         .filter(engine_credential::Column::RevokedAt.is_null())
         .exec(db)
@@ -517,10 +535,7 @@ pub async fn revoke_engine_credential(
         return Ok(false);
     }
     dev_machine::Entity::update_many()
-        .col_expr(
-            dev_machine::Column::EngineSignInState,
-            Expr::value(state),
-        )
+        .col_expr(dev_machine::Column::EngineSignInState, Expr::value(state))
         .col_expr(
             dev_machine::Column::EngineCredentialExpiresAt,
             Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
@@ -600,13 +615,15 @@ pub async fn authenticate_engine_credential(
     now: DateTime<Utc>,
 ) -> Result<AuthenticatedCredential, AuthError> {
     if raw.is_empty() || !raw.starts_with(ENGINE_CREDENTIAL_PREFIX) {
-        return Err(AuthError::Credential(EngineCredentialError::sign_in_required()));
+        return Err(AuthError::Credential(
+            EngineCredentialError::sign_in_required(),
+        ));
     }
     let row = engine_credential::Entity::find()
-        .filter(engine_credential::Column::TokenHash.eq(pidash_auth::token::hash_token(
-            raw,
-            secret_key,
-        )))
+        .filter(
+            engine_credential::Column::TokenHash
+                .eq(pidash_auth::token::hash_token(raw, secret_key)),
+        )
         .one(db)
         .await
         .map_err(|error| AuthError::Database(into_sqlx(error)))?
@@ -619,25 +636,22 @@ pub async fn authenticate_engine_credential(
         expires_at: utc(row.expires_at),
     };
     if row.revoked_at.is_some() || utc(row.expires_at) <= now {
-        return Err(AuthError::Credential(EngineCredentialError::with_credential(
-            "engine_sign_in_required",
-            credential,
-        )));
+        return Err(AuthError::Credential(
+            EngineCredentialError::with_credential("engine_sign_in_required", credential),
+        ));
     }
     let Some(machine) = read_machine(db, row.dev_machine_id)
         .await
         .map_err(AuthError::Database)?
     else {
-        return Err(AuthError::Credential(EngineCredentialError::with_credential(
-            "dev_machine_revoked",
-            credential,
-        )));
+        return Err(AuthError::Credential(
+            EngineCredentialError::with_credential("dev_machine_revoked", credential),
+        ));
     };
     if machine.revoked_at.is_some() || machine.owner_id != row.user_id {
-        return Err(AuthError::Credential(EngineCredentialError::with_credential(
-            "dev_machine_revoked",
-            credential,
-        )));
+        return Err(AuthError::Credential(
+            EngineCredentialError::with_credential("dev_machine_revoked", credential),
+        ));
     }
     let user = users::Entity::find_by_id(row.user_id)
         .one(db)
@@ -650,10 +664,9 @@ pub async fn authenticate_engine_credential(
             ))
         })?;
     if !user.is_active {
-        return Err(AuthError::Credential(EngineCredentialError::with_credential(
-            "engine_sign_in_required",
-            credential,
-        )));
+        return Err(AuthError::Credential(
+            EngineCredentialError::with_credential("engine_sign_in_required", credential),
+        ));
     }
     engine_credential::Entity::update_many()
         .col_expr(engine_credential::Column::LastUsedAt, Expr::value(at(now)))
@@ -717,17 +730,10 @@ mod tests {
             "revoked"
         );
         // Active with no expiry is active.
-        assert_eq!(
-            current_engine_sign_in_state("active", None, now),
-            "active"
-        );
+        assert_eq!(current_engine_sign_in_state("active", None, now), "active");
         // Active far from expiry is active.
         assert_eq!(
-            current_engine_sign_in_state(
-                "active",
-                Some(now + chrono::Duration::days(10)),
-                now
-            ),
+            current_engine_sign_in_state("active", Some(now + chrono::Duration::days(10)), now),
             "active"
         );
         // Inside the 3-day window is expiring (boundary: exactly 3d).
@@ -736,11 +742,7 @@ mod tests {
             "expiring"
         );
         assert_eq!(
-            current_engine_sign_in_state(
-                "active",
-                Some(now + chrono::Duration::days(2)),
-                now
-            ),
+            current_engine_sign_in_state("active", Some(now + chrono::Duration::days(2)), now),
             "expiring"
         );
         // At or past expiry is expired.
@@ -788,10 +790,7 @@ mod tests {
             ["engine_sign_in_state", "engine_credential_expires_at"]
         );
         assert_eq!(object["engine_sign_in_state"], "active");
-        assert_eq!(
-            object["engine_credential_expires_at"],
-            expires.to_rfc3339()
-        );
+        assert_eq!(object["engine_credential_expires_at"], expires.to_rfc3339());
         let without = engine_credential_payload("signed_out", None, now);
         assert!(without["engine_credential_expires_at"].is_null());
     }
@@ -857,7 +856,12 @@ mod tests {
             None,
             Some(created)
         ));
-        assert!(!silent_issue_allowed_decision("active", None, Some(reported), None));
+        assert!(!silent_issue_allowed_decision(
+            "active",
+            None,
+            Some(reported),
+            None
+        ));
     }
 
     #[test]
@@ -867,14 +871,8 @@ mod tests {
             state_for_revoke_reason("user_signed_out"),
             Some("signed_out")
         );
-        assert_eq!(
-            state_for_revoke_reason("machine_removed"),
-            Some("revoked")
-        );
-        assert_eq!(
-            state_for_revoke_reason("machine_merged"),
-            Some("revoked")
-        );
+        assert_eq!(state_for_revoke_reason("machine_removed"), Some("revoked"));
+        assert_eq!(state_for_revoke_reason("machine_merged"), Some("revoked"));
         assert_eq!(state_for_revoke_reason("admin"), Some("revoked"));
         assert_eq!(state_for_revoke_reason("superseded"), None);
         assert_eq!(state_for_revoke_reason(""), None);

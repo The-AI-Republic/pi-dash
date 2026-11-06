@@ -30,8 +30,8 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::engine_credential::{
-    SIGN_IN_STATE_EXPIRED, SIGN_IN_STATE_REVOKED, SIGN_IN_STATE_SIGNED_OUT, current_engine_sign_in_state,
-    has_live_engine_credential, is_legacy_desktop, utc,
+    current_engine_sign_in_state, has_live_engine_credential, is_legacy_desktop, utc,
+    SIGN_IN_STATE_EXPIRED, SIGN_IN_STATE_REVOKED, SIGN_IN_STATE_SIGNED_OUT,
 };
 use super::engine_credential::{PAUSE_ENGINE_DISABLED, PAUSE_ENGINE_SIGN_IN_REQUIRED};
 
@@ -80,7 +80,11 @@ const HEALTHY_STATES: &[&str] = &["available", "expiring"];
 const NEVER_REPLACED_BY_A_REPORT: &[&str] = &[PAUSE_ENGINE_DISABLED];
 /// Report `sign_in_state` values that mean the engine is signed out
 /// (`_SIGNED_OUT_STATES`).
-const SIGNED_OUT_STATES: &[&str] = &[SIGN_IN_STATE_EXPIRED, SIGN_IN_STATE_SIGNED_OUT, SIGN_IN_STATE_REVOKED];
+const SIGNED_OUT_STATES: &[&str] = &[
+    SIGN_IN_STATE_EXPIRED,
+    SIGN_IN_STATE_SIGNED_OUT,
+    SIGN_IN_STATE_REVOKED,
+];
 /// Stored report fields are stripped and cut to this length (`_MAX_FIELD`).
 const MAX_FIELD: usize = 64;
 
@@ -284,7 +288,15 @@ async fn clear_reason(
             return Ok(false);
         }
     }
-    set_engine_auto_pause_reason(db, machine.id, PAUSE_NONE, &[], Some(&[current.as_str()]), now).await
+    set_engine_auto_pause_reason(
+        db,
+        machine.id,
+        PAUSE_NONE,
+        &[],
+        Some(&[current.as_str()]),
+        now,
+    )
+    .await
 }
 
 /// `_clean(value)`: stringify, strip, and cut to 64 chars.
@@ -317,10 +329,7 @@ pub async fn record_engine_state_report(
     let reason_code = clean(report.get("reason_code"));
     let mut stored = Map::new();
     stored.insert("state".to_owned(), Value::String(state.clone()));
-    stored.insert(
-        "reason_code".to_owned(),
-        Value::String(reason_code.clone()),
-    );
+    stored.insert("reason_code".to_owned(), Value::String(reason_code.clone()));
     for key in ["sign_in_state", "credential_expires_at"] {
         let value = report.get(key);
         let is_empty_optional = match value {
@@ -368,13 +377,23 @@ pub async fn record_engine_state_report(
             .and_then(Value::as_str)
             .is_some_and(|sign_in| SIGNED_OUT_STATES.contains(&sign_in))
     {
-        apply_reason(db, &fresh, PAUSE_ENGINE_SIGN_IN_REQUIRED, NEVER_REPLACED_BY_A_REPORT, now).await?;
+        apply_reason(
+            db,
+            &fresh,
+            PAUSE_ENGINE_SIGN_IN_REQUIRED,
+            NEVER_REPLACED_BY_A_REPORT,
+            now,
+        )
+        .await?;
     } else if HEALTHY_STATES.contains(&state.as_str()) && reason_code.is_empty() {
         clear_reason(db, &fresh, CLEARED_BY_HEALTHY_REPORT, now).await?;
     }
     Ok(fresh_after(db, machine_id)
         .await
-        .map(|row| row.map(|machine| machine.engine_auto_pause_reason).unwrap_or_default())
+        .map(|row| {
+            row.map(|machine| machine.engine_auto_pause_reason)
+                .unwrap_or_default()
+        })
         .unwrap_or_default())
 }
 
@@ -565,7 +584,12 @@ mod tests {
         ] {
             assert!(is_known_reason(reason), "{reason}");
         }
-        for unknown in ["engine_not_installed", "profile_pending", "never", "superseded"] {
+        for unknown in [
+            "engine_not_installed",
+            "profile_pending",
+            "never",
+            "superseded",
+        ] {
             assert!(!is_known_reason(unknown), "{unknown}");
         }
     }
@@ -621,10 +645,7 @@ mod tests {
         // endpoint's to clear.
         for reason in CLEARED_BY_HEALTHY_REPORT {
             assert!(
-                !matches!(
-                    *reason,
-                    PAUSE_PROFILE_UNAVAILABLE | PAUSE_ENGINE_DISABLED
-                ),
+                !matches!(*reason, PAUSE_PROFILE_UNAVAILABLE | PAUSE_ENGINE_DISABLED),
                 "{reason}"
             );
         }
