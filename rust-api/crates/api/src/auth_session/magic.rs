@@ -920,8 +920,12 @@ async fn save_user_data(
             login_uagent,
             avatar: None,
             avatar_asset_id: None,
-            display_name: None,
-            is_staff: None,
+            // `user.save()` (`base.py:232`) is a full save, so every
+            // `User.save()` effect applies (`user.py:169-187`): the
+            // empty-`display_name` backfill and the superuser staff sync
+            // (NEWPIDASH-41; the email twin got them in NEWPIDASH-17).
+            display_name: Some(identity::DisplayNameUpdate::BackfillCase),
+            is_staff: Some(identity::StaffSync::OrSuperuser),
             touch_updated_at: true,
             rotated_token: &rotated,
             now,
