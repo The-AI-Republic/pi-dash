@@ -480,12 +480,15 @@ fn target_string(data: &JVal, key: &str) -> Result<String, Response> {
     if !j_truthy(value) {
         return Ok(String::new());
     }
-    match value {
-        JVal::Str(text) => Ok(pidash_compat::py::py_strip(&text.to_lossy_string()).to_owned()),
-        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
-            Err(server_error())
-        }
-    }
+    // `str(...)` coercion (`machines.py:204`): truthy non-strings render
+    // via `py_str` (`True`, `123`, repr containers), then UUID-parse 400s.
+    let rendered = match value {
+        JVal::Str(text) => text.to_lossy_string(),
+        other => crate::v1_cycles_modules::json::py_str(other)
+            .map(|text| text.to_lossy_string())
+            .map_err(|_| server_error())?,
+    };
+    Ok(pidash_compat::py::py_strip(&rendered).to_owned())
 }
 
 pub async fn merge_into_post(
@@ -506,8 +509,8 @@ pub async fn merge_into_post(
         Err(response) => return response,
     };
     // `str(request.data.get("target_dev_machine_id") or
-    // request.data.get("target") or "").strip()`: non-existant 500s at
-    // the first truthy non-string leg.
+    // request.data.get("target") or "").strip()` (`machines.py:204`):
+    // truthy non-strings `str()`-coerce, then the UUID parse 400s.
     let first = match target_string(&data, "target_dev_machine_id") {
         Ok(value) => value,
         Err(response) => return response,
@@ -582,6 +585,46 @@ pub async fn merge_into_post(
             );
         }
     };
+    // Post-commit effects in Django registration order:
+    // publishes (per finalized run) → handoffs → drains → cleanup.
+    let ports = crate::runner_runs::LivePorts::new(pool.clone(), &state);
+    for run_id in &outcome.publish_run_ids {
+        for effect in [
+            pidash_services::runner_runs::LifecycleEffect::PublishTerminalEffects {
+                run_id: *run_id,
+            },
+            pidash_services::runner_runs::LifecycleEffect::ApplyTerminalEffectsInline {
+                run_id: *run_id,
+            },
+        ] {
+            let _ = pidash_jobs::orchestration::drain_publish_effects(vec![effect], |one| {
+                crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                    &pool,
+                    &ports,
+                    vec![one],
+                    Some(user_id),
+                )
+            })
+            .await;
+        }
+    }
+    for (_runner_id, run_id) in &outcome.handoff_pairs {
+        if crate::project_move_handoff::complete_project_move_handoff(
+            &pool,
+            &state,
+            *run_id,
+            Some(user_id),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "failed to complete project-move handoff after revoking runner {} (run {})",
+                _runner_id,
+                run_id
+            );
+        }
+    }
     for pod_id in &outcome.drain_pod_ids {
         let redis = pidash_db::redis::client_from_settings(state.settings());
         let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
@@ -589,6 +632,15 @@ pub async fn merge_into_post(
             redis.as_ref(),
             &state.settings().runner,
             *pod_id,
+        )
+        .await;
+    }
+    for runner_id in &outcome.cleanup_runner_ids {
+        let redis = pidash_db::redis::client_from_settings(state.settings());
+        let _ = pidash_db::runner_sessions::outbox::schedule_stream_cleanup_for_runner(
+            redis.as_ref(),
+            &state.settings().runner,
+            &runner_id.to_string(),
         )
         .await;
     }

@@ -1159,6 +1159,10 @@ pub const INVITE_GONE_BODY: &str = r#"{"error":"legacy_enrollment_disabled","err
 pub const REVIVE_GONE_BODY: &str = r#"{"error":"legacy_enrollment_disabled","error_description":"Delete this runner and run `pidash runner add` from the authenticated target machine."}"#;
 
 /// Enroll/create 201 shared envelope fields (`:361-374,771-784`).
+/// `provisioning`/`pod_dispatch`/`created` are the create-only trio
+/// (`:783-807`); the enroll body (`:334-350`) has none of them, so they
+/// are `Option` and rendered only when [`EnrollmentBody::include_create_fields`]
+/// is set.
 pub struct EnrollmentBody<'a> {
     pub runner_id: &'a str,
     pub runner_name: &'a str,
@@ -1173,10 +1177,12 @@ pub struct EnrollmentBody<'a> {
     pub provisioning: &'a str,
     pub pod_dispatch: &'a str,
     pub created: bool,
+    pub include_create_fields: bool,
 }
 
 /// The enroll 201 (`:361-377`) and create 201 (`:771-787`): identical
 /// key order; `machine_token` present ONLY when minted (appended last).
+/// The create trio is present only on the create path.
 pub fn enrollment_body(fields: &EnrollmentBody<'_>) -> String {
     let mut body = Map::with_capacity(13);
     body.insert(
@@ -1227,15 +1233,17 @@ pub fn enrollment_body(fields: &EnrollmentBody<'_>) -> String {
         "machine_token_minted".to_owned(),
         Value::Bool(fields.machine_token.is_some()),
     );
-    body.insert(
-        "provisioning".to_owned(),
-        Value::String(fields.provisioning.to_owned()),
-    );
-    body.insert(
-        "pod_dispatch".to_owned(),
-        Value::String(fields.pod_dispatch.to_owned()),
-    );
-    body.insert("created".to_owned(), Value::Bool(fields.created));
+    if fields.include_create_fields {
+        body.insert(
+            "provisioning".to_owned(),
+            Value::String(fields.provisioning.to_owned()),
+        );
+        body.insert(
+            "pod_dispatch".to_owned(),
+            Value::String(fields.pod_dispatch.to_owned()),
+        );
+        body.insert("created".to_owned(), Value::Bool(fields.created));
+    }
     if let Some(token) = fields.machine_token {
         body.insert("machine_token".to_owned(), Value::String(token.to_owned()));
     }
@@ -1460,10 +1468,12 @@ async fn enroll_runner_inner(
             workspace_slug: &runner.workspace_slug,
             pod_slug: &runner.pod_name,
             project_identifier: &runner.project_identifier,
+            // Enroll 201 (`enrollment.py:334-350`): no create trio.
             machine_token: machine_minted.as_ref().map(|minted| minted.raw.as_str()),
             provisioning: "manual",
             pod_dispatch: "pod_member",
             created: true,
+            include_create_fields: false,
         }),
     )
 }
@@ -1515,18 +1525,30 @@ struct AttemptDone {
 /// be created, else the 409 response. OSS CE has no gateway lane, so the
 /// profile is always unavailable (mirrors N51); the pause reason follows
 /// the managed-runner kill switch.
-fn engine_refusal(
-    _tx: &mut Transaction<'_, Postgres>,
+async fn engine_refusal(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
     _dev_machine: &pidash_db::entity::dev_machine::Model,
     settings: &pidash_db::config::Settings,
 ) -> Option<Response> {
     let (_available, pause_reason) = engine_cred::engine_profile_for_user_available(settings);
+    // `profile.reason_code` follows the caller's BYOK key
+    // (`agent_model_profile_for_user`, `model_provider.py:110-113`).
+    let conn = TxConn::new(&mut *tx);
+    let profile_reason_code =
+        match engine_cred::engine_profile_reason_code_for_user(&conn, user_id).await {
+            Ok(code) => code,
+            Err(err) => {
+                tracing::warn!("engine_refusal byok lookup failed: {err}");
+                return Some(server_error());
+            }
+        };
     Some(json_response(
         StatusCode::CONFLICT,
         serde_json::json!({
             "error": "engine_unavailable",
             "reason_code": pause_reason,
-            "profile_reason_code": engine_cred::engine_profile_reason_code(),
+            "profile_reason_code": profile_reason_code,
             "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
         })
         .to_string(),
@@ -1577,7 +1599,8 @@ async fn create_attempt(
             let Some(machine_full) = fetch_dev_machine_full(tx, machine_id).await else {
                 return Attempt::Server;
             };
-            if let Some(refusal) = engine_refusal(tx, &machine_full, settings) {
+            if let Some(refusal) = engine_refusal(tx, params.user_id, &machine_full, settings).await
+            {
                 return Attempt::Refusal(refusal);
             }
             // Credential check (live now, not stored).
@@ -1657,14 +1680,11 @@ async fn create_attempt(
                         return Attempt::Server;
                     }
                 }
-                let pod_dispatch = if hit.name == runner_name && hit.name.starts_with("builtin-") {
-                    "pinned_only".to_owned()
-                } else {
-                    // Existing row already carries its dispatch; read it.
-                    match fetch_runner_pod_dispatch(tx, hit.id).await {
-                        Some(d) => d,
-                        None => return Attempt::Server,
-                    }
+                // `runner.pod_dispatch` verbatim (`:797`): pre-#2910 rows
+                // may carry `pod_member`; never force `pinned_only`.
+                let pod_dispatch = match fetch_runner_pod_dispatch(tx, hit.id).await {
+                    Some(d) => d,
+                    None => return Attempt::Server,
                 };
                 return Attempt::Done(AttemptDone {
                     runner_id: hit.id,
@@ -1899,12 +1919,16 @@ async fn create_runner_inner(
     };
     // `agent_kind` (CLI field; `agent` alias): `engine` asks for the
     // built-in engine runner. Never read from the body as provisioning.
-    let agent_kind_raw = data
-        .get("agent_kind")
-        .or_else(|| data.get("agent"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let agent_kind = agent_kind_raw.trim().to_lowercase();
+    // Python `or` chain: the first *truthy* leg wins, then `str()`
+    // coercion (`enrollment.py:575`): `agent_kind=""` falls through to
+    // `agent`, while a truthy non-string renders via `py_str`.
+    let agent_kind = {
+        let picked = ["agent_kind", "agent"]
+            .into_iter()
+            .find_map(|key| data.get(key).filter(|v| py_truthy(v)));
+        let rendered = picked.map(pidash_compat::py::py_str).unwrap_or_default();
+        py_strip(&rendered).to_lowercase()
+    };
 
     if project_identifier.is_empty() {
         return json_response(StatusCode::BAD_REQUEST, error_body("project is required"));
@@ -2069,7 +2093,12 @@ async fn create_runner_inner(
                 }
             }
             Attempt::Refusal(response) => {
-                let _ = tx.rollback().await;
+                // Django returns from inside `atomic()` (`:713-715`), so the
+                // dev-machine touch/create commits; only a commit failure
+                // 500s here. Commit (not rollback) to keep the touch.
+                if tx.commit().await.is_err() {
+                    return server_error();
+                }
                 return response;
             }
             Attempt::Ownership => {
@@ -2106,6 +2135,7 @@ async fn create_runner_inner(
             provisioning: &done.provisioning,
             pod_dispatch: &done.pod_dispatch,
             created: done.created,
+            include_create_fields: true,
         }),
     )
 }
@@ -2562,7 +2592,7 @@ mod tests {
 
     #[test]
     fn enrollment_body_key_order_pins_f7() {
-        let without_token = enrollment_body(&EnrollmentBody {
+        let base = EnrollmentBody {
             runner_id: "r",
             runner_name: "n",
             refresh_token: "rt_x",
@@ -2576,31 +2606,55 @@ mod tests {
             provisioning: "manual",
             pod_dispatch: "pod_member",
             created: true,
-        });
+            include_create_fields: true,
+        };
+        let without_token = enrollment_body(&base);
         assert_eq!(
             without_token,
             r#"{"runner_id":"r","runner_name":"n","refresh_token":"rt_x","access_token":"jwt","access_token_expires_at":"2026-01-01T00:00:00+00:00","refresh_token_generation":1,"workspace_slug":"ws","pod_slug":"pod","project_identifier":"PRJ","long_poll_interval_secs":25,"protocol_version":4,"machine_token_minted":false,"provisioning":"manual","pod_dispatch":"pod_member","created":true}"#
         );
         let with_token = enrollment_body(&EnrollmentBody {
+            runner_id: "r",
+            runner_name: "n",
+            refresh_token: "rt_x",
+            access_token: "jwt",
+            access_token_expires_at: "2026-01-01T00:00:00+00:00".to_owned(),
+            refresh_token_generation: 1,
+            workspace_slug: "ws",
+            pod_slug: "pod",
+            project_identifier: "PRJ",
             machine_token: Some("mt_x"),
-            ..EnrollmentBody {
-                runner_id: "r",
-                runner_name: "n",
-                refresh_token: "rt_x",
-                access_token: "jwt",
-                access_token_expires_at: "2026-01-01T00:00:00+00:00".to_owned(),
-                refresh_token_generation: 1,
-                workspace_slug: "ws",
-                pod_slug: "pod",
-                project_identifier: "PRJ",
-                machine_token: None,
-                provisioning: "manual",
-                pod_dispatch: "pod_member",
-                created: true,
-            }
+            provisioning: "manual",
+            pod_dispatch: "pod_member",
+            created: true,
+            include_create_fields: true,
         });
         assert!(with_token.ends_with(r#","machine_token":"mt_x"}"#));
         assert!(with_token.contains(r#""machine_token_minted":true"#));
+        // Legacy enroll (`:334-350`): no create trio at all.
+        let enroll = enrollment_body(&EnrollmentBody {
+            runner_id: "r",
+            runner_name: "n",
+            refresh_token: "rt_x",
+            access_token: "jwt",
+            access_token_expires_at: "2026-01-01T00:00:00+00:00".to_owned(),
+            refresh_token_generation: 1,
+            workspace_slug: "ws",
+            pod_slug: "pod",
+            project_identifier: "PRJ",
+            machine_token: None,
+            provisioning: "manual",
+            pod_dispatch: "pod_member",
+            created: true,
+            include_create_fields: false,
+        });
+        assert_eq!(
+            enroll,
+            r#"{"runner_id":"r","runner_name":"n","refresh_token":"rt_x","access_token":"jwt","access_token_expires_at":"2026-01-01T00:00:00+00:00","refresh_token_generation":1,"workspace_slug":"ws","pod_slug":"pod","project_identifier":"PRJ","long_poll_interval_secs":25,"protocol_version":4,"machine_token_minted":false}"#
+        );
+        assert!(!enroll.contains("provisioning"));
+        assert!(!enroll.contains("pod_dispatch"));
+        assert!(!enroll.contains(r#""created""#));
     }
 
     #[test]

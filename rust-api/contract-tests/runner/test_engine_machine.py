@@ -371,6 +371,203 @@ def test_engine_unavailable_on_ce(settings, daemon_world, seeder):
     assert body["error_description"] == "This Pi Dash instance cannot serve the built-in engine for this account."
 
 
+def test_engine_byok_profile_reason_code(settings, daemon_world, seeder):
+    # A user holding a BYOK key gets byok_not_supported_on_desktop
+    # (agent_model_profile_for_user, model_provider.py:110-113).
+    host = f"byok-{seeder.tag}"
+    _manual_machine(seeder, daemon_world["owner"]["id"], host)
+    seeder.db.execute(
+        "INSERT INTO assistant_user_llm_config (user_id, provider_kind, base_url, model_name, api_key_encrypted, created_at, updated_at) VALUES (%s,'openai','https://example.invalid','m',%s,now(),now())",
+        (daemon_world["owner"]["id"], b"enc-key"),
+    )
+    try:
+        with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
+            response = client.post(
+                f"{DAEMON}/runners/",
+                json={
+                    "project": daemon_world["project"]["identifier"],
+                    "workspace_slug": daemon_world["workspace"]["slug"],
+                    "host_label": host,
+                    "agent_kind": "engine",
+                },
+            )
+        assert response.status_code == 409, response.text
+        body = response.json()
+        assert body["error"] == "engine_unavailable"
+        assert body["reason_code"] in ("engine_disabled", "profile_unavailable")
+        assert body["profile_reason_code"] == "byok_not_supported_on_desktop", body
+    finally:
+        seeder.db.execute("DELETE FROM assistant_user_llm_config WHERE user_id = %s", (daemon_world["owner"]["id"],))
+
+
+def test_engine_unavailable_no_byok_defaults_llm_missing(settings, daemon_world, seeder):
+    host = f"nobyk-{seeder.tag}"
+    _manual_machine(seeder, daemon_world["owner"]["id"], host)
+    with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
+        response = client.post(
+            f"{DAEMON}/runners/",
+            json={
+                "project": daemon_world["project"]["identifier"],
+                "workspace_slug": daemon_world["workspace"]["slug"],
+                "host_label": host,
+                "agent_kind": "engine",
+            },
+        )
+    assert response.status_code == 409, response.text
+    assert response.json()["profile_reason_code"] == "llm_config_missing"
+
+
+def test_agent_kind_empty_falls_through_to_agent_alias(settings, daemon_world, seeder):
+    # Python `or` chain: agent_kind="" is falsy, so `agent` wins
+    # (enrollment.py:575). On a manual machine that asks for an engine.
+    host = f"alias-{seeder.tag}"
+    _manual_machine(seeder, daemon_world["owner"]["id"], host)
+    with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
+        response = client.post(
+            f"{DAEMON}/runners/",
+            json={
+                "project": daemon_world["project"]["identifier"],
+                "workspace_slug": daemon_world["workspace"]["slug"],
+                "host_label": host,
+                "agent_kind": "",
+                "agent": "engine",
+            },
+        )
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == "engine_unavailable"
+    seeder.db.execute("DELETE FROM machine_token WHERE user_id = %s AND host_label = %s", (daemon_world["owner"]["id"], host))
+    seeder.db.execute("DELETE FROM dev_machine WHERE owner_id = %s AND host_label = %s", (daemon_world["owner"]["id"], host))
+
+
+def test_engine_refusal_commits_machine_touch(settings, daemon_world, seeder):
+    # Django returns inside atomic(): the touch commits (R5).
+    host = f"touch-{seeder.tag}"
+    machine = _manual_machine(seeder, daemon_world["owner"]["id"], host)
+    seeder.db.execute("UPDATE dev_machine SET last_seen_at = now() - interval '1 day' WHERE id = %s", (machine["id"],))
+    with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
+        response = client.post(
+            f"{DAEMON}/runners/",
+            json={
+                "project": daemon_world["project"]["identifier"],
+                "workspace_slug": daemon_world["workspace"]["slug"],
+                "host_label": host,
+                "agent_kind": "engine",
+            },
+        )
+    assert response.status_code == 409, response.text
+    # last_seen_at refreshed despite the refusal (rollback would keep
+    # the day-old value).
+    row = seeder.db.fetchone(
+        "SELECT last_seen_at > now() - interval '5 minutes' AS fresh FROM dev_machine WHERE id = %s",
+        (machine["id"],),
+    )
+    assert row["fresh"] is True, row
+    seeder.db.execute("DELETE FROM machine_token WHERE user_id = %s AND host_label = %s", (daemon_world["owner"]["id"], host))
+    seeder.db.execute("DELETE FROM dev_machine WHERE owner_id = %s AND host_label = %s", (daemon_world["owner"]["id"], host))
+
+
+def test_merge_nonstring_target_400(settings, user_client, seeder, daemon_world):
+    # str(123) -> "123" -> UUID parse 400s, never a 500 (machines.py:204).
+    host = f"nonstr-{seeder.tag}"
+    source = _manual_machine(seeder, daemon_world["owner"]["id"], host)
+    response = user_client.post(
+        f"{DAEMON}/dev-machines/{source['id']}/merge-into/",
+        json={"target_dev_machine_id": 123},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json() == {"error": "invalid_target_dev_machine_id"}
+
+
+def test_dedupe_returns_stored_pod_dispatch(settings, daemon_world, seeder):
+    # runner.pod_dispatch verbatim on re-add (:797): a pre-#2910 row
+    # carrying pod_member stays pod_member (never forced pinned_only).
+    host = f"dedupe-{seeder.tag}"
+    machine = _legacy_machine(seeder, daemon_world["owner"]["id"], host)
+    runner = seeder.enroll_runner(daemon_world["owner"]["id"], daemon_world["workspace"]["id"], daemon_world["pod"]["id"], f"d-{seeder.tag}-{machine['id'][:8]}", name=f"builtin-dedupe-{seeder.tag}")
+    seeder.db.execute("UPDATE runner SET provisioning='desktop_bundled', pod_dispatch='pod_member', dev_machine_id=%s WHERE id = %s", (machine["id"], runner["id"]))
+    with api_key_client(settings.base_url, daemon_world["api_token"]["token"]) as client:
+        response = client.post(
+            f"{DAEMON}/runners/",
+            json={
+                "project": daemon_world["project"]["identifier"],
+                "workspace_slug": daemon_world["workspace"]["slug"],
+                "host_label": host,
+                "agent_kind": "engine",
+            },
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["runner_id"] == runner["id"]
+    assert body["created"] is False
+    assert body["pod_dispatch"] == "pod_member", body
+    seeder.db.execute("DELETE FROM machine_token WHERE user_id = %s AND host_label = %s", (daemon_world["owner"]["id"], host))
+    seeder.db.execute("DELETE FROM runner WHERE id = %s", (runner["id"],))
+    seeder.db.execute("DELETE FROM dev_machine WHERE owner_id = %s AND host_label = %s", (daemon_world["owner"]["id"], host))
+
+
+def test_merge_held_runs_finalize_fully(settings, user_client, seeder, daemon_world):
+    # §13 collision: handover cancel (no cancel_reason) + revoke
+    # cancel (cancel_reason dev_machine_merged), markers cleared,
+    # finalize path end to end. Cloud runs carry no runner/pin
+    # (agent_run_cloud_has_no_local_assignment), so merge can never
+    # finalize one; the cloud terminal-event arm is implemented in
+    # finalize_merge_cancel for finalize parity but is unreachable
+    # from this endpoint by construction.
+    host = f"held-{seeder.tag}"
+    source = _manual_machine(seeder, daemon_world["owner"]["id"], host)
+    target = _manual_machine(seeder, daemon_world["owner"]["id"], host)
+    pod = daemon_world["pod"]
+    other_pod = seeder.create_pod(daemon_world["workspace"]["id"], daemon_world["project"]["id"], name=f"held-other-{seeder.tag}"[:100])
+    survivor = seeder.enroll_runner(daemon_world["owner"]["id"], daemon_world["workspace"]["id"], pod["id"], f"hs-{seeder.tag}-{target['id'][:8]}", name=f"held-survivor-{seeder.tag}")
+    survivor_id = survivor["id"]
+    seeder.db.execute("UPDATE runner SET provisioning='desktop_bundled', pod_dispatch='pinned_only', dev_machine_id=%s WHERE id = %s", (target["id"], survivor_id))
+    loser = seeder.enroll_runner(daemon_world["owner"]["id"], daemon_world["workspace"]["id"], pod["id"], f"hl-{seeder.tag}-{source['id'][:8]}", name=f"held-loser-{seeder.tag}")
+    loser_id = loser["id"]
+    seeder.db.execute("UPDATE runner SET provisioning='desktop_bundled', pod_dispatch='pinned_only', dev_machine_id=%s WHERE id = %s", (source["id"], loser_id))
+    # Held run on the loser with day-old markers (prove the finalize
+    # reset + post-commit re-apply refreshed them).
+    held_id = str(__import__("uuid").uuid4())
+    seeder.db.execute(
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, terminal_hooks_applied_at, terminal_capacity_released_at, created_at) VALUES (%s,%s,%s,%s,%s,%s,'running','','direct','managed_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now() - interval '1 day', now() - interval '1 day', now())",
+        (held_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"], daemon_world["owner"]["id"], pod["id"], loser_id),
+    )
+    seeder._put("agent_run", held_id)
+    # Queued managed run pinned to the loser in another pod.
+    queued_id = str(__import__("uuid").uuid4())
+    seeder.db.execute(
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','managed_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now())",
+        (queued_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"], daemon_world["owner"]["id"], other_pod["id"], loser_id),
+    )
+    seeder._put("agent_run", queued_id)
+    response = user_client.post(
+        f"{DAEMON}/dev-machines/{source['id']}/merge-into/",
+        json={"target_dev_machine_id": target["id"]},
+    )
+    assert response.status_code == 200, response.text
+    row = seeder.db.fetchone("SELECT status, error_details, cancel_reason, terminal_hooks_applied_at, terminal_capacity_released_at FROM agent_run WHERE id = %s", (held_id,))
+    assert row["status"] == "cancelled"
+    # Bag keys are code/message (FOLDED_KEYS).
+    assert row["error_details"]["message"] == "runner revoked"
+    assert row["error_details"]["code"] == "runner_revoked"
+    assert row["cancel_reason"] == "dev_machine_merged"
+    # Finalize reset both markers to NULL in-tx, then the post-commit
+    # terminal effects re-applied them: fresh, not day-old.
+    fresh = seeder.db.fetchone(
+        "SELECT terminal_hooks_applied_at > now() - interval '5 minutes' AS hooks_fresh, terminal_capacity_released_at > now() - interval '5 minutes' AS cap_fresh FROM agent_run WHERE id = %s",
+        (held_id,),
+    )
+    assert fresh["hooks_fresh"] is True, fresh
+    assert fresh["cap_fresh"] is True, fresh
+    # Managed executor: no terminal event (cloud-only).
+    assert seeder.db.fetchone("SELECT seq FROM agent_run_event WHERE agent_run_id = %s AND kind = 'terminal'", (held_id,)) is None
+    queued = seeder.db.fetchone("SELECT status, error_details, cancel_reason FROM agent_run WHERE id = %s", (queued_id,))
+    assert queued["status"] == "cancelled"
+    assert queued["error_details"]["message"] == "runner revoked"
+    assert queued["error_details"]["code"] == "runner_revoked"
+    # Handover cancel carries no cancel_reason (Django sets none here).
+    assert queued["cancel_reason"] == ""
+
+
 def test_cap_gone(settings, daemon_world, seeder):
     # Managed cap 409 is gone: creating many manual runners never hits
     # managed_runner_limit.

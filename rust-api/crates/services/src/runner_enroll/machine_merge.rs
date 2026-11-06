@@ -31,14 +31,17 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    agent_run, dev_machine, machine_session, pod as pod_entity, projects as project_entity,
-    runner as runner_entity, workspaces as workspace_entity,
+    agent_run, agent_run_event, dev_machine, machine_session, pod as pod_entity,
+    projects as project_entity, runner as runner_entity, workspaces as workspace_entity,
 };
 
 use crate::domain::engine_credential::{self, revoke_reason};
 use crate::domain::tokens;
 use crate::runner_enroll::engine_naming;
 use crate::runner_enroll::queries::enroll_reads;
+use crate::runner_enroll::revoke as revoke_kernels;
+use crate::runner_runs::finalization;
+use crate::runner_runs::SetValue;
 
 /// Live-session window (`LIVE_SESSION_WINDOW`, 90s).
 pub const LIVE_SESSION_WINDOW_SECS: i64 = 90;
@@ -192,65 +195,161 @@ impl From<DbErr> for MergeError {
 }
 
 /// The merge outcome: the stored `merge_result` document (the same
-/// object the response answers) plus the pods a caller drains on
-/// commit (`{survivor.pod} | loose_pods`).
+/// object the response answers) plus the post-commit effects in
+/// Django registration order — publishes (per finalized run), handoffs
+/// (per revoke-cancelled run), pod drains, stream cleanup (per
+/// revoked loser). The caller fires them after commit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergeOutcome {
     pub result: Value,
     pub drain_pod_ids: Vec<Uuid>,
+    pub publish_run_ids: Vec<Uuid>,
+    pub handoff_pairs: Vec<(Uuid, Uuid)>,
+    pub cleanup_runner_ids: Vec<Uuid>,
 }
 
-/// Cancel one `managed_runner` queued run on a collision
-/// (`finalize_agent_run` with `error`/`error_code`): status
-/// `cancelled`, `ended_at = now`, the `error_details` bag gains the
-/// pair. First-writer-wins on the run row (a concurrent finalize
-/// wins; the update then touches no row).
-async fn finalize_cancel_queued(
+/// `finalize_agent_run` (`agent_run_finalization.py:50-96`) for the
+/// merge cancels, over SeaORM: row-lock the run, merge
+/// `error_details` under the lock, write the terminal values
+/// (`status`, `ended_at`, both markers cleared, `cancel_reason` when
+/// the caller passes one), append the cloud-only terminal event, and
+/// report whether the row finalized (the caller then collects the
+/// terminal-effects publication). First-writer-wins: a terminal row
+/// or a failed expected filter is `Ok(false)`.
+///
+/// `expected_queued`: the handover cancel's `expected_status=QUEUED`
+/// (no `cancel_reason`). `expected_runner`: the revoke cancel's
+/// `expected_runner_id` (`cancel_reason` set).
+async fn finalize_merge_cancel(
     db: &impl ConnectionTrait,
     run_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), DbErr> {
-    let run = agent_run::Entity::find_by_id(run_id).one(db).await?;
-    let Some(run) = run else {
-        return Ok(());
-    };
-    if run.status != "queued" {
-        return Ok(());
+    expected_queued: bool,
+    expected_runner: Option<Uuid>,
+    cancel_reason: Option<&str>,
+) -> Result<bool, DbErr> {
+    use pidash_types::runner_runs::AgentRunStatus;
+
+    let mut extras: Vec<(&'static str, SetValue)> = vec![
+        (
+            "error",
+            SetValue::Text(revoke_kernels::FINALIZE_ERROR.to_owned()),
+        ),
+        (
+            "error_code",
+            SetValue::Text(revoke_kernels::FINALIZE_ERROR_CODE.to_owned()),
+        ),
+    ];
+    if let Some(reason) = cancel_reason {
+        extras.push(("cancel_reason", SetValue::Text(reason.to_owned())));
     }
+    let values = finalization::plan_finalize_values(AgentRunStatus::Cancelled, &extras)
+        .map_err(|err| DbErr::RecordNotFound(err.to_string()))?;
+    let locked = agent_run::Entity::find_by_id(run_id)
+        .lock_exclusive()
+        .one(db)
+        .await?;
+    let Some(run) = locked else {
+        return Ok(false);
+    };
+    let row_status = AgentRunStatus::from_value(&run.status).unwrap_or(AgentRunStatus::Queued);
+    if !finalization::finalize_lock_passes(
+        row_status,
+        run.runner_id,
+        expected_runner,
+        expected_queued.then_some(AgentRunStatus::Queued),
+    ) {
+        return Ok(false);
+    }
+    // Folded keys (`FOLDED_KEYS`: `error` → `message`,
+    // `error_code` → `code`): the bag carries code/message.
+    use pidash_db::runner_runs::agent_run::{ERROR_DETAILS_CODE, ERROR_DETAILS_MESSAGE};
     let mut bag = match run.error_details.clone() {
         Value::Object(map) => map,
         _ => Map::new(),
     };
     bag.insert(
-        "error".to_owned(),
-        Value::String("runner revoked".to_owned()),
+        ERROR_DETAILS_MESSAGE.to_owned(),
+        Value::String(revoke_kernels::FINALIZE_ERROR.to_owned()),
     );
     bag.insert(
-        "error_code".to_owned(),
-        Value::String("runner_revoked".to_owned()),
+        ERROR_DETAILS_CODE.to_owned(),
+        Value::String(revoke_kernels::FINALIZE_ERROR_CODE.to_owned()),
     );
-    agent_run::Entity::update_many()
+    let mut update = agent_run::Entity::update_many();
+    update = update
         .col_expr(agent_run::Column::Status, Expr::value("cancelled"))
         .col_expr(agent_run::Column::EndedAt, Expr::value(now))
         .col_expr(
+            agent_run::Column::TerminalHooksAppliedAt,
+            Expr::value(Option::<DateTime<Utc>>::None),
+        )
+        .col_expr(
+            agent_run::Column::TerminalCapacityReleasedAt,
+            Expr::value(Option::<DateTime<Utc>>::None),
+        )
+        .col_expr(
             agent_run::Column::ErrorDetails,
             Expr::value(Value::Object(bag)),
-        )
+        );
+    if let Some(reason) = cancel_reason {
+        update = update.col_expr(
+            agent_run::Column::CancelReason,
+            Expr::value(reason.to_owned()),
+        );
+    }
+    update
         .filter(agent_run::Column::Id.eq(run_id))
-        .filter(agent_run::Column::Status.eq("queued"))
         .exec(db)
         .await
-        .map(drop)
+        .map(drop)?;
+    // Cloud-only terminal event (`:82-94`).
+    if run.executor_kind == "cloud_agent" {
+        let exists = agent_run_event::Entity::find()
+            .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+            .filter(agent_run_event::Column::Kind.eq("terminal"))
+            .limit(1u64)
+            .all(db)
+            .await?;
+        if exists.is_empty() {
+            let max_seq = agent_run_event::Entity::find()
+                .filter(agent_run_event::Column::AgentRunId.eq(run_id))
+                .order_by_desc(agent_run_event::Column::Seq)
+                .limit(1u64)
+                .all(db)
+                .await?
+                .first()
+                .map(|row| row.seq);
+            let plan = finalization::plan_terminal_event(
+                max_seq,
+                AgentRunStatus::Cancelled,
+                &finalization::finalize_error_code(&values),
+            );
+            use sea_orm::{ActiveValue, Set};
+            agent_run_event::Entity::insert(agent_run_event::ActiveModel {
+                id: ActiveValue::NotSet,
+                seq: Set(plan.seq),
+                kind: Set("terminal".to_owned()),
+                payload: Set(plan.payload),
+                created_at: Set(now.into()),
+                agent_run_id: Set(run_id),
+            })
+            .exec_without_returning(db)
+            .await?;
+        }
+    }
+    Ok(true)
 }
 
 /// Hand `loser`'s queued runs to `survivor` (`_hand_over_to_survivor`,
-/// revision 4.0). Returns the pods to drain (`{survivor.pod} | loose`).
+/// revision 4.0). Returns the pods to drain (`{survivor.pod} | loose`)
+/// and the finalized run ids (terminal-effects publication each).
 async fn hand_over_to_survivor(
     db: &impl ConnectionTrait,
     loser: &runner_entity::Model,
     survivor: &runner_entity::Model,
     now: DateTime<Utc>,
-) -> Result<HashSet<Uuid>, DbErr> {
+) -> Result<(HashSet<Uuid>, Vec<Uuid>), DbErr> {
     // Queued runs pinned to the loser, oldest first.
     let queued = agent_run::Entity::find()
         .filter(agent_run::Column::PinnedRunnerId.eq(loser.id))
@@ -260,6 +359,7 @@ async fn hand_over_to_survivor(
         .all(db)
         .await?;
     let mut loose_pods = HashSet::new();
+    let mut published = Vec::new();
     for run in &queued {
         if run.pod_id == survivor.pod_id {
             // Re-pin to the survivor (same pod).
@@ -282,8 +382,10 @@ async fn hand_over_to_survivor(
                 .exec(db)
                 .await
                 .map(drop)?;
-        } else if run.executor_kind == "managed_runner" {
-            finalize_cancel_queued(db, run.id, now).await?;
+        } else if run.executor_kind == "managed_runner"
+            && finalize_merge_cancel(db, run.id, now, true, None, None).await?
+        {
+            published.push(run.id);
         }
         // Any other executor kind keeps its pin (Django ignores it the
         // same way: only `local_runner` is released, only
@@ -291,73 +393,70 @@ async fn hand_over_to_survivor(
     }
     let mut drains = loose_pods;
     drains.insert(survivor.pod_id);
-    Ok(drains)
+    Ok((drains, published))
 }
 
-/// The loser revoke (`Runner.revoke` with `dev_machine_merged`):
-/// stamp, revoke this runner's sessions, cancel its non-terminal
-/// runs, unpin its queued follow-ups (any left after the hand-over).
+/// The loser revoke (`Runner.revoke` with `dev_machine_merged`,
+/// S1-S4 via the `revoke` performers): stamp (`stamp_runner_revoked`),
+/// revoke sessions, cancel non-terminal runs through
+/// [`finalize_merge_cancel`] (markers, `cancel_reason`, cloud event),
+/// unpin queued follow-ups. Returns the post-commit descriptors —
+/// drain pods (S3+S4, first-seen), published runs, handoff pairs —
+/// plus the cleanup runner id (always, per `revoke`).
+#[allow(clippy::type_complexity)]
 async fn revoke_loser(
     db: &impl ConnectionTrait,
     loser_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), DbErr> {
-    // S1: stamp (keeps `updated_at`).
-    runner_entity::Entity::update_many()
-        .col_expr(runner_entity::Column::Status, Expr::value("revoked"))
-        .col_expr(runner_entity::Column::RevokedAt, Expr::value(now))
-        .col_expr(
-            runner_entity::Column::RevokedReason,
-            Expr::value("dev_machine_merged"),
-        )
-        .filter(runner_entity::Column::Id.eq(loser_id))
-        .exec(db)
-        .await
-        .map(drop)?;
+) -> Result<(Vec<Uuid>, Vec<Uuid>, Vec<(Uuid, Uuid)>), DbErr> {
+    revoke_kernels::stamp_runner_revoked(db, loser_id, now, "dev_machine_merged").await?;
     // S2: revoke sessions (domain writer).
     tokens::revoke_runner_sessions_for_runner(db, loser_id, now, "dev_machine_merged")
         .await
         .map_err(|err| DbErr::RecordNotFound(err.to_string()))?;
-    // S3: cancel non-terminal runs (assigned/running/queued leftovers).
-    let active = agent_run::Entity::find()
-        .filter(agent_run::Column::RunnerId.eq(loser_id))
-        .filter(agent_run::Column::Status.is_in(["assigned", "running", "queued"]))
-        .order_by_desc(agent_run::Column::CreatedAt)
-        .all(db)
-        .await?;
-    for run in &active {
-        let mut bag = match run.error_details.clone() {
-            Value::Object(map) => map,
-            _ => Map::new(),
-        };
-        bag.insert(
-            "error".to_owned(),
-            Value::String("runner revoked".to_owned()),
-        );
-        bag.insert(
-            "error_code".to_owned(),
-            Value::String("runner_revoked".to_owned()),
-        );
-        agent_run::Entity::update_many()
-            .col_expr(agent_run::Column::Status, Expr::value("cancelled"))
-            .col_expr(agent_run::Column::EndedAt, Expr::value(now))
-            .col_expr(
-                agent_run::Column::ErrorDetails,
-                Expr::value(Value::Object(bag)),
-            )
-            .filter(agent_run::Column::Id.eq(run.id))
-            .exec(db)
-            .await
-            .map(drop)?;
+    // S3: locked non-terminal runs, newest first
+    // (`revoke::lock_active_runs` carries the full 8-status set).
+    let active_runs = revoke_kernels::lock_active_runs(db, loser_id).await?;
+    let mut cancelled_run_ids = Vec::with_capacity(active_runs.len());
+    let mut published = Vec::new();
+    for (run_id, _) in &active_runs {
+        if finalize_merge_cancel(
+            db,
+            *run_id,
+            now,
+            false,
+            Some(loser_id),
+            Some("dev_machine_merged"),
+        )
+        .await?
+        {
+            cancelled_run_ids.push(*run_id);
+            published.push(*run_id);
+        }
     }
     // S4: unpin queued follow-ups still pinned here.
-    agent_run::Entity::update_many()
-        .col_expr(agent_run::Column::PinnedRunnerId, Expr::value(None::<Uuid>))
-        .filter(agent_run::Column::PinnedRunnerId.eq(loser_id))
-        .filter(agent_run::Column::Status.eq("queued"))
-        .exec(db)
-        .await
-        .map(drop)
+    let pinned_pod_ids = revoke_kernels::pinned_queued_pod_ids(db, loser_id).await?;
+    if !pinned_pod_ids.is_empty() {
+        revoke_kernels::unpin_queued_runs_for_runner(db, loser_id).await?;
+    }
+    let mut drained_pod_ids: Vec<Uuid> = Vec::new();
+    for (_, pod_id) in &active_runs {
+        if let Some(pod_id) = pod_id {
+            if !drained_pod_ids.contains(pod_id) {
+                drained_pod_ids.push(*pod_id);
+            }
+        }
+    }
+    for pod_id in pinned_pod_ids.iter().flatten() {
+        if !drained_pod_ids.contains(pod_id) {
+            drained_pod_ids.push(*pod_id);
+        }
+    }
+    let handoff_pairs = cancelled_run_ids
+        .iter()
+        .map(|run_id| (loser_id, *run_id))
+        .collect();
+    Ok((drained_pod_ids, published, handoff_pairs))
 }
 
 /// `merge_dev_machine` (`machine_identity.py:286-405`): one
@@ -405,6 +504,9 @@ pub async fn merge_dev_machine(
             return Ok(MergeOutcome {
                 result: source.merge_result.clone(),
                 drain_pod_ids: Vec::new(),
+                publish_run_ids: Vec::new(),
+                handoff_pairs: Vec::new(),
+                cleanup_runner_ids: Vec::new(),
             });
         }
         return Err(MergeError::AlreadyMerged);
@@ -447,6 +549,9 @@ pub async fn merge_dev_machine(
     let mut moved: Vec<String> = Vec::new();
     let mut collisions: Vec<Value> = Vec::new();
     let mut drain_pods: HashSet<Uuid> = HashSet::new();
+    let mut publish_run_ids: Vec<Uuid> = Vec::new();
+    let mut handoff_pairs: Vec<(Uuid, Uuid)> = Vec::new();
+    let mut cleanup_runner_ids: Vec<Uuid> = Vec::new();
     for runner in &runners {
         let pod = pod_entity::Entity::find_by_id(runner.pod_id)
             .one(db)
@@ -456,9 +561,15 @@ pub async fn merge_dev_machine(
         let is_engine = runner.provisioning == "desktop_bundled";
         if let Some(survivor) = survivors.get(&project_id).filter(|_| is_engine) {
             let survivor = survivor.clone();
-            let drains = hand_over_to_survivor(db, runner, &survivor, now).await?;
+            let (drains, published) = hand_over_to_survivor(db, runner, &survivor, now).await?;
             drain_pods.extend(drains);
-            revoke_loser(db, runner.id, now).await?;
+            publish_run_ids.extend(published);
+            let (loser_drains, loser_published, loser_handoffs) =
+                revoke_loser(db, runner.id, now).await?;
+            drain_pods.extend(loser_drains);
+            publish_run_ids.extend(loser_published);
+            handoff_pairs.extend(loser_handoffs);
+            cleanup_runner_ids.push(runner.id);
             collisions.push(serde_json::json!({
                 "revoked_runner_id": runner.id.to_string(),
                 "survivor_runner_id": survivor.id.to_string(),
@@ -568,5 +679,8 @@ pub async fn merge_dev_machine(
     Ok(MergeOutcome {
         result,
         drain_pod_ids,
+        publish_run_ids,
+        handoff_pairs,
+        cleanup_runner_ids,
     })
 }
