@@ -962,6 +962,117 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
     .map(drop)
 }
 
+/// `live_engine_runner_for` (#2910): the machine's live engine runner on
+/// the project, oldest first, optionally locked. Returns `(id, name,
+/// generation, pod_id)`.
+pub struct LiveEngineHit {
+    pub id: Uuid,
+    pub name: String,
+    pub generation: i32,
+    pub pod_id: Uuid,
+}
+
+pub async fn live_engine_runner_for(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<LiveEngineHit>, DbErr> {
+    use pidash_db::entity::{pod, runner};
+    // Join runner -> pod, filter by project, oldest first, locked.
+    let rows = runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::Name,
+            runner::Column::RefreshTokenGeneration,
+            runner::Column::PodId,
+        ])
+        .join_as(
+            sea_orm::JoinType::InnerJoin,
+            runner::Entity::belongs_to(pod::Entity).from(runner::Column::PodId).to(pod::Column::Id).into(),
+            "pod_",
+        )
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
+        .filter(runner::Column::RevokedAt.is_null())
+        .order_by_asc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
+        .await?;
+    let Some((id, name, generation, pod_id)) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+    Ok(Some(LiveEngineHit {
+        id,
+        name,
+        generation,
+        pod_id,
+    }))
+}
+
+/// `_taken_names` (#2910): machine live names + every pod runner name
+/// (revoked included), optionally excluding one runner.
+pub async fn taken_names(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    pod_id: Uuid,
+    exclude_runner_id: Option<Uuid>,
+) -> Result<std::collections::HashSet<String>, DbErr> {
+    use pidash_db::entity::runner;
+    let query = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Name)
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    sea_orm::Condition::all()
+                        .add(runner::Column::DevMachineId.eq(machine_id))
+                        .add(runner::Column::RevokedAt.is_null()),
+                )
+                .add(runner::Column::PodId.eq(pod_id)),
+        );
+    let rows = query.into_tuple().all(db).await?;
+    let mut names: std::collections::HashSet<String> = rows.into_iter().map(|(n,)| n).collect();
+    if let Some(exclude) = exclude_runner_id {
+        if let Some(row) = runner::Entity::find_by_id(exclude)
+            .select_only()
+            .column(runner::Column::Name)
+            .into_tuple::<String>()
+            .one(db)
+            .await?
+        {
+            names.remove(&row);
+        }
+    }
+    Ok(names)
+}
+
+/// `unique_runner_name` (#2910) over the ORM taken set.
+pub fn unique_runner_name(
+    base: &str,
+    taken: &std::collections::HashSet<String>,
+) -> String {
+    use crate::runner_enroll::engine_naming::with_suffix;
+    if !taken.contains(base) {
+        return base.to_owned();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = with_suffix(base, n);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// `engine_runner_name` (#2910): base + uniqueness.
+pub fn engine_runner_name_from_base(base: &str, taken: &std::collections::HashSet<String>) -> String {
+    unique_runner_name(base, taken)
+}
+
 /// The session-auth user row `(id, password, is_active)`.
 pub async fn session_user(
     db: &impl ConnectionTrait,
