@@ -29,7 +29,7 @@ pub mod runner;
 pub mod runner_ops;
 mod start;
 mod scheduler;
-mod state;
+pub mod state;
 mod status;
 mod stop;
 mod tui;

@@ -72,7 +72,7 @@ pub async fn resolve_project(
     projects
         .into_iter()
         .find(|p| p.id == needle || p.identifier.to_uppercase() == needle_upper)
-        .ok_or_else(|| CliError::new(EXIT_NOT_FOUND, format!("project {needle:?} not found")))
+        .ok_or_else(|| CliError::new(EXIT_NOT_FOUND, format!("no project with identifier {needle:?}")))
 }
 
 pub async fn default_project(client: &ApiClient) -> Result<Option<ProjectRow>, CliError> {
