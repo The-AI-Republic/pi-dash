@@ -135,19 +135,17 @@ G6 :: /api/workspaces/{slug}/workspace-themes/ :: PUT:serves-but-django-405;PATC
 G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-405;PUT:serves-but-django-405
 ```
 
-### G7 — engine runner endpoints pending NEWPIDASH-50 (7 rows)
+### G7 — engine runner endpoints pending NEWPIDASH-50 (4 rows)
 
 Fix: NEWPIDASH-50 (engine credential, engine/profile, engine/model-token,
-engine/credential/revoke, auto-pause, dev-machine identity). The seven Django
+engine/credential/revoke, auto-pause, dev-machine identity). The four Django
 routes below have no Rust counterpart yet and are classified as G7 (not G0)
 so the checker stays clean while the sibling issue lands. When N50 lands,
-delete these lines.
+delete these lines. (NEWPIDASH-52 owns the three daemon dev-machine routes;
+they left this block when they landed.)
 
 ```expected-routes
 G7 :: /api/runners/dev-machines/{machine_id}/engine-sign-out/ :: no-rust-route
-G7 :: /api/v1/runner/dev-machines/{dev_machine_id}/ :: no-rust-route
-G7 :: /api/v1/runner/dev-machines/{dev_machine_id}/merge-into/ :: no-rust-route
-G7 :: /api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/ :: no-rust-route
 G7 :: /api/v1/runner/engine/credential/revoke/ :: no-rust-route
 G7 :: /api/v1/runner/engine/model-token/ :: no-rust-route
 G7 :: /api/v1/runner/engine/profile/ :: no-rust-route

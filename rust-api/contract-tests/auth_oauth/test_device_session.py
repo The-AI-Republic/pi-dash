@@ -281,16 +281,18 @@ def test_machine_token_valid_exchange(client: httpx.Client, ctx):
     )
     assert resp.status_code == 201, (resp.status_code, resp.text[:300])
     body = resp.json()
-    assert set(body) == {"machine_token", "workspace_slug", "dev_machine_id", "host_label"}
+    assert set(body) == {"machine_token", "workspace_slug", "dev_machine_id", "host_label", "engine_sign_in_state"}
     assert re.fullmatch(r"mt_[A-Za-z0-9_-]{43}", body["machine_token"]), body["machine_token"]
     assert body["workspace_slug"] == ctx["w1"]["slug"]
     assert body["dev_machine_id"] == dm
     assert body["host_label"] == "myhost"
-    # Key order is the Python dict order.
+    assert body["engine_sign_in_state"] == "never"
+    # Key order is the Python dict order (engine_sign_in_state last).
     text = resp.text
     assert (
         text.index('"machine_token"') < text.index('"workspace_slug"')
         < text.index('"dev_machine_id"') < text.index('"host_label"')
+        < text.index('"engine_sign_in_state"')
     ), text[:200]
     # The bridge with the device-flow description is spent; any other
     # description is left alone.

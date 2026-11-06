@@ -20,9 +20,13 @@ WEB = "/api/runners"
 pytestmark = pytest.mark.contract
 
 MACHINE_KEYS = {
-    "id", "host_label", "label", "visibility", "runner_count",
-    "online_runner_count", "control_online", "last_seen_at",
-    "last_heartbeat_at", "revoked_at", "created_at", "updated_at",
+    "id", "host_label", "label", "visibility", "provisioning",
+    "runner_count", "online_runner_count", "control_online",
+    "engine_paused_by_owner", "engine_auto_pause_reason", "engine_paused",
+    "engine_team_runs", "engine_sign_in_state", "engine_credential_expires_at",
+    "engine_state", "engine_state_reported_at", "merged_into",
+    "last_seen_at", "last_heartbeat_at", "revoked_at",
+    "created_at", "updated_at",
 }
 
 

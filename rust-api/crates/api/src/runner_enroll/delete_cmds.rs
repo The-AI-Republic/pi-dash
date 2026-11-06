@@ -1465,21 +1465,24 @@ fn owned(
 }
 
 /// Register the web deletes + machine-command routes
-/// (`runner/web_urls.py`: dev-machine delete, create-runner post, the
-/// create-runner status get). Merged under `RouteGroup::RunnerWeb` at
-/// the F-10 seam; the runner-detail DELETE joins the sibling
-/// `manage::routes` registration for its path (axum merges
-/// same-path `MethodRouter`s, so a second registration would collide
-/// on the doubly-defined DELETE).
+/// (`runner/web_urls.py`: dev-machine delete + owner-controls patch,
+/// create-runner post, the create-runner status get). Merged under
+/// `RouteGroup::RunnerWeb` at the F-10 seam; the runner-detail DELETE
+/// joins the sibling `manage::routes` registration for its path (axum
+/// merges same-path `MethodRouter`s, so a second registration would
+/// collide on the doubly-defined DELETE).
 pub fn web_routes() -> Router<AppState> {
-    use axum::routing::{delete, get, post};
-    const DELETE_ONLY: &[&str] = &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"];
+    use axum::routing::{get, patch, post};
+    const PATCH_DELETE_ONLY: &[&str] = &["GET", "POST", "PUT", "HEAD", "OPTIONS"];
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     Router::new()
         .route(
             "/api/runners/dev-machines/{machine_id}/",
-            owned(delete(machine_delete), DELETE_ONLY),
+            owned(
+                patch(super::manage::dev_machine_patch).delete(machine_delete),
+                PATCH_DELETE_ONLY,
+            ),
         )
         .route(
             "/api/runners/dev-machines/{machine_id}/create-runner/",
