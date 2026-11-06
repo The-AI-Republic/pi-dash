@@ -843,8 +843,8 @@ pub async fn count_pod_runners(db: &impl ConnectionTrait, pod_id: Uuid) -> Resul
         .await
 }
 
-/// A reused desktop runner `(id, name, refresh_token_generation)`.
-pub type ReuseHitRow = (Uuid, String, i32);
+/// A reused desktop runner `(id, name, refresh_token_generation, pod_dispatch)`.
+pub type ReuseHitRow = (Uuid, String, i32, String);
 
 /// E7 reuse probe ([`desktop_reuse_probe_sql`]): the live bundled runner
 /// for this machine / owner / pod / workspace, `Meta.ordering`, locked.
@@ -862,6 +862,7 @@ pub async fn desktop_reuse_probe(
             runner::Column::Id,
             runner::Column::Name,
             runner::Column::RefreshTokenGeneration,
+            runner::Column::PodDispatch,
         ])
         .filter(runner::Column::DevMachineId.eq(dev_machine_id))
         .filter(runner::Column::OwnerId.eq(owner_id))

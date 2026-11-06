@@ -2650,7 +2650,7 @@ mod tests {
         let bytes = serde_json::to_string(&rows).expect("serializes");
         assert_eq!(
             bytes,
-            "[{\"kind\":\"cloud_agent\",\"available\":false,\"reason_code\":\"cloud_agent_unavailable\"},{\"kind\":\"local_runner\",\"available\":false,\"reason_code\":\"no_local_runner\"},{\"kind\":\"managed_runner\",\"available\":false,\"reason_code\":\"managed_runner_disabled\"}]"
+            "[{\"kind\":\"cloud_agent\",\"available\":false,\"reason_code\":\"cloud_agent_unavailable\",\"deprecated\":true},{\"kind\":\"local_runner\",\"available\":false,\"reason_code\":\"no_local_runner\",\"deprecated\":false},{\"kind\":\"managed_runner\",\"available\":false,\"reason_code\":\"managed_runner_disabled\",\"deprecated\":true}]"
         );
     }
 
@@ -2769,7 +2769,7 @@ mod tests {
                 ("workspace_detail", vec!["name", "slug", "id", "logo_url"]),
                 (
                     "agent_executor_options",
-                    vec!["kind", "available", "reason_code"],
+                    vec!["kind", "available", "reason_code", "deprecated"],
                 ),
             ],
         );
@@ -2803,7 +2803,7 @@ mod tests {
             &str_list(node.get("key_order").expect("ko")),
             &[(
                 "agent_executor_options",
-                vec!["kind", "available", "reason_code"],
+                vec!["kind", "available", "reason_code", "deprecated"],
             )],
         );
         // Fresh instances (create-201) omit the four annotations.
@@ -2861,7 +2861,7 @@ mod tests {
             &str_list(node.get("key_order").expect("ko")),
             &[(
                 "agent_executor_options",
-                vec!["kind", "available", "reason_code"],
+                vec!["kind", "available", "reason_code", "deprecated"],
             )],
         );
     }

@@ -240,17 +240,20 @@
           {
             "kind": "cloud_agent",
             "available": false,
-            "reason_code": "cloud_agent_unavailable"
+            "reason_code": "cloud_agent_unavailable",
+            "deprecated": true
           },
           {
             "kind": "local_runner",
             "available": false,
-            "reason_code": "no_local_runner"
+            "reason_code": "no_local_runner",
+            "deprecated": false
           },
           {
             "kind": "managed_runner",
             "available": false,
-            "reason_code": "managed_runner_disabled"
+            "reason_code": "managed_runner_disabled",
+            "deprecated": true
           }
         ],
         "created_at": "2026-10-02T22:22:36.124504Z",
@@ -450,17 +453,20 @@
             {
               "kind": "cloud_agent",
               "available": false,
-              "reason_code": "cloud_agent_unavailable"
+              "reason_code": "cloud_agent_unavailable",
+              "deprecated": true
             },
             {
               "kind": "local_runner",
               "available": false,
-              "reason_code": "no_local_runner"
+              "reason_code": "no_local_runner",
+              "deprecated": false
             },
             {
               "kind": "managed_runner",
               "available": false,
-              "reason_code": "managed_runner_disabled"
+              "reason_code": "managed_runner_disabled",
+              "deprecated": true
             }
           ],
           "created_at": "2026-10-02T22:22:36.124504Z",
@@ -531,17 +537,20 @@
             {
               "kind": "cloud_agent",
               "available": false,
-              "reason_code": "cloud_agent_unavailable"
+              "reason_code": "cloud_agent_unavailable",
+              "deprecated": true
             },
             {
               "kind": "local_runner",
               "available": false,
-              "reason_code": "no_local_runner"
+              "reason_code": "no_local_runner",
+              "deprecated": false
             },
             {
               "kind": "managed_runner",
               "available": false,
-              "reason_code": "managed_runner_disabled"
+              "reason_code": "managed_runner_disabled",
+              "deprecated": true
             }
           ],
           "created_at": "2026-10-02T22:22:36.124504Z",
@@ -624,17 +633,20 @@
               {
                 "kind": "cloud_agent",
                 "available": false,
-                "reason_code": "cloud_agent_unavailable"
+                "reason_code": "cloud_agent_unavailable",
+                "deprecated": true
               },
               {
                 "kind": "local_runner",
                 "available": false,
-                "reason_code": "no_local_runner"
+                "reason_code": "no_local_runner",
+                "deprecated": false
               },
               {
                 "kind": "managed_runner",
                 "available": false,
-                "reason_code": "managed_runner_disabled"
+                "reason_code": "managed_runner_disabled",
+                "deprecated": true
               }
             ],
             "created_at": "2026-10-02T22:22:36.124504Z",
@@ -794,17 +806,20 @@
           {
             "kind": "cloud_agent",
             "available": false,
-            "reason_code": "cloud_agent_unavailable"
+            "reason_code": "cloud_agent_unavailable",
+            "deprecated": true
           },
           {
             "kind": "local_runner",
             "available": false,
-            "reason_code": "no_local_runner"
+            "reason_code": "no_local_runner",
+            "deprecated": false
           },
           {
             "kind": "managed_runner",
             "available": false,
-            "reason_code": "managed_runner_disabled"
+            "reason_code": "managed_runner_disabled",
+            "deprecated": true
           }
         ],
         "created_at": "2026-10-02T22:22:36.124504Z",
@@ -879,17 +894,20 @@
           {
             "kind": "cloud_agent",
             "available": false,
-            "reason_code": "cloud_agent_unavailable"
+            "reason_code": "cloud_agent_unavailable",
+            "deprecated": true
           },
           {
             "kind": "local_runner",
             "available": false,
-            "reason_code": "no_local_runner"
+            "reason_code": "no_local_runner",
+            "deprecated": false
           },
           {
             "kind": "managed_runner",
             "available": false,
-            "reason_code": "managed_runner_disabled"
+            "reason_code": "managed_runner_disabled",
+            "deprecated": true
           }
         ],
         "created_at": "2026-10-02T22:22:36.124504Z",
