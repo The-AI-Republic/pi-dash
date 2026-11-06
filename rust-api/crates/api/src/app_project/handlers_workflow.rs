@@ -4063,3 +4063,63 @@ mod tests {
         );
     }
 }
+
+/// Estimate-point prefetch against a constraint-free temp table on a
+/// one-connection pool: live rows only, `IN` over several estimates,
+/// `value` ascending.
+#[cfg(test)]
+mod live_points_read {
+    use super::*;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn live_fetch_points_for() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        sqlx::query(
+            "CREATE TEMP TABLE estimate_points AS SELECT * FROM public.estimate_points WITH NO DATA",
+        )
+        .execute(&pool)
+        .await
+        .expect("temp table");
+        let (e1, e2, e3, other) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (proj, ws) = (Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query(&format!(
+            "INSERT INTO estimate_points (id, key, description, value, project_id, workspace_id, estimate_id, created_at, updated_at, deleted_at) \
+             VALUES (gen_random_uuid(), 1, 'Big', '30', '{proj}', '{ws}', '{e1}', now(), now(), NULL), \
+                    (gen_random_uuid(), 2, 'Small', '5', '{proj}', '{ws}', '{e1}', now(), now(), NULL), \
+                    (gen_random_uuid(), 3, 'Mid', '12', '{proj}', '{ws}', '{e2}', now(), now(), NULL), \
+                    (gen_random_uuid(), 4, 'Gone', '1', '{proj}', '{ws}', '{e1}', now(), now(), now()), \
+                    (gen_random_uuid(), 5, 'Other', '2', '{proj}', '{ws}', '{other}', now(), now(), NULL)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed");
+
+        let rows = fetch_points_for(&pool, &[e1, e2, e3]).await.expect("read");
+        // `value` is a VARCHAR column: Django's `ORDER BY value` is
+        // lexicographic, and the SeaORM read keeps it.
+        assert_eq!(
+            rows.iter().map(|row| row.6.as_str()).collect::<Vec<_>>(),
+            vec!["12", "30", "5"],
+            "live only, value ascending"
+        );
+        assert_eq!(rows[0].5, "Mid");
+        assert!(fetch_points_for(&pool, &[])
+            .await
+            .expect("empty")
+            .is_empty());
+    }
+}

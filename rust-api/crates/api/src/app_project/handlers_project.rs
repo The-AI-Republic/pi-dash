@@ -7815,3 +7815,80 @@ mod live_tests {
         assert_eq!(options[2].reason_code, "desktop_not_connected");
     }
 }
+
+/// Member-id read against constraint-free temp tables on a one-connection
+/// pool: active, live, slug-scoped rows only, newest first, bots excluded
+/// by the serializer render.
+#[cfg(test)]
+mod live_members_read {
+    use super::*;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn live_fetch_members() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in ["workspaces", "users", "project_members"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, other_ws, proj, other_proj) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (u1, u2, u3, u4, u5, u6) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme'), ('{other_ws}', 'other')"),
+            format!(
+                "INSERT INTO users (id, email, is_bot) VALUES \
+                 ('{u1}', 'u1@x.io', false), ('{u2}', 'u2@x.io', true), \
+                 ('{u3}', 'u3@x.io', false), ('{u4}', 'u4@x.io', false), \
+                 ('{u5}', 'u5@x.io', false), ('{u6}', 'u6@x.io', false)"
+            ),
+            format!(
+                "INSERT INTO project_members (id, member_id, project_id, workspace_id, is_active, created_at, deleted_at) \
+                 VALUES (gen_random_uuid(), '{u1}', '{proj}', '{ws}', true, now(), NULL), \
+                        (gen_random_uuid(), '{u2}', '{proj}', '{ws}', true, now() - interval '1 hour', NULL), \
+                        (gen_random_uuid(), '{u3}', '{proj}', '{ws}', false, now(), NULL), \
+                        (gen_random_uuid(), '{u4}', '{proj}', '{ws}', true, now(), now()), \
+                        (gen_random_uuid(), '{u5}', '{other_proj}', '{ws}', true, now(), NULL), \
+                        (gen_random_uuid(), '{u6}', '{proj}', '{other_ws}', true, now(), NULL)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let rows = fetch_members(&pool, &proj, "acme").await.expect("read");
+        assert_eq!(
+            rows.iter().map(|row| row.member_id).collect::<Vec<_>>(),
+            vec![Some(u1), Some(u2)],
+            "active live slug-scoped rows, newest first"
+        );
+        assert_eq!(rows[0].is_bot, Some(false));
+        assert_eq!(rows[1].is_bot, Some(true));
+        assert_eq!(
+            render_members(&rows).expect("render"),
+            vec![u1.to_string()],
+            "bots drop out at render"
+        );
+    }
+}

@@ -2964,11 +2964,7 @@ async fn join_post(
             // `ws_member` is a SeaORM `Option<Uuid>` (not the old sqlx
             // tuple); the connection follows the main-side convention
             // (`sea_orm_connection`), as in the `members::add` call above.
-            members::activate_by_id(
-                &pidash_db::pool::sea_orm_connection(&pool),
-                id,
-                created_by,
-            )
+            members::activate_by_id(&pidash_db::pool::sea_orm_connection(&pool), id, created_by)
                 .await
                 .map_err(|_| Denial::ServerError)?;
         }
@@ -5122,5 +5118,121 @@ mod pidashconv_736_tests {
         // TAB and U+0085 padding already matched Django; pin the behavior.
         assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
         assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
+    }
+}
+
+/// Invite reads against constraint-free temp tables on a one-connection
+/// pool: the `project_member_invites` JOIN `projects` JOIN `workspaces`
+/// queryset keeps its soft-delete scope, slug+project filters and
+/// `-created_at` order, and the single-row fetch keeps its 404 miss.
+#[cfg(test)]
+mod live_invite_reads {
+    use super::*;
+    use uuid::Uuid;
+
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in ["workspaces", "projects", "project_member_invites"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        Some(pool)
+    }
+
+    async fn seed(pool: &sqlx::PgPool, ws: Uuid, proj: Uuid) {
+        for sql in [
+            format!(
+                "INSERT INTO workspaces (id, name, slug) VALUES ('{ws}', 'Acme', 'acme')"
+            ),
+            format!(
+                "INSERT INTO projects (id, identifier, name, description, logo_props, is_default, workspace_id) \
+                 VALUES ('{proj}', 'ENG', 'Engine', '', '{{}}', false, '{ws}')"
+            ),
+        ] {
+            sqlx::query(&sql).execute(pool).await.expect("seed");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_fetch_invites() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let (ws, proj, other_proj, older, newer, gone) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        seed(&pool, ws, proj).await;
+        sqlx::query(&format!(
+            "INSERT INTO projects (id, identifier, name, description, logo_props, is_default, workspace_id) \
+             VALUES ('{other_proj}', 'OTS', 'Other', '', '{{}}', false, '{ws}')"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed");
+        for sql in [
+            format!(
+                "INSERT INTO project_member_invites (id, email, accepted, token, role, project_id, workspace_id, created_at, updated_at, deleted_at) \
+                 VALUES ('{older}', 'old@x.io', false, 't-old', 1, '{proj}', '{ws}', now() - interval '1 day', now(), NULL), \
+                        ('{newer}', 'new@x.io', false, 't-new', 2, '{proj}', '{ws}', now(), now(), NULL), \
+                        ('{gone}', 'gone@x.io', false, 't-gone', 1, '{proj}', '{ws}', now(), now(), now()), \
+                        (gen_random_uuid(), 'other@x.io', false, 't-other', 1, '{other_proj}', '{ws}', now(), now(), NULL)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let rows = fetch_invites(&pool, "acme", &proj).await.expect("read");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.email.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new@x.io", "old@x.io"],
+            "live only, newest first"
+        );
+        assert_eq!(rows[0].project_identifier, "ENG");
+        assert_eq!(rows[0].workspace_slug, "acme");
+
+        let one = fetch_invite_one(&pool, "acme", &proj, &older)
+            .await
+            .expect("one");
+        assert_eq!(one.email, "old@x.io");
+        assert!(matches!(
+            fetch_invite_one(&pool, "acme", &proj, &gone).await,
+            Err(Denial::InviteNotFound)
+        ));
+        assert!(matches!(
+            fetch_invite_one(&pool, "missing-slug", &proj, &older).await,
+            Err(Denial::InviteNotFound)
+        ));
+
+        let mine = fetch_user_invites(&pool, Some("old@x.io"))
+            .await
+            .expect("user invites");
+        assert_eq!(
+            mine.iter()
+                .map(|row| row.email.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old@x.io"]
+        );
+        let none = fetch_user_invites(&pool, Some("nobody@x.io"))
+            .await
+            .expect("user invites miss");
+        assert!(none.is_empty());
     }
 }
