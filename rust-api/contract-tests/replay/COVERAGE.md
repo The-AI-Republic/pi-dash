@@ -1,12 +1,12 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write `(route, method)` pairs: **621** total, **496** covered by the corpus.
+Write `(route, method)` pairs: **593** total, **496** covered by the corpus.
 
 | bucket                   | pairs |
 | ------------------------ | ----- |
 | covered                  | 496   |
 | proxied by design        | 95    |
-| debug toolbar (dev-only) | 28    |
+| debug toolbar (dev-only) | 0     |
 | missing with fix issue   | 2     |
 | excluded with reason     | 0     |
 | owned, no session yet    | 0     |
@@ -610,34 +610,7 @@ Write `(route, method)` pairs: **621** total, **496** covered by the corpus.
 
 ## Debug toolbar
 
-- `DELETE /__debug__/history_refresh/` (web)
-- `PATCH /__debug__/history_refresh/` (web)
-- `POST /__debug__/history_refresh/` (web)
-- `PUT /__debug__/history_refresh/` (web)
-- `DELETE /__debug__/history_sidebar/` (web)
-- `PATCH /__debug__/history_sidebar/` (web)
-- `POST /__debug__/history_sidebar/` (web)
-- `PUT /__debug__/history_sidebar/` (web)
-- `DELETE /__debug__/render_panel/` (web)
-- `PATCH /__debug__/render_panel/` (web)
-- `POST /__debug__/render_panel/` (web)
-- `PUT /__debug__/render_panel/` (web)
-- `DELETE /__debug__/sql_explain/` (web)
-- `PATCH /__debug__/sql_explain/` (web)
-- `POST /__debug__/sql_explain/` (web)
-- `PUT /__debug__/sql_explain/` (web)
-- `DELETE /__debug__/sql_profile/` (web)
-- `PATCH /__debug__/sql_profile/` (web)
-- `POST /__debug__/sql_profile/` (web)
-- `PUT /__debug__/sql_profile/` (web)
-- `DELETE /__debug__/sql_select/` (web)
-- `PATCH /__debug__/sql_select/` (web)
-- `POST /__debug__/sql_select/` (web)
-- `PUT /__debug__/sql_select/` (web)
-- `DELETE /__debug__/template_source/` (web)
-- `PATCH /__debug__/template_source/` (web)
-- `POST /__debug__/template_source/` (web)
-- `PUT /__debug__/template_source/` (web)
+(none)
 
 ## Missing with fix issue
 
