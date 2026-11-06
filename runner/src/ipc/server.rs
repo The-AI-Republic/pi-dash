@@ -336,15 +336,14 @@ impl IpcServer {
                 Ok(Response::EngineRunnerAdded(info))
             }
             Request::EngineRunnerRemove { runner } => {
-                // Revoke in the cloud first (the server unpins and fails
-                // strict runs, design §7), then tear down locally. The
-                // folder on disk is kept.
+                // Revoke in the cloud first, preserving the runner's row
+                // and history, then remove its local block. The task
+                // folder is kept (built-in engine design §11).
                 let (runner_id, token) = self.spawn_ctx.engine_runner_for_removal(&runner)?;
-                crate::cloud::runners::delete_runner(
+                crate::cloud::runners::revoke_runner(
                     &self.spawn_ctx.cloud_url(),
                     &token,
                     &runner_id,
-                    false,
                 )
                 .await
                 .with_context(|| format!("removing {runner:?} in the cloud"))?;
