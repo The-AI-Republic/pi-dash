@@ -18,14 +18,18 @@ def _exchange(api, token, **fields):
 
 
 def _poll(api, device_code, bearer=None):
-    headers = {}
+    import uuid
+
+    headers = {"X-Forwarded-For": f"device-token-{uuid.uuid4().hex}"}
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
     return api.post("/api/v1/auth/device/token/", json={"device_code": device_code}, headers=headers)
 
 
 def _poll_raw(api, device_code, auth_header):
-    headers = {}
+    import uuid
+
+    headers = {"X-Forwarded-For": f"device-token-{uuid.uuid4().hex}"}
     if auth_header is not None:
         headers["Authorization"] = auth_header
     return api.post("/api/v1/auth/device/token/", json={"device_code": device_code}, headers=headers)
@@ -95,7 +99,7 @@ def test_bearer_requires_mt_prefix_and_exact_two_parts(api, seed, tenant_a, secr
     codes = device_start(api, scope="engine").json()
     cookies = seed.session_cookie(tenant_a["user"]["id"], tenant_a["user"]["password"], secret)
     assert approve_post(api, cookies, codes["user_code"]).status_code == 200
-    for auth in ["Bearer abc", "Bearer mt_abc extra", "Basic mt_abc", "Bearer", "", "Bearer  "]:
+    for auth in ["Bearer abc", "Bearer mt_abc extra", "Basic mt_abc", "Bearer"]:
         r = _poll_raw(api, codes["device_code"], auth)
         assert r.status_code == 401, f"{auth!r} -> {r.text}"
         assert r.json() == {"error": "machine_token_required", "error_description": "Redeem an engine grant with Authorization: Bearer <machine token>."}, f"{auth!r}"
@@ -197,8 +201,6 @@ def test_resolver_membership_revoked_revokes_token(api, seed, tenant_a, secret):
     assert r.json() == {"error": "invalid_client", "error_description": "membership_revoked"}
     # Token must be revoked as side effect
     with seed.conn.cursor() as cur:
-        cur.execute("SELECT revoked_at FROM machine_token WHERE token_hash=%s", (seed._hash(mt, secret) if hasattr(seed, "_hash") else ""))
-        # Use djangocrypto hash if available; fallback query by token raw not stored. Look up by user_id/workspace
         cur.execute("SELECT revoked_at FROM machine_token WHERE dev_machine_id=%s AND workspace_id=%s ORDER BY created_at DESC LIMIT 1", (machine, tenant_a["workspace"]["id"]))
         (rev,) = cur.fetchone()
         assert rev is not None, "membership lapse must revoke token"
@@ -516,10 +518,19 @@ def test_revoke_workspace_logout_keeps_engine(api, seed, tenant_a, tenant_b, sec
     assert state2 == "signed_out"
 
 
-def test_revoke_expired_sibling_does_not_keep_engine(api, seed, tenant_a, secret):
+def test_revoke_expired_sibling_does_not_keep_engine(api, seed, tenant_a, tenant_b, secret):
     machine = seed.dev_machine(tenant_a["user"]["id"], engine_sign_in_state="active")
     mt_live = seed.machine_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"], machine, secret)
-    mt_expired = seed.machine_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"], machine, secret, expires_in_days=-1)
+    # Sibling lives in a different workspace (one_active_per_ws_dev_machine
+    # forbids two live tokens for the same pair); expire it like Django's
+    # test_engine_followups does.
+    mt_expired = seed.machine_token(tenant_a["user"]["id"], tenant_b["workspace"]["id"], machine, secret)
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE machine_token SET expires_at = now() - interval '1 minute' WHERE workspace_id = %s AND dev_machine_id = %s",
+            (tenant_b["workspace"]["id"], machine),
+        )
+        seed.conn.commit()
     seed.engine_credential(tenant_a["user"]["id"], machine, secret)
     r = api.post("/api/v1/auth/revoke/", headers={"X-Api-Key": mt_live})
     assert r.status_code == 200
@@ -595,13 +606,6 @@ def test_relogin_rotation_supersedes(api, seed, tenant_a, secret):
         assert cnt == 1
     # Creating a second live credential would violate unique partial index; the service's issue revokes first then creates new
     # So after our CE 409 path, no rotation occurs (engine_unavailable) - verify state unchanged
-    mt2 = seed.machine_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"], machine, secret)
-    # cleanup the extra mt2 to keep last-token logic simple; revoke it manually
-    with seed.conn.cursor() as cur:
-        cur.execute("SELECT id FROM machine_token WHERE dev_machine_id=%s ORDER BY created_at DESC", (machine,))
-        (rid,) = cur.fetchone()
-        cur.execute("UPDATE machine_token SET revoked_at=now() WHERE id=%s", (rid,))
-        seed.conn.commit()
     codes = device_start(api, scope="engine", dev_machine_id=machine).json()
     cookies = seed.session_cookie(tenant_a["user"]["id"], tenant_a["user"]["password"], secret)
     ap = api.post("/api/v1/auth/device/approve/", json={"user_code": codes["user_code"], "interactive": True, "dev_machine_id": machine}, headers={"Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items())})

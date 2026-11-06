@@ -1354,7 +1354,7 @@ mod tests {
         )));
         assert_eq!(
             insert,
-            format!("INSERT INTO \"machine_token\" (\"id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\", \"user_id\", \"workspace_id\", \"dev_machine_id\") VALUES ({nil}, 'h', 'x', 'f', 'l', TRUE, '2026-11-05 10:00:00.000000 +00:00', NULL, NULL, {nil}, {nil}, NULL)")
+            format!("INSERT INTO \"machine_token\" (\"id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\", \"expires_at\", \"user_id\", \"workspace_id\", \"dev_machine_id\") VALUES ({nil}, 'h', 'x', 'f', 'l', TRUE, '2026-11-05 10:00:00.000000 +00:00', NULL, NULL, '2027-01-04 10:00:00.000000 +00:00', {nil}, {nil}, NULL)")
         );
     }
 
