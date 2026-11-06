@@ -359,6 +359,7 @@ mod tests {
 
     fn config_with(runners: Vec<RunnerConfig>) -> Config {
         Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),

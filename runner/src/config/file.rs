@@ -278,6 +278,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -507,6 +508,7 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -556,6 +558,7 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -593,6 +596,7 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = paths_for(tmp.path());
         let cfg = Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -633,6 +637,7 @@ model_default = "o4-mini"
         let tmp = tempdir().unwrap();
         let paths = Arc::new(paths_for(tmp.path()));
         let cfg = Config {
+            engine: Default::default(),
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),

@@ -82,10 +82,8 @@ impl<'a> Policy<'a> {
                     return Decision::AutoAccept;
                 }
             }
-            ApprovalKind::NetworkAccess => {
-                if self.config.auto_approve_network {
-                    return Decision::AutoAccept;
-                }
+            ApprovalKind::NetworkAccess if self.config.auto_approve_network => {
+                return Decision::AutoAccept;
             }
             _ => {}
         }

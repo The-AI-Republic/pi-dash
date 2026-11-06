@@ -62,13 +62,14 @@ if [[ "${1:-}" == "exec" ]]; then
     out="$dev/apps/web/build/client"
     mkdir -p "$out/assets"
     api="${VITE_API_BASE_URL:-http://localhost:8000}"
+    web="${VITE_WEB_BASE_URL:-http://localhost:8000}"
     {
         echo '<!doctype html><html><head><title>legacy web</title></head>'
         echo "<body>$api<div id=root></div>"
         printf 'y%.0s' $(seq 1 5000)
         echo '</body></html>'
     } > "$out/index.html"
-    echo "// $api" > "$out/assets/app.js"
+    echo "// $api $web" > "$out/assets/app.js"
     exit 0
 fi
 echo "fake pnpm: unexpected arguments: $*" >&2
