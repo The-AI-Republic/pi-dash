@@ -47,6 +47,9 @@ _NXUUID = "33333333-4444-5555-6666-777777777777"
 MT_RAW = "mt_rp823webofff0000000000000000000001"
 AIDW = "22222222-3333-4444-5555-666666666666"
 
+EC_RAW = "ec_rp823engine0000000000000000000001"
+MT_WEB_ENGINE = "mt_rp823wengine00000000000000000001"
+
 _STATIC = {
     "mt": MT_RAW,
     "aidw": AIDW,
@@ -184,6 +187,63 @@ def _setup(world, config) -> dict:
 
 
 _MT = {"Authorization": "Bearer {mt}", "X-Runner-Id": "{roff}"}
+
+
+def _seed_engine_sign_out(conn) -> None:
+    import uuid
+
+    from _harness.seed import Seeder, SeedTracker
+    from _harness.tokens import fingerprint as _fp
+    from _harness.tokens import hash_token as _hash
+
+    from .space import _ConnDb
+
+    adapter = _ConnDb(conn)
+    secret = os.environ["SECRET_KEY"]
+    seeder = Seeder(adapter, SeedTracker(adapter), tag="RP823", secret_key=secret)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM workspaces WHERE slug = 'replay-ws'")
+        ws_id = str(cur.fetchone()[0])
+        cur.execute("SELECT id FROM users WHERE email = 'replay-admin@example.com'")
+        admin_id = str(cur.fetchone()[0])
+    machine = seeder.create_dev_machine(admin_id, host_label="rp-wmeng")
+    # The token pulls the machine into workspace scope; the engine
+    # credential is the sign-out's revoke target (active, 14-day TTL).
+    seeder.create_machine_token(
+        admin_id, ws_id, MT_WEB_ENGINE, host_label="rp-wmeng",
+        dev_machine_id=machine["id"],
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO engine_credential
+               (id, user_id, dev_machine_id, token_hash, fingerprint,
+                created_at, expires_at, revoked_reason)
+               VALUES (%s,%s,%s,%s,%s, now(), now() + interval '14 days', '')""",
+            (
+                str(uuid.uuid4()),
+                admin_id,
+                machine["id"],
+                _hash(EC_RAW, secret),
+                _fp(EC_RAW),
+            ),
+        )
+        cur.execute(
+            "UPDATE dev_machine SET engine_sign_in_state = 'active',"
+            " engine_credential_expires_at = now() + interval '14 days'"
+            " WHERE id = %s",
+            (machine["id"],),
+        )
+
+
+def _setup_engine_sign_out(world, config) -> dict:
+    import psycopg
+
+    out = {}
+    with psycopg.connect(config.django_db) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM dev_machine WHERE host_label = 'rp-wmeng'")
+        out["meng"] = str(cur.fetchone()[0])
+    return out
+
 
 
 SESSIONS = (
@@ -735,4 +795,58 @@ SESSIONS = (
             ),
         ),
     ),
+    Session(
+        name="runner_web_engine_sign_out",
+        domain="runner_web",
+        source=(
+            "runner/test_engine_credential.py (web engine-sign-out) + "
+            "Django's test_engine_identity.py::test_web_sign_out_the_engine"
+        ),
+        auth_users=("admin",),
+        static_context={"ec": EC_RAW},
+        seed=_seed_engine_sign_out,
+        setup=_setup_engine_sign_out,
+        setup_keys=("meng",),
+        timestamp_columns={
+            # Evidence: the sign-out stamps the credential's
+            # revoked_at with now() per backend; the machine's
+            # engine_state_reported_at stays NULL on both sides.
+            "engine_credential": ["revoked_at"],
+        },
+        db_cell_refs=[
+            ("engine_credential", "dev_machine_id", "dev_machine", ""),
+        ],
+        requests=(
+            _prime("eng"),
+            # The workspace-scoped sign-out revokes the credential
+            # with reason signed_out (state signed_out) and answers
+            # the workspace machine serialization.
+            Request(
+                "POST", f"{WEB}/dev-machines/{{meng}}/engine-sign-out/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/engine-sign-out/",
+                json={"workspace": "{ws_id}"},
+                auth="admin", expect_status=200,
+                **_csrf("eng"),
+            ),
+            # Idempotent: a second sign-out is still 200 (the
+            # credential is already revoked).
+            Request(
+                "POST", f"{WEB}/dev-machines/{{meng}}/engine-sign-out/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/engine-sign-out/",
+                json={"workspace": "{ws_id}"},
+                auth="admin", expect_status=200,
+                **_csrf("eng"),
+            ),
+            # A workspace the machine is not attached to does not
+            # see it (404, nothing revoked).
+            Request(
+                "POST", f"{WEB}/dev-machines/{{meng}}/engine-sign-out/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/engine-sign-out/",
+                json={"workspace": "{other_ws_id}"},
+                auth="admin", expect_status=404,
+                **_csrf("eng"),
+            ),
+        ),
+    ),
 )
+
