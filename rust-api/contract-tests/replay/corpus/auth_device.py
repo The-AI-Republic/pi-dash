@@ -209,4 +209,86 @@ SESSIONS = (
             ),
         ),
     ),
+    Session(
+        name="auth_engine_grant",
+        domain="v1_cli_auth",
+        source="v1_cli_auth/test_engine_device_flow.py",
+        auth_users=("member",),
+        seed=lambda conn: conn.commit(),
+        generated_columns={"api_tokens": ["label"], "machine_token": ["token_hash", "token_fingerprint"], "engine_credential": ["token_hash", "fingerprint"]},
+        timestamp_columns={"cli_device_codes": ["expires_at", "last_polled_at"], "dev_machine": ["last_seen_at"], "machine_token": ["last_used_at", "revoked_at"], "engine_credential": ["created_at", "expires_at", "last_used_at", "revoked_at"]},
+        payload_time_paths={},
+        requests=(
+            # engine scope start with named machine
+            Request(
+                "POST", "/api/v1/auth/device/start/",
+                route="/api/v1/auth/device/start/",
+                json={"scope": "engine", "dev_machine_id": DEV_MACHINE_ID},
+                auth="anonymous",
+                capture={"device_code": "device_code", "user_code": "user_code"},
+                expect_status=200,
+            ),
+            # invalid scope
+            Request(
+                "POST", "/api/v1/auth/device/start/",
+                route="/api/v1/auth/device/start/",
+                json={"scope": "bogus"},
+                auth="anonymous", expect_status=400,
+            ),
+            # approve interactive
+            Request(
+                "POST", "/api/v1/auth/device/approve/",
+                route="/api/v1/auth/device/approve/",
+                json={"user_code": "{user_code}", "interactive": True, "dev_machine_id": DEV_MACHINE_ID},
+                auth="member", expect_status=200,
+            ),
+            # pending poll without bearer (machine_token_required)
+            Request(
+                "POST", "/api/v1/auth/device/token/",
+                route="/api/v1/auth/device/token/",
+                json={"device_code": "{device_code}"},
+                auth="anonymous",
+                expect_status=401,
+            ),
+            # machine-token exchange via bridge path already covered; here verify engine-sign-in-state present
+            Request(
+                "POST", "/api/v1/auth/device/start/",
+                route="/api/v1/auth/device/start/",
+                json={},
+                auth="anonymous",
+                capture={"device_code2": "device_code", "user_code2": "user_code"},
+                expect_status=200,
+            ),
+            Request(
+                "POST", "/api/v1/auth/device/approve/",
+                route="/api/v1/auth/device/approve/",
+                json={"user_code": "{user_code2}", "interactive": True},
+                auth="member", expect_status=200,
+            ),
+            Request(
+                "POST", "/api/v1/auth/device/token/",
+                route="/api/v1/auth/device/token/",
+                json={"device_code": "{device_code2}"},
+                auth="anonymous",
+                delay_before=4.0,
+                capture={"bridge": "access_token"},
+                expect_status=200,
+            ),
+            Request(
+                "POST", "/api/v1/auth/machine-token/",
+                route="/api/v1/auth/machine-token/",
+                json={"workspace_slug": "{ws}", "dev_machine_id": DEV_MACHINE_ID, "host_label": "replay-macbook"},
+                headers={"X-Api-Key": "{bridge}"},
+                auth="anonymous",
+                capture={"machine_token": "machine_token"},
+                expect_status=201,
+            ),
+            Request(
+                "POST", "/api/v1/auth/revoke/",
+                route="/api/v1/auth/revoke/",
+                headers={"X-Api-Key": "{machine_token}"},
+                auth="anonymous", expect_status=200,
+            ),
+        ),
+    ),
 )

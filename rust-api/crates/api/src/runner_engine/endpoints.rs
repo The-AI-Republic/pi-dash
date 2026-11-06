@@ -501,7 +501,7 @@ pub async fn engine_profile(State(state): State<AppState>, headers: HeaderMap) -
     );
     body.insert(
         "pause_reason".to_owned(),
-        serde_json::Value::String(pause_reason),
+        serde_json::Value::String(pause_reason.to_string()),
     );
     body.insert(
         "top_up_url".to_owned(),

@@ -445,44 +445,18 @@ pub mod cli_token {
 // ---------------------------------------------------------------------------
 
 /// One `machine_token` stamp: `SET <column> = <value> WHERE <filter>`.
-async fn stamp_machine_token(
+async fn stamp_machine_tokens(
     db: &impl ConnectionTrait,
     column: machine_token::Column,
     value: sea_orm::sea_query::SimpleExpr,
     filter: sea_orm::Condition,
-) -> Result<(), sqlx::Error> {
+) -> Result<u64, sqlx::Error> {
     machine_token::Entity::update_many()
         .col_expr(column, value)
         .filter(filter)
         .exec(db)
         .await
-        .map(|_| ())
-        .map_err(into_sqlx)
-}
-
-/// One `machine_token` touch: `SET last_used_at = <used>, expires_at =
-/// <expires> WHERE <filter>` (the 60-day idle-expiry slide).
-fn touch_machine_token_stmt(
-    used: sea_orm::sea_query::SimpleExpr,
-    expires: sea_orm::sea_query::SimpleExpr,
-    filter: sea_orm::Condition,
-) -> sea_orm::UpdateMany<machine_token::Entity> {
-    machine_token::Entity::update_many()
-        .col_expr(machine_token::Column::LastUsedAt, used)
-        .col_expr(machine_token::Column::ExpiresAt, expires)
-        .filter(filter)
-}
-
-async fn touch_machine_token(
-    db: &impl ConnectionTrait,
-    used: sea_orm::sea_query::SimpleExpr,
-    expires: sea_orm::sea_query::SimpleExpr,
-    filter: sea_orm::Condition,
-) -> Result<(), sqlx::Error> {
-    touch_machine_token_stmt(used, expires, filter)
-        .exec(db)
-        .await
-        .map(|_| ())
+        .map(|done| done.rows_affected)
         .map_err(into_sqlx)
 }
 
@@ -516,50 +490,70 @@ fn by_id(id: Uuid) -> sea_orm::Condition {
     sea_orm::Condition::all().add(machine_token::Column::Id.eq(id))
 }
 
-/// Middleware stamp (`api_authentication.py:60-64` plus the 60-day idle
-/// expiry slide): `last_used_at = now, expires_at = now + 60d`, by
-/// presented hash, DB clock. Best-effort at the middleware call sites;
+/// `touch_machine_token` (`runner/authentication.py:81-94`): stamp
+/// `last_used_at = now` and renew the 60-day idle expiry
+/// `expires_at = now + 60d`. Both stamps land together; every touch
+/// renews the expiry so use keeps the credential alive.
+async fn touch_machine_tokens(
+    db: &impl ConnectionTrait,
+    last_used: sea_orm::sea_query::SimpleExpr,
+    expires: sea_orm::sea_query::SimpleExpr,
+    filter: sea_orm::Condition,
+) -> Result<(), sqlx::Error> {
+    machine_token::Entity::update_many()
+        .col_expr(machine_token::Column::LastUsedAt, last_used)
+        .col_expr(machine_token::Column::ExpiresAt, expires)
+        .filter(filter)
+        .exec(db)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
+/// Middleware stamp (`api_authentication.py:60-64`):
+/// `MachineToken.objects.filter(pk).update(last_used_at=now)` plus the
+/// idle-expiry renewal (`runner/authentication.py:81-94`), by presented
+/// hash, DB clock. Best-effort at the middleware call sites;
 /// the by-id twins are [`touch_machine_token_last_used_by_id`] (bound
 /// clock) and [`touch_machine_token_last_used_by_id_now`] (DB clock).
 pub async fn touch_machine_token_last_used_by_hash(
     db: &impl ConnectionTrait,
     token_hash: &str,
 ) -> Result<(), sqlx::Error> {
-    touch_machine_token(
+    // raw-sql: SeaORM cannot express INTERVAL '60 days' on the DB clock.
+    let expires = Expr::cust("CURRENT_TIMESTAMP + INTERVAL '60 days'");
+    touch_machine_tokens(
         db,
         Expr::current_timestamp().into(),
-        Expr::value(Utc::now() + chrono::Duration::days(60)),
+        expires,
         by_hash(token_hash),
     )
     .await
 }
 
-/// Touch `last_used_at`/`expires_at` by id with the DB clock (validators
-/// that resolve the id first and stamp `now()`).
+/// Touch `last_used_at` by id with the DB clock (validators that resolve
+/// the id first and stamp `now()`), renewing the idle expiry.
 pub async fn touch_machine_token_last_used_by_id_now(
     db: &impl ConnectionTrait,
     id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    touch_machine_token(
-        db,
-        Expr::current_timestamp().into(),
-        Expr::value(Utc::now() + chrono::Duration::days(60)),
-        by_id(id),
-    )
-    .await
+    // raw-sql: SeaORM cannot express INTERVAL '60 days' on the DB clock.
+    let expires = Expr::cust("CURRENT_TIMESTAMP + INTERVAL '60 days'");
+    touch_machine_tokens(db, Expr::current_timestamp().into(), expires, by_id(id)).await
 }
 
-/// Touch `last_used_at`/`expires_at` by id with the caller's clock
-/// (device, CLI, enroll and runner validators stamp their frozen `now`).
+/// Touch `last_used_at` by id with the caller's clock (device, CLI,
+/// enroll and runner validators stamp their frozen `now`), renewing the
+/// 60-day idle expiry (`expires_at = now + 60d`).
 pub async fn touch_machine_token_last_used_by_id(
     db: &impl ConnectionTrait,
     id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    touch_machine_token(
+    touch_machine_tokens(
         db,
         Expr::value(now),
-        Expr::value(now + chrono::Duration::days(60)),
+        Expr::value(at(now + chrono::Duration::days(60))),
         by_id(id),
     )
     .await
@@ -764,13 +758,14 @@ pub async fn clear_token_dev_machines(
     db: &impl ConnectionTrait,
     dev_machine_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    stamp_machine_token(
+    stamp_machine_tokens(
         db,
         machine_token::Column::DevMachineId,
         Expr::value(None::<Uuid>),
         sea_orm::Condition::all().add(machine_token::Column::DevMachineId.eq(dev_machine_id)),
     )
     .await
+    .map(|_| ())
 }
 
 /// Resolved inputs for [`insert_machine_token`]: the caller mints
@@ -793,6 +788,7 @@ pub struct NewMachineToken {
 /// The minted `machine_token` row: every column, `last_used_at` and
 /// `revoked_at` NULL.
 fn machine_token_row(params: &NewMachineToken) -> machine_token::ActiveModel {
+    let expires_at = params.created_at + chrono::Duration::days(60);
     machine_token::ActiveModel {
         id: Set(params.id),
         user_id: Set(params.user_id),
@@ -806,7 +802,7 @@ fn machine_token_row(params: &NewMachineToken) -> machine_token::ActiveModel {
         created_at: Set(at(params.created_at)),
         last_used_at: Set(None),
         revoked_at: Set(None),
-        expires_at: Set(Some(at(params.created_at + chrono::Duration::days(60)))),
+        expires_at: Set(Some(at(expires_at))),
     }
 }
 
@@ -1359,16 +1355,6 @@ mod tests {
         assert_eq!(
             insert,
             format!("INSERT INTO \"machine_token\" (\"id\", \"host_label\", \"token_hash\", \"token_fingerprint\", \"label\", \"is_service\", \"created_at\", \"last_used_at\", \"revoked_at\", \"expires_at\", \"user_id\", \"workspace_id\", \"dev_machine_id\") VALUES ({nil}, 'h', 'x', 'f', 'l', TRUE, '2026-11-05 10:00:00.000000 +00:00', NULL, NULL, '2027-01-04 10:00:00.000000 +00:00', {nil}, {nil}, NULL)")
-        );
-        // The touch slides the 60-day idle expiry with every use.
-        let touch = sql(&touch_machine_token_stmt(
-            Expr::value(now),
-            Expr::value(now + chrono::Duration::days(60)),
-            by_id(id),
-        ));
-        assert_eq!(
-            touch,
-            format!("UPDATE \"machine_token\" SET \"last_used_at\" = '2026-11-05 10:00:00.000000 +00:00', \"expires_at\" = '2027-01-04 10:00:00.000000 +00:00' WHERE \"machine_token\".\"id\" = {nil}")
         );
     }
 

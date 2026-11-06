@@ -66,6 +66,10 @@ pub const PAUSE_ENGINE_DISABLED: &str = "engine_disabled";
 /// Auto-pause reason: the model profile is unavailable.
 pub const PAUSE_PROFILE_UNAVAILABLE: &str = "profile_unavailable";
 
+/// `SILENT_RENEWAL_REFUSED` (`engine_credentials.py:51`): the silent
+/// renewal refusal wire code.
+pub const SILENT_RENEWAL_REFUSED: &str = "engine_silent_renewal_refused";
+
 /// `silent_issue_allowed`'s store arm (`SILENT_RENEWAL_ALLOWED_STATES`).
 pub fn silent_renewal_allowed(state: &str) -> bool {
     matches!(state, SIGN_IN_STATE_EXPIRING | SIGN_IN_STATE_EXPIRED)
@@ -685,14 +689,29 @@ pub async fn authenticate_engine_credential(
 pub fn engine_profile_for_user(
     managed_enabled: bool,
     profile: &crate::extensions::AgentModelProfile,
-) -> (bool, String) {
+) -> (bool, &'static str) {
     if !managed_enabled {
-        return (false, PAUSE_ENGINE_DISABLED.to_owned());
+        return (false, PAUSE_ENGINE_DISABLED);
     }
     if !profile.available {
-        return (false, PAUSE_PROFILE_UNAVAILABLE.to_owned());
+        return (false, PAUSE_PROFILE_UNAVAILABLE);
     }
-    (true, PAUSE_NONE.to_owned())
+    (true, PAUSE_NONE)
+}
+
+/// The device-flow availability gate (NEWPIDASH-51): the same rule as
+/// [`engine_profile_for_user`] with the CE profile, which is always
+/// unavailable (CE has no lane the desktop serves; see the
+/// `agent_model_profile` seam docs). The `reason_code` in the
+/// device-flow 409 is the pause reason, which is identical on both
+/// paths, so this needs no has-key lookup.
+pub fn engine_profile_for_user_available(
+    settings: &pidash_db::config::Settings,
+) -> (bool, &'static str) {
+    if !settings.managed_runner.enabled {
+        return (false, PAUSE_ENGINE_DISABLED);
+    }
+    (false, PAUSE_PROFILE_UNAVAILABLE)
 }
 
 /// `instance_can_serve_engine(user)`: True when `pidash auth login` should
