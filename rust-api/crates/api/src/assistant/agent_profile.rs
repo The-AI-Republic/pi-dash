@@ -254,6 +254,22 @@ async fn post_token(
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             error_response(status, serde_json::json!({ "error": code }))
         }
+        Err(CredentialError::WalletEmpty { detail }) => {
+            // The built-in engine's wallet classification maps onto this
+            // endpoint's transient arm, exactly as Django's
+            // `_classify_credential_error` mapped a wallet failure onto
+            // `gateway_unavailable` (503): the app keeps the current
+            // token until it expires. The response is unchanged.
+            tracing::warn!(
+                user = %actor.id,
+                detail = %detail,
+                "managed_runner.token_refresh_failed"
+            );
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({ "error": "gateway_unavailable" }),
+            )
+        }
     }
 }
 
