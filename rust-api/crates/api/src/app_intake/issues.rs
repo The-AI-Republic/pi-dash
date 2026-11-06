@@ -2123,7 +2123,6 @@ async fn validate_executor(
     executor: &Option<Option<String>>,
     errors: &mut FieldErrors,
 ) -> Result<bool, Denial> {
-
     // The mid-flight rule runs for explicit null too (`None` clears
     // the override); `None == None` is unchanged, like Django's
     // `str(None) == str(None)`.
@@ -6586,7 +6585,6 @@ async fn check_agent_executor(
 ) -> Result<(), Response> {
     // Pods-only: no gate remains; normalization happens at parse.
     Ok(())
-
 }
 
 /// `assigned_pod` project-equality + soft-delete checks (`validate`,
