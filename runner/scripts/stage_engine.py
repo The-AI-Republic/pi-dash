@@ -18,8 +18,9 @@ archive as `engine/<version>/`. For Windows targets it also writes
 includes so the MSI installs the same directory under `bin\\engine\\`.
 
 The engine is the unmodified upstream OpenAI Codex release asset named in
-`runner/ENGINE_VERSION`, checked against the SHA-256 digest GitHub publishes
-in the release metadata, then renamed. Only that one regular file is read out
+`runner/ENGINE_VERSION`, checked against the SHA-256 digest pinned for it in
+`runner/ENGINE_SHA256` (and against the digest GitHub publishes in the
+release metadata), then renamed. Only that one regular file is read out
 of the upstream archive; nothing the archive names is extracted onto disk.
 
 Needs `gh` with a token (GH_TOKEN), as the desktop scripts do.
@@ -39,6 +40,7 @@ import tempfile
 
 RUNNER_DIR = Path(__file__).resolve().parents[1]
 VERSION_FILE = RUNNER_DIR / "ENGINE_VERSION"
+PINS_FILE = RUNNER_DIR / "ENGINE_SHA256"
 DEFAULT_OUT = RUNNER_DIR / "dist-engine"
 UPSTREAM = "openai/codex"
 
@@ -80,6 +82,38 @@ def upstream_asset(target):
     engine_target = target.replace("linux-gnu", "linux-musl")
     member = f"codex-{engine_target}{suffix}"
     return f"{member}.tar.gz", member, f"pidash-agent-engine{suffix}"
+
+
+def read_pins(tag, path=PINS_FILE):
+    """{asset: "sha256:<hex>"} pinned for `tag` in `runner/ENGINE_SHA256`.
+
+    The file names the tag it was written for; a pin file left behind by an
+    ENGINE_VERSION bump is an error, not a silent pass.
+    """
+    pinned_tag = None
+    pins = {}
+    for number, raw in enumerate(Path(path).read_text().splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) == 2 and fields[0] == "tag":
+            pinned_tag = fields[1]
+            continue
+        digest = fields[0].lower() if fields else ""
+        if len(fields) != 2 or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError(f"{path}:{number}: expected `<sha256>  <asset>`, got {raw!r}")
+        pins[fields[1]] = "sha256:" + digest
+    if pinned_tag != tag:
+        raise ValueError(f"{path} pins digests for {pinned_tag!r}, but ENGINE_VERSION is {tag!r}; update both together")
+    return pins
+
+
+def pinned_digest(pins, asset):
+    digest = pins.get(asset)
+    if digest is None:
+        raise ValueError(f"No SHA-256 pinned for {UPSTREAM}/{asset} in {PINS_FILE.name}")
+    return digest
 
 
 def gh_json(*args):
@@ -141,16 +175,23 @@ WXI = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def stage(target, out, tag, fetch=None):
+def stage(target, out, tag, pins, fetch=None):
     """Write the engine directory for `target` under `out`; return its path.
 
-    `fetch(tag, asset) -> (payload, digest, license, notice)` is injectable
-    for tests; the default talks to GitHub through `gh`.
+    `pins` is `read_pins(tag)`. `fetch(tag, asset) -> (payload, digest,
+    license, notice)` is injectable for tests; the default talks to GitHub
+    through `gh`. The payload must match both the pinned digest and the one
+    the upstream release metadata reports.
     """
     asset, member, shipped = upstream_asset(target)
     version = version_from_tag(tag)
+    expected = pinned_digest(pins, asset)
     payload, digest, license_text, notice_text = (fetch or fetch_from_github)(tag, asset)
-    verify(payload, digest, asset)
+    if digest != expected:
+        raise ValueError(
+            f"Upstream metadata for {asset} reports {digest}, but {PINS_FILE.name} pins {expected}"
+        )
+    verify(payload, expected, asset)
     binary = executable_bytes(payload, asset, member)
 
     out = Path(out)
@@ -204,11 +245,13 @@ def main(argv=None):
     parser.add_argument("--target", required=True, help="CLI release target triple")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--version-file", type=Path, default=VERSION_FILE)
+    parser.add_argument("--pins-file", type=Path, default=PINS_FILE)
     parser.add_argument("--no-smoke", action="store_true", help="skip running --version")
     args = parser.parse_args(argv)
 
     tag = read_engine_tag(args.version_file)
-    directory = stage(args.target, args.out, tag)
+    pins = read_pins(tag, args.pins_file)
+    directory = stage(args.target, args.out, tag, pins)
     print(f"[stage-engine] {args.target}: staged {tag} at {directory}")
     if not args.no_smoke:
         version = smoke(directory, args.target)

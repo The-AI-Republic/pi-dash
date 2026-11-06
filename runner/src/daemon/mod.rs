@@ -25,7 +25,15 @@ pub async fn run(config: Config, creds: Credentials, paths: Paths, opts: Options
     // Resolve the built-in engine once and keep that path for the life of
     // this process (`crate::engine::locate::resolved`), so a `pidash update`
     // that installs a newer engine never swaps the binary under a run.
-    crate::engine::locate::init_at_daemon_start(&config.engine);
+    if let Err(crate::engine::locate::LocateError::NotInstalled { .. }) =
+        crate::engine::locate::init_at_daemon_start(&config.engine)
+    {
+        // An install updated in place from a `pidash` that predates the
+        // engine has none yet. Fetch it in the background; never fatal.
+        tokio::spawn(crate::engine::auto_install::install_missing(
+            config.engine.clone(),
+        ));
+    }
     supervisor::Supervisor::new(config, creds, paths, opts)
         .run()
         .await

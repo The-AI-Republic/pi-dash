@@ -37,6 +37,16 @@ def tarball(members):
     return out.getvalue()
 
 
+def digest_of(payload):
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def pins_for(target, payload):
+    """Pins that accept `payload` as `target`'s upstream asset."""
+    asset, _, _ = stage_engine.upstream_asset(target)
+    return {asset: digest_of(payload)}
+
+
 def fake_fetch(payload, digest=None):
     digest = digest or "sha256:" + hashlib.sha256(payload).hexdigest()
 
@@ -94,6 +104,26 @@ class VersionFileTests(unittest.TestCase):
                 stage_engine.read_engine_tag(path)
 
 
+class PinsFileTests(unittest.TestCase):
+    def test_repo_pins_cover_every_target_for_the_pinned_tag(self):
+        tag = stage_engine.read_engine_tag()
+        pins = stage_engine.read_pins(tag)
+        for target in stage_engine.SUPPORTED_TARGETS:
+            asset, _, _ = stage_engine.upstream_asset(target)
+            self.assertRegex(pins[asset], r"^sha256:[0-9a-f]{64}$")
+
+    def test_pins_for_another_tag_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "update both together"):
+            stage_engine.read_pins("rust-v9.9.9")
+
+    def test_malformed_pin_line_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ENGINE_SHA256"
+            path.write_text(f"tag {TAG}\nnot-a-digest  codex-x.tar.gz\n")
+            with self.assertRaisesRegex(ValueError, "expected"):
+                stage_engine.read_pins(TAG, path)
+
+
 class StageTests(unittest.TestCase):
     def setUp(self):
         self.out = Path(tempfile.mkdtemp(prefix="stage-engine-"))
@@ -102,7 +132,11 @@ class StageTests(unittest.TestCase):
     def test_stages_renamed_engine_with_licence_files(self):
         payload = tarball({"codex-x86_64-unknown-linux-musl": b"ELF engine"})
         directory = stage_engine.stage(
-            "x86_64-unknown-linux-gnu", self.out, TAG, fetch=fake_fetch(payload)
+            "x86_64-unknown-linux-gnu",
+            self.out,
+            TAG,
+            pins_for("x86_64-unknown-linux-gnu", payload),
+            fetch=fake_fetch(payload),
         )
         self.assertEqual(directory, self.out / "engine/0.153.4")
         self.assertEqual(
@@ -116,7 +150,11 @@ class StageTests(unittest.TestCase):
     def test_windows_stages_the_msi_version_define(self):
         payload = tarball({"codex-x86_64-pc-windows-msvc.exe": b"MZ engine"})
         directory = stage_engine.stage(
-            "x86_64-pc-windows-msvc", self.out, TAG, fetch=fake_fetch(payload)
+            "x86_64-pc-windows-msvc",
+            self.out,
+            TAG,
+            pins_for("x86_64-pc-windows-msvc", payload),
+            fetch=fake_fetch(payload),
         )
         self.assertTrue((directory / "pidash-agent-engine.exe").is_file())
         wxi = (self.out / "engine.wxi").read_text()
@@ -129,6 +167,7 @@ class StageTests(unittest.TestCase):
                 "x86_64-unknown-linux-gnu",
                 self.out,
                 TAG,
+                {"codex-x86_64-unknown-linux-musl.tar.gz": "sha256:" + "0" * 64},
                 fetch=fake_fetch(payload, digest="sha256:" + "0" * 64),
             )
         self.assertFalse((self.out / "engine").exists())
@@ -137,21 +176,29 @@ class StageTests(unittest.TestCase):
         payload = tarball({"codex-x86_64-unknown-linux-musl": None})
         with self.assertRaisesRegex(ValueError, "Expected exactly one"):
             stage_engine.stage(
-                "x86_64-unknown-linux-gnu", self.out, TAG, fetch=fake_fetch(payload)
+                "x86_64-unknown-linux-gnu",
+                self.out,
+                TAG,
+                pins_for("x86_64-unknown-linux-gnu", payload),
+                fetch=fake_fetch(payload),
             )
 
     def test_restaging_replaces_a_previous_target(self):
+        windows = tarball({"codex-x86_64-pc-windows-msvc.exe": b"MZ"})
         stage_engine.stage(
             "x86_64-pc-windows-msvc",
             self.out,
             "rust-v0.150.0",
-            fetch=fake_fetch(tarball({"codex-x86_64-pc-windows-msvc.exe": b"MZ"})),
+            pins_for("x86_64-pc-windows-msvc", windows),
+            fetch=fake_fetch(windows),
         )
+        mac = tarball({"codex-aarch64-apple-darwin": b"Mach-O"})
         stage_engine.stage(
             "aarch64-apple-darwin",
             self.out,
             TAG,
-            fetch=fake_fetch(tarball({"codex-aarch64-apple-darwin": b"Mach-O"})),
+            pins_for("aarch64-apple-darwin", mac),
+            fetch=fake_fetch(mac),
         )
         self.assertEqual([p.name for p in (self.out / "engine").iterdir()], ["0.153.4"])
         self.assertEqual(
@@ -159,6 +206,28 @@ class StageTests(unittest.TestCase):
             ["pidash-agent-engine"],
         )
         self.assertFalse((self.out / "engine.wxi").exists())
+
+    def test_replaced_upstream_asset_is_refused(self):
+        # Upstream metadata and payload agree with each other, but not with
+        # the digest pinned in the repo: an asset swapped upstream.
+        original = tarball({"codex-x86_64-unknown-linux-musl": b"ELF engine"})
+        replaced = tarball({"codex-x86_64-unknown-linux-musl": b"ELF evil"})
+        with self.assertRaisesRegex(ValueError, "pins"):
+            stage_engine.stage(
+                "x86_64-unknown-linux-gnu",
+                self.out,
+                TAG,
+                pins_for("x86_64-unknown-linux-gnu", original),
+                fetch=fake_fetch(replaced),
+            )
+        self.assertFalse((self.out / "engine").exists())
+
+    def test_asset_without_a_pin_is_refused(self):
+        payload = tarball({"codex-x86_64-unknown-linux-musl": b"ELF engine"})
+        with self.assertRaisesRegex(ValueError, "No SHA-256 pinned"):
+            stage_engine.stage(
+                "x86_64-unknown-linux-gnu", self.out, TAG, {}, fetch=fake_fetch(payload)
+            )
 
     def test_missing_digest_is_an_error(self):
         with self.assertRaisesRegex(ValueError, "Missing SHA-256"):
