@@ -11,7 +11,6 @@ crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
 crates/api/src/app_cycles/handlers_analytics.rs 12
 crates/api/src/app_cycles/handlers_favorites.rs 5
 crates/api/src/app_cycles/handlers_progress.rs 6
-crates/api/src/app_intake/issues.rs 71
 crates/api/src/app_issues/mod.rs 2
 crates/api/src/app_modules/handlers_archive.rs 5
 crates/api/src/app_modules/handlers_module_issues.rs 10
@@ -145,7 +144,6 @@ crates/services/src/scheduler/builtins.rs 5
 
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
-crates/api/src/app_intake/issues.rs | 03711dfaa7dd
 crates/api/src/v1_assets/sticky.rs | e6dc5d83f1e3
 crates/api/src/v1_cli_auth/runner.rs | e6dc5d83f1e3
 crates/jobs/src/tasks_mail/notifications.rs | c6d50deb8e37
