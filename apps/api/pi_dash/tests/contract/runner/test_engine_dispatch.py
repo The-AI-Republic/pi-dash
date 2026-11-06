@@ -90,9 +90,7 @@ def teammate(workspace, project):
 
 @pytest.fixture
 def member(workspace, project, create_user):
-    ProjectMember.objects.get_or_create(
-        workspace=workspace, project=project, member=create_user, defaults={"role": 20}
-    )
+    ProjectMember.objects.get_or_create(workspace=workspace, project=project, member=create_user, defaults={"role": 20})
     return create_user
 
 
@@ -274,9 +272,7 @@ def test_pod_member_engine_ranks_equally(issue, engine, pod, create_user):
     runner; the matcher's existing order picks between them."""
     _pod_member(engine)
     mini = _runner(create_user, pod, name="mini")
-    candidates = set(
-        Runner.objects.assignable().filter(pod=pod).exclude(pod_dispatch=RunnerPodDispatch.PINNED_ONLY)
-    )
+    candidates = set(Runner.objects.assignable().filter(pod=pod).exclude(pod_dispatch=RunnerPodDispatch.PINNED_ONLY))
     assert candidates == {engine, mini}
     run = _queued(issue, created_by=create_user, pod=pod)
     assert matcher.drain_pod(pod) == 1
@@ -365,14 +361,16 @@ def test_continuation_pins_to_pod_member_engine_and_is_released_when_pod_work_of
         prompt="x",
     )
     # pinned_only: a continuation is created unpinned in the pod.
-    assert _pinned_runner_for(parent, pod) is None
+    assert _pinned_runner_for(parent, pod, creator=create_user, trigger=parent.trigger, issue=parent.work_item) is None
 
     url = reverse("runner-detail", kwargs={"runner_id": engine.id})
     resp = session_client.patch(url, {"pod_dispatch": "pod_member"}, format="json")
     assert resp.status_code == 200, resp.content
     assert resp.json()["pod_dispatch"] == "pod_member"
     engine.refresh_from_db()
-    assert _pinned_runner_for(parent, pod) == engine
+    assert (
+        _pinned_runner_for(parent, pod, creator=create_user, trigger=parent.trigger, issue=parent.work_item) == engine
+    )
 
     continuation = _queued(issue, created_by=create_user, pinned_runner=engine, pod=pod)
     with transaction.atomic():
@@ -398,10 +396,42 @@ def test_continuation_is_not_pinned_to_a_paused_pod_member_engine(issue, engine,
         status=AgentRunStatus.COMPLETED,
         prompt="x",
     )
-    assert _pinned_runner_for(parent, pod) == engine
+    assert (
+        _pinned_runner_for(parent, pod, creator=create_user, trigger=parent.trigger, issue=parent.work_item) == engine
+    )
     DevMachine.objects.filter(pk=machine.pk).update(engine_paused_by_owner=True)
     parent.refresh_from_db()
-    assert _pinned_runner_for(parent, pod) is None
+    assert _pinned_runner_for(parent, pod, creator=create_user, trigger=parent.trigger, issue=parent.work_item) is None
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+@pytest.mark.parametrize("trigger", [AgentRunTrigger.RUN_AI, AgentRunTrigger.COMMENT_AND_RUN, AgentRunTrigger.TICK])
+def test_continuation_pin_respects_the_next_runs_principal_and_trigger(
+    issue, engine, teammate, pod, monkeypatch, fresh, trigger
+):
+    from pi_dash.orchestration import service
+
+    _pod_member(engine)
+    other = _runner(teammate, pod, name="teammate-agent")
+    parent = AgentRun.objects.create(
+        workspace=issue.workspace,
+        work_item=issue,
+        pod=pod,
+        runner=engine,
+        created_by=engine.owner,
+        status=AgentRunStatus.COMPLETED,
+        prompt="prior",
+    )
+    monkeypatch.setattr(service, "build_first_turn", lambda *args, **kwargs: "follow-up")
+    create = service._create_and_dispatch_run if fresh else service._create_continuation_run
+    outcome = create(issue=issue, parent=parent, creator=teammate, pod=pod, trigger=trigger)
+    run = outcome.created_run
+    assert run is not None
+    automatic = trigger == AgentRunTrigger.TICK
+    assert run.pinned_runner_id == (engine.id if automatic else None)
+    with transaction.atomic():
+        assert (matcher.next_for_runner(engine) == run) is automatic
+        assert (matcher.next_for_runner(other) == run) is not automatic
 
 
 def test_owner_pause_releases_locality_pins_and_blocks_matching(
@@ -479,9 +509,7 @@ def test_offline_sweep_releases_locality_pin_on_pinned_only_engine(issue, engine
 
 def test_machine_patch_rejects_server_set_fields(session_client, workspace, engine, machine):
     url = reverse("dev-machine-delete", kwargs={"machine_id": machine.id})
-    resp = session_client.patch(
-        url, {"workspace": str(workspace.id), "engine_auto_pause_reason": ""}, format="json"
-    )
+    resp = session_client.patch(url, {"workspace": str(workspace.id), "engine_auto_pause_reason": ""}, format="json")
     assert resp.status_code == 400
 
 
