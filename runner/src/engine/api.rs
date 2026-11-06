@@ -215,12 +215,26 @@ pub enum EngineApiError {
 }
 
 impl EngineApiError {
+    pub(crate) fn is_workspace_auth_failure(&self) -> bool {
+        matches!(self, Self::Refused { status: 401 | 403, reason_code, .. } if workspace_auth_code(reason_code))
+    }
+
     pub fn reason_code(&self) -> Option<&str> {
         match self {
             Self::Refused { reason_code, .. } => Some(reason_code),
             Self::Other(_) => None,
         }
     }
+}
+
+fn workspace_auth_code(code: &str) -> bool {
+    matches!(
+        code,
+        "machine_token_expired"
+            | "machine_token_revoked"
+            | "machine_token_invalid"
+            | "membership_revoked"
+    )
 }
 
 #[derive(Deserialize)]
@@ -238,7 +252,12 @@ struct ErrorBody {
 fn refused(status: StatusCode, body: &str) -> EngineApiError {
     let parsed: Option<ErrorBody> = serde_json::from_str(body).ok();
     let (code, detail) = match parsed {
-        Some(b) => (b.reason_code.or(b.error), b.detail),
+        Some(b) => (
+            b.reason_code
+                .or(b.error)
+                .or_else(|| b.detail.clone().filter(|code| workspace_auth_code(code))),
+            b.detail,
+        ),
         None => (
             None,
             (!body.trim().is_empty()).then(|| body.trim().to_string()),
