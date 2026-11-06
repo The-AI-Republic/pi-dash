@@ -15,7 +15,7 @@
   "/api/v1/runner/chat/sessions/{session_id}/messages/{message_id}/started/": ["post"],
   "/api/v1/runner/chat/sessions/{session_id}/started/": ["post"],
   "/api/v1/runner/dev-machines/desktop-enroll/": ["delete", "post"],
-  "/api/v1/runner/dev-machines/{dev_machine_id}/": ["patch"],
+  "/api/v1/runner/dev-machines/{dev_machine_id}/": ["get", "patch"],
   "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/": ["post"],
   "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/": ["post"],
   "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/": ["get"],

@@ -46,7 +46,7 @@ from pi_dash.authentication.services.cli_tokens import (
 from pi_dash.db.models import APIToken, CLIDeviceCode, WorkspaceMember
 from pi_dash.db.models.api import CLI_DEVICE_SCOPE_CLI, CLI_DEVICE_SCOPE_ENGINE, CLI_DEVICE_SCOPES
 from pi_dash.authentication.utils.host import base_host
-from pi_dash.runner.models import DevMachine, MachineToken
+from pi_dash.runner.models import DevMachine, EngineCredentialRevokeReason, MachineToken
 from pi_dash.runner.services import tokens as runner_tokens
 from pi_dash.runner.services.engine_credentials import (
     SILENT_RENEWAL_REFUSED,
@@ -55,6 +55,7 @@ from pi_dash.runner.services.engine_credentials import (
     engine_profile_for_user,
     instance_can_serve_engine,
     issue_engine_credential,
+    revoke_engine_credential,
     silent_issue_allowed,
 )
 from pi_dash.runner.services.permissions import is_workspace_member
@@ -760,12 +761,36 @@ class DeviceMachineTokenEndpoint(APIView):
         return Response(body, status=status.HTTP_201_CREATED)
 
 
+def _machine_has_live_token(machine: DevMachine) -> bool:
+    """True while any machine token of ``machine`` can still authenticate."""
+    from django.db.models import Q
+
+    return (
+        MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True)
+        .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+        .exists()
+    )
+
+
 class DeviceCodeRevokeEndpoint(APIView):
     """Invalidate the caller's CLI token. Idempotent.
 
     Used by ``pidash auth logout``. The caller authenticates with their
     current token (which we then mark inactive). Subsequent requests
     with that token will 401.
+
+    For a daemon credential bound to a computer, the machine's engine is
+    signed out too (credential revoked, state ``signed_out``, so the app's
+    silent renewal is refused until an explicit sign-in) — but only when
+    this was the machine's **last** live machine token. ``pidash auth
+    logout --workspace X`` revokes one workspace's token and must leave the
+    engine serving the workspaces still signed in (design §4.3: one
+    workspace's sign-out stops only that workspace's runners). A full
+    ``pidash auth logout`` revokes every token, so its last revocation
+    signs the engine out, as does signing out each workspace in turn. The
+    runner's full logout also calls ``engine/credential/revoke/`` first
+    (as ``pidash auth logout --engine`` does); this rule is the server's
+    backstop for clients that do not.
     """
 
     permission_classes = [IsAuthenticated]
@@ -774,7 +799,15 @@ class DeviceCodeRevokeEndpoint(APIView):
     def post(self, request):
         machine_token = getattr(request, "auth_machine_token", None)
         if machine_token is not None:
-            machine_token.revoke()
+            with transaction.atomic():
+                machine = None
+                if machine_token.dev_machine_id is not None:
+                    # Serializes concurrent revocations of one machine's
+                    # tokens, so the "last live token" check below is exact.
+                    machine = DevMachine.objects.select_for_update().filter(pk=machine_token.dev_machine_id).first()
+                machine_token.revoke()
+                if machine is not None and not _machine_has_live_token(machine):
+                    revoke_engine_credential(machine, reason=EngineCredentialRevokeReason.SIGNED_OUT)
             return Response({"ok": True}, status=status.HTTP_200_OK)
         # request.auth is the raw token string (see APIKeyAuthentication).
         raw_token = request.auth

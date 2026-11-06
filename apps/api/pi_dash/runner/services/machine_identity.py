@@ -89,9 +89,10 @@ def _with_suffix(base: str, n: int) -> str:
 
 
 def _taken_names(machine: DevMachine, pod, exclude_runner_id=None) -> set:
-    machine_names = Runner.objects.filter(dev_machine=machine, revoked_at__isnull=True)
+    runners = Runner._base_manager
+    machine_names = runners.filter(dev_machine_id=machine.pk, revoked_at__isnull=True)
     # ``runner_unique_name_per_pod`` covers every row in the pod, revoked too.
-    pod_names = Runner.objects.filter(pod=pod) if pod is not None else Runner.objects.none()
+    pod_names = runners.filter(pod_id=pod.pk) if pod is not None else runners.none()
     if exclude_runner_id is not None:
         machine_names = machine_names.exclude(pk=exclude_runner_id)
         pod_names = pod_names.exclude(pk=exclude_runner_id)

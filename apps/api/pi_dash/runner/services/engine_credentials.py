@@ -211,6 +211,10 @@ def issue_engine_credential(*, user, dev_machine: DevMachine, silent: bool = Fal
     return IssuedEngineCredential(raw=raw, credential=credential)
 
 
+#: Revoke reasons that are a person signing out (not a removal or an admin).
+_SIGN_OUT_REASONS = frozenset({EngineCredentialRevokeReason.SIGNED_OUT, EngineCredentialRevokeReason.USER_SIGNED_OUT})
+
+
 def revoke_engine_credential(dev_machine: DevMachine, *, reason: str) -> bool:
     """Revoke ``dev_machine``'s live engine credential and record the state.
 
@@ -234,6 +238,11 @@ def revoke_engine_credential(dev_machine: DevMachine, *, reason: str) -> bool:
             revoked_at=now, revoked_reason=reason
         )
         had_engine = machine.engine_sign_in_state != EngineSignInState.NEVER or bool(revoked)
+        if not had_engine and reason in _SIGN_OUT_REASONS:
+            # Never turned on: a sign-out (the full `pidash auth logout`)
+            # leaves it `never`, so the app still offers "Turn on" rather
+            # than saying "signed out".
+            return False
         machine.engine_sign_in_state = state
         machine.engine_credential_expires_at = None
         machine.save(update_fields=["engine_sign_in_state", "engine_credential_expires_at", "updated_at"])
