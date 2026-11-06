@@ -30,7 +30,7 @@
   "/api/v1/runner/projects/": ["get"],
   "/api/v1/runner/runners/": ["post"],
   "/api/v1/runner/runners/enroll/": ["post"],
-  "/api/v1/runner/runners/{runner_id}/": ["delete"],
+  "/api/v1/runner/runners/{runner_id}/": ["delete", "post"],
   "/api/v1/runner/runners/{runner_id}/refresh/": ["post"],
   "/api/v1/runner/runners/{runner_id}/sessions/": ["post"],
   "/api/v1/runner/runners/{runner_id}/sessions/{sid}/": ["delete"],

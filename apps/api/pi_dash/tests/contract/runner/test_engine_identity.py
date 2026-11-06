@@ -25,6 +25,8 @@ from django.utils import timezone
 
 from pi_dash.db.models import CLIDeviceCode, Project, User, WorkspaceMember
 from pi_dash.runner.models import (
+    AgentRun,
+    AgentRunStatus,
     DevMachine,
     EngineAutoPauseReason,
     EngineCredential,
@@ -811,6 +813,44 @@ def test_engine_runner_is_unique_per_machine_and_project(db, create_user, worksp
     second = _create_runner(laptop_mt, project="DEF", agent_kind="engine")
     assert second.status_code == 201, second.data
     assert second.data["runner_id"] != first.data["runner_id"]
+
+
+@override_settings(**ENABLED)
+def test_engine_self_removal_revokes_the_row_and_preserves_run_history(db, create_user, machine, mt, lane):
+    _sign_in(create_user, machine)
+    created = _create_runner(mt, project="DEF", agent_kind="engine")
+    runner = Runner.objects.get(pk=created.data["runner_id"])
+    run = AgentRun.objects.create(
+        workspace=runner.workspace,
+        pod=runner.pod,
+        runner=runner,
+        created_by=create_user,
+        status=AgentRunStatus.COMPLETED,
+        prompt="history",
+    )
+    response = _client(bearer=mt).post(f"/api/v1/runner/runners/{runner.id}/", {}, format="json")
+    assert response.status_code == 204
+    runner.refresh_from_db()
+    run.refresh_from_db()
+    assert runner.revoked_at is not None and runner.revoked_reason == "user_revoke"
+    assert run.runner_id == runner.id
+    # The revoked runner no longer authenticates; the CLI recognizes this
+    # exact refusal as a completed revoke when retrying local cleanup.
+    again = _client(bearer=mt).post(f"/api/v1/runner/runners/{runner.id}/", {}, format="json")
+    assert again.status_code == 401 and str(again.data["detail"]) == "runner_revoked"
+
+
+@override_settings(**ENABLED)
+def test_engine_self_removal_refuses_another_machines_token(db, create_user, workspace, machine, mt, lane):
+    _sign_in(create_user, machine)
+    created = _create_runner(mt, project="DEF", agent_kind="engine")
+    runner = Runner.objects.get(pk=created.data["runner_id"])
+    other = DevMachine.objects.create(owner=create_user, host_label="other")
+    other_token = _mint_mt(create_user, workspace, other)
+    response = _client(bearer=other_token).post(f"/api/v1/runner/runners/{runner.id}/", {}, format="json")
+    assert response.status_code == 401
+    runner.refresh_from_db()
+    assert runner.revoked_at is None
 
 
 @override_settings(**ENABLED)
