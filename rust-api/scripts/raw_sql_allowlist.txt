@@ -65,8 +65,7 @@ crates/api/src/assistant/messages.rs 8
 crates/api/src/assistant/stt_config.rs 5
 crates/api/src/assistant/threads.rs 6
 crates/api/src/assistant/transcribe.rs 1
-crates/api/src/auth_oauth/device_flow.rs 10
-crates/api/src/auth_oauth/device_session.rs 10
+crates/api/src/auth_oauth/device_session.rs 5
 crates/api/src/auth_oauth/login.rs 2
 crates/api/src/auth_oauth/mod.rs 3
 crates/api/src/auth_oauth/oauth_gitea.rs 15
@@ -242,7 +241,6 @@ crates/services/src/scheduler/builtins.rs 5
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
 crates/api/src/app_intake/issues.rs | 03711dfaa7dd
-crates/api/src/auth_oauth/device_session.rs | e6dc5d83f1e3
 crates/api/src/prompting/mod.rs | 5eb6f5df0734
 crates/api/src/prompting/mod.rs | ca7bbdefd9fe
 crates/api/src/v1_assets/intake.rs | e6dc5d83f1e3

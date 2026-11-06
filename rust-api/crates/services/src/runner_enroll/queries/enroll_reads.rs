@@ -954,6 +954,7 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
         revoked_reason: Set(String::new()),
         paused_at: Set(None),
         paused_by_id: Set(None),
+        pod_dispatch: Set("pod_member".to_owned()),
     })
     .exec_without_returning(db)
     .await

@@ -36,9 +36,12 @@ Proxied pairs need no entry: the check verifies them live against
 EXCLUDED = {}
 
 MISSING_FIX = {
-    # NOTE (rebase): PIDASHCONV-827 landed — the two instance-admin
-    # pairs now exist as proxied routes, so the MISSING entries were
-    # removed (proxied pairs carry the generic PROXIED reason).
+    # NEWPIDASH-50: engine runner write pairs not yet owned in Rust
+    ("/api/runners/dev-machines/{}/engine-sign-out/", "POST"): "NEWPIDASH-50: engine sign-out endpoint pending",
+    ("/api/v1/runner/dev-machines/{}/", "PATCH"): "NEWPIDASH-50: dev-machine identity patch pending",
+    ("/api/v1/runner/dev-machines/{}/merge-into/", "POST"): "NEWPIDASH-50: dev-machine merge pending",
+    ("/api/v1/runner/engine/credential/revoke/", "POST"): "NEWPIDASH-50: engine credential revoke pending",
+    ("/api/v1/runner/engine/model-token/", "POST"): "NEWPIDASH-50: engine model-token pending",
 }
 
 OWNED_UNCOVERED = {

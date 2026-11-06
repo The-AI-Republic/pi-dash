@@ -90,7 +90,7 @@ plus contract pins, so the rows are deleted below.
 
 ```
 
-### G6 — handler-denial 405s, proven (OWNED-by-denial) (10 rows)
+### G6 — handler-denial 405s, proven (OWNED-by-denial) (12 rows)
 
 Fix: PIDASHCONV-830. Proven by
 `contract-tests/app_workspace/test_denied_methods.py` (green on both
@@ -112,9 +112,6 @@ gone from the fenced lines below. Only the POST-only export route
 truly 405s HEAD, and that denial is proven like the rest.
 
 NEWPIDASH-31 extends G6 with the three device-session auth routes.
-(PIDESKAPP-206: `machine-token/` and `revoke/` are parked on Django —
-every method proxies — until the built-in engine credential is ported,
-so only `workspaces/` keeps its G6 row; see `device_session::routes`.)
 Their denials are deliberate (PIDASHCONV-1478): the API-key token
 lives in Rust's database, so a proxied verdict would fail Django's
 copy of the auth gate before its own method check — the handlers
@@ -127,6 +124,8 @@ class); only the POST-owned routes truly 405 HEAD.
 
 ```expected-routes
 G6 :: /api/users/me/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
+G6 :: /api/v1/auth/machine-token/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
+G6 :: /api/v1/auth/revoke/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
 G6 :: /api/v1/auth/workspaces/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspace-slug-check/ :: POST:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspaces/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
@@ -134,6 +133,24 @@ G6 :: /api/workspaces/{slug}/ :: POST:serves-but-django-405
 G6 :: /api/workspaces/{slug}/user-activity/{user_id}/export/ :: GET:serves-but-django-405;PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405;HEAD:serves-but-django-405
 G6 :: /api/workspaces/{slug}/workspace-themes/ :: PUT:serves-but-django-405;PATCH:serves-but-django-405;DELETE:serves-but-django-405
 G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-405;PUT:serves-but-django-405
+```
+
+### G7 — engine runner endpoints pending NEWPIDASH-50 (7 rows)
+
+Fix: NEWPIDASH-50 (engine credential, engine/profile, engine/model-token,
+engine/credential/revoke, auto-pause, dev-machine identity). The seven Django
+routes below have no Rust counterpart yet and are classified as G7 (not G0)
+so the checker stays clean while the sibling issue lands. When N50 lands,
+delete these lines.
+
+```expected-routes
+G7 :: /api/runners/dev-machines/{machine_id}/engine-sign-out/ :: no-rust-route
+G7 :: /api/v1/runner/dev-machines/{dev_machine_id}/ :: no-rust-route
+G7 :: /api/v1/runner/dev-machines/{dev_machine_id}/merge-into/ :: no-rust-route
+G7 :: /api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/ :: no-rust-route
+G7 :: /api/v1/runner/engine/credential/revoke/ :: no-rust-route
+G7 :: /api/v1/runner/engine/model-token/ :: no-rust-route
+G7 :: /api/v1/runner/engine/profile/ :: no-rust-route
 ```
 
 ### Rust-only routes (9, all justified in-script)
