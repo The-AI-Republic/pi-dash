@@ -332,6 +332,7 @@ struct IssueRow {
     git_work_branch: String,
     created_via: Option<String>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
     workpad: String,
 }
@@ -371,6 +372,7 @@ impl IssueRow {
             git_work_branch: row.try_get("git_work_branch")?,
             created_via: row.try_get("created_via")?,
             assigned_pod_id: row.try_get("assigned_pod_id")?,
+            assigned_runner_id: row.try_get("assigned_runner_id")?,
             agent_executor: row.try_get("agent_executor")?,
             workpad: row.try_get("workpad")?,
         })
@@ -413,13 +415,14 @@ impl IssueRow {
             workpad: self.workpad.clone(),
             created_via: self.created_via.clone(),
             assigned_pod_id: self.assigned_pod_id,
+            assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
         }
     }
 }
 
 #[allow(dead_code)]
-const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, agent_executor, workpad";
+const ISSUE_COLUMNS: &str = "id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, parent_id, state_id, point, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, complexity_score, start_date, target_date, sequence_id, sort_order, completed_at, archived_at, is_draft, external_source, external_id, type_id, git_work_branch, created_via, assigned_pod_id, assigned_runner_id, agent_executor, workpad";
 
 /// `Issue.objects.get(pk, workspace_id, project_id)` (`:199-203,:250-254`).
 async fn fetch_issue(
@@ -470,6 +473,7 @@ async fn fetch_issue(
                 git_work_branch: m.git_work_branch,
                 created_via: m.created_via,
                 assigned_pod_id: m.assigned_pod_id,
+                assigned_runner_id: m.assigned_runner_id,
                 agent_executor: m.agent_executor,
                 workpad: m.workpad,
             })
@@ -2287,6 +2291,7 @@ async fn collection_create(
         workpad: String::new(),
         created_via: None,
         assigned_pod_id: None,
+        assigned_runner_id: None,
         agent_executor: None,
     };
     let fire = fire_spec(&actor.id, now);
@@ -2926,6 +2931,7 @@ mod tests {
                 git_work_branch: String::new(),
                 created_via: None,
                 assigned_pod_id: None,
+                assigned_runner_id: None,
                 agent_executor: None,
                 workpad: String::new(),
             },

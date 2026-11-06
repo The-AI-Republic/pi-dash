@@ -825,6 +825,8 @@ where
             pod_id: Set(row.pod_id),
             created_by_id: Set(row.created_by_id),
             pinned_runner_id: Set(row.pinned_runner_id),
+            // Django model default (`PinKind.LOCALITY`, runner 0039).
+            pin_kind: Set("locality".to_owned()),
             scheduler_binding_id: Set(None),
             llm_model: Set(String::new()),
             trigger: Set(row.trigger.clone()),

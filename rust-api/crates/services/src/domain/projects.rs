@@ -150,6 +150,11 @@ pub struct NewProject<'a> {
     pub updated_at: DateTime<Utc>,
 }
 
+/// `Project.dedicated_runner_lost_action` model default (PDASHOSS01-297,
+/// design §6.6): `AddField(default=...)` leaves no DB default behind, so
+/// every insert names it.
+pub const DEDICATED_RUNNER_LOST_ACTION_DEFAULT: &str = "fail_to_backlog";
+
 /// The create-path default sweep (`Project.save()` on create): every
 /// live default in the workspace clears. Django has both this and the
 /// self-excluding update-path clear ([`clear_other_defaults_stmt`]);
@@ -212,6 +217,8 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         agent_ticking_enabled: Set(p.agent_ticking),
         default_agent_executor: Set(p.default_executor.to_owned()),
         members_can_edit_states: Set(p.members_can_edit_states),
+        // Django field default (db 0173 drops the DB default).
+        dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
     }
 }
 
@@ -870,6 +877,7 @@ fn seed_project_row(id: Uuid, p: &SeedProject<'_>) -> projects::ActiveModel {
         agent_ticking_enabled: Set(true),
         default_agent_executor: Set(p.default_agent_executor.to_owned()),
         members_can_edit_states: Set(true),
+        dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
     }
 }
 
