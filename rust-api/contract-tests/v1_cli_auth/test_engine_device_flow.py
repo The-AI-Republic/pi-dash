@@ -550,9 +550,11 @@ def test_revoke_full_logout_never_idempotent(api, seed, tenant_a, secret):
         cur.execute("SELECT engine_sign_in_state FROM dev_machine WHERE id=%s", (machine,))
         (state,) = cur.fetchone()
     assert state == "never"
-    # idempotent second revoke (same token now revoked) -> still 200 and never
+    # The revoked token is now rejected (DRF answers 403: no auth header
+    # challenge; the CLI clears its local token either way). Mirrors Django's
+    # test_full_logout_without_engine_leaves_it_never_and_is_idempotent.
     r2 = api.post("/api/v1/auth/revoke/", headers={"X-Api-Key": mt})
-    assert r2.status_code == 200
+    assert r2.status_code in (401, 403)
     with seed.conn.cursor() as cur:
         cur.execute("SELECT engine_sign_in_state FROM dev_machine WHERE id=%s", (machine,))
         (state2,) = cur.fetchone()
