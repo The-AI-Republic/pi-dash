@@ -976,7 +976,10 @@ pub async fn live_engine_runner_for(
     project_id: Uuid,
 ) -> Result<Option<LiveEngineHit>, DbErr> {
     use pidash_db::entity::{pod, runner};
-    // Join runner -> pod, filter by project, oldest first, locked.
+    // The machine's live engine runners, oldest first (locked). The
+    // project filter is applied in memory via the pod row: a `JOIN`
+    // alias renders the unaliased `pod.project_id` reference, which
+    // Postgres rejects (`invalid reference to FROM-clause entry`).
     let rows = runner::Entity::find()
         .select_only()
         .columns([
@@ -985,16 +988,7 @@ pub async fn live_engine_runner_for(
             runner::Column::RefreshTokenGeneration,
             runner::Column::PodId,
         ])
-        .join_as(
-            sea_orm::JoinType::InnerJoin,
-            runner::Entity::belongs_to(pod::Entity)
-                .from(runner::Column::PodId)
-                .to(pod::Column::Id)
-                .into(),
-            "pod_",
-        )
         .filter(runner::Column::DevMachineId.eq(machine_id))
-        .filter(pod::Column::ProjectId.eq(project_id))
         .filter(runner::Column::Provisioning.eq("desktop_bundled"))
         .filter(runner::Column::RevokedAt.is_null())
         .order_by_asc(runner::Column::CreatedAt)
@@ -1002,15 +996,20 @@ pub async fn live_engine_runner_for(
         .into_tuple()
         .all(db)
         .await?;
-    let Some((id, name, generation, pod_id)) = rows.into_iter().next() else {
-        return Ok(None);
-    };
-    Ok(Some(LiveEngineHit {
-        id,
-        name,
-        generation,
-        pod_id,
-    }))
+    for (id, name, generation, pod_id) in rows {
+        let pod_row = pod::Entity::find_by_id(pod_id).one(db).await?;
+        if let Some(pod_row) = pod_row {
+            if pod_row.project_id == project_id {
+                return Ok(Some(LiveEngineHit {
+                    id,
+                    name,
+                    generation,
+                    pod_id,
+                }));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// `_taken_names` (#2910): machine live names + every pod runner name

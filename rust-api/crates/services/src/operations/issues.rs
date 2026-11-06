@@ -2252,11 +2252,10 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
                 }
             }
             Event::Html(content) => out.push(MdEvent::HtmlBlock(content.to_string())),
-            Event::InlineHtml(content) => {
-                if image_stack.is_empty() {
-                    out.push(MdEvent::HtmlInline(content.to_string()));
-                }
+            Event::InlineHtml(content) if image_stack.is_empty() => {
+                out.push(MdEvent::HtmlInline(content.to_string()));
             }
+            Event::InlineHtml(_) => {}
             Event::SoftBreak => {
                 if let Some(image) = image_stack.last_mut() {
                     image.2.push(' ');

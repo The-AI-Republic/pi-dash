@@ -3,6 +3,7 @@
 //! `POST merge-into/` (#2910/#2912, design §4.10 + §13).
 
 #![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 
 use axum::extract::{Extension, Path, State};
 use axum::http::{header, StatusCode};
@@ -348,9 +349,7 @@ async fn dual_caller(
         })
         .unwrap_or(false);
     if has_mt {
-        let auth = authenticate_machine_token(&pool, secret.as_bytes(), headers, ALLOW_GET)
-            .await
-            .map_err(|response| response)?;
+        let auth = authenticate_machine_token(&pool, secret.as_bytes(), headers, ALLOW_GET).await?;
         match auth {
             Some(auth) => return Ok((pool, auth.user_id, Some(auth))),
             None => {
@@ -361,9 +360,7 @@ async fn dual_caller(
             }
         }
     }
-    let user_id = session_user_id(&pool, secret.as_bytes(), extension)
-        .await
-        .map_err(|response| response)?;
+    let user_id = session_user_id(&pool, secret.as_bytes(), extension).await?;
     match user_id {
         Some(user_id) => Ok((pool, user_id, None)),
         None => Err(json_response(

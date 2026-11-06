@@ -1639,8 +1639,8 @@ async fn create_attempt(
                         params.project_identifier,
                     );
                     runner_name = enroll_sql::engine_runner_name_from_base(&base, &taken);
-                    if runner_name != hit.name {
-                        if pidash_db::entity::runner::Entity::update_many()
+                    if runner_name != hit.name
+                        && pidash_db::entity::runner::Entity::update_many()
                             .col_expr(
                                 pidash_db::entity::runner::Column::Name,
                                 sea_orm::sea_query::Expr::value(runner_name.clone()),
@@ -1653,9 +1653,8 @@ async fn create_attempt(
                             .exec(&pidash_db::orm_tx::TxConn::new(&mut *tx))
                             .await
                             .is_err()
-                        {
-                            return Attempt::Server;
-                        }
+                    {
+                        return Attempt::Server;
                     }
                 }
                 let pod_dispatch = if hit.name == runner_name && hit.name.starts_with("builtin-") {
