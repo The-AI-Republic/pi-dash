@@ -445,6 +445,19 @@ def test_model_token_dead_credential_pauses_with_sign_in_required(db, create_use
     assert machine.engine_auto_pause_reason == "engine_sign_in_required"
 
 
+@override_settings(**ENABLED)
+def test_superseded_credential_does_not_pause_the_replacement_engine(db, create_user, machine, lane):
+    old = _sign_in(create_user, machine)
+    current = _sign_in(create_user, machine)
+    stale = _client(bearer=old.raw).post("/api/v1/runner/engine/model-token/", {}, format="json")
+    assert stale.status_code == 401
+    assert stale.data["reason_code"] == "engine_sign_in_required"
+    machine.refresh_from_db()
+    assert machine.engine_auto_pause_reason == ""
+    assert machine.current_engine_sign_in_state() == EngineSignInState.ACTIVE
+    assert _client(bearer=current.raw).post("/api/v1/runner/engine/model-token/", {}, format="json").status_code == 200
+
+
 @pytest.mark.parametrize(
     "setup, reason, http",
     [
