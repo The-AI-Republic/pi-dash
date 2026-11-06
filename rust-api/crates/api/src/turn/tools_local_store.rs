@@ -10,10 +10,9 @@
 //! (`record_write` rows, `issue_activity` + sweep enqueues, the live
 //! state-transition drive).
 //!
-//! [`PgToolStore`] is the sqlx implementation, reusing the services SQL
-//! fragments (`MEMBER_PROJECTS_SQL`, `SCOPED_ISSUES_SQL`,
-//! `PROJECT_WRITE_GATE_SQL`, the FTS/filter builders, the relation
-//! statements) and the jobs orchestration drivers. Unit tests drive the
+//! [`PgToolStore`] is the SeaORM implementation, reusing the services
+//! filter/FTS builders, the domain fault ports and the jobs
+//! orchestration drivers. Unit tests drive the
 //! executors through a fixture store (see `tools_local` tests); live-DB
 //! proof of this file's SQL comes with PIDASHCONV-863's oracle replay,
 //! the D-11 `tools_exec` precedent — except the fused update, whose
@@ -176,20 +175,6 @@ pub struct PairRow {
     pub related_issue_id: Uuid,
     pub relation_type: String,
 }
-
-/// `query_as` tuple shapes (one per multi-column read without a
-/// dedicated row struct).
-type CommentRowTuple = (
-    Option<String>,
-    DateTime<Utc>,
-    String,
-    Option<Uuid>,
-    Option<String>,
-    Option<String>,
-);
-type MemberRowTuple = (Option<Uuid>, Option<String>, Option<String>, i16);
-type GroupedReadTuple = (Uuid, String, i32, String, Option<String>, Option<String>);
-type LockedIssueTuple = (Uuid, Option<Uuid>, Option<String>, Option<String>);
 
 /// The other end of a grouped relation (`relations._item` inputs).
 #[derive(Debug, Clone, PartialEq)]
@@ -599,18 +584,18 @@ pub type RedisClient = Arc<redis::Client>;
 // Live store
 // ---------------------------------------------------------------------------
 
-use pidash_services::assistant::tools_issues::{
-    ListFilterPredicates, ISSUE_FTS_SQL, PROJECT_WRITE_GATE_SQL,
+use pidash_db::entity::{
+    agent_run, assistant_event, assistant_message, assistant_thread, assistant_turn,
+    assistant_user_llm_config, git_provider_accounts, git_repositories, git_repository_bindings,
+    github_repositories, github_repository_syncs, issue_comments, issue_relations, issue_sequences,
+    issues, labels, pod, project_members, projects, states, users, workspaces,
 };
-
-/// Issue columns the brief/detail shapes read, over the `issues` alias of
-/// [`SCOPED_ISSUES_SQL`]-family queries plus the joined project
-/// identifier and state name/group (`select_related("project", "state")`).
-const ISSUE_ROW_COLUMNS: &str =
-    "issues.id, issues.project_id, projects.identifier AS project_identifier, \
-     issues.workspace_id, issues.sequence_id, issues.name, issues.parent_id, issues.state_id, \
-     states.name AS state_name, states.group AS state_group, issues.priority, \
-     issues.description_stripped, issues.created_by_id, issues.updated_at";
+use pidash_services::assistant::tools_issues::ListFilterPredicates;
+use sea_orm::sea_query::{Alias, Expr, Func};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, IntoSimpleExpr,
+    JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
+};
 
 /// The live [`ToolStore`]: sqlx over the worker pool, reqwest for the PR
 /// fetch, the multiplexed redis client for the swallowed publish, and
@@ -627,6 +612,104 @@ pub struct PgToolStore {
 }
 
 impl PgToolStore {
+    /// Fused-drive probe savepoint (`update_issue_row` /
+    /// `drive_create_transition`): the probe's bounce writes roll back.
+    /// `~Transaction` has no nested-begin, so a named savepoint is the
+    /// reviewed escape hatch here (same probe shape on both drives).
+    async fn probe_savepoint(
+        &self,
+        tx: &mut pidash_db::tx::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        // raw-sql: a named SAVEPOINT is the preview-rollback shape the
+        // fused drives keep (no nested-begin escape on `Transaction`).
+        sqlx::query("SAVEPOINT turn_preflight_probe")
+            .execute(&mut **tx.inner())
+            .await?;
+        Ok(())
+    }
+
+    async fn rollback_probe_savepoint(
+        &self,
+        tx: &mut pidash_db::tx::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        // raw-sql: named-savepoint rollback for the fused-drive probe.
+        sqlx::query("ROLLBACK TO SAVEPOINT turn_preflight_probe")
+            .execute(&mut **tx.inner())
+            .await?;
+        Ok(())
+    }
+
+    /// `projects.list_projects :20`: member projects in the slug's
+    /// workspace, name order, first 50 (`DISTINCT` against re-added
+    /// memberships, `_scoping.py:45-49`).
+    fn member_projects_query(deps: &AssistantDeps) -> sea_orm::Select<projects::Entity> {
+        projects::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                projects::Relation::ProjectMembers.def(),
+            )
+            .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+            .filter(project_members::Column::MemberId.eq(deps.user_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(projects::Column::DeletedAt.is_null())
+            .distinct()
+            .order_by_asc(projects::Column::Name)
+            .limit(50)
+    }
+
+    /// `tools_github::BINDING_TOKEN_SQL`: newest binding on a member
+    /// project whose repository matches provider + namespace/name
+    /// case-insensitively; the `credential_config` value rides through.
+    fn binding_config_query(
+        deps: &AssistantDeps,
+        provider: &str,
+        namespace: &str,
+        repo: &str,
+    ) -> sea_orm::Select<git_repository_bindings::Entity> {
+        let member_projects = projects::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                projects::Relation::ProjectMembers.def(),
+            )
+            .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+            .select_only()
+            .column(projects::Column::Id)
+            .distinct()
+            .filter(project_members::Column::MemberId.eq(deps.user_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(projects::Column::DeletedAt.is_null())
+            .into_query();
+        git_repository_bindings::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::GitRepositories.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                git_repository_bindings::Relation::GitProviderAccounts.def(),
+            )
+            .filter(git_repository_bindings::Column::ProjectId.in_subquery(member_projects))
+            .filter(git_repositories::Column::Provider.eq(provider))
+            .filter(
+                Expr::expr(Func::upper(Expr::col((
+                    git_repositories::Entity,
+                    git_repositories::Column::Namespace,
+                ))))
+                .eq(Func::upper(Expr::val(namespace.to_owned()))),
+            )
+            .filter(
+                Expr::expr(Func::upper(Expr::col((
+                    git_repositories::Entity,
+                    git_repositories::Column::Name,
+                ))))
+                .eq(Func::upper(Expr::val(repo.to_owned()))),
+            )
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .order_by_desc(git_repository_bindings::Column::CreatedAt)
+    }
+
     pub fn new(
         pool: PgPool,
         redis: Option<RedisClient>,
@@ -688,111 +771,304 @@ impl PgToolStore {
     }
 }
 
-/// FROM/WHERE half of `tools_issues::SCOPED_ISSUES_SQL` (which selects
-/// `issues.*`): the row readers need the joined project/state columns
-/// too, so they pair this fragment with [`ISSUE_ROW_COLUMNS`]. The
-/// `sql_fragments_match_services_consts` test pins the two texts equal
-/// (whitespace-insensitive), so the services const stays the one
-/// reviewed source.
-const SCOPED_ISSUES_FILTER: &str = "FROM issues \
-     INNER JOIN projects ON projects.id = issues.project_id \
-     INNER JOIN workspaces ON workspaces.id = issues.workspace_id \
-     INNER JOIN project_members ON (project_members.project_id = projects.id \
-     AND project_members.member_id = $1 AND project_members.is_active) \
-     LEFT OUTER JOIN states ON states.id = issues.state_id \
-     WHERE workspaces.slug = $2 \
-     AND issues.deleted_at IS NULL \
-     AND NOT (states.group = 'triage' AND states.group IS NOT NULL) \
-     AND NOT (issues.archived_at IS NOT NULL) \
-     AND NOT (projects.archived_at IS NOT NULL) \
-     AND NOT (issues.is_draft)";
-
-/// FROM/WHERE half of `tools_issues::MEMBER_PROJECTS_SQL`, same pinning deal.
-const MEMBER_PROJECTS_FILTER: &str = "FROM projects \
-     INNER JOIN project_members ON (project_members.project_id = projects.id \
-     AND project_members.member_id = $1 AND project_members.is_active) \
-     INNER JOIN workspaces ON workspaces.id = projects.workspace_id \
-     WHERE workspaces.slug = $2 AND projects.deleted_at IS NULL";
-
-/// Decode one [`ISSUE_ROW_COLUMNS`] row from an untyped query result.
-fn decode_issue_row(row: &sqlx::postgres::PgRow) -> Result<IssueRow, StoreError> {
-    use sqlx::Row;
-    Ok(IssueRow {
-        id: row.try_get("id")?,
-        project_id: row.try_get("project_id")?,
-        project_identifier: row.try_get("project_identifier")?,
-        workspace_id: row.try_get("workspace_id")?,
-        sequence_id: i64::from(row.try_get::<i32, _>("sequence_id")?),
-        name: row.try_get("name")?,
-        parent_id: row.try_get("parent_id")?,
-        state_id: row.try_get("state_id")?,
-        state_name: row.try_get("state_name")?,
-        state_group: row.try_get("state_group")?,
-        priority: row.try_get("priority")?,
-        description_stripped: row.try_get("description_stripped")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_at: row.try_get("updated_at")?,
-    })
+/// `Issue.issue_objects` conjuncts past `deleted_at` (the scoped-issues
+/// WHERE over the `states` LEFT JOIN + `projects` INNER JOIN):
+/// `NOT (states.group = 'triage' AND states.group IS NOT NULL)` keeps
+/// stateless issues (the inner `AND` is FALSE, not NULL, for them) plus
+/// the archived/draft exclusions. Same null-safe triage trap as
+/// `tools_issues::SCOPED_ISSUES_SQL` / `handlers_core`'s
+/// `issue_objects_condition`.
+fn issue_objects_condition() -> Condition {
+    Condition::all()
+        .add(
+            Condition::all()
+                .add(states::Column::Group.eq("triage"))
+                .add(states::Column::Group.is_not_null())
+                .not(),
+        )
+        .add(issues::Column::ArchivedAt.is_null())
+        .add(projects::Column::ArchivedAt.is_null())
+        .add(issues::Column::IsDraft.eq(false))
 }
 
-type IssueRowTuple = (
-    Uuid,
-    Uuid,
-    String,
-    Uuid,
-    i32,
-    String,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<String>,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<Uuid>,
-    DateTime<Utc>,
-);
-
-fn issue_row_from_tuple(row: IssueRowTuple) -> IssueRow {
-    IssueRow {
-        id: row.0,
-        project_id: row.1,
-        project_identifier: row.2,
-        workspace_id: row.3,
-        sequence_id: i64::from(row.4),
-        name: row.5,
-        parent_id: row.6,
-        state_id: row.7,
-        state_name: row.8,
-        state_group: row.9,
-        priority: row.10,
-        description_stripped: row.11,
-        created_by_id: row.12,
-        updated_at: row.13,
+/// `my_issues_scope_sql` (`user_issues_queryset`, `core/querysets.py:33-52`)
+/// as SeaORM: `assigned` / `created` / `all` (assigned OR created OR
+/// subscribed). The soft-delete asymmetry is preserved: the M2M `EXISTS`
+/// arms carry NO `deleted_at` predicate, exactly as the hand-written
+/// fragment reads.
+fn my_issues_scope_condition(scope: &str, user_id: Uuid) -> Condition {
+    use pidash_db::entity::{issue_assignees, issue_subscribers};
+    let assigned = Expr::exists(
+        issue_assignees::Entity::find()
+            .select_only()
+            .column(issue_assignees::Column::Id)
+            .filter(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::IssueId))
+                    .equals((issues::Entity, issues::Column::Id)),
+            )
+            .filter(issue_assignees::Column::AssigneeId.eq(user_id))
+            .into_query(),
+    );
+    let subscribed = Expr::exists(
+        issue_subscribers::Entity::find()
+            .select_only()
+            .column(issue_subscribers::Column::Id)
+            .filter(
+                Expr::col((
+                    issue_subscribers::Entity,
+                    issue_subscribers::Column::IssueId,
+                ))
+                .equals((issues::Entity, issues::Column::Id)),
+            )
+            .filter(issue_subscribers::Column::SubscriberId.eq(user_id))
+            .into_query(),
+    );
+    match scope {
+        "assigned" => Condition::all().add(assigned),
+        "created" => Condition::all().add(issues::Column::CreatedById.eq(user_id)),
+        _ => Condition::any()
+            .add(assigned)
+            .add(issues::Column::CreatedById.eq(user_id))
+            .add(subscribed),
     }
+}
+
+/// The list-issues filter predicates (`ListFilterPredicates::to_sql`) as
+/// SeaORM conditions over the `issues` base. UUID tokens arrive
+/// pre-validated ([`normalize_list_filters`]); an unparsable token makes
+/// the arm match nothing (the SQL `::uuid` cast could not fail on reachable
+/// inputs).
+fn list_filter_condition(filters: &ListFilterPredicates) -> Condition {
+    use pidash_db::entity::issue_labels;
+    let parse = |tokens: &[String]| -> Vec<Uuid> {
+        tokens
+            .iter()
+            .filter_map(|token| Uuid::parse_str(token).ok())
+            .collect()
+    };
+    let mut condition = Condition::all();
+    if !filters.state_in.is_empty() {
+        let ids = parse(&filters.state_in);
+        // `issues.state_id IN (...)` — empty (all-invalid) matches nothing.
+        condition = condition.add(issues::Column::StateId.is_in(ids));
+    }
+    if !filters.state_group_in.is_empty() {
+        let groups = filters.state_group_in.clone();
+        let state_ids = states::Entity::find()
+            .select_only()
+            .column(states::Column::Id)
+            .filter(states::Column::Group.is_in(groups))
+            .into_query();
+        condition = condition.add(issues::Column::StateId.in_subquery(state_ids));
+    }
+    if !filters.priority_in.is_empty() {
+        condition = condition.add(issues::Column::Priority.is_in(filters.priority_in.clone()));
+    }
+    if filters.parent_is_null {
+        condition = condition.add(issues::Column::ParentId.is_null());
+    } else if !filters.parent_in.is_empty() {
+        let ids = parse(&filters.parent_in);
+        condition = condition.add(issues::Column::ParentId.is_in(ids));
+    }
+    if !filters.label_ids_in.is_empty() {
+        let ids = parse(&filters.label_ids_in);
+        let labelled = Expr::exists(
+            issue_labels::Entity::find()
+                .select_only()
+                .column(issue_labels::Column::Id)
+                .filter(
+                    Expr::col((issue_labels::Entity, issue_labels::Column::IssueId))
+                        .equals((issues::Entity, issues::Column::Id)),
+                )
+                .filter(issue_labels::Column::LabelId.is_in(ids))
+                .filter(issue_labels::Column::DeletedAt.is_null())
+                .into_query(),
+        );
+        condition = condition.add(labelled);
+    }
+    // No predicates at all: the `to_sql` empty string adds no conjunct.
+    if condition.is_empty() {
+        condition = condition.add(issues::Column::Id.is_not_null());
+    }
+    condition
+}
+
+/// `ISSUE_FTS_SQL` as a SeaORM `Condition` (the `search_issues_page` arm):
+/// FTS over name + description, `name` icontains, the `sequence_id` arm and
+/// the project-identifier arm, `OR`-joined exactly as the hand-written
+/// fragment reads. `ILIKE` keeps `escape_icontains` escaping through the
+/// bound pattern value; the `sequence_id` arm keeps the UNNEST-array
+/// membership (empty tokens match nothing, as the array form does).
+fn fts_condition(query: &str) -> Condition {
+    use pidash_services::assistant::tools_issues::{escape_icontains, search_sequence_tokens};
+    use sea_orm::sea_query::extension::postgres::PgExpr;
+
+    // `TO_TSVECTOR('english'::regconfig, COALESCE(name,'') || ' ' || COALESCE(description_stripped,''))`
+    // and `WEBSEARCH_TO_TSQUERY('english'::regconfig, query)`: the
+    // `PgFunc` OID-typed regconfig cannot carry the reviewed `'english'`
+    // text cast, so the vector/query ride as `Func::cust` (the same
+    // cust precedent `list_engine`/`list_grouping` keep for `row_to_json`
+    // / `NULLIF` — the FTS registry literals stay inside the builder).
+    let name_col = Expr::col((issues::Entity, issues::Column::Name));
+    let desc_col = Expr::col((issues::Entity, issues::Column::DescriptionStripped));
+    // COALESCE(name, '') || ' ' || COALESCE(description_stripped, '').
+    let name_part = Func::coalesce([name_col.into_simple_expr(), Expr::val("").into()]);
+    let desc_part = Func::coalesce([desc_col.into_simple_expr(), Expr::val("").into()]);
+    let vector_text = name_part.concatenate(Expr::val(" ")).concatenate(desc_part);
+    let vector = Func::cust(sea_orm::sea_query::Alias::new("to_tsvector"))
+        .arg(Expr::val("english").cast_as(Alias::new("regconfig")))
+        .arg(vector_text);
+    let webquery = Func::cust(sea_orm::sea_query::Alias::new("websearch_to_tsquery"))
+        .arg(Expr::val("english").cast_as(Alias::new("regconfig")))
+        .arg(Expr::val(query.to_owned()));
+    let fts_match = Expr::expr(vector).matches(webquery);
+    let escaped = escape_icontains(query);
+    let pattern = format!("%{escaped}%");
+    let name_ilike = Expr::col((issues::Entity, issues::Column::Name)).ilike(pattern.clone());
+    let tokens = search_sequence_tokens(query);
+    let identifiers = Expr::exists(
+        projects::Entity::find()
+            .select_only()
+            .column(projects::Column::Id)
+            .filter(
+                Expr::col((projects::Entity, projects::Column::Id))
+                    .equals((issues::Entity, issues::Column::ProjectId)),
+            )
+            .filter(Expr::col((projects::Entity, projects::Column::Identifier)).ilike(pattern))
+            .into_query(),
+    );
+    Condition::any()
+        .add(fts_match)
+        .add(name_ilike)
+        .add(issues::Column::SequenceId.is_in(tokens))
+        .add(identifiers)
+}
+
+/// The member-scoped issues base: `tools_issues::SCOPED_ISSUES_SQL`'s
+/// FROM/WHERE as SeaORM joins (INNER projects/workspaces/project_members on
+/// the actor, LEFT states) with the null-safe triage + archived/draft
+/// conjuncts. The `project_members` membership is an INNER join with the
+/// actor + active filters, exactly as the hand-written fragment reads.
+fn scoped_issues_base(user_id: Uuid, slug: &str) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(issue_objects_condition())
+}
+
+/// One scoped-issue row decoded by name: the joined
+/// project identifier and state name/group ride as aliased columns.
+#[derive(Debug, FromQueryResult)]
+struct IssueJoinedRow {
+    id: Uuid,
+    project_id: Uuid,
+    project_identifier: String,
+    workspace_id: Uuid,
+    sequence_id: i32,
+    name: String,
+    parent_id: Option<Uuid>,
+    state_id: Option<Uuid>,
+    state_name: Option<String>,
+    state_group: Option<String>,
+    priority: String,
+    description_stripped: Option<String>,
+    created_by_id: Option<Uuid>,
+    updated_at: DateTime<Utc>,
+}
+
+fn issue_row_from_joined(row: IssueJoinedRow) -> IssueRow {
+    IssueRow {
+        id: row.id,
+        project_id: row.project_id,
+        project_identifier: row.project_identifier,
+        workspace_id: row.workspace_id,
+        sequence_id: i64::from(row.sequence_id),
+        name: row.name,
+        parent_id: row.parent_id,
+        state_id: row.state_id,
+        state_name: row.state_name,
+        state_group: row.state_group,
+        priority: row.priority,
+        description_stripped: row.description_stripped,
+        created_by_id: row.created_by_id,
+        updated_at: row.updated_at,
+    }
+}
+
+/// `UPDATE issues` post-save re-read (unscoped): issues joined to projects
+/// (identifier) and states (name/group), by id.
+fn unscoped_issue_select(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .filter(issues::Column::Id.eq(issue_id))
+}
+
+fn issue_row_projection(query: sea_orm::Select<issues::Entity>) -> sea_orm::Select<issues::Entity> {
+    query
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::ProjectId,
+            issues::Column::WorkspaceId,
+            issues::Column::SequenceId,
+            issues::Column::Name,
+            issues::Column::ParentId,
+            issues::Column::StateId,
+            issues::Column::Priority,
+            issues::Column::DescriptionStripped,
+            issues::Column::CreatedById,
+            issues::Column::UpdatedAt,
+        ])
+        .column_as(projects::Column::Identifier, "project_identifier")
+        .column_as(states::Column::Name, "state_name")
+        .column_as(states::Column::Group, "state_group")
+}
+
+/// SeaORM error mapped the way the store's `StoreError::from(sqlx::Error)`
+/// arms read: database failures surface as `Db(message)`.
+fn orm_err(error: DbErr) -> StoreError {
+    StoreError::from(pidash_db::orm_tx::into_sqlx(error))
 }
 
 impl ToolStore for PgToolStore {
     async fn require_user(&self, deps: &AssistantDeps) -> Result<Uuid, StoreError> {
-        let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1")
-            .bind(deps.user_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let id: Option<Uuid> = users::Entity::find()
+            .select_only()
+            .column(users::Column::Id)
+            .filter(users::Column::Id.eq(deps.user_id))
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
         id.ok_or(StoreError::Missing { model: "User" })
     }
 
     async fn member_projects(&self, deps: &AssistantDeps) -> Result<Vec<ProjectRow>, StoreError> {
-        // `DISTINCT` (`_scoping.py:45-49`): remove+re-add leaves two
-        // `is_active` rows (soft-delete never clears it); without it
-        // the project lists twice.
-        let rows: Vec<(Uuid, String, String, Uuid, bool)> = sqlx::query_as(&format!(
-            "SELECT DISTINCT projects.id, projects.identifier, projects.name, \
-             projects.workspace_id, projects.guest_view_all_features \
-             {MEMBER_PROJECTS_FILTER} ORDER BY projects.name LIMIT 50"
-        ))
-        .bind(deps.user_id)
-        .bind(&deps.workspace_slug)
-        .fetch_all(&self.pool)
-        .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, String, String, Uuid, bool)> = Self::member_projects_query(deps)
+            .select_only()
+            .columns([
+                projects::Column::Id,
+                projects::Column::Identifier,
+                projects::Column::Name,
+                projects::Column::WorkspaceId,
+                projects::Column::GuestViewAllFeatures,
+            ])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
             .map(
@@ -812,15 +1088,23 @@ impl ToolStore for PgToolStore {
         deps: &AssistantDeps,
         project_id: &Uuid,
     ) -> Result<Option<ProjectRow>, StoreError> {
-        let row: Option<(Uuid, String, String, Uuid, bool)> = sqlx::query_as(&format!(
-            "SELECT projects.id, projects.identifier, projects.name, projects.workspace_id, \
-             projects.guest_view_all_features {MEMBER_PROJECTS_FILTER} AND projects.id = $3"
-        ))
-        .bind(deps.user_id)
-        .bind(&deps.workspace_slug)
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row: Option<(Uuid, String, String, Uuid, bool)> = Self::member_projects_query(deps)
+            .filter(projects::Column::Id.eq(*project_id))
+            .limit(1)
+            .offset(0)
+            .select_only()
+            .columns([
+                projects::Column::Id,
+                projects::Column::Identifier,
+                projects::Column::Name,
+                projects::Column::WorkspaceId,
+                projects::Column::GuestViewAllFeatures,
+            ])
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(row.map(
             |(id, identifier, name, workspace_id, guest_view_all_features)| ProjectRow {
                 id,
@@ -837,15 +1121,14 @@ impl ToolStore for PgToolStore {
         deps: &AssistantDeps,
         issue_id: &Uuid,
     ) -> Result<Option<IssueRow>, StoreError> {
-        let row: Option<IssueRowTuple> = sqlx::query_as(&format!(
-            "SELECT {ISSUE_ROW_COLUMNS} {SCOPED_ISSUES_FILTER} AND issues.id = $3"
-        ))
-        .bind(deps.user_id)
-        .bind(&deps.workspace_slug)
-        .bind(issue_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(issue_row_from_tuple))
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = issue_row_projection(scoped_issues_base(deps.user_id, &deps.workspace_slug))
+            .filter(issues::Column::Id.eq(*issue_id))
+            .into_model::<IssueJoinedRow>()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(row.map(issue_row_from_joined))
     }
 
     async fn search_issues_page(
@@ -856,52 +1139,30 @@ impl ToolStore for PgToolStore {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<IssueRow>, StoreError> {
-        use pidash_services::assistant::tools_issues::{
-            escape_icontains, search_sequence_tokens, search_uses_fts,
-        };
+        use pidash_services::assistant::tools_issues::search_uses_fts;
         // `issues.search_issues :65-74`: scope, optional project
         // narrowing, FTS only for non-blank queries, `.distinct()`,
         // `-updated_at`, the lookahead window.
-        let mut sql = format!("SELECT DISTINCT {ISSUE_ROW_COLUMNS} {SCOPED_ISSUES_FILTER}");
-        if project_id.is_some() {
-            sql.push_str(" AND issues.project_id = $3");
-        }
-        let mut next_param: i32 = if project_id.is_some() { 4 } else { 3 };
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
         let use_fts = search_uses_fts(query);
-        if use_fts {
-            // [`ISSUE_FTS_SQL`] numbers its own binds $1/$2/$3; shift
-            // them past the scope/project binds.
-            let fts = ISSUE_FTS_SQL
-                .replace("$1", &format!("${}", next_param))
-                .replace("$2", &format!("${}", next_param + 1))
-                .replace("$3", &format!("${}", next_param + 2));
-            sql.push_str(&format!(" AND {fts}"));
-            next_param += 3;
-        }
-        sql.push_str(&format!(
-            " ORDER BY issues.updated_at DESC LIMIT ${} OFFSET ${}",
-            next_param,
-            next_param + 1
-        ));
-        let mut statement = sqlx::query(&sql)
-            .bind(deps.user_id)
-            .bind(&deps.workspace_slug);
+        let fts = use_fts.then(|| fts_condition(query));
+        let mut query =
+            issue_row_projection(scoped_issues_base(deps.user_id, &deps.workspace_slug)).distinct();
         if let Some(project) = project_id {
-            statement = statement.bind(project);
+            query = query.filter(issues::Column::ProjectId.eq(project));
         }
-        if use_fts {
-            let tokens = search_sequence_tokens(query);
-            statement = statement
-                .bind(query)
-                .bind(tokens)
-                .bind(escape_icontains(query));
+        if let Some(fts) = fts {
+            query = query.filter(fts);
         }
-        let rows = statement
-            .bind(limit + 1)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(decode_issue_row).collect()
+        let rows = query
+            .order_by_desc(issues::Column::UpdatedAt)
+            .limit((limit + 1) as u64)
+            .offset(offset.max(0) as u64)
+            .into_model::<IssueJoinedRow>()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(rows.into_iter().map(issue_row_from_joined).collect())
     }
 
     async fn list_issues_page(
@@ -914,32 +1175,19 @@ impl ToolStore for PgToolStore {
     ) -> Result<Vec<IssueRow>, StoreError> {
         // `issues.list_issues :114-124`: project filter, compiled
         // predicates, `.distinct()`, `-updated_at`, lookahead window.
-        let mut params: Vec<String> = Vec::new();
-        let rendered = filters.to_sql(&mut params, 4);
-        let mut sql = format!(
-            "SELECT DISTINCT {ISSUE_ROW_COLUMNS} {SCOPED_ISSUES_FILTER} AND issues.project_id = $3"
-        );
-        if !rendered.is_empty() {
-            sql.push_str(&format!(" AND {rendered}"));
-        }
-        let next_param = 4 + params.len() as i32;
-        sql.push_str(&format!(
-            " ORDER BY issues.updated_at DESC LIMIT ${next_param} OFFSET ${}",
-            next_param + 1
-        ));
-        let mut statement = sqlx::query(&sql)
-            .bind(deps.user_id)
-            .bind(&deps.workspace_slug)
-            .bind(project_id);
-        for param in &params {
-            statement = statement.bind(param);
-        }
-        let rows = statement
-            .bind(limit + 1)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(decode_issue_row).collect()
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows = issue_row_projection(scoped_issues_base(deps.user_id, &deps.workspace_slug))
+            .distinct()
+            .filter(issues::Column::ProjectId.eq(*project_id))
+            .filter(list_filter_condition(filters))
+            .order_by_desc(issues::Column::UpdatedAt)
+            .limit((limit + 1) as u64)
+            .offset(offset.max(0) as u64)
+            .into_model::<IssueJoinedRow>()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(rows.into_iter().map(issue_row_from_joined).collect())
     }
 
     async fn my_issues_page(
@@ -949,62 +1197,63 @@ impl ToolStore for PgToolStore {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<IssueRow>, StoreError> {
-        use pidash_services::assistant::tools_issues::my_issues_scope_sql;
         // `issues.list_my_issues :143`: involvement filter inside the
-        // member scope, `-updated_at`, lookahead window. The scope
-        // fragment binds `$1` (user id) again — same value, new slot.
-        let fragment = my_issues_scope_sql(
-            pidash_services::assistant::tools_scoping::IssueScope::parse(scope).as_str(),
-        )
-        .replace("$1", "$3");
-        let sql = format!(
-            "SELECT DISTINCT {ISSUE_ROW_COLUMNS} {SCOPED_ISSUES_FILTER} AND {fragment} \
-             ORDER BY issues.updated_at DESC LIMIT $4 OFFSET $5"
-        );
-        let rows = sqlx::query(&sql)
-            .bind(deps.user_id)
-            .bind(&deps.workspace_slug)
-            .bind(deps.user_id)
-            .bind(limit + 1)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(decode_issue_row).collect()
+        // member scope, `-updated_at`, lookahead window.
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let parsed = pidash_services::assistant::tools_scoping::IssueScope::parse(scope);
+        let rows = issue_row_projection(scoped_issues_base(deps.user_id, &deps.workspace_slug))
+            .distinct()
+            .filter(my_issues_scope_condition(parsed.as_str(), deps.user_id))
+            .order_by_desc(issues::Column::UpdatedAt)
+            .limit((limit + 1) as u64)
+            .offset(offset.max(0) as u64)
+            .into_model::<IssueJoinedRow>()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(rows.into_iter().map(issue_row_from_joined).collect())
     }
 
     async fn issue_comments(&self, issue_id: &Uuid) -> Result<Vec<IssueCommentRow>, StoreError> {
-        let rows: Vec<CommentRowTuple> =
-            sqlx::query_as(
-                "SELECT issue_comments.comment_stripped, issue_comments.created_at, \
-                 issue_comments.speaker_type, issue_comments.actor_id, users.display_name, users.email \
-                 FROM issue_comments LEFT OUTER JOIN users ON users.id = issue_comments.actor_id \
-                 WHERE issue_comments.issue_id = $1 AND issue_comments.deleted_at IS NULL \
-                 ORDER BY issue_comments.created_at DESC LIMIT 10",
-            )
-            .bind(issue_id)
-            .fetch_all(&self.pool)
-            .await?;
+        #[derive(Debug, FromQueryResult)]
+        struct CommentRow {
+            comment_stripped: Option<String>,
+            created_at: DateTime<Utc>,
+            speaker_type: String,
+            actor_id: Option<Uuid>,
+            actor_display_name: Option<String>,
+            actor_email: Option<String>,
+        }
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<CommentRow> = issue_comments::Entity::find()
+            .select_only()
+            .columns([
+                issue_comments::Column::CommentStripped,
+                issue_comments::Column::CreatedAt,
+                issue_comments::Column::SpeakerType,
+                issue_comments::Column::ActorId,
+            ])
+            .column_as(users::Column::DisplayName, "actor_display_name")
+            .column_as(users::Column::Email, "actor_email")
+            .join(JoinType::LeftJoin, issue_comments::Relation::Users3.def())
+            .filter(issue_comments::Column::IssueId.eq(*issue_id))
+            .filter(issue_comments::Column::DeletedAt.is_null())
+            .order_by_desc(issue_comments::Column::CreatedAt)
+            .limit(10)
+            .into_model()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
-            .map(
-                |(
-                    comment_stripped,
-                    created_at,
-                    speaker_type,
-                    actor_id,
-                    actor_display_name,
-                    actor_email,
-                )| {
-                    IssueCommentRow {
-                        comment_stripped,
-                        created_at,
-                        speaker_type,
-                        actor_id,
-                        actor_display_name,
-                        actor_email,
-                    }
-                },
-            )
+            .map(|row| IssueCommentRow {
+                comment_stripped: row.comment_stripped,
+                created_at: row.created_at,
+                speaker_type: row.speaker_type,
+                actor_id: row.actor_id,
+                actor_display_name: row.actor_display_name,
+                actor_email: row.actor_email,
+            })
             .collect())
     }
 
@@ -1016,17 +1265,26 @@ impl ToolStore for PgToolStore {
         // `_scoping.project_states`: the `State` default manager
         // excludes soft-deleted and triage rows (`state.py:79-84`),
         // ordered by `State.Meta.ordering` (`sequence`).
-        let rows: Vec<(Uuid, String, String, bool, f64)> = sqlx::query_as(
-            "SELECT states.id, states.name, states.group, states.default, states.sequence \
-             FROM states INNER JOIN workspaces ON workspaces.id = states.workspace_id \
-             WHERE states.project_id = $1 AND workspaces.slug = $2 \
-             AND states.deleted_at IS NULL AND NOT (states.group = 'triage') \
-             ORDER BY states.sequence",
-        )
-        .bind(project_id)
-        .bind(&deps.workspace_slug)
-        .fetch_all(&self.pool)
-        .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, String, String, bool, f64)> = states::Entity::find()
+            .join(JoinType::InnerJoin, states::Relation::Workspaces.def())
+            .select_only()
+            .columns([
+                states::Column::Id,
+                states::Column::Name,
+                states::Column::Group,
+                states::Column::Default,
+                states::Column::Sequence,
+            ])
+            .filter(states::Column::ProjectId.eq(*project_id))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .order_by_asc(states::Column::Sequence)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
             .map(|(id, name, group, default, sequence)| StateRow {
@@ -1044,16 +1302,19 @@ impl ToolStore for PgToolStore {
         deps: &AssistantDeps,
         project_id: &Uuid,
     ) -> Result<Vec<LabelRow>, StoreError> {
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT labels.id, labels.name FROM labels \
-             INNER JOIN workspaces ON workspaces.id = labels.workspace_id \
-             WHERE labels.project_id = $1 AND workspaces.slug = $2 AND labels.deleted_at IS NULL \
-             ORDER BY labels.name",
-        )
-        .bind(project_id)
-        .bind(&deps.workspace_slug)
-        .fetch_all(&self.pool)
-        .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, String)> = labels::Entity::find()
+            .join(JoinType::InnerJoin, labels::Relation::Workspaces.def())
+            .select_only()
+            .columns([labels::Column::Id, labels::Column::Name])
+            .filter(labels::Column::ProjectId.eq(*project_id))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(labels::Column::DeletedAt.is_null())
+            .order_by_asc(labels::Column::Name)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
             .map(|(id, name)| LabelRow { id, name })
@@ -1061,15 +1322,18 @@ impl ToolStore for PgToolStore {
     }
 
     async fn workspace_labels(&self, deps: &AssistantDeps) -> Result<Vec<LabelRow>, StoreError> {
-        let rows: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT labels.id, labels.name FROM labels \
-             INNER JOIN workspaces ON workspaces.id = labels.workspace_id \
-             WHERE labels.project_id IS NULL AND workspaces.slug = $1 \
-             AND labels.deleted_at IS NULL",
-        )
-        .bind(&deps.workspace_slug)
-        .fetch_all(&self.pool)
-        .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, String)> = labels::Entity::find()
+            .join(JoinType::InnerJoin, labels::Relation::Workspaces.def())
+            .select_only()
+            .columns([labels::Column::Id, labels::Column::Name])
+            .filter(labels::Column::ProjectId.is_null())
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(labels::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
             .map(|(id, name)| LabelRow { id, name })
@@ -1086,24 +1350,32 @@ impl ToolStore for PgToolStore {
         // identifier + sequence, triage/archived/draft excluded.
         // `.first()` under `Issue.Meta.ordering` (`-created_at`); the
         // `::int` cast makes out-of-int4 tails raise exactly as
-        // Django's int4 bind does (miss-vs-500 parity).
-        let row: Option<IssueRowTuple> = sqlx::query_as(&format!(
-            "SELECT {ISSUE_ROW_COLUMNS} FROM issues \
-             INNER JOIN projects ON projects.id = issues.project_id \
-             INNER JOIN workspaces ON workspaces.id = issues.workspace_id \
-             LEFT OUTER JOIN states ON states.id = issues.state_id \
-             WHERE workspaces.slug = $1 AND UPPER(projects.identifier) = UPPER($2) \
-             AND issues.sequence_id = $3::int AND issues.deleted_at IS NULL \
-             AND NOT (states.group = 'triage' AND states.group IS NOT NULL) AND NOT (issues.archived_at IS NOT NULL) \
-             AND NOT (projects.archived_at IS NOT NULL) AND NOT (issues.is_draft) \
-             ORDER BY issues.created_at DESC LIMIT 1"
-        ))
-        .bind(&deps.workspace_slug)
-        .bind(project_ident)
-        .bind(sequence_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(issue_row_from_tuple))
+        // Django's int4 bind does (miss-vs-500 parity). SeaORM binds the
+        // i64 onto the int4 column with a typed value instead.
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = issue_row_projection(
+            issues::Entity::find()
+                .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+                .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+                .join(JoinType::LeftJoin, issues::Relation::States.def())
+                .filter(issues::Column::DeletedAt.is_null())
+                .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+                .filter(issue_objects_condition()),
+        )
+        .filter(
+            Expr::expr(Func::upper(Expr::col((
+                projects::Entity,
+                projects::Column::Identifier,
+            ))))
+            .eq(Func::upper(Expr::val(project_ident.to_owned()))),
+        )
+        .filter(issues::Column::SequenceId.eq(sequence_id as i32))
+        .order_by_desc(issues::Column::CreatedAt)
+        .into_model::<IssueJoinedRow>()
+        .one(&db)
+        .await
+        .map_err(orm_err)?;
+        Ok(row.map(issue_row_from_joined))
     }
 
     async fn project_members(
@@ -1113,28 +1385,45 @@ impl ToolStore for PgToolStore {
     ) -> Result<Vec<MemberRow>, StoreError> {
         // `role` is a `PositiveSmallIntegerField` (int2): decode i16,
         // widen for the row.
-        let rows: Vec<MemberRowTuple> = sqlx::query_as(
-            "SELECT project_members.member_id, users.display_name, users.email, project_members.role \
-             FROM project_members \
-             INNER JOIN workspaces ON workspaces.id = project_members.workspace_id \
-             LEFT OUTER JOIN users ON users.id = project_members.member_id \
-             WHERE project_members.project_id = $1 AND workspaces.slug = $2 \
-             AND project_members.is_active AND project_members.deleted_at IS NULL \
-             ORDER BY project_members.created_at DESC",
-        )
-        .bind(project_id)
-        .bind(&deps.workspace_slug)
-        .fetch_all(&self.pool)
-        .await?;
+        #[derive(Debug, FromQueryResult)]
+        struct MemberRowDb {
+            member_id: Option<Uuid>,
+            display_name: Option<String>,
+            email: Option<String>,
+            role: i16,
+        }
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<MemberRowDb> = project_members::Entity::find()
+            .select_only()
+            .columns([
+                project_members::Column::MemberId,
+                project_members::Column::Role,
+            ])
+            .column_as(users::Column::DisplayName, "display_name")
+            .column_as(users::Column::Email, "email")
+            .join(
+                JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .join(JoinType::LeftJoin, project_members::Relation::Users2.def())
+            .filter(project_members::Column::ProjectId.eq(*project_id))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .order_by_desc(project_members::Column::CreatedAt)
+            .into_model()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         // `if m.member is None: continue` (`projects.py:56-57`).
         Ok(rows
             .into_iter()
-            .filter_map(|(member_id, display_name, email, role)| {
-                member_id.map(|member_id| MemberRow {
+            .filter_map(|row| {
+                row.member_id.map(|member_id| MemberRow {
                     member_id,
-                    display_name,
-                    email,
-                    role: i32::from(role),
+                    display_name: row.display_name,
+                    email: row.email,
+                    role: i32::from(row.role),
                 })
             })
             .collect())
@@ -1145,29 +1434,95 @@ impl ToolStore for PgToolStore {
         deps: &AssistantDeps,
         project_id: &Uuid,
     ) -> Result<bool, StoreError> {
-        let allowed: Option<bool> = sqlx::query_scalar(PROJECT_WRITE_GATE_SQL)
-            .bind(deps.user_id)
-            .bind(&deps.workspace_slug)
-            .bind(project_id)
-            .fetch_one(&self.pool)
-            .await?;
-        Ok(allowed.unwrap_or(false))
+        // `check_project_role(..., [ADMIN, MEMBER])`: an active member row
+        // with role 20/15, or any active membership plus workspace-admin.
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let write_role: Option<Uuid> = project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .filter(project_members::Column::MemberId.eq(deps.user_id))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(project_members::Column::ProjectId.eq(*project_id))
+            .filter(project_members::Column::Role.is_in([20i16, 15i16]))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        if write_role.is_some() {
+            return Ok(true);
+        }
+        let any_member: Option<Uuid> = project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .filter(project_members::Column::MemberId.eq(deps.user_id))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(project_members::Column::ProjectId.eq(*project_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        if any_member.is_none() {
+            return Ok(false);
+        }
+        let admin: Option<Uuid> = pidash_db::entity::workspace_members::Entity::find()
+            .select_only()
+            .column(pidash_db::entity::workspace_members::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                pidash_db::entity::workspace_members::Relation::Workspaces.def(),
+            )
+            .filter(pidash_db::entity::workspace_members::Column::MemberId.eq(deps.user_id))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(pidash_db::entity::workspace_members::Column::Role.eq(20i16))
+            .filter(pidash_db::entity::workspace_members::Column::IsActive.eq(true))
+            .filter(pidash_db::entity::workspace_members::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(admin.is_some())
     }
 
     async fn agent_runs(&self, issue_id: &Uuid) -> Result<Vec<AgentRunRow>, StoreError> {
-        let rows: Vec<(Uuid, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT id, status, created_at FROM agent_run \
-             WHERE work_item_id = $1 ORDER BY created_at DESC LIMIT 5",
-        )
-        .bind(issue_id)
-        .fetch_all(&self.pool)
-        .await?;
+        #[derive(Debug, FromQueryResult)]
+        struct RunRow {
+            id: Uuid,
+            status: String,
+            created_at: Option<DateTime<Utc>>,
+        }
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<RunRow> = agent_run::Entity::find()
+            .select_only()
+            .columns([
+                agent_run::Column::Id,
+                agent_run::Column::Status,
+                agent_run::Column::CreatedAt,
+            ])
+            .filter(agent_run::Column::WorkItemId.eq(*issue_id))
+            .order_by_desc(agent_run::Column::CreatedAt)
+            .limit(5)
+            .into_model()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
-            .map(|(id, status, created_at)| AgentRunRow {
-                id,
-                status,
-                created_at,
+            .map(|row| AgentRunRow {
+                id: row.id,
+                status: row.status,
+                created_at: row.created_at,
             })
             .collect())
     }
@@ -1180,29 +1535,54 @@ impl ToolStore for PgToolStore {
     ) -> Result<Option<IssueRow>, StoreError> {
         // `.first()` under `Issue.Meta.ordering` (`-created_at`);
         // the `::int` cast keeps int4-range parity with Django's bind
-        // (out-of-range tails raise instead of missing).
-        let sql = format!(
-            "SELECT {ISSUE_ROW_COLUMNS} {SCOPED_ISSUES_FILTER} \
-             AND UPPER(projects.identifier) = UPPER($3) AND issues.sequence_id = $4::int \
-             ORDER BY issues.created_at DESC LIMIT 1"
-        );
-        let rows = sqlx::query(&sql)
-            .bind(deps.user_id)
-            .bind(&deps.workspace_slug)
-            .bind(project_ident)
-            .bind(sequence_id)
-            .fetch_all(&self.pool)
-            .await?;
-        rows.first().map(decode_issue_row).transpose()
+        // (out-of-range tails raise instead of missing). SeaORM binds the
+        // i64 onto the int4 column with a typed value instead.
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = issue_row_projection(scoped_issues_base(deps.user_id, &deps.workspace_slug))
+            .filter(
+                Expr::expr(Func::upper(Expr::col((
+                    projects::Entity,
+                    projects::Column::Identifier,
+                ))))
+                .eq(Func::upper(Expr::val(project_ident.to_owned()))),
+            )
+            .filter(issues::Column::SequenceId.eq(sequence_id as i32))
+            .order_by_desc(issues::Column::CreatedAt)
+            .into_model::<IssueJoinedRow>()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(row.map(issue_row_from_joined))
     }
 
     async fn pair_rows(&self, a_id: &Uuid, b_id: &Uuid) -> Result<Vec<PairRow>, StoreError> {
-        let rows: Vec<(Uuid, Uuid, Uuid, String)> =
-            sqlx::query_as(pidash_services::assistant::tools_issues::PAIR_ROWS_SQL)
-                .bind(a_id)
-                .bind(b_id)
-                .fetch_all(&self.pool)
-                .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, Uuid, Uuid, String)> = issue_relations::Entity::find()
+            .select_only()
+            .columns([
+                issue_relations::Column::Id,
+                issue_relations::Column::IssueId,
+                issue_relations::Column::RelatedIssueId,
+                issue_relations::Column::RelationType,
+            ])
+            .filter(
+                Condition::any()
+                    .add(
+                        Condition::all()
+                            .add(issue_relations::Column::IssueId.eq(*a_id))
+                            .add(issue_relations::Column::RelatedIssueId.eq(*b_id)),
+                    )
+                    .add(
+                        Condition::all()
+                            .add(issue_relations::Column::IssueId.eq(*b_id))
+                            .add(issue_relations::Column::RelatedIssueId.eq(*a_id)),
+                    ),
+            )
+            .filter(issue_relations::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
             .map(|(id, issue_id, related_issue_id, relation_type)| PairRow {
@@ -1325,12 +1705,34 @@ impl ToolStore for PgToolStore {
         issue_id: &Uuid,
         workspace_id: &Uuid,
     ) -> Result<Vec<PairRow>, StoreError> {
-        let rows: Vec<(Uuid, Uuid, Uuid, String)> =
-            sqlx::query_as(pidash_services::assistant::tools_issues::GROUPED_RELATIONS_SQL)
-                .bind(issue_id)
-                .bind(workspace_id)
-                .fetch_all(&self.pool)
-                .await?;
+        // Every live row touching the issue in its workspace, self-pairs
+        // excluded (`GROUPED_RELATIONS_SQL`).
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, Uuid, Uuid, String)> = issue_relations::Entity::find()
+            .select_only()
+            .columns([
+                issue_relations::Column::Id,
+                issue_relations::Column::IssueId,
+                issue_relations::Column::RelatedIssueId,
+                issue_relations::Column::RelationType,
+            ])
+            .filter(
+                Condition::any()
+                    .add(issue_relations::Column::IssueId.eq(*issue_id))
+                    .add(issue_relations::Column::RelatedIssueId.eq(*issue_id)),
+            )
+            .filter(issue_relations::Column::WorkspaceId.eq(*workspace_id))
+            .filter(
+                Condition::all()
+                    .add(issue_relations::Column::IssueId.eq(*issue_id))
+                    .add(issue_relations::Column::RelatedIssueId.eq(*issue_id))
+                    .not(),
+            )
+            .filter(issue_relations::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
             .map(|(id, issue_id, related_issue_id, relation_type)| PairRow {
@@ -1351,42 +1753,58 @@ impl ToolStore for PgToolStore {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows: Vec<GroupedReadTuple> = sqlx::query_as(&format!(
-            "SELECT issues.id, projects.identifier, issues.sequence_id, issues.name, \
-                 states.name, states.group {SCOPED_ISSUES_FILTER} \
-                 AND issues.id = ANY($3) AND issues.workspace_id = $4"
-        ))
-        .bind(deps.user_id)
-        .bind(&deps.workspace_slug)
-        .bind(ids)
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await?;
+        #[derive(Debug, FromQueryResult)]
+        struct GroupedRead {
+            id: Uuid,
+            project_identifier: String,
+            sequence_id: i32,
+            name: String,
+            state_name: Option<String>,
+            state_group: Option<String>,
+        }
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<GroupedRead> = scoped_issues_base(deps.user_id, &deps.workspace_slug)
+            .select_only()
+            .columns([
+                issues::Column::Id,
+                issues::Column::SequenceId,
+                issues::Column::Name,
+            ])
+            .column_as(projects::Column::Identifier, "project_identifier")
+            .column_as(states::Column::Name, "state_name")
+            .column_as(states::Column::Group, "state_group")
+            .filter(issues::Column::Id.is_in(ids.to_vec()))
+            .filter(issues::Column::WorkspaceId.eq(*workspace_id))
+            .into_model()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(rows
             .into_iter()
-            .map(
-                |(id, project_identifier, sequence_id, name, state_name, state_group)| {
-                    GroupedIssueRow {
-                        id,
-                        project_identifier,
-                        sequence_id: i64::from(sequence_id),
-                        name,
-                        state_name,
-                        state_group,
-                    }
-                },
-            )
+            .map(|row| GroupedIssueRow {
+                id: row.id,
+                project_identifier: row.project_identifier,
+                sequence_id: i64::from(row.sequence_id),
+                name: row.name,
+                state_name: row.state_name,
+                state_group: row.state_group,
+            })
             .collect())
     }
 
     async fn issue_parent_id(&self, issue_id: &Uuid) -> Result<Option<Uuid>, StoreError> {
         // `Issue.objects.filter(pk).values_list("parent_id").first()`:
         // the plain manager (soft-delete only, triage included).
-        let parent: Option<Option<Uuid>> =
-            sqlx::query_scalar("SELECT parent_id FROM issues WHERE id = $1 AND deleted_at IS NULL")
-                .bind(issue_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let parent: Option<Option<Uuid>> = issues::Entity::find()
+            .select_only()
+            .column(issues::Column::ParentId)
+            .filter(issues::Column::Id.eq(*issue_id))
+            .filter(issues::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(parent.flatten())
     }
 
@@ -1395,16 +1813,18 @@ impl ToolStore for PgToolStore {
         input: &NewIssueInput,
         now: &DateTime<Utc>,
     ) -> Result<IssueRow, StoreError> {
-        use pidash_db::ops::repair::{convert_uuid_to_integer, ADVISORY_LOCK_SQL};
         let mut tx = self.pool.begin().await?;
         // The tool's `Project.objects.select_for_update().get(...)`
         // (`issues.py:259`); missing is `DoesNotExist` → internal.
-        let locked: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-        )
-        .bind(input.project_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let locked: Option<Uuid> = projects::Entity::find_by_id(input.project_id)
+            .filter(projects::Column::DeletedAt.is_null())
+            .lock_exclusive()
+            .select_only()
+            .column(projects::Column::Id)
+            .into_tuple()
+            .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+            .await
+            .map_err(orm_err)?;
         if locked.is_none() {
             return Err(StoreError::Missing { model: "Project" });
         }
@@ -1412,20 +1832,39 @@ impl ToolStore for PgToolStore {
         // intentionally not repeated: `Issue.save` overwrites the
         // passed `sequence_id` from `issue_sequences` (`issue.py:313`),
         // so the read is unobservable (a lock-free SELECT).
-        sqlx::query(ADVISORY_LOCK_SQL)
-            .bind(convert_uuid_to_integer(&input.project_id))
-            .execute(&mut *tx)
-            .await?;
+        // raw-sql: `pg_advisory_xact_lock` is the D-37 advisory-lock
+        // statement the repair precedent ports for `Issue.save`'s
+        // sequence allocation; it is not an entity query.
+        {
+            let key = pidash_db::ops::repair::convert_uuid_to_integer(&input.project_id);
+            let stmt = sea_orm::sea_query::Query::select()
+                .expr(
+                    sea_orm::sea_query::Func::cust(sea_orm::sea_query::Alias::new(
+                        "pg_advisory_xact_lock",
+                    ))
+                    .arg(key),
+                )
+                .to_owned();
+            pidash_db::orm_tx::TxConn::new(&mut tx)
+                .execute_unprepared(&stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder))
+                .await
+                .map_err(orm_err)?;
+        }
         // `IssueSequence.objects` is the soft-delete manager, and
         // `sequence` is a `PositiveBigIntegerField` (int8).
-        let last: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(sequence) FROM issue_sequences \
-             WHERE project_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(input.project_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let sequence: i64 = last.map(|value| value.saturating_add(1)).unwrap_or(1);
+        let last: Option<Option<i64>> = issue_sequences::Entity::find()
+            .select_only()
+            .column_as(issue_sequences::Column::Sequence.max(), "m")
+            .filter(issue_sequences::Column::ProjectId.eq(input.project_id))
+            .filter(issue_sequences::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+            .await
+            .map_err(orm_err)?;
+        let sequence: i64 = last
+            .flatten()
+            .map(|value| value.saturating_add(1))
+            .unwrap_or(1);
         // `Issue.save` None-state resolution (`issue.py:286-301`):
         // default non-triage state, else the first non-triage row
         // (`.first()` under `State.Meta.ordering`, so lowest
@@ -1433,31 +1872,39 @@ impl ToolStore for PgToolStore {
         // query expression and the `StateManager` group exclusion apply:
         // seeded Triage rows carry `is_triage = FALSE` (the project seed
         // never sets it), so the column alone would admit them.
-        let state_id =
-            match input.state_id {
-                Some(id) => Some(id),
-                None => {
-                    let default: Option<Uuid> = sqlx::query_scalar(
-                        "SELECT id FROM states WHERE project_id = $1 AND is_triage = FALSE \
-                         AND deleted_at IS NULL AND NOT (states.group = 'triage') \
-                         AND states.default ORDER BY sequence LIMIT 1",
-                    )
-                    .bind(input.project_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-                    match default {
-                        Some(id) => Some(id),
-                        None => sqlx::query_scalar(
-                            "SELECT id FROM states WHERE project_id = $1 AND is_triage = FALSE \
-                             AND deleted_at IS NULL AND NOT (states.group = 'triage') \
-                             ORDER BY sequence LIMIT 1",
-                        )
-                        .bind(input.project_id)
-                        .fetch_optional(&mut *tx)
-                        .await?,
-                    }
+        let state_id = match input.state_id {
+            Some(id) => Some(id),
+            None => {
+                let default: Option<Uuid> = states::Entity::find()
+                    .select_only()
+                    .column(states::Column::Id)
+                    .filter(states::Column::ProjectId.eq(input.project_id))
+                    .filter(states::Column::IsTriage.eq(false))
+                    .filter(states::Column::DeletedAt.is_null())
+                    .filter(states::Column::Group.ne("triage"))
+                    .filter(states::Column::Default.eq(true))
+                    .order_by_asc(states::Column::Sequence)
+                    .into_tuple()
+                    .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                    .await
+                    .map_err(orm_err)?;
+                match default {
+                    Some(id) => Some(id),
+                    None => states::Entity::find()
+                        .select_only()
+                        .column(states::Column::Id)
+                        .filter(states::Column::ProjectId.eq(input.project_id))
+                        .filter(states::Column::IsTriage.eq(false))
+                        .filter(states::Column::DeletedAt.is_null())
+                        .filter(states::Column::Group.ne("triage"))
+                        .order_by_asc(states::Column::Sequence)
+                        .into_tuple()
+                        .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                        .await
+                        .map_err(orm_err)?,
                 }
-            };
+            }
+        };
         // `completed_at` (`issue.py:302-309`): only when the caller
         // passed a state — a None resolved above skips the stamp (the
         // `else` quirk).
@@ -1465,11 +1912,14 @@ impl ToolStore for PgToolStore {
         let mut state_name: Option<String> = None;
         let mut state_group: Option<String> = None;
         if let Some(id) = state_id {
-            let row: Option<(String, String)> =
-                sqlx::query_as("SELECT name, states.group FROM states WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
+            let row: Option<(String, String)> = states::Entity::find()
+                .select_only()
+                .columns([states::Column::Name, states::Column::Group])
+                .filter(states::Column::Id.eq(id))
+                .into_tuple()
+                .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                .await
+                .map_err(orm_err)?;
             if let Some((name, group)) = row {
                 if input.state_id.is_some() && group == "completed" {
                     completed_at = Some(*now);
@@ -1479,34 +1929,39 @@ impl ToolStore for PgToolStore {
             }
         }
         // `assigned_pod` (`issue.py:276-284`): the project's default pod.
-        let assigned_pod: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM pod WHERE project_id = $1 AND is_default AND deleted_at IS NULL LIMIT 1",
-        )
-        .bind(input.project_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let assigned_pod: Option<Uuid> = pod::Entity::find()
+            .select_only()
+            .column(pod::Column::Id)
+            .filter(pod::Column::ProjectId.eq(input.project_id))
+            .filter(pod::Column::IsDefault.eq(true))
+            .filter(pod::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+            .await
+            .map_err(orm_err)?;
         // `sort_order` (`issue.py:333-340`): max in (project, state) +
         // 10000, else the 65535 default. `Issue.objects` (soft-delete
         // only) — including triage/archived/draft rows.
-        let largest: Option<f64> = if let Some(id) = state_id {
-            sqlx::query_scalar(
-                "SELECT MAX(sort_order) FROM issues \
-                 WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL",
-            )
-            .bind(input.project_id)
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?
-        } else {
-            sqlx::query_scalar(
-                "SELECT MAX(sort_order) FROM issues \
-                 WHERE project_id = $1 AND state_id IS NULL AND deleted_at IS NULL",
-            )
-            .bind(input.project_id)
-            .fetch_one(&mut *tx)
-            .await?
+        let largest: Option<Option<f64>> = {
+            let query = issues::Entity::find()
+                .select_only()
+                .column_as(issues::Column::SortOrder.max(), "m")
+                .filter(issues::Column::ProjectId.eq(input.project_id))
+                .filter(issues::Column::DeletedAt.is_null());
+            let query = match state_id {
+                Some(id) => query.filter(issues::Column::StateId.eq(id)),
+                None => query.filter(issues::Column::StateId.is_null()),
+            };
+            query
+                .into_tuple()
+                .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                .await
+                .map_err(orm_err)?
         };
-        let sort_order = largest.map(|value| value + 10000.0).unwrap_or(65535.0);
+        let sort_order = largest
+            .flatten()
+            .map(|value| value + 10000.0)
+            .unwrap_or(65535.0);
         // `description_stripped` (`issue.py:341-350`): the MLStripper
         // recompute, None for empty HTML.
         let stripped: Option<String> = if input.description_html.is_empty() {
@@ -1586,12 +2041,14 @@ impl ToolStore for PgToolStore {
         // The creator's BYOK key presence for the managed-LLM profile
         // closure (D-11 `drive_transition`); a pre-tx pool read, as the
         // drive's was before fusing.
-        let key_row: Option<Option<Vec<u8>>> = sqlx::query_scalar(
-            "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
-        )
-        .bind(actor_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let key_row: Option<Option<Vec<u8>>> = assistant_user_llm_config::Entity::find()
+            .select_only()
+            .column(assistant_user_llm_config::Column::ApiKeyEncrypted)
+            .filter(assistant_user_llm_config::Column::UserId.eq(*actor_id))
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(&self.pool))
+            .await
+            .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
         let cloud = self.cloud.clone();
@@ -1627,17 +2084,18 @@ impl ToolStore for PgToolStore {
         // the locked row's pre-save name/group (`from_state =
         // locked.state`, `issues.py:339`) — the pre-lock read may be
         // stale under a concurrent edit.
-        let locked: Option<LockedIssueTuple> = sqlx::query_as(
-            "SELECT issues.id, issues.state_id, states.name, states.group FROM issues \
-             LEFT OUTER JOIN states ON states.id = issues.state_id \
-             WHERE issues.id = $1 AND issues.deleted_at IS NULL FOR UPDATE OF issues",
-        )
-        .bind(issue_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
-        let Some((_, from_id, from_name, from_group)) = locked else {
+        let locked = issue_row_projection(unscoped_issue_select(*issue_id))
+            .filter(issues::Column::DeletedAt.is_null())
+            .lock_exclusive()
+            .into_model::<IssueJoinedRow>()
+            .one(&pidash_db::orm_tx::TxConn::new(tx.inner()))
+            .await
+            .map_err(orm_err)?;
+        let Some(locked) = locked else {
             return Err(StoreError::Missing { model: "Issue" });
         };
+        let (from_id, from_name, from_group) =
+            (locked.state_id, locked.state_name, locked.state_group);
         // `locked.save(update_fields=...)` (`issues.py:337-361`):
         // exactly the tool's columns (the write itself lives in
         // `domain::issues`, on this same fused transaction).
@@ -1659,17 +2117,13 @@ impl ToolStore for PgToolStore {
         .await?;
         // Post-save read (unscoped: scope was verified pre-lock; this
         // mirrors the in-memory `locked` row plus joined names).
-        let row: Option<IssueRowTuple> = sqlx::query_as(&format!(
-            "SELECT {ISSUE_ROW_COLUMNS} FROM issues \
-             INNER JOIN projects ON projects.id = issues.project_id \
-             LEFT OUTER JOIN states ON states.id = issues.state_id \
-             WHERE issues.id = $1"
-        ))
-        .bind(issue_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
+        let row = issue_row_projection(unscoped_issue_select(*issue_id))
+            .into_model::<IssueJoinedRow>()
+            .one(&pidash_db::orm_tx::TxConn::new(tx.inner()))
+            .await
+            .map_err(orm_err)?;
         let mut row = row
-            .map(issue_row_from_tuple)
+            .map(issue_row_from_joined)
             .ok_or(StoreError::Missing { model: "Issue" })?;
         // The save-time state: the completion-comment decision below
         // stays keyed to the save (`to_state`), exactly as Django's
@@ -1727,9 +2181,7 @@ impl ToolStore for PgToolStore {
                 crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
             let triggered_by =
                 pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
-            sqlx::query("SAVEPOINT turn_preflight_probe")
-                .execute(&mut **tx.inner())
-                .await?;
+            self.probe_savepoint(&mut tx).await?;
             let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
             // `resolve_pod_for_issue` reads issue + pods only (no
             // ticker), so probing pre-reconcile decides identically to
@@ -1768,9 +2220,7 @@ impl ToolStore for PgToolStore {
             // writes, and its log lines are dropped (the re-run emits
             // the real bounce's lines once).
             let (mut tx, _, _, _, _, _) = probe_store.into_parts();
-            sqlx::query("ROLLBACK TO SAVEPOINT turn_preflight_probe")
-                .execute(&mut **tx.inner())
-                .await?;
+            self.rollback_probe_savepoint(&mut tx).await?;
             let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
             let mut stub = FixedPreflight {
                 proceed,
@@ -1857,17 +2307,13 @@ impl ToolStore for PgToolStore {
         // locked and the bounce wrote here, so a miss is unreachable;
         // `Missing` keeps the file's lost-race shape (PIDASHCONV-1444).
         if changed {
-            let fresh: Option<IssueRowTuple> = sqlx::query_as(&format!(
-                "SELECT {ISSUE_ROW_COLUMNS} FROM issues \
-                 INNER JOIN projects ON projects.id = issues.project_id \
-                 LEFT OUTER JOIN states ON states.id = issues.state_id \
-                 WHERE issues.id = $1"
-            ))
-            .bind(issue_id)
-            .fetch_optional(&mut **tx.inner())
-            .await?;
+            let fresh = issue_row_projection(unscoped_issue_select(*issue_id))
+                .into_model::<IssueJoinedRow>()
+                .one(&pidash_db::orm_tx::TxConn::new(tx.inner()))
+                .await
+                .map_err(orm_err)?;
             row = fresh
-                .map(issue_row_from_tuple)
+                .map(issue_row_from_joined)
                 .ok_or(StoreError::Missing { model: "Issue" })?;
         }
         tx.commit().await?;
@@ -1928,12 +2374,14 @@ impl ToolStore for PgToolStore {
         };
         // The creator's BYOK key presence for the managed-LLM profile
         // closure (D-11 `drive_transition`).
-        let key_row: Option<Option<Vec<u8>>> = sqlx::query_scalar(
-            "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
-        )
-        .bind(actor_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let key_row: Option<Option<Vec<u8>>> = assistant_user_llm_config::Entity::find()
+            .select_only()
+            .column(assistant_user_llm_config::Column::ApiKeyEncrypted)
+            .filter(assistant_user_llm_config::Column::UserId.eq(*actor_id))
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(&self.pool))
+            .await
+            .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
         let cloud = self.cloud.clone();
@@ -2042,12 +2490,14 @@ impl ToolStore for PgToolStore {
         };
         // The creator's BYOK key presence for the managed-LLM profile
         // closure (D-11 `drive_transition`).
-        let key_row: Option<Option<Vec<u8>>> = sqlx::query_scalar(
-            "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
-        )
-        .bind(actor_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let key_row: Option<Option<Vec<u8>>> = assistant_user_llm_config::Entity::find()
+            .select_only()
+            .column(assistant_user_llm_config::Column::ApiKeyEncrypted)
+            .filter(assistant_user_llm_config::Column::UserId.eq(*actor_id))
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(&self.pool))
+            .await
+            .map_err(orm_err)?;
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
         let cloud = self.cloud.clone();
@@ -2107,9 +2557,7 @@ impl ToolStore for PgToolStore {
         let matcher = crate::v1_work_items::handlers_actions::LiveMatcher::new(self.pool.clone());
         let triggered_by = pidash_db::dispatch::status::AgentRunTrigger::StateTransition.value();
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
-        sqlx::query("SAVEPOINT turn_preflight_probe")
-            .execute(&mut **tx.inner())
-            .await?;
+        self.probe_savepoint(&mut tx).await?;
         let mut probe_store = LiveCreationStore::new(tx, &self.pool, make_deps());
         // `resolve_pod_for_issue` reads issue + pods only (no
         // ticker), so probing pre-reconcile decides identically to
@@ -2148,9 +2596,7 @@ impl ToolStore for PgToolStore {
         // writes, and its log lines are dropped (the re-run emits
         // the real bounce's lines once).
         let (mut tx, _, _, _, _, _) = probe_store.into_parts();
-        sqlx::query("ROLLBACK TO SAVEPOINT turn_preflight_probe")
-            .execute(&mut **tx.inner())
-            .await?;
+        self.rollback_probe_savepoint(&mut tx).await?;
         let mut drive_store = LiveCreationStore::new(tx, &self.pool, make_deps());
         let mut stub = FixedPreflight {
             proceed,
@@ -2359,10 +2805,14 @@ impl ToolStore for PgToolStore {
         // The open turn, if any (`filter(pk).first()` — None is fine).
         // The payload below still renders `str(deps.turn_id)`
         // unconditionally (`_results.py:107`).
-        let turn: Option<Uuid> = sqlx::query_scalar("SELECT id FROM assistant_turn WHERE id = $1")
-            .bind(deps.turn_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let turn: Option<Uuid> = assistant_turn::Entity::find()
+            .select_only()
+            .column(assistant_turn::Column::Id)
+            .filter(assistant_turn::Column::Id.eq(deps.turn_id))
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(&self.pool))
+            .await
+            .map_err(orm_err)?;
         // Message row (`events.create_message`): own transaction, thread
         // locked, thread-scoped seq. Missing thread is `DoesNotExist` →
         // internal. The lock blocks (as Python's `SELECT ... FOR
@@ -2376,24 +2826,28 @@ impl ToolStore for PgToolStore {
         let message_seq: i64;
         {
             let mut tx = self.pool.begin().await?;
-            let locked: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
-                    .bind(deps.thread_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
+            let locked: Option<Uuid> = assistant_thread::Entity::find_by_id(deps.thread_id)
+                .lock_exclusive()
+                .select_only()
+                .column(assistant_thread::Column::Id)
+                .into_tuple()
+                .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                .await
+                .map_err(orm_err)?;
             if locked.is_none() {
                 return Err(StoreError::Missing {
                     model: "AssistantThread",
                 });
             }
-            let max: Option<i64> = sqlx::query_scalar(&format!(
-                "SELECT MAX(m) FROM ({}) AS seqs",
-                events::next_message_seq_sql()
-            ))
-            .bind(deps.thread_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            message_seq = max.unwrap_or(0) + 1;
+            let max: Option<Option<i64>> = assistant_message::Entity::find()
+                .select_only()
+                .column_as(assistant_message::Column::Seq.max(), "m")
+                .filter(assistant_message::Column::ThreadId.eq(deps.thread_id))
+                .into_tuple()
+                .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                .await
+                .map_err(orm_err)?;
+            message_seq = max.flatten().unwrap_or(0) + 1;
             pidash_services::domain::assistant::create_message_row(
                 &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &pidash_services::domain::assistant::NewMessage {
@@ -2433,24 +2887,28 @@ impl ToolStore for PgToolStore {
         let event_seq: i64;
         {
             let mut tx = self.pool.begin().await?;
-            let locked: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM assistant_thread WHERE id = $1 FOR UPDATE")
-                    .bind(deps.thread_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
+            let locked: Option<Uuid> = assistant_thread::Entity::find_by_id(deps.thread_id)
+                .lock_exclusive()
+                .select_only()
+                .column(assistant_thread::Column::Id)
+                .into_tuple()
+                .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                .await
+                .map_err(orm_err)?;
             if locked.is_none() {
                 return Err(StoreError::Missing {
                     model: "AssistantThread",
                 });
             }
-            let max: Option<i64> = sqlx::query_scalar(&format!(
-                "SELECT MAX(m) FROM ({}) AS seqs",
-                events::next_event_seq_sql()
-            ))
-            .bind(deps.thread_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            event_seq = max.unwrap_or(0) + 1;
+            let max: Option<Option<i64>> = assistant_event::Entity::find()
+                .select_only()
+                .column_as(assistant_event::Column::Seq.max(), "m")
+                .filter(assistant_event::Column::ThreadId.eq(deps.thread_id))
+                .into_tuple()
+                .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                .await
+                .map_err(orm_err)?;
+            event_seq = max.flatten().unwrap_or(0) + 1;
             pidash_services::domain::assistant::append_event(
                 &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &pidash_services::domain::assistant::NewEvent {
@@ -2471,13 +2929,15 @@ impl ToolStore for PgToolStore {
         // is re-read (the builder has no `RETURNING`); the payload
         // renders spaced (`json.dumps`), not compact.
         if let Some(redis) = &self.redis {
-            let event_id: Option<i64> = sqlx::query_scalar(
-                "SELECT id FROM assistant_event WHERE thread_id = $1 AND seq = $2",
-            )
-            .bind(deps.thread_id)
-            .bind(event_seq)
-            .fetch_optional(&self.pool)
-            .await?;
+            let event_id: Option<i64> = assistant_event::Entity::find()
+                .select_only()
+                .column(assistant_event::Column::Id)
+                .filter(assistant_event::Column::ThreadId.eq(deps.thread_id))
+                .filter(assistant_event::Column::Seq.eq(event_seq))
+                .into_tuple()
+                .one(&pidash_db::pool::sea_orm_connection(&self.pool))
+                .await
+                .map_err(orm_err)?;
             if let Some(event_id) = event_id {
                 let thread_id = deps.thread_id.to_string();
                 let message_id = message_id.to_string();
@@ -2513,15 +2973,14 @@ impl ToolStore for PgToolStore {
         namespace: &str,
         repo: &str,
     ) -> Result<Option<Value>, StoreError> {
-        let config: Option<Value> =
-            sqlx::query_scalar(pidash_services::assistant::tools_github::BINDING_TOKEN_SQL)
-                .bind(deps.user_id)
-                .bind(&deps.workspace_slug)
-                .bind(provider)
-                .bind(namespace)
-                .bind(repo)
-                .fetch_optional(&self.pool)
-                .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let config: Option<Value> = Self::binding_config_query(deps, provider, namespace, repo)
+            .select_only()
+            .column(git_provider_accounts::Column::CredentialConfig)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(config)
     }
 
@@ -2531,14 +2990,49 @@ impl ToolStore for PgToolStore {
         namespace: &str,
         repo: &str,
     ) -> Result<Option<Value>, StoreError> {
-        let credentials: Option<Value> =
-            sqlx::query_scalar(pidash_services::assistant::tools_github::SYNC_TOKEN_SQL)
-                .bind(deps.user_id)
-                .bind(&deps.workspace_slug)
-                .bind(namespace)
-                .bind(repo)
-                .fetch_optional(&self.pool)
-                .await?;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let member_projects = projects::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                projects::Relation::ProjectMembers.def(),
+            )
+            .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+            .select_only()
+            .column(projects::Column::Id)
+            .distinct()
+            .filter(project_members::Column::MemberId.eq(deps.user_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(workspaces::Column::Slug.eq(&deps.workspace_slug))
+            .filter(projects::Column::DeletedAt.is_null())
+            .into_query();
+        let credentials: Option<Value> = github_repository_syncs::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                github_repository_syncs::Relation::GithubRepositories.def(),
+            )
+            .select_only()
+            .column(github_repository_syncs::Column::Credentials)
+            .filter(github_repository_syncs::Column::ProjectId.in_subquery(member_projects))
+            .filter(
+                Expr::expr(Func::upper(Expr::col((
+                    github_repositories::Entity,
+                    github_repositories::Column::Owner,
+                ))))
+                .eq(Func::upper(Expr::val(namespace.to_owned()))),
+            )
+            .filter(
+                Expr::expr(Func::upper(Expr::col((
+                    github_repositories::Entity,
+                    github_repositories::Column::Name,
+                ))))
+                .eq(Func::upper(Expr::val(repo.to_owned()))),
+            )
+            .filter(github_repository_syncs::Column::DeletedAt.is_null())
+            .order_by_desc(github_repository_syncs::Column::CreatedAt)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
         Ok(credentials)
     }
 
@@ -2754,11 +3248,6 @@ async fn enqueue_best_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_services::assistant::tools_issues::{MEMBER_PROJECTS_SQL, SCOPED_ISSUES_SQL};
-
-    fn squashed(text: &str) -> String {
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
 
     /// The event envelope carries `role: "tool_result"` (`kind` →
     /// `role`, `events.message_envelope`), with the full 9-key shape
@@ -3164,23 +3653,5 @@ mod tests {
         assert_eq!(row.2, "hello", "MLStripper comment_stripped");
         assert_eq!(desc.0, "<p>hello</p>", "description keeps the HTML");
         assert_eq!(desc.1.as_deref(), Some("hello"), "strip_tags row");
-    }
-
-    /// The inlined FROM/WHERE fragments equal the reviewed services
-    /// consts (the row readers only swap the SELECT list).
-    #[test]
-    fn sql_fragments_match_services_consts() {
-        assert_eq!(
-            squashed(&format!("SELECT DISTINCT issues.* {SCOPED_ISSUES_FILTER}")),
-            squashed(SCOPED_ISSUES_SQL),
-            "scoped issues fragment"
-        );
-        assert_eq!(
-            squashed(&format!(
-                "SELECT DISTINCT projects.id {MEMBER_PROJECTS_FILTER}"
-            )),
-            squashed(MEMBER_PROJECTS_SQL),
-            "member projects fragment"
-        );
     }
 }
