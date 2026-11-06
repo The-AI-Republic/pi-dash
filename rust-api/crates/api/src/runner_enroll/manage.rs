@@ -1201,6 +1201,14 @@ async fn render_runner_row(pool: &PgPool, row: &RunnerJoinRow) -> Result<String,
 // Dev-machine list (`runners.py:62-125`)
 // ---------------------------------------------------------------------------
 
+/// `{"error":"dev_machine_revoked"}` — 409 (`machine_identity.py`).
+pub const DEV_MACHINE_REVOKED_BODY: &str = r#"{"error":"dev_machine_revoked"}"#;
+
+/// `{"error": <message>}` for a machine-controls parse failure.
+fn machine_control_denial(message: &str) -> Response {
+    bad_request(&serde_json::to_string(&serde_json::json!({"error": message})).expect("error body renders"))
+}
+
 /// `GET /api/runners/dev-machines/` (`runners.py:62-125`): workspace
 /// required/member gate, the runner+token machine-id union with the
 /// three annotations + `control_online`, `-last_seen_at, -created_at`
@@ -1255,6 +1263,251 @@ pub async fn dev_machines_list(
         }
     }
     json_response(StatusCode::OK, format!("[{}]", bodies.join(",")))
+}
+
+/// The raw (unstripped) body `workspace` for
+/// [`manage_reads::request_workspace_id`]: falsy maps to `None` (the
+/// or-chain falls through to the query value), strings pass through,
+/// truthy non-strings are the source's `AttributeError` → 500.
+fn body_opt_raw(value: Option<&JVal>) -> Result<Option<String>, Response> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !j_truthy(value) {
+        return Ok(None);
+    }
+    match value {
+        JVal::Str(text) => Ok(Some(text.to_lossy_string())),
+        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
+            Err(server_error())
+        }
+    }
+}
+
+/// The M4 scope read for the machine PATCH (`_machine_is_in_workspace_scope`):
+/// miss or out-of-scope → 404 `not found`.
+async fn scope_machine_patch(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    machine_id: Uuid,
+) -> Result<bool, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let machine = manage_reads::machine_gate(&db, machine_id)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(machine) = machine else {
+        return Ok(false);
+    };
+    let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
+        workspace: WorkspaceId::from(workspace_id.to_string()),
+        authenticated: true,
+        visibility: i32::from(machine.visibility),
+        owned_by_requester: machine.owner_id == user_id,
+    });
+    if !can_view {
+        return Ok(false);
+    }
+    let runner_hit =
+        manage_reads::machine_scope_runner_exists(&db, machine_id, user_id, workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    let token_hit =
+        manage_reads::machine_scope_token_exists(&db, machine_id, user_id, workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    Ok(runner_hit || token_hit)
+}
+
+/// `PATCH /api/runners/dev-machines/<machine_id>/` (`runners.py`
+/// `DevMachineDeleteEndpoint.patch` + `machine_identity.py`): owner
+/// controls (`engine_paused_by_owner` / `engine_team_runs` / `label`).
+/// Flow: workspace 400, membership 403, parse 400, scope 404, update
+/// errors; the response is the annotated `_serialize_dev_machine`.
+pub async fn dev_machine_patch(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    Query(params): Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let body_raw = match data_get(&data, "workspace") {
+        Ok(value) => match body_opt_raw(value) {
+            Ok(raw) => raw,
+            Err(response) => return response,
+        },
+        Err(response) => return response,
+    };
+    let query_raw = crate::license::query_last(&params, "workspace");
+    let picked = manage_reads::request_workspace_id(body_raw.as_deref(), query_raw.as_deref());
+    if picked.is_empty() {
+        return bad_request(WORKSPACE_REQUIRED_BODY);
+    }
+    let workspace_id = match parse_uuid(&picked) {
+        Ok(workspace_id) => workspace_id,
+        Err(response) => return response,
+    };
+    let role = match workspace_role(&pool, workspace_id, user_id).await {
+        Ok(role) => role,
+        Err(response) => return response,
+    };
+    if !membership::is_workspace_member(role) {
+        return forbidden();
+    }
+    // Parse the controls from the JSON body (unknown-key/label/bool
+    // validation). A non-object body already 500'd at the workspace
+    // read above.
+    let JVal::Object(object) = &data else {
+        return server_error();
+    };
+    let map = crate::v1_cycles_modules::json::to_serde_publish_map(object);
+    let values =
+        match pidash_services::runner_enroll::machine_controls::parse_machine_controls(
+            &map,
+            &pidash_services::runner_enroll::machine_controls::WEB_FIELDS,
+        ) {
+            Ok(values) => values,
+            Err(message) => return machine_control_denial(&message),
+        };
+    match scope_machine_patch(&pool, user_id, workspace_id, machine_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let updated = {
+        let conn = TxConn::new(&mut tx);
+        pidash_services::runner_enroll::machine_controls::update_machine_controls(
+            &conn,
+            machine_id,
+            user_id,
+            &values,
+            now_micros(),
+        )
+        .await
+    };
+    let updated = match updated {
+        Ok(updated) => {
+            if tx.commit().await.is_err() {
+                return server_error();
+            }
+            updated
+        }
+        Err(
+            pidash_services::runner_enroll::machine_controls::UpdateError::Failure(failure),
+        ) => {
+            let _ = tx.rollback().await;
+            return match failure {
+                pidash_services::runner_enroll::machine_controls::MachineControlFailure::NotFound => {
+                    not_found()
+                }
+                pidash_services::runner_enroll::machine_controls::MachineControlFailure::Forbidden => {
+                    forbidden()
+                }
+                pidash_services::runner_enroll::machine_controls::MachineControlFailure::Revoked => {
+                    conflict(DEV_MACHINE_REVOKED_BODY)
+                }
+            };
+        }
+        Err(pidash_services::runner_enroll::machine_controls::UpdateError::Db(_)) => {
+            return server_error();
+        }
+    };
+    // `_serialize_dev_machine`: the M5 annotated re-read, falling back
+    // to the unannotated in-memory instance when the row vanished.
+    let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
+    let cutoff =
+        now_micros() - chrono::Duration::seconds(manage_reads::CONTROL_PRESENCE_WINDOW_SECS);
+    let row = match manage_reads::machine_serialize(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        machine_id,
+        user_id,
+        workspace_id,
+        visibility,
+        cutoff,
+    )
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return server_error(),
+    };
+    match row {
+        Some(row) => match render_machine(&DevMachineOwned::from(row)) {
+            Ok(body) => json_response(StatusCode::OK, body),
+            Err(response) => response,
+        },
+        None => {
+            // Unannotated fallback: omit the annotation keys, engine
+            // fields from the updated model.
+            let now = Utc::now();
+            let sign_in_state =
+                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    &updated.model.engine_sign_in_state,
+                    updated
+                        .model
+                        .engine_credential_expires_at
+                        .map(|at| at.with_timezone(&Utc)),
+                    now,
+                );
+            let render = DevMachineRender {
+                id: updated.model.id.to_string(),
+                host_label: updated.model.host_label.clone(),
+                label: updated.model.label.clone(),
+                visibility: i64::from(updated.model.visibility),
+                provisioning: updated.model.provisioning.clone(),
+                runner_count: None,
+                online_runner_count: None,
+                control_online: None,
+                engine_paused_by_owner: updated.model.engine_paused_by_owner,
+                engine_auto_pause_reason: updated.model.engine_auto_pause_reason.clone(),
+                engine_team_runs: updated.model.engine_team_runs,
+                engine_sign_in_state: sign_in_state,
+                engine_credential_expires_at: updated
+                    .model
+                    .engine_credential_expires_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                engine_state: updated.model.engine_state.clone(),
+                engine_state_reported_at: updated
+                    .model
+                    .engine_state_reported_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                merged_into: updated.model.merged_into_id.map(|id| id.to_string()),
+                last_seen_at: updated
+                    .model
+                    .last_seen_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                last_heartbeat_at: None,
+                revoked_at: updated
+                    .model
+                    .revoked_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                created_at: crate::serializer::render_datetime(&updated.model.created_at.with_timezone(&Utc)),
+                updated_at: crate::serializer::render_datetime(&updated.model.updated_at.with_timezone(&Utc)),
+            };
+            match render.to_json() {
+                Ok(body) => json_response(StatusCode::OK, body),
+                Err(response) => response,
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
