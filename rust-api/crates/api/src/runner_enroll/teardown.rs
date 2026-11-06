@@ -1177,9 +1177,18 @@ struct MachineRender {
     host_label: String,
     label: String,
     visibility: i64,
+    provisioning: String,
     runner_count: Option<i64>,
     online_runner_count: Option<i64>,
     control_online: Option<bool>,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<String>,
+    engine_state: Value,
+    engine_state_reported_at: Option<String>,
+    merged_into: Option<String>,
     last_seen_at: Option<String>,
     last_heartbeat_at: Option<Option<String>>,
     revoked_at: Option<String>,
@@ -1189,24 +1198,23 @@ struct MachineRender {
 
 impl MachineRender {
     fn to_json(&self) -> Result<String, Response> {
-        let engine_state = serde_json::json!({});
         let row = shapes::DevMachineRow {
             id: &self.id,
             host_label: &self.host_label,
             label: &self.label,
             visibility: self.visibility,
-            provisioning: "manual",
+            provisioning: &self.provisioning,
             runner_count: self.runner_count,
             online_runner_count: self.online_runner_count,
             control_online: self.control_online,
-            engine_paused_by_owner: false,
-            engine_auto_pause_reason: "",
-            engine_team_runs: false,
-            engine_sign_in_state: "never",
-            engine_credential_expires_at: None,
-            engine_state: &engine_state,
-            engine_state_reported_at: None,
-            merged_into: None,
+            engine_paused_by_owner: self.engine_paused_by_owner,
+            engine_auto_pause_reason: &self.engine_auto_pause_reason,
+            engine_team_runs: self.engine_team_runs,
+            engine_sign_in_state: &self.engine_sign_in_state,
+            engine_credential_expires_at: self.engine_credential_expires_at.as_deref(),
+            engine_state: &self.engine_state,
+            engine_state_reported_at: self.engine_state_reported_at.as_deref(),
+            merged_into: self.merged_into.as_deref(),
             last_seen_at: self.last_seen_at.as_deref(),
             last_heartbeat_at: self
                 .last_heartbeat_at
@@ -1254,14 +1262,34 @@ async fn serialize_machine(
             Some((revoked_at, updated_at)) => (Some(revoked_at), updated_at),
             None => (machine.revoked_at, machine.updated_at),
         };
+        let fallback_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+            &machine.engine_sign_in_state,
+            machine.engine_credential_expires_at,
+            Utc::now(),
+        );
         return MachineRender {
             id: machine.id.to_string(),
             host_label: machine.host_label.clone(),
             label: machine.label.clone(),
             visibility: i64::from(machine.visibility),
+            provisioning: machine.provisioning.clone(),
             runner_count: None,
             online_runner_count: None,
             control_online: None,
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+            engine_team_runs: machine.engine_team_runs,
+            engine_sign_in_state: fallback_state,
+            engine_credential_expires_at: machine
+                .engine_credential_expires_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+            engine_state: machine.engine_state.clone(),
+            engine_state_reported_at: machine
+                .engine_state_reported_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+            merged_into: machine.merged_into_id.map(|id| id.to_string()),
             last_seen_at: machine
                 .last_seen_at
                 .as_ref()
@@ -1273,14 +1301,34 @@ async fn serialize_machine(
         }
         .to_json();
     };
+    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+        &row.engine_sign_in_state,
+        row.engine_credential_expires_at,
+        Utc::now(),
+    );
     MachineRender {
         id: machine.id.to_string(),
         host_label: row.host_label,
         label: row.label,
         visibility: i64::from(machine.visibility),
+        provisioning: row.provisioning,
         runner_count: Some(row.runner_count),
         online_runner_count: Some(row.online_runner_count),
         control_online: Some(row.control_online),
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_team_runs: row.engine_team_runs,
+        engine_sign_in_state: sign_in_state,
+        engine_credential_expires_at: row
+            .engine_credential_expires_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        engine_state: row.engine_state,
+        engine_state_reported_at: row
+            .engine_state_reported_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        merged_into: row.merged_into_id.map(|id| id.to_string()),
         last_seen_at: row
             .last_seen_at
             .as_ref()
@@ -1311,6 +1359,7 @@ struct FullRunner {
     name: String,
     host_label: String,
     provisioning: String,
+    pod_dispatch: String,
     visibility: i16,
     enrolled_at: Option<DateTime<Utc>>,
     capabilities: Value,
@@ -1341,6 +1390,7 @@ impl From<runner::Model> for FullRunner {
             name: row.name,
             host_label: row.host_label,
             provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
             visibility: row.visibility,
             enrolled_at: row.enrolled_at.map(at),
             capabilities: row.capabilities,
@@ -1387,11 +1437,16 @@ struct PodMiniOwned {
     project_id: Uuid,
 }
 
-/// Owned `dev_machine` mini (`serializers.py:145-153`).
+/// Owned `dev_machine` mini (`serializers.py:145-153` + #2910 trio).
 struct DevMachineMiniOwned {
     id: String,
     host_label: String,
     label: String,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
@@ -1450,7 +1505,12 @@ struct RunnerRender {
     name: String,
     status: String,
     host_label: String,
+    is_engine: bool,
+    engine_paused: bool,
+    dispatch_paused: bool,
+    machine_display_name: String,
     provisioning: String,
+    pod_dispatch: String,
     os: String,
     arch: String,
     runner_version: String,
@@ -1485,19 +1545,34 @@ impl RunnerRender {
             project: &project_id,
             project_identifier: &self.pod_identifier,
         };
-        let dev_machine =
-            self.dev_machine_detail
-                .as_ref()
-                .map(|detail| shapes::DevMachineMiniRow {
+        let now = Utc::now();
+        let dev_mini_state;
+        let dev_mini_expires;
+        let dev_machine = match self.dev_machine_detail.as_ref() {
+            Some(detail) => {
+                dev_mini_state =
+                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        &detail.engine_sign_in_state,
+                        detail.engine_credential_expires_at,
+                        now,
+                    );
+                dev_mini_expires = detail
+                    .engine_credential_expires_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime);
+                Some(shapes::DevMachineMiniRow {
                     id: &detail.id,
                     host_label: &detail.host_label,
                     label: &detail.label,
-                    engine_paused_by_owner: false,
-                    engine_auto_pause_reason: "",
-                    engine_team_runs: false,
-                    engine_sign_in_state: "never",
-                    engine_credential_expires_at: None,
-                });
+                    engine_paused_by_owner: detail.engine_paused_by_owner,
+                    engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                    engine_team_runs: detail.engine_team_runs,
+                    engine_sign_in_state: &dev_mini_state,
+                    engine_credential_expires_at: dev_mini_expires.as_deref(),
+                })
+            }
+            None => None,
+        };
         let live_state = self.live_state.as_ref().map(|live| shapes::LiveStateRow {
             observed_run_id: live.observed_run_id.as_deref(),
             last_event_at: live.last_event_at.as_deref(),
@@ -1518,12 +1593,12 @@ impl RunnerRender {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
-            is_engine: false,
-            engine_paused: false,
-            dispatch_paused: false,
-            machine_display_name: &self.host_label,
+            is_engine: self.is_engine,
+            engine_paused: self.engine_paused,
+            dispatch_paused: self.dispatch_paused,
+            machine_display_name: &self.machine_display_name,
             provisioning: &self.provisioning,
-            pod_dispatch: "pod_member",
+            pod_dispatch: &self.pod_dispatch,
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
@@ -1590,10 +1665,42 @@ async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
             .ok_or_else(server_error)?;
         dev_machine_detail = Some(DevMachineMiniOwned {
             id: machine.id.to_string(),
-            host_label: machine.host_label,
-            label: machine.label,
+            host_label: machine.host_label.clone(),
+            label: machine.label.clone(),
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+            engine_team_runs: machine.engine_team_runs,
+            engine_sign_in_state: machine.engine_sign_in_state.clone(),
+            engine_credential_expires_at: machine
+                .engine_credential_expires_at
+                .map(|at| at.with_timezone(&Utc)),
         });
     }
+    let is_engine = runner.provisioning == "desktop_bundled";
+    let engine_paused = match &dev_machine_detail {
+        Some(machine) if is_engine => {
+            machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty()
+        }
+        _ => false,
+    };
+    let machine_display_name = match &dev_machine_detail {
+        Some(machine) => {
+            if !machine.label.is_empty() {
+                machine.label.clone()
+            } else if !machine.host_label.is_empty() {
+                machine.host_label.clone()
+            } else {
+                "This computer".to_owned()
+            }
+        }
+        None => {
+            if !runner.host_label.is_empty() {
+                runner.host_label.clone()
+            } else {
+                runner.name.clone()
+            }
+        }
+    };
     // Lazy `pod.project.identifier`: a forward-FK read through
     // `Project._base_manager`, so a tombstoned project still renders.
     let (_, pod_identifier) = catalog_reads::project_facts(&db, project_id, false)
@@ -1606,7 +1713,12 @@ async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
         name: runner.name.clone(),
         status: runner.status.clone(),
         host_label: runner.host_label.clone(),
+        is_engine,
+        engine_paused,
+        dispatch_paused: runner.paused_at.is_some(),
+        machine_display_name,
         provisioning: runner.provisioning.clone(),
+        pod_dispatch: runner.pod_dispatch.clone(),
         os: runner.os.clone(),
         arch: runner.arch.clone(),
         runner_version: runner.runner_version.clone(),

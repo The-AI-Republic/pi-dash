@@ -584,13 +584,22 @@ pub async fn project_identifier_exists(
 // ---------------------------------------------------------------------------
 
 /// One M3 list row: the serialized machine columns plus the four
-/// annotations.
+/// annotations (#2910 engine state).
 #[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct MachineListRow {
     pub id: Uuid,
     pub host_label: String,
     pub label: String,
     pub visibility: i16,
+    pub provisioning: String,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: String,
+    pub engine_credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub engine_state: serde_json::Value,
+    pub engine_state_reported_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub merged_into_id: Option<Uuid>,
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -708,6 +717,15 @@ fn annotated_machines(
             dev_machine::Column::HostLabel,
             dev_machine::Column::Label,
             dev_machine::Column::Visibility,
+            dev_machine::Column::Provisioning,
+            dev_machine::Column::EnginePausedByOwner,
+            dev_machine::Column::EngineAutoPauseReason,
+            dev_machine::Column::EngineTeamRuns,
+            dev_machine::Column::EngineSignInState,
+            dev_machine::Column::EngineCredentialExpiresAt,
+            dev_machine::Column::EngineState,
+            dev_machine::Column::EngineStateReportedAt,
+            dev_machine::Column::MergedIntoId,
             dev_machine::Column::LastSeenAt,
             dev_machine::Column::RevokedAt,
             dev_machine::Column::CreatedAt,
@@ -748,7 +766,8 @@ pub async fn machine_list(
 
 /// One R1/R2 row: the runner's serialized columns, its dev-machine mini
 /// (NULL when the `LEFT JOIN` misses: legacy enrollments with no
-/// machine), its pod and the pod's project identifier.
+/// machine), its pod and the pod's project identifier (#2910 engine
+/// dispatch + mini engine trio).
 #[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct RunnerJoinRow {
     pub id: Uuid,
@@ -759,6 +778,7 @@ pub struct RunnerJoinRow {
     pub name: String,
     pub host_label: String,
     pub provisioning: String,
+    pub pod_dispatch: String,
     pub visibility: i16,
     pub enrolled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub capabilities: serde_json::Value,
@@ -778,6 +798,11 @@ pub struct RunnerJoinRow {
     pub dm_id: Option<Uuid>,
     pub dm_host_label: Option<String>,
     pub dm_label: Option<String>,
+    pub dm_engine_paused_by_owner: Option<bool>,
+    pub dm_engine_auto_pause_reason: Option<String>,
+    pub dm_engine_team_runs: Option<bool>,
+    pub dm_engine_sign_in_state: Option<String>,
+    pub dm_engine_credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub pod_workspace_id: Uuid,
     pub pod_project_id: Uuid,
     pub pod_name: String,
@@ -811,6 +836,7 @@ fn runner_join_query() -> Select<runner::Entity> {
             runner::Column::Name,
             runner::Column::HostLabel,
             runner::Column::Provisioning,
+            runner::Column::PodDispatch,
             runner::Column::Visibility,
             runner::Column::EnrolledAt,
             runner::Column::Capabilities,
@@ -831,6 +857,11 @@ fn runner_join_query() -> Select<runner::Entity> {
         .column_as(dev_machine::Column::Id, "dm_id")
         .column_as(dev_machine::Column::HostLabel, "dm_host_label")
         .column_as(dev_machine::Column::Label, "dm_label")
+        .column_as(dev_machine::Column::EnginePausedByOwner, "dm_engine_paused_by_owner")
+        .column_as(dev_machine::Column::EngineAutoPauseReason, "dm_engine_auto_pause_reason")
+        .column_as(dev_machine::Column::EngineTeamRuns, "dm_engine_team_runs")
+        .column_as(dev_machine::Column::EngineSignInState, "dm_engine_sign_in_state")
+        .column_as(dev_machine::Column::EngineCredentialExpiresAt, "dm_engine_credential_expires_at")
         .column_as(pod::Column::WorkspaceId, "pod_workspace_id")
         .column_as(pod::Column::ProjectId, "pod_project_id")
         .column_as(pod::Column::Name, "pod_name")
@@ -963,13 +994,22 @@ pub async fn runner_live_state(
 }
 
 /// The M6 locked machine row the revoke / rotate views read.
-#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct LockedMachineRow {
     pub id: Uuid,
     pub owner_id: Uuid,
     pub host_label: String,
     pub label: String,
     pub visibility: i16,
+    pub provisioning: String,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: String,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: String,
+    pub engine_credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub engine_state: serde_json::Value,
+    pub engine_state_reported_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub merged_into_id: Option<Uuid>,
     pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -990,6 +1030,15 @@ pub async fn lock_machine(
             dev_machine::Column::HostLabel,
             dev_machine::Column::Label,
             dev_machine::Column::Visibility,
+            dev_machine::Column::Provisioning,
+            dev_machine::Column::EnginePausedByOwner,
+            dev_machine::Column::EngineAutoPauseReason,
+            dev_machine::Column::EngineTeamRuns,
+            dev_machine::Column::EngineSignInState,
+            dev_machine::Column::EngineCredentialExpiresAt,
+            dev_machine::Column::EngineState,
+            dev_machine::Column::EngineStateReportedAt,
+            dev_machine::Column::MergedIntoId,
             dev_machine::Column::LastSeenAt,
             dev_machine::Column::RevokedAt,
             dev_machine::Column::CreatedAt,
@@ -1139,6 +1188,15 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
+        "engine_sign_in_state",
+        "engine_credential_expires_at",
+        "engine_state",
+        "engine_state_reported_at",
+        "merged_into_id",
+        "merge_result",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -1153,6 +1211,7 @@ mod tests {
         "name",
         "host_label",
         "provisioning",
+        "pod_dispatch",
         "visibility",
         "refresh_token_hash",
         "refresh_token_fingerprint",

@@ -1513,29 +1513,19 @@ struct AttemptDone {
 
 /// `_engine_refusal` (`enrollment.py:813-843`): `None` when the engine may
 /// be created, else the 409 response. OSS CE has no gateway lane, so the
-/// profile is always unavailable when the kill switch is on (mirrors N51).
+/// profile is always unavailable (mirrors N51); the pause reason follows
+/// the managed-runner kill switch.
 fn engine_refusal(
-    tx: &mut Transaction<'_, Postgres>,
-    dev_machine: &pidash_db::entity::dev_machine::Model,
+    _tx: &mut Transaction<'_, Postgres>,
+    _dev_machine: &pidash_db::entity::dev_machine::Model,
     settings: &pidash_db::config::Settings,
 ) -> Option<Response> {
-    let _ = (tx, dev_machine);
-    let pause_reason = if !settings.managed_runner.enabled {
-        "engine_disabled"
-    } else {
-        "profile_unavailable"
-    };
-    let _ = pause_reason;
-    let reason_code = if !settings.managed_runner.enabled {
-        "engine_disabled"
-    } else {
-        "profile_unavailable"
-    };
+    let (_available, pause_reason) = engine_cred::engine_profile_for_user_available(settings);
     Some(json_response(
         StatusCode::CONFLICT,
         serde_json::json!({
             "error": "engine_unavailable",
-            "reason_code": reason_code,
+            "reason_code": pause_reason,
             "profile_reason_code": engine_cred::engine_profile_reason_code(),
             "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
         })
