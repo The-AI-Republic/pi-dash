@@ -112,9 +112,13 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use hmac::{Hmac, Mac};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, Set,
+};
 use serde_json::{Map, Value};
 use sha2::Sha256;
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::license::form_body::{select_body_kind, BodyKind};
@@ -124,6 +128,9 @@ use pidash_auth::token as auth_token;
 use pidash_compat::py::py_json_string;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_compat::response::{json_response as raw, json_value as json_body, no_content};
+use pidash_db::entity::{
+    api_tokens, dev_machine, file_assets, machine_token, users, workspace_members,
+};
 use pidash_db::v1_assets::asset_queries;
 
 // ---------------------------------------------------------------------------
@@ -200,9 +207,8 @@ fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
 /// `handle_exception` write split (`base.py:142-146` vs `:166-170`):
 /// Django raises `IntegrityError` for SQLSTATE class 23 (NOT NULL, FK,
 /// check violations) → 400; every other column error → generic 500.
-fn write_error(error: sqlx::Error) -> Response {
-    let integrity = matches!(&error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")));
-    if integrity {
+fn write_error(error: sea_orm::DbErr) -> Response {
+    if pidash_db::orm_tx::is_integrity_violation(&error) {
         return raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY);
     }
     server_error(error)
@@ -290,13 +296,16 @@ pub async fn authenticate(
 /// name, loaded but NOT parsed — parsing happens after authentication in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Option<String>, Denial> {
-    let zone: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(zone.and_then(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let zone: Option<String> = users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(zone)
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -317,17 +326,46 @@ fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
     }
 }
 
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    user_id: Uuid,
+    is_active: bool,
+    expired_at: Option<DateTime<Utc>>,
+}
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS NULL`,
+/// the `SoftDeletionManager` scope, `db/mixins.py:56-66`: a soft-deleted
+/// token 403s instead of authenticating).
+async fn live_api_token(
+    pool: &sqlx::PgPool,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::UserId,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
-    // `deleted_at IS NULL` is the `SoftDeletionManager` scope
-    // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
-    // rows, so a soft-deleted token 403s instead of authenticating.
-    let row: Option<(Uuid, bool, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL")
-            .bind(presented)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((user_id, is_active, expired_at)) = row else {
+    let row = live_api_token(pool, presented).await?;
+    let Some(ApiTokenLookup {
+        user_id,
+        is_active,
+        expired_at,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now = Utc::now();
@@ -350,23 +388,71 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<
     Ok(user_id)
 }
 
+/// `machine_token` by hash, LEFT JOIN `dev_machine` for its revocation
+/// (`api_authentication.py:47-70`). No liveness scope: the tables have
+/// no soft delete.
+async fn machine_token_with_device(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::DevMachineId,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)),
+            "dev_revoked_at",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`):
+/// an active, live `workspace_members` row.
+async fn is_active_workspace_member(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit: Option<Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
+}
+
 async fn authenticate_machine_token(
     pool: &sqlx::PgPool,
     presented: &str,
     secret_key: &[u8],
 ) -> Result<Uuid, Denial> {
     let token_hash = auth_token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at AS dev_revoked_at
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = machine_token_with_device(pool, &token_hash).await?;
     let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
@@ -379,16 +465,7 @@ async fn authenticate_machine_token(
         .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: a non-member is revoked
     // first, then denied — exactly like Python.
-    let member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members
-          WHERE workspace_id = $1 AND member_id = $2 AND is_active
-          AND deleted_at IS NULL)",
-    )
-    .bind(row.workspace_id)
-    .bind(row.user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let member = is_active_workspace_member(pool, row.workspace_id, row.user_id).await?;
     if !member {
         pidash_services::domain::tokens::revoke_machine_token_by_id_now(
             &pidash_db::pool::sea_orm_connection(pool),
@@ -407,7 +484,7 @@ async fn authenticate_machine_token(
     Ok(row.user_id)
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct MachineTokenLookup {
     id: Uuid,
     user_id: Uuid,
@@ -625,31 +702,31 @@ struct AssetRow {
     attributes: Option<Value>,
 }
 
-fn asset_row(row: &sqlx::postgres::PgRow) -> Result<AssetRow, sqlx::Error> {
-    Ok(AssetRow {
-        entity_type: row.try_get("entity_type")?,
-        user_id: row.try_get("user_id")?,
-        storage_metadata: row.try_get("storage_metadata")?,
-        attributes: row.try_get("attributes")?,
-    })
+fn asset_from_model(model: &file_assets::Model) -> AssetRow {
+    AssetRow {
+        entity_type: model.entity_type.clone(),
+        user_id: model.user_id,
+        storage_metadata: model.storage_metadata.clone(),
+        // `attributes` is NOT NULL in the entity, so the decode is
+        // always present — the old `Option<Value>` read only ever
+        // delivered `Some`.
+        attributes: Some(model.attributes.clone()),
+    }
 }
 
 /// `FileAsset.objects.get(id=asset_id, user_id=request.user.id)`
 /// (`asset.py:210,237`, server twins `:366,394`) via
-/// [`asset_queries::user_scoped_get_sql`]: manager scope plus both exact
+/// [`asset_queries::user_scoped_get`]: manager scope plus both exact
 /// predicates, deliberately **no** `is_deleted` filter (BUG-no-is-deleted).
 /// Binds: `$1` asset id, `$2` acting-user id.
 async fn user_scoped_get(
     pool: &sqlx::PgPool,
     asset_id: Uuid,
     user_id: Uuid,
-) -> Result<Option<AssetRow>, sqlx::Error> {
-    let row = sqlx::query(&asset_queries::user_scoped_get_sql())
-        .bind(asset_id)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
-    row.map(|row| asset_row(&row)).transpose()
+) -> Result<Option<AssetRow>, sea_orm::DbErr> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = asset_queries::fetch_user_scoped(&db, asset_id, user_id).await?;
+    Ok(model.map(|model| asset_from_model(&model)))
 }
 
 /// `FileAsset.asset_url` (`db/models/asset.py:80-87`) for the POST 200.
@@ -685,20 +762,15 @@ async fn publish_metadata(pool: &sqlx::PgPool, asset_id: &Uuid) {
 /// return; the wire stays 204). The views never call this helper — it is
 /// ported because the issue names it, and stays uncalled exactly like
 /// Python.
-pub async fn asset_delete(pool: &sqlx::PgPool, asset_id: Uuid) -> Result<(), sqlx::Error> {
-    let row = sqlx::query(&asset_queries::soft_delete_select_sql())
-        .bind(asset_id)
-        .fetch_optional(pool)
-        .await?;
-    if row.is_none() {
+pub async fn asset_delete(pool: &sqlx::PgPool, asset_id: Uuid) -> Result<(), sea_orm::DbErr> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    if asset_queries::fetch_soft_delete(&db, asset_id)
+        .await?
+        .is_none()
+    {
         return Ok(());
     }
-    sqlx::query(&asset_queries::soft_delete_update_sql())
-        .bind(true)
-        .bind(Utc::now())
-        .bind(asset_id)
-        .execute(pool)
-        .await?;
+    asset_queries::soft_delete_save(&db, Utc::now(), asset_id).await?;
     Ok(())
 }
 
@@ -735,14 +807,14 @@ async fn entity_asset_delete(
         // `User.objects.get(id=None)` → `DoesNotExist` → 404, no writes.
         return Ok(EntityDeleteOutcome::UserMissing);
     };
-    let row = sqlx::query(&asset_queries::entity_user_select_sql())
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
-    let Some(row) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = asset_queries::fetch_entity_user(&db, user_id)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    let Some(model) = model else {
         return Ok(EntityDeleteOutcome::UserMissing);
     };
-    let user = UserRow::decode(&row)?;
+    let user = UserRow::from_model(&model);
     let shaped = match user.shaped(target) {
         Some(shaped) => shaped,
         // Null email: `self.email.lower()` raises `AttributeError` →
@@ -816,48 +888,48 @@ struct UserRow {
 }
 
 impl UserRow {
-    fn decode(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            password: row.try_get("password")?,
-            last_login: row.try_get("last_login")?,
-            id: row.try_get("id")?,
-            username: row.try_get("username")?,
-            mobile_number: row.try_get("mobile_number")?,
-            email: row.try_get("email")?,
-            display_name: row.try_get("display_name")?,
-            first_name: row.try_get("first_name")?,
-            last_name: row.try_get("last_name")?,
-            avatar: row.try_get("avatar")?,
-            avatar_asset_id: row.try_get("avatar_asset_id")?,
-            cover_image: row.try_get("cover_image")?,
-            cover_image_asset_id: row.try_get("cover_image_asset_id")?,
-            date_joined: row.try_get("date_joined")?,
-            created_at: row.try_get("created_at")?,
-            last_location: row.try_get("last_location")?,
-            created_location: row.try_get("created_location")?,
-            is_superuser: row.try_get("is_superuser")?,
-            is_managed: row.try_get("is_managed")?,
-            is_password_expired: row.try_get("is_password_expired")?,
-            is_active: row.try_get("is_active")?,
-            is_staff: row.try_get("is_staff")?,
-            is_email_verified: row.try_get("is_email_verified")?,
-            is_password_autoset: row.try_get("is_password_autoset")?,
-            is_password_reset_required: row.try_get("is_password_reset_required")?,
-            token: row.try_get("token")?,
-            last_active: row.try_get("last_active")?,
-            last_login_time: row.try_get("last_login_time")?,
-            last_logout_time: row.try_get("last_logout_time")?,
-            last_login_ip: row.try_get("last_login_ip")?,
-            last_logout_ip: row.try_get("last_logout_ip")?,
-            last_login_medium: row.try_get("last_login_medium")?,
-            last_login_uagent: row.try_get("last_login_uagent")?,
-            token_updated_at: row.try_get("token_updated_at")?,
-            is_bot: row.try_get("is_bot")?,
-            bot_type: row.try_get("bot_type")?,
-            user_timezone: row.try_get("user_timezone")?,
-            is_email_valid: row.try_get("is_email_valid")?,
-            masked_at: row.try_get("masked_at")?,
-        })
+    fn from_model(model: &users::Model) -> Self {
+        Self {
+            password: model.password.clone(),
+            last_login: model.last_login.map(|t| t.with_timezone(&Utc)),
+            id: model.id,
+            username: model.username.clone(),
+            mobile_number: model.mobile_number.clone(),
+            email: model.email.clone(),
+            display_name: model.display_name.clone(),
+            first_name: model.first_name.clone(),
+            last_name: model.last_name.clone(),
+            avatar: model.avatar.clone(),
+            avatar_asset_id: model.avatar_asset_id,
+            cover_image: model.cover_image.clone(),
+            cover_image_asset_id: model.cover_image_asset_id,
+            date_joined: model.date_joined.with_timezone(&Utc),
+            created_at: model.created_at.with_timezone(&Utc),
+            last_location: model.last_location.clone(),
+            created_location: model.created_location.clone(),
+            is_superuser: model.is_superuser,
+            is_managed: model.is_managed,
+            is_password_expired: model.is_password_expired,
+            is_active: model.is_active,
+            is_staff: model.is_staff,
+            is_email_verified: model.is_email_verified,
+            is_password_autoset: model.is_password_autoset,
+            is_password_reset_required: model.is_password_reset_required,
+            token: model.token.clone(),
+            last_active: model.last_active.map(|t| t.with_timezone(&Utc)),
+            last_login_time: model.last_login_time.map(|t| t.with_timezone(&Utc)),
+            last_logout_time: model.last_logout_time.map(|t| t.with_timezone(&Utc)),
+            last_login_ip: model.last_login_ip.clone(),
+            last_logout_ip: model.last_logout_ip.clone(),
+            last_login_medium: model.last_login_medium.clone(),
+            last_login_uagent: model.last_login_uagent.clone(),
+            token_updated_at: model.token_updated_at.map(|t| t.with_timezone(&Utc)),
+            is_bot: model.is_bot,
+            bot_type: model.bot_type.clone(),
+            user_timezone: model.user_timezone.clone(),
+            is_email_valid: model.is_email_valid,
+            masked_at: model.masked_at.map(|t| t.with_timezone(&Utc)),
+        }
     }
 
     /// Apply the FK clear plus the `User.save()` shaping, returning `None`
@@ -916,6 +988,7 @@ impl ShapedUserRow {
     /// [`pidash_services::domain::identity::entity_user_save_sql`] bind contract.
     async fn save(&self, pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
         let row = &self.row;
+        // raw-sql: the statement is sea-query-built in pidash_services::domain::identity (Batch 3d owns the builder migration); this callsite executes its text verbatim.
         sqlx::query(&pidash_services::domain::identity::entity_user_save_sql())
             .bind(&row.password)
             .bind(row.last_login)
@@ -1047,23 +1120,29 @@ pub(crate) async fn handle_post(
     });
     let asset_id = Uuid::new_v4();
     let now = Utc::now();
+    let typed_now: chrono::DateTime<chrono::FixedOffset> = now.into();
     // `FileAsset.objects.create(...)` (`asset.py:153-160`): every column
     // in `_meta` order with the Django defaults inlined (`uuid4` pk,
     // `auto_now_add` stamps, `false` booleans, `'{}'` JSON dicts).
-    let inserted = sqlx::query(
-        r#"INSERT INTO "file_assets" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at", "attributes", "asset", "user_id", "workspace_id", "draft_issue_id", "project_id", "issue_id", "comment_id", "page_id", "entity_type", "entity_identifier", "is_deleted", "is_archived", "external_id", "external_source", "size", "is_uploaded", "storage_metadata") VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, NULL, NULL, NULL, NULL, NULL, NULL, $8, NULL, false, false, NULL, NULL, $9, false, '{}')"#,
-    )
-    .bind(asset_id)
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(sqlx::types::Json(attributes))
-    .bind(&asset_key)
-    .bind(actor.id)
-    .bind(entity_type)
-    .bind(size_limit as f64)
-    .execute(pool)
-    .await;
+    let record = file_assets::ActiveModel {
+        id: Set(asset_id),
+        created_at: Set(typed_now),
+        updated_at: Set(typed_now),
+        created_by_id: Set(Some(actor.id)),
+        attributes: Set(attributes),
+        asset: Set(asset_key.clone()),
+        user_id: Set(Some(actor.id)),
+        entity_type: Set(Some(entity_type.to_owned())),
+        size: Set(size_limit as f64),
+        is_deleted: Set(false),
+        is_archived: Set(false),
+        is_uploaded: Set(false),
+        storage_metadata: Set(Some(serde_json::json!({}))),
+        ..Default::default()
+    };
+    let inserted = record
+        .insert(&pidash_db::pool::sea_orm_connection(pool))
+        .await;
     if let Err(error) = inserted {
         return write_error(error);
     }
@@ -1189,21 +1268,22 @@ pub(crate) async fn handle_patch(
         .get("attributes")
         .cloned()
         .unwrap_or_else(|| asset.attributes.unwrap_or(Value::Null));
-    let attributes_bind: Option<sqlx::types::Json<Value>> = match attributes {
+    let attributes_bind: Option<Value> = match attributes {
         Value::Null => None,
-        value => Some(sqlx::types::Json(value)),
+        value => Some(value),
     };
     // `asset.save(update_fields=["is_uploaded", "attributes"])` — only
     // those two columns, no `updated_at` bump (Django 4.2 `_save_table`
     // filters `non_pks` by `update_fields`).
-    if let Err(error) = sqlx::query(
-        r#"UPDATE "file_assets" SET "is_uploaded" = $1, "attributes" = $2 WHERE "id" = $3"#,
-    )
-    .bind(true)
-    .bind(attributes_bind)
-    .bind(asset_id)
-    .execute(pool)
-    .await
+    if let Err(error) = file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsUploaded, Expr::value(true))
+        .col_expr(
+            file_assets::Column::Attributes,
+            Expr::value(attributes_bind),
+        )
+        .filter(file_assets::Column::Id.eq(asset_id))
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
     {
         return write_error(error);
     }
@@ -1273,18 +1353,19 @@ pub(crate) async fn handle_delete(
             return server_error("user.email.lower() raised AttributeError");
         }
         Err(error) => {
+            // The save half still runs sqlx (its builder is services-owned);
+            // re-wrap it so the integrity branch sees the driver error.
+            let error = sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(error));
             return write_error(error);
         }
     }
     // `asset.save(update_fields=["is_deleted", "deleted_at"])` — only
     // those two columns, no `updated_at` bump.
-    if let Err(error) = sqlx::query(
-        r#"UPDATE "file_assets" SET "is_deleted" = $1, "deleted_at" = $2 WHERE "id" = $3"#,
+    if let Err(error) = asset_queries::soft_delete_save(
+        &pidash_db::pool::sea_orm_connection(pool),
+        Utc::now(),
+        asset_id,
     )
-    .bind(true)
-    .bind(Utc::now())
-    .bind(asset_id)
-    .execute(pool)
     .await
     {
         return write_error(error);
@@ -1780,9 +1861,20 @@ mod tests {
     // `is_deleted` predicate (BUG-no-is-deleted); pin the bind contract.
     #[test]
     fn user_lookup_has_no_soft_delete_filter() {
-        let sql = asset_queries::user_scoped_get_sql();
-        assert!(sql.contains("\"file_assets\".\"id\" = ($1)"), "{sql}");
-        assert!(sql.contains("\"file_assets\".\"user_id\" = ($2)"), "{sql}");
+        use sea_query::PostgresQueryBuilder;
+        let sql = asset_queries::user_scoped_get(
+            Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+            Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.contains("\"file_assets\".\"id\" = '22222222-2222-2222-2222-222222222222'"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("\"file_assets\".\"user_id\" = '33333333-3333-3333-3333-333333333333'"),
+            "{sql}"
+        );
         assert!(
             sql.contains("\"file_assets\".\"deleted_at\" IS NULL"),
             "{sql}"
@@ -1818,21 +1910,35 @@ mod tests {
     // (`$1`–`$40`); the soft-delete helper binds id + two fields.
     #[test]
     fn helper_builders_carry_their_binds() {
+        use sea_query::PostgresQueryBuilder;
         let save = pidash_services::domain::identity::entity_user_save_sql();
         assert!(
             save.contains("$1") && save.contains("$39") && save.contains("$40"),
             "{save}"
         );
         assert_eq!(asset_queries::USER_COLUMNS.len(), 40);
-        let select = asset_queries::soft_delete_select_sql();
-        assert!(select.contains("$1"), "{select}");
-        assert!(select.contains("LIMIT 1"), "{select}");
-        let update = asset_queries::soft_delete_update_sql();
+        let select = asset_queries::soft_delete_select(
+            Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+        )
+        .to_string(PostgresQueryBuilder);
         assert!(
-            update.contains("SET \"is_deleted\" = $1, \"deleted_at\" = $2"),
+            select.contains("= '22222222-2222-2222-2222-222222222222'"),
+            "{select}"
+        );
+        assert!(select.contains("LIMIT 1"), "{select}");
+        let update = asset_queries::soft_delete_update(
+            Utc::now(),
+            Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(
+            update.contains("SET \"is_deleted\" = TRUE, \"deleted_at\" ="),
             "{update}"
         );
-        assert!(update.contains("($3)"), "{update}");
+        assert!(
+            update.contains("= '22222222-2222-2222-2222-222222222222'"),
+            "{update}"
+        );
     }
 
     #[test]
