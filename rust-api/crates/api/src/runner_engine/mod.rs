@@ -23,6 +23,24 @@ use axum::Router;
 
 use crate::state::AppState;
 
+/// Stamp DRF's `Allow` value on every response the engine handlers
+/// return (`APIView.default_response_headers`, applied to errors too via
+/// `finalize_response`).
+fn with_allow(
+    route: axum::routing::MethodRouter<AppState>,
+    value: &'static str,
+) -> axum::routing::MethodRouter<AppState> {
+    use axum::http::header;
+    route.layer(axum::middleware::map_response(
+        move |mut response: axum::http::Response<axum::body::Body>| async move {
+            response
+                .headers_mut()
+                .insert(header::ALLOW, header::HeaderValue::from_static(value));
+            response
+        },
+    ))
+}
+
 /// Register the daemon engine endpoints (profile is GET-only; the
 /// other two are POST-only). Non-owned verbs proxy to Django.
 pub fn routes() -> Router<AppState> {
@@ -31,14 +49,23 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/v1/runner/engine/profile/",
-            crate::edge::owned(get(endpoints::engine_profile), &["GET"]),
+            with_allow(
+                crate::edge::owned(get(endpoints::engine_profile), &["GET"]),
+                crate::runner_enroll::auth::ALLOW_GET,
+            ),
         )
         .route(
             "/api/v1/runner/engine/model-token/",
-            crate::edge::owned(post(endpoints::engine_model_token), &["POST"]),
+            with_allow(
+                crate::edge::owned(post(endpoints::engine_model_token), &["POST"]),
+                crate::runner_enroll::auth::ALLOW_POST,
+            ),
         )
         .route(
             "/api/v1/runner/engine/credential/revoke/",
-            crate::edge::owned(post(endpoints::engine_credential_revoke), &["POST"]),
+            with_allow(
+                crate::edge::owned(post(endpoints::engine_credential_revoke), &["POST"]),
+                crate::runner_enroll::auth::ALLOW_POST,
+            ),
         )
 }

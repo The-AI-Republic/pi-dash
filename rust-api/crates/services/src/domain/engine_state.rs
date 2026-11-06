@@ -30,8 +30,8 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::engine_credential::{
-    current_engine_sign_in_state, has_live_engine_credential, is_legacy_desktop, utc,
-    SIGN_IN_STATE_EXPIRED, SIGN_IN_STATE_REVOKED, SIGN_IN_STATE_SIGNED_OUT,
+    has_live_engine_credential, is_legacy_desktop, utc, SIGN_IN_STATE_EXPIRED,
+    SIGN_IN_STATE_REVOKED, SIGN_IN_STATE_SIGNED_OUT,
 };
 use super::engine_credential::{PAUSE_ENGINE_DISABLED, PAUSE_ENGINE_SIGN_IN_REQUIRED};
 
@@ -444,14 +444,8 @@ pub async fn pause_engines_with_expired_credentials(
         };
         // Re-check on the row just read (Django's locked re-check): a
         // renewal that committed after the candidate query must not be
-        // paused, and the derived-state computation is the same one the
-        // credential read path uses.
-        let state = current_engine_sign_in_state(
-            &machine.engine_sign_in_state,
-            machine.engine_credential_expires_at.map(utc),
-            now,
-        );
-        if state != "active" {
+        // paused, so the four candidate filters are re-tested verbatim.
+        if machine.engine_sign_in_state != "active" {
             continue;
         }
         if machine

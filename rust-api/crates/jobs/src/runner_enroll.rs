@@ -839,6 +839,15 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
             .await
             .map_err(store_err)
     }
+
+    async fn delete_machine_engine_credentials(
+        &mut self,
+        machine_id: Uuid,
+    ) -> Result<(), RevokeError> {
+        delete_svc::delete_machine_engine_credentials(&TxConn::new(self.tx), machine_id)
+            .await
+            .map_err(store_err)
+    }
 }
 
 /// Pool-backed [`PubsubStore`] for the escaped frame/close path

@@ -759,6 +759,51 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/runner/engine/credential/revoke/": {
+    "post": {
+      "operationId": "runner_engine_credential_revoke_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/model-token/": {
+    "post": {
+      "operationId": "runner_engine_model_token_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/engine/profile/": {
+    "get": {
+      "operationId": "runner_engine_profile_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": null,
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/runner/health/": {
     "get": {
       "operationId": "runner_health_retrieve",
@@ -17072,7 +17117,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 200);
+        assert_eq!(ops, 203);
     }
 
     #[test]
@@ -17303,8 +17348,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(omitted_parameters, 16);
-        assert_eq!(omitted_summaries, 106);
+        assert_eq!(omitted_parameters, 19);
+        assert_eq!(omitted_summaries, 109);
     }
 
     #[test]

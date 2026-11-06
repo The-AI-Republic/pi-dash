@@ -1034,10 +1034,48 @@ pub async fn dev_machine_engine_sign_out(
     if tx.commit().await.is_err() {
         return server_error();
     }
+    // The engine sign-in payload keys (`DevMachineSerializer`'s
+    // `engine_sign_in_state` + `engine_credential_expires_at`): the
+    // locked row and the shared machine renders do not carry them, so
+    // they merge onto the body here (NEWPIDASH-52 folds them into the
+    // shared serializers).
+    let engine_payload = {
+        use pidash_db::entity::dev_machine;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let engine = dev_machine::Entity::find_by_id(machine_id)
+            .one(&db)
+            .await
+            .ok()
+            .flatten();
+        match engine {
+            Some(engine) => pidash_services::domain::engine_credential::engine_credential_payload(
+                &engine.engine_sign_in_state,
+                engine
+                    .engine_credential_expires_at
+                    .as_ref()
+                    .map(|dt| dt.with_timezone(&chrono::Utc)),
+                now_micros(),
+            ),
+            None => serde_json::Value::Object(Default::default()),
+        }
+    };
+    let merge_engine = |body: String| -> String {
+        let mut value: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(_) => return body,
+        };
+        let payload = engine_payload.as_object().cloned().unwrap_or_default();
+        if let Some(obj) = value.as_object_mut() {
+            for (key, old) in payload {
+                obj.insert(key, old);
+            }
+        }
+        serde_json::to_string(&value).unwrap_or(body)
+    };
     match workspace_id {
         Some(workspace_id) => {
             match serialize_machine(&pool, &machine, user_id, workspace_id, None).await {
-                Ok(body) => json_response(StatusCode::OK, body),
+                Ok(body) => json_response(StatusCode::OK, merge_engine(body)),
                 Err(response) => response,
             }
         }
@@ -1067,7 +1105,7 @@ pub async fn dev_machine_engine_sign_out(
                 updated_at: crate::serializer::render_datetime(&machine.updated_at),
             }
             .to_json()
-            .map(|body| json_response(StatusCode::OK, body))
+            .map(|body| json_response(StatusCode::OK, merge_engine(body)))
             .unwrap_or_else(|response| response)
         }
     }

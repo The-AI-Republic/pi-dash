@@ -92,8 +92,8 @@
 use chrono::{DateTime, Utc};
 use pidash_db::entity::{
     agent_chat_approval, agent_chat_event, agent_chat_message, agent_chat_session, agent_run,
-    chat_message_dedupe, dev_machine, machine_session, runner, runner_force_refresh,
-    runner_live_state,
+    chat_message_dedupe, dev_machine, engine_credential, machine_session, runner,
+    runner_force_refresh, runner_live_state,
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -414,6 +414,19 @@ pub async fn delete_machine_row(db: &impl ConnectionTrait, machine_id: Uuid) -> 
         .map(drop)
 }
 
+/// CASCADE from the machine row: the credential rows die with the
+/// machine (Django's collector; the DB FK carries no cascade).
+pub async fn delete_machine_engine_credentials(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+) -> Result<(), DbErr> {
+    engine_credential::Entity::delete_many()
+        .filter(engine_credential::Column::DevMachineId.eq(machine_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
 // ---------------------------------------------------------------------------
 // Seam + drivers
 // ---------------------------------------------------------------------------
@@ -556,6 +569,14 @@ pub trait RunnerDeleteStore: RevokeStore {
     /// Machine `SET_NULL` on token rows
     /// (`crate::domain::tokens::clear_token_dev_machines`).
     async fn null_token_machines(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
+
+    /// CASCADE from the machine row (`on_delete=CASCADE`, emulated by
+    /// Django's collector — the DB FK carries no cascade of its own):
+    /// the credential rows die with the machine.
+    async fn delete_machine_engine_credentials(
+        &mut self,
+        machine_id: Uuid,
+    ) -> Result<(), RevokeError>;
 
     /// Machine-row delete.
     async fn delete_machine_row(&mut self, machine_id: Uuid) -> Result<(), RevokeError>;
@@ -734,6 +755,7 @@ pub async fn delete_dev_machine<S: RunnerDeleteStore>(
         store.delete_machine_sessions(machine_id).await?;
         store.null_runner_machines(machine_id).await?;
         store.null_token_machines(machine_id).await?;
+        store.delete_machine_engine_credentials(machine_id).await?;
         store.delete_machine_row(machine_id).await?;
     }
     Ok(DeleteMachineOutcome {
@@ -846,6 +868,7 @@ mod tests {
         NullRunnerMachines(Uuid),
         NullTokenMachines(Uuid),
         DelMachineRow(Uuid),
+        DelEngineCredentials(Uuid),
     }
 
     struct Fake {
@@ -1105,6 +1128,14 @@ mod tests {
             self.calls.push(Call::DelMachineRow(machine_id));
             Ok(())
         }
+
+        async fn delete_machine_engine_credentials(
+            &mut self,
+            machine_id: Uuid,
+        ) -> Result<(), RevokeError> {
+            self.calls.push(Call::DelEngineCredentials(machine_id));
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -1296,6 +1327,7 @@ mod tests {
                 Call::DelMachineSessions(uuid(5)),
                 Call::NullRunnerMachines(uuid(5)),
                 Call::NullTokenMachines(uuid(5)),
+                Call::DelEngineCredentials(uuid(5)),
                 Call::DelMachineRow(uuid(5)),
             ]
         );
