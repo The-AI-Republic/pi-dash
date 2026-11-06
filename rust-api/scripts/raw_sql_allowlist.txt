@@ -48,7 +48,6 @@ crates/api/src/app_workspace/handlers_lists.rs 9
 crates/api/src/app_workspace/handlers_members.rs 11
 crates/api/src/app_workspace/handlers_prefs.rs 51
 crates/api/src/app_workspace/handlers_tokens.rs 6
-crates/api/src/app_workspace/handlers_user.rs 25
 crates/api/src/app_workspace/handlers_workspace.rs 17
 crates/api/src/assistant/agent_profile.rs 1
 crates/api/src/assistant/common.rs 4
