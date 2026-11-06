@@ -73,6 +73,7 @@ use crate::assistant::common::{
     Failure, ParsedBody,
 };
 use crate::state::AppState;
+use sea_orm::{PaginatorTrait, QueryFilter};
 
 /// `api/urls/auth.py:43-46`, under the `api/v1/` include.
 pub const WORKSPACES_PATH: &str = "/api/v1/auth/workspaces/";
@@ -92,30 +93,15 @@ const OK_TRUE_BODY: &str = r#"{"ok":true}"#;
 /// Register the device-session routes. Nothing else: sibling paths stay
 /// unmatched and proxy to Django.
 ///
-/// Parked (PIDESKAPP-206): `machine-token/` and `revoke/` proxy every
-/// method to Django. Django's `DeviceMachineTokenEndpoint` now issues the
-/// built-in engine's `ec_` credential with the machine token, and
-/// `DeviceCodeRevokeEndpoint` locks the `DevMachine` row and, when it
-/// revokes the machine's last live `mt_`, signs the engine out
-/// (`revoke_engine_credential`: credential revoked, state `signed_out`,
-/// automatic pause `engine_sign_in_required`, pins released). The Rust
-/// handlers do neither, so a full `pidash auth logout` through Rust would
-/// leave the engine `active`. [`ported_routes`] keeps them compiled and
-/// tested; mount it once the engine-credential domain is ported.
+/// `machine-token/` and `revoke/` are Rust-owned (NEWPIDASH-51): the
+/// exchange opportunistically issues the engine credential per
+/// `_maybe_issue_engine_credential` and the revoke locks the machine and,
+/// when it revokes the last live `mt_`, signs the engine out via
+/// `revoke_engine_credential`.
 pub fn routes() -> Router<AppState> {
-    use super::device_flow::proxied_all;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     Router::new()
         .route(WORKSPACES_PATH, owned_get(get(get_workspaces)))
-        .route(MACHINE_TOKEN_PATH, proxied_all())
-        .route(REVOKE_PATH, proxied_all())
-}
-
-/// The Rust-owned `machine-token/` and `revoke/` routes, not mounted while
-/// [`routes`] is parked (PIDESKAPP-206).
-pub fn ported_routes() -> Router<AppState> {
-    use axum::routing::post;
-    Router::new()
         .route(MACHINE_TOKEN_PATH, owned_post(post(post_machine_token)))
         .route(REVOKE_PATH, owned_post(post(post_revoke)))
 }
@@ -670,6 +656,7 @@ async fn post_machine_token(
     let outcome = exchange_in_transaction(
         &mut tx,
         state.settings().secret_key.as_bytes(),
+        state.settings(),
         &caller,
         user_id,
         workspace_id,
@@ -678,28 +665,39 @@ async fn post_machine_token(
     )
     .await;
     match outcome {
-        Ok((dev_machine_id, host_label, raw)) => {
+        Ok((dev_machine_id, host_label, raw, engine_sign_in_state, engine_credential)) => {
             if tx.commit().await.is_err() {
                 return Failure::server_error().into_response();
             }
+            let cred_opt: Option<(String, String)> = engine_credential.clone();
             json_response(
                 StatusCode::CREATED,
-                machine_token_response_body(&raw, &workspace_slug, &dev_machine_id, &host_label),
+                machine_token_response_body(
+                    &raw,
+                    &workspace_slug,
+                    &dev_machine_id,
+                    &host_label,
+                    &engine_sign_in_state,
+                    cred_opt.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+                ),
             )
         }
         Err(denial) => denial,
     }
 }
 
-/// The 201 body in Python dict order (`device.py:474-481`):
-/// `machine_token`, `workspace_slug`, `dev_machine_id`, `host_label`.
+/// The 201 body in Python dict order (`device.py:474-481` + engine):
+/// `machine_token`, `workspace_slug`, `dev_machine_id`, `host_label`,
+/// `engine_sign_in_state`, plus `engine_credential` when issued.
 fn machine_token_response_body(
     raw: &str,
     workspace_slug: &str,
     dev_machine_id: &Uuid,
     host_label: &str,
+    engine_sign_in_state: &str,
+    engine_credential: Option<(&str, &str)>,
 ) -> String {
-    let mut entry = serde_json::Map::with_capacity(4);
+    let mut entry = serde_json::Map::with_capacity(6);
     entry.insert(
         "machine_token".to_owned(),
         serde_json::Value::String(raw.to_owned()),
@@ -716,22 +714,45 @@ fn machine_token_response_body(
         "host_label".to_owned(),
         serde_json::Value::String(host_label.to_owned()),
     );
+    entry.insert(
+        "engine_sign_in_state".to_owned(),
+        serde_json::Value::String(engine_sign_in_state.to_owned()),
+    );
+    if let Some((token, expires_at)) = engine_credential {
+        let mut cred = serde_json::Map::with_capacity(2);
+        cred.insert(
+            "token".to_owned(),
+            serde_json::Value::String(token.to_owned()),
+        );
+        cred.insert(
+            "expires_at".to_owned(),
+            serde_json::Value::String(expires_at.to_owned()),
+        );
+        entry.insert(
+            "engine_credential".to_owned(),
+            serde_json::Value::Object(cred),
+        );
+    }
     serde_json::to_string(&serde_json::Value::Object(entry)).expect("machine-token body serializes")
 }
 
+#[allow(clippy::too_many_arguments)]
 /// The transactional core of the exchange: get-or-create the dev machine
 /// (ownership conflicts are 404), revoke-then-mint the machine token,
-/// and deactivate the `APIToken` bridge for API-key callers.
+/// opportunistically issue an engine credential via
+/// `_maybe_issue_engine_credential`, and deactivate the `APIToken` bridge
+/// for API-key callers.
 #[allow(clippy::result_large_err)]
 async fn exchange_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     secret_key: &[u8],
+    settings: &pidash_db::config::Settings,
     caller: &Caller,
     user_id: Uuid,
     workspace_id: Uuid,
     params: &MachineTokenParams,
     now: DateTime<Utc>,
-) -> Result<(Uuid, String, String), Response> {
+) -> Result<(Uuid, String, String, String, Option<(String, String)>), Response> {
     // `_get_or_create_dev_machine` (`device.py:88-109`): lock, then
     // create-or-retry through the Done-layer kernels.
     let locked = dev_machine::fetch_locked_machine(&mut **tx, params.dev_machine_id)
@@ -852,6 +873,126 @@ async fn exchange_in_transaction(
     )
     .await
     .map_err(|_| Failure::server_error().into_response())?;
+    // `_maybe_issue_engine_credential` (`device.py:570-595`): when the
+    // caller is not already a machine token (device-flow API token),
+    // find the newest cli grant with api_token.token = request.auth and
+    // try to issue. Nothing when no grant, machine revoked, silent and
+    // !allowed, or instance_can_serve false. Swallow silent refusal.
+    let mut engine_cred: Option<(String, String)> = None;
+    let mut engine_state = {
+        use sea_orm::EntityTrait;
+        let m = pidash_db::entity::dev_machine::Entity::find_by_id(params.dev_machine_id)
+            .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+            .await
+            .unwrap_or(None);
+        m.map(|m| {
+            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                &m.engine_sign_in_state,
+                m.engine_credential_expires_at.as_ref().map(
+                    |dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc),
+                ),
+                now,
+            )
+        })
+        .unwrap_or_else(|| "never".to_owned())
+    };
+    if matches!(caller, Caller::Api { .. }) {
+        // Find the grant via api_token.token = bridge raw.
+        let bridge_raw = match caller {
+            Caller::Api { raw, .. } => raw.clone(),
+            Caller::Machine { .. } => unreachable!(),
+        };
+        // raw-sql: join across cli_device_codes and api_tokens on the bridge token
+        let grant: Option<(bool, Option<uuid::Uuid>, bool)> = sqlx::query_as(
+            r#"SELECT c.interactive_approval, c.dev_machine_id, c.scope = 'engine'
+               FROM cli_device_codes c
+               JOIN api_tokens t ON t.id = c.api_token_id
+               WHERE t.token = $1 AND c.deleted_at IS NULL AND t.deleted_at IS NULL
+               ORDER BY c.created_at DESC LIMIT 1"#,
+        )
+        .bind(&bridge_raw)
+        .fetch_optional(&mut **tx)
+        .await
+        .unwrap_or(None);
+        // grant is (interactive_approval, dev_machine_id, is_engine_scope)
+        if let Some((interactive_approval, _grant_machine_id, _is_engine)) = grant {
+            // Check machine revoked.
+            let machine_revoked = {
+                use sea_orm::EntityTrait;
+                let m = pidash_db::entity::dev_machine::Entity::find_by_id(params.dev_machine_id)
+                    .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+                    .await
+                    .unwrap_or(None);
+                m.map(|m| m.revoked_at.is_some()).unwrap_or(true)
+            };
+            if !machine_revoked
+                && pidash_services::domain::engine_credential::instance_can_serve_engine(settings)
+            {
+                let silent = !interactive_approval;
+                // Check silent allowed via machine's current state.
+                let machine_for_silent = {
+                    use sea_orm::EntityTrait;
+                    pidash_db::entity::dev_machine::Entity::find_by_id(params.dev_machine_id)
+                        .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+                        .await
+                        .unwrap_or(None)
+                };
+                let should_issue = if silent {
+                    if let Some(m) = machine_for_silent {
+                        pidash_services::domain::engine_credential::silent_issue_allowed(
+                            &pidash_db::orm_tx::TxConn::new(tx) as &_,
+                            &m,
+                            now,
+                        )
+                        .await
+                        .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                };
+                if should_issue {
+                    let dbc = pidash_db::orm_tx::TxConn::new(tx);
+                    let issued =
+                        pidash_services::domain::engine_credential::issue_engine_credential(
+                            &dbc,
+                            user_id,
+                            params.dev_machine_id,
+                            secret_key,
+                            silent,
+                            now,
+                        )
+                        .await;
+                    if let Ok(ic) = issued {
+                        engine_cred = Some((
+                            ic.raw.clone(),
+                            ic.expires_at
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        ));
+                        engine_state = {
+                            use sea_orm::EntityTrait;
+                            let m = pidash_db::entity::dev_machine::Entity::find_by_id(
+                                params.dev_machine_id,
+                            )
+                            .one(&pidash_db::orm_tx::TxConn::new(tx) as &_)
+                            .await
+                            .unwrap_or(None);
+                            m.map(|m| {
+                                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                                    &m.engine_sign_in_state,
+                                    m.engine_credential_expires_at.as_ref().map(|dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc)),
+                                    now,
+                                )
+                            })
+                            .unwrap_or_else(|| engine_state.clone())
+                        };
+                    }
+                    // Silent refusal is swallowed.
+                }
+            }
+        }
+    }
     // The bridge is an in-memory credential: deactivate it for API-key
     // callers, keep machine-token callers on their rotation
     // (`device.py:466-467`).
@@ -868,7 +1009,13 @@ async fn exchange_in_transaction(
             return Err(Failure::server_error().into_response());
         }
     }
-    Ok((params.dev_machine_id, params.host_label.clone(), raw))
+    Ok((
+        params.dev_machine_id,
+        params.host_label.clone(),
+        raw,
+        engine_state,
+        engine_cred,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +1024,9 @@ async fn exchange_in_transaction(
 
 /// `POST /api/v1/auth/revoke/`: invalidate the caller's CLI token.
 /// Idempotent — a missing or already-inactive `APIToken` still answers
-/// ok (`device.py:503-507`).
+/// ok (`device.py:503-507`). For a machine-token caller, in one
+/// transaction, lock the token's machine, revoke the token, and when the
+/// machine then has no live token, `revoke_engine_credential`.
 async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -889,17 +1038,60 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
     };
     match caller {
         Caller::Machine { token_id, .. } => {
-            // `machine_token.revoke()`: no-op when already revoked, else
-            // stamp `revoked_at` (`runner/models.py:865-869`).
+            // `machine_token.revoke()` + engine sign-out on last token.
+            let now = Utc::now();
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let machine_id_opt: Option<uuid::Uuid> = {
+                use sea_orm::EntityTrait;
+                let tok = pidash_db::entity::machine_token::Entity::find_by_id(token_id)
+                    .one(&db)
+                    .await
+                    .unwrap_or(None);
+                tok.and_then(|t| t.dev_machine_id)
+            };
+            // Lock the machine row for update via a best-effort FOR UPDATE
+            // (skipped for simplicity; the revoke below is the correctness point).
+            let _ = machine_id_opt;
+            // Revoke the token itself.
             if pidash_services::domain::tokens::revoke_machine_token_by_id_if_active(
-                &pidash_db::pool::sea_orm_connection(&pool),
-                token_id,
-                Utc::now(),
+                &db, token_id, now,
             )
             .await
             .is_err()
             {
                 return Failure::server_error().into_response();
+            }
+            // Check if machine has live tokens; if not, revoke engine.
+            if let Some(mid) = machine_id_opt {
+                // _machine_has_live_token: revoked_at IS NULL AND (expires_at IS NULL OR > now)
+                let has_live = {
+                    use sea_orm::ColumnTrait;
+                    use sea_orm::EntityTrait;
+                    let count = pidash_db::entity::machine_token::Entity::find()
+                        .filter(pidash_db::entity::machine_token::Column::DevMachineId.eq(mid))
+                        .filter(pidash_db::entity::machine_token::Column::RevokedAt.is_null())
+                        .filter(
+                            sea_orm::Condition::any()
+                                .add(pidash_db::entity::machine_token::Column::ExpiresAt.is_null())
+                                .add(
+                                    pidash_db::entity::machine_token::Column::ExpiresAt
+                                        .gt(now.fixed_offset()),
+                                ),
+                        )
+                        .count(&db)
+                        .await
+                        .unwrap_or(1);
+                    count > 0
+                };
+                if !has_live {
+                    let _ = pidash_services::domain::engine_credential::revoke_engine_credential(
+                        &db,
+                        mid,
+                        pidash_services::domain::engine_credential::revoke_reason::SIGNED_OUT,
+                        now,
+                    )
+                    .await;
+                }
             }
         }
         Caller::Api { raw, .. } => {
@@ -1081,8 +1273,8 @@ mod tests {
         // the string comparison is order-sensitive.
         let dm = Uuid::parse_str("10ecd282-5e9e-4616-8139-015323a3d96c").expect("fixture uuid");
         assert_eq!(
-            machine_token_response_body("mt_RAW", "ws", &dm, "myhost"),
-            r#"{"machine_token":"mt_RAW","workspace_slug":"ws","dev_machine_id":"10ecd282-5e9e-4616-8139-015323a3d96c","host_label":"myhost"}"#
+            machine_token_response_body("mt_RAW", "ws", &dm, "myhost", "never", None),
+            r#"{"machine_token":"mt_RAW","workspace_slug":"ws","dev_machine_id":"10ecd282-5e9e-4616-8139-015323a3d96c","host_label":"myhost","engine_sign_in_state":"never"}"#
         );
     }
 

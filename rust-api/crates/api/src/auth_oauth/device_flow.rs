@@ -78,13 +78,13 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::auth_oauth::models::{api_token_device_flow, cli_device_code};
 use pidash_services::auth_session::guards::{allow_request, throttle_denied_json, throttle_wait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use super::guards::{
     device_start_cache_key, device_start_throttle_rate, verification_uri,
     DEVICE_CODE_MIN_POLL_GAP_SECS, DEVICE_CODE_POLL_INTERVAL_SECS, DEVICE_CODE_START_MAX_RETRIES,
     DEVICE_CODE_TTL_SECS,
 };
-use pidash_compat::db::is_unique_violation;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_compat::response::{error_body, json_response};
 
@@ -96,34 +96,14 @@ use pidash_compat::response::{error_body, json_response};
 /// unmatched and proxy to Django through the fallback (notably Django's
 /// own 405s, e.g. `GET device/start/`).
 ///
-/// Parked (PIDESKAPP-206): the three device-flow paths proxy every method
-/// to Django. Django's views gained the built-in engine's `scope = engine`
-/// grants, the silent/interactive approval rules and engine-credential
-/// issuance on redemption (`device.py`, design
-/// `.ai_design/built_engine_as_runner/design.md` §4.3), and the Rust port
-/// has none of it; serving these POSTs from Rust would drop engine
-/// sign-in. [`ported_routes`] keeps the Rust handlers compiled and tested
-/// for when the engine-credential domain is ported; mount it then.
+/// The three device-flow paths are Rust-owned (NEWPIDASH-51): engine
+/// `scope`, silent/interactive approval rules and engine-credential
+/// issuance on redemption are ported.
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/v1/auth/device/start/", proxied_all())
-        .route("/api/v1/auth/device/approve/", proxied_all())
-        .route("/api/v1/auth/device/token/", proxied_all())
-}
-
-/// The Rust-owned device-flow routes, not mounted while [`routes`] is
-/// parked (PIDESKAPP-206). Re-mount once the engine scope, approval rules
-/// and engine-credential issuance are ported.
-pub fn ported_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/auth/device/start/", owned_start())
         .route("/api/v1/auth/device/approve/", owned_approve())
         .route("/api/v1/auth/device/token/", owned_token())
-}
-
-/// Every method proxies to Django (the parked device paths).
-pub(crate) fn proxied_all() -> axum::routing::MethodRouter<AppState> {
-    axum::routing::any(crate::edge::proxy)
 }
 
 /// `device/start/`: POST is owned; everything else proxies.
@@ -249,8 +229,7 @@ fn session_actor_id(extension: Option<Extension<SessionHandle>>) -> Option<uuid:
 // Body parsing + user_code normalization (pure)
 // ---------------------------------------------------------------------------
 
-/// Locked `cli_device_codes` columns the approve path reads
-/// (`id, user_id, approved, denied, consumed, expires_at`).
+/// Locked `cli_device_codes` columns the approve path reads.
 type ApproveRow = (
     uuid::Uuid,
     Option<uuid::Uuid>,
@@ -258,11 +237,12 @@ type ApproveRow = (
     bool,
     bool,
     chrono::DateTime<chrono::Utc>,
+    String,
+    Option<uuid::Uuid>,
+    bool,
 );
 
-/// Locked `cli_device_codes` columns the token path reads
-/// (`id, user_id, workspace_id, approved, denied, consumed, expires_at`,
-/// `last_polled_at`).
+/// Locked `cli_device_codes` columns the token path reads.
 type TokenRow = (
     uuid::Uuid,
     Option<uuid::Uuid>,
@@ -272,6 +252,9 @@ type TokenRow = (
     bool,
     chrono::DateTime<chrono::Utc>,
     Option<chrono::DateTime<chrono::Utc>>,
+    String,
+    Option<uuid::Uuid>,
+    bool,
 );
 
 /// Parse a JSON body leniently: empty means "no fields" (DRF reads an
@@ -296,6 +279,73 @@ fn parse_body(body: &Bytes) -> Result<serde_json::Value, Denial> {
 /// (a JSON array/string/number has no `.get`, like DRF's `request.data`).
 fn body_field<'a>(data: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
     data.as_object()?.get(key)
+}
+
+/// Python truthiness for JSON values (`x or y`): null, false, 0, "", [], {}
+/// are falsy.
+fn is_truthy(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_i64().unwrap_or(1) != 0,
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// `str(request.data.get("scope") or "cli").strip().lower()` — Python's
+/// `or` collapses falsy values to the default, then `str()` on the truthy
+/// remainder, then strip/lower.
+fn device_flow_scope(data: &serde_json::Value) -> String {
+    match body_field(data, "scope") {
+        Some(v) if is_truthy(v) => {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                other => other.to_string(),
+            };
+            s.trim().to_lowercase()
+        }
+        _ => "cli".to_owned(),
+    }
+}
+
+/// `_parse_uuid(request.data.get("dev_machine_id"))` for the start endpoint:
+/// only when scope is engine and the value is truthy.
+fn device_flow_claimed_machine_id(data: &serde_json::Value, scope: &str) -> Option<uuid::Uuid> {
+    if scope != "engine" {
+        return None;
+    }
+    let v = body_field(data, "dev_machine_id")?;
+    if !is_truthy(v) {
+        return None;
+    }
+    let s = match v {
+        serde_json::Value::String(s) => s.trim().to_owned(),
+        other => other.to_string().trim().to_owned(),
+    };
+    if s.is_empty() {
+        None
+    } else {
+        s.parse::<uuid::Uuid>().ok()
+    }
+}
+
+/// SeaORM unique-violation detection for the start insert.
+/// `DbErr` from a unique violation contains the Postgres code 23505.
+fn is_unique_violation_db(err: &sea_orm::DbErr) -> bool {
+    let s = err.to_string();
+    s.contains("duplicate") || s.contains("unique") || s.contains("23505")
+}
+
+fn silent_refusal_description(state: &str) -> &'static str {
+    match state {
+        "never" => "The built-in engine is not turned on for this computer; turn it on explicitly.",
+        "active" => "The built-in engine credential on this computer is not due for renewal yet.",
+        _ => "The built-in engine was signed out on this computer; sign it in explicitly.",
+    }
 }
 
 /// Why a raw `user_code` is unusable (`device.py:204-216`).
@@ -470,9 +520,14 @@ fn throttled(wait: Option<f64>) -> Response {
 ///
 /// Anonymous (`AllowAny`, empty `authentication_classes`), throttled per
 /// IP (`DeviceCodeStartThrottle`, enforced here through the
-/// `super::guards` spec and the shared DRF kernel). The body is never
-/// read.
-async fn post_start(State(state): State<AppState>, headers: HeaderMap, peer: PeerAddr) -> Response {
+/// `super::guards` spec and the shared DRF kernel). The body is read for
+/// `scope` / `dev_machine_id` (`device.py` engine branch).
+async fn post_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    body: Bytes,
+) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
@@ -482,40 +537,91 @@ async fn post_start(State(state): State<AppState>, headers: HeaderMap, peer: Pee
     if let Err(wait) = check_start_throttle(&state, &headers, peer.0).await {
         return throttled(wait);
     }
+    // `scope`: cli (default) or engine; stripped and lowercased
+    // (`device.py` engine branch). A value other than cli/engine is 400
+    // invalid_scope. For engine scope a non-empty dev_machine_id must
+    // parse as a UUID, else 400 invalid_dev_machine_id.
+    let data = match parse_body(&body) {
+        Ok(d) => d,
+        Err(denial) => return denial.into_response(),
+    };
+    let scope = device_flow_scope(&data);
+    if !matches!(scope.as_str(), "cli" | "engine") {
+        return Denial::Error(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "error": "invalid_scope",
+                "error_description": "scope must be 'cli' or 'engine'.",
+            })
+            .to_string(),
+        )
+        .into_response();
+    }
+    let claimed_machine_id = device_flow_claimed_machine_id(&data, &scope);
+    if scope == "engine"
+        && body_field(&data, "dev_machine_id").is_some_and(is_truthy)
+        && claimed_machine_id.is_none()
+    {
+        return Denial::Error(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "error": "invalid_dev_machine_id",
+            })
+            .to_string(),
+        )
+        .into_response();
+    }
+
     // One grant window for every attempt (`device.py:159`).
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::seconds(DEVICE_CODE_TTL_SECS as i64);
 
-    let mut created: Option<(String, String)> = None;
+    let mut created: Option<(String, String, String)> = None;
     for _ in 0..DEVICE_CODE_START_MAX_RETRIES {
         let device_code = cli_device_code::generate_device_code();
         let user_code = cli_device_code::generate_user_code();
-        let insert = sqlx::query(
-            r#"INSERT INTO cli_device_codes
-               (id, created_at, updated_at, device_code, user_code,
-                approved, denied, consumed, expires_at)
-               VALUES ($1, $2, $3, $4, $5, false, false, false, $6)"#,
+        // SeaORM insert for the engine fields (scope, dev_machine_id);
+        // the DB fills the rest via defaults. `Set(None)` would write NULL
+        // and override the DB default, so `interactive_approval` and
+        // `scope` get real values.
+        use sea_orm::Set;
+        let insert = pidash_db::entity::cli_device_codes::Entity::insert(
+            pidash_db::entity::cli_device_codes::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(now.fixed_offset()),
+                updated_at: Set(now.fixed_offset()),
+                deleted_at: Set(None),
+                device_code: Set(device_code.clone()),
+                user_code: Set(user_code.clone()),
+                approved: Set(false),
+                denied: Set(false),
+                consumed: Set(false),
+                expires_at: Set(expires_at.fixed_offset()),
+                last_polled_at: Set(None),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                user_id: Set(None),
+                workspace_id: Set(None),
+                scope: Set(scope.clone()),
+                dev_machine_id: Set(claimed_machine_id),
+                interactive_approval: Set(false),
+                api_token_id: Set(None),
+            },
         )
-        .bind(uuid::Uuid::new_v4())
-        .bind(now)
-        .bind(now)
-        .bind(&device_code)
-        .bind(&user_code)
-        .bind(expires_at)
-        .execute(&pool)
+        .exec_without_returning(&pidash_db::pool::sea_orm_connection(&pool))
         .await;
         match insert {
             Ok(_) => {
-                created = Some((device_code, user_code));
+                created = Some((device_code, user_code, scope.clone()));
                 break;
             }
-            Err(err) if is_unique_violation(&err) => {
+            Err(err) if is_unique_violation_db(&err) => {
                 tracing::warn!("CLIDeviceCode create collided, retrying: {err}");
             }
             Err(_) => return Denial::ServerError.into_response(),
         }
     }
-    let Some((device_code, user_code)) = created else {
+    let Some((device_code, user_code, scope_val)) = created else {
         return Denial::Error(
             StatusCode::SERVICE_UNAVAILABLE,
             serde_json::json!({
@@ -534,6 +640,7 @@ async fn post_start(State(state): State<AppState>, headers: HeaderMap, peer: Pee
             "verification_uri": verification_uri(&verification_base(&state)),
             "expires_in": DEVICE_CODE_TTL_SECS,
             "interval": DEVICE_CODE_POLL_INTERVAL_SECS,
+            "scope": scope_val,
         }),
     )
 }
@@ -543,8 +650,11 @@ async fn post_start(State(state): State<AppState>, headers: HeaderMap, peer: Pee
 // ---------------------------------------------------------------------------
 
 /// Session-auth: the logged-in human approves a pending CLI login
-/// (`device.py:190-278`), stamping the row with their user, most-recent
-/// workspace (or none) and `approved`.
+/// (`device.py:190-278` + engine grants). Validated before the transaction:
+/// `workspace_slug` (stripped), `interactive` (default false, non-bool 400),
+/// `dev_machine_id` (unparsable 400). Workspace: explicit slug must exist
+/// and approver must be a member (404), else most-recent membership.
+/// Engine grant: `_check_engine_grant_approval`.
 async fn post_approve(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -561,9 +671,7 @@ async fn post_approve(
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
-    // `(request.data.get("user_code") or "").strip().upper()`: a missing
-    // or non-string value answers the required 400 (Django would 500 on
-    // a non-string's `.strip()`; see module docs).
+    // `(request.data.get("user_code") or "").strip().upper()`
     let raw = body_field(&data, "user_code")
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -579,8 +687,42 @@ async fn post_approve(
         }
     };
 
-    // The approver's email for the 200 shape; an unknown or inactive id
-    // is anonymous in Django's session auth, hence the same 401.
+    // Pre-transaction validation (`device.py` engine approve).
+    let workspace_slug_raw = body_field(&data, "workspace_slug")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let interactive = match body_field(&data, "interactive") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        None => false,
+        Some(_) => {
+            return Denial::error(StatusCode::BAD_REQUEST, "interactive must be a boolean.")
+                .into_response();
+        }
+    };
+    let requested_machine_id: Option<uuid::Uuid> = match body_field(&data, "dev_machine_id") {
+        Some(v) if is_truthy(v) => {
+            let s = match v {
+                serde_json::Value::String(s) => s.trim().to_owned(),
+                other => other.to_string().trim().to_owned(),
+            };
+            if s.is_empty() {
+                None
+            } else {
+                match s.parse::<uuid::Uuid>() {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        return Denial::error(StatusCode::BAD_REQUEST, "invalid_dev_machine_id")
+                            .into_response();
+                    }
+                }
+            }
+        }
+        _ => None,
+    };
+
+    // The approver's email for the 200 shape.
     let email: Option<(Option<String>,)> =
         sqlx::query_as(r#"SELECT email FROM users WHERE id = $1 AND is_active"#)
             .bind(actor_id)
@@ -591,12 +733,14 @@ async fn post_approve(
         return Denial::UnauthorizedDetail.into_response();
     };
 
+    let db = pidash_db::pool::sea_orm_connection(&pool);
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    // raw-sql: FOR UPDATE on the grant row has no SeaORM equivalent.
     let row: Option<ApproveRow> = sqlx::query_as(
-        r#"SELECT id, user_id, approved, denied, consumed, expires_at
+        r#"SELECT id, user_id, approved, denied, consumed, expires_at, scope, dev_machine_id, interactive_approval
            FROM cli_device_codes
            WHERE user_code = $1 AND deleted_at IS NULL
            FOR UPDATE"#,
@@ -605,9 +749,18 @@ async fn post_approve(
     .fetch_optional(&mut *tx)
     .await
     .unwrap_or(None);
-    // Roll back on every early return below by dropping `tx`: nothing was
-    // written yet, matching the `transaction.atomic()` no-write exits.
-    let Some((row_id, row_user_id, approved, denied, consumed, expires_at)) = row else {
+    let Some((
+        row_id,
+        row_user_id,
+        approved,
+        denied,
+        consumed,
+        expires_at,
+        row_scope,
+        row_dev_machine_id,
+        row_interactive,
+    )) = row
+    else {
         return Denial::error(
             StatusCode::NOT_FOUND,
             "Code not recognized. Check the code on your terminal and try again.",
@@ -636,31 +789,141 @@ async fn post_approve(
         .into_response();
     }
 
-    // Most-recent active membership (`select_related("workspace")`,
-    // `order_by("-created_at")`, `device.py:259-264`).
-    let membership: Option<(uuid::Uuid, String)> = sqlx::query_as(
-        r#"SELECT wm.workspace_id, w.slug
-           FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND wm.is_active AND wm.deleted_at IS NULL
-           ORDER BY wm.created_at DESC
-           LIMIT 1"#,
-    )
-    .bind(actor_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .unwrap_or(None);
-    let (workspace_id, workspace_slug) = match membership {
-        Some((id, slug)) => (Some(id), Some(slug)),
-        None => (None, None),
+    // Workspace: explicit slug vs most-recent.
+    let (workspace_id, workspace_slug) = if !workspace_slug_raw.is_empty() {
+        // raw-sql: workspace lookup is a simple SELECT but via SeaORM would need
+        // the entity (kept as sqlx for the pre-txn engine path; counted as raw).
+        let ws: Option<(uuid::Uuid, String)> = sqlx::query_as(
+            r#"SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#,
+        )
+        .bind(&workspace_slug_raw)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap_or(None);
+        let Some((ws_id, ws_slug)) = ws else {
+            return Denial::error(StatusCode::NOT_FOUND, "workspace_not_found").into_response();
+        };
+        // Membership check.
+        let is_member: bool = sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#,
+        )
+        .bind(ws_id)
+        .bind(actor_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap_or(Some(false))
+        .unwrap_or(false);
+        if !is_member {
+            return Denial::error(StatusCode::NOT_FOUND, "workspace_not_found").into_response();
+        }
+        (Some(ws_id), Some(ws_slug))
+    } else {
+        let membership: Option<(uuid::Uuid, String)> = sqlx::query_as(
+            r#"SELECT wm.workspace_id, w.slug
+               FROM workspace_members wm
+               JOIN workspaces w ON w.id = wm.workspace_id
+               WHERE wm.member_id = $1 AND wm.is_active AND wm.deleted_at IS NULL
+               ORDER BY wm.created_at DESC
+               LIMIT 1"#,
+        )
+        .bind(actor_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap_or(None);
+        match membership {
+            Some((id, slug)) => (Some(id), Some(slug)),
+            None => (None, None),
+        }
     };
+
+    // Engine grant approval (`_check_engine_grant_approval`).
+    let mut machine_state: Option<String> = None;
+    let mut resolved_machine_id: Option<uuid::Uuid> = row_dev_machine_id;
+    if row_scope == "engine" {
+        // Requested and stored both set and different => 400.
+        if let (Some(req), Some(stored)) = (requested_machine_id, row_dev_machine_id) {
+            if req != stored {
+                return Denial::error(StatusCode::BAD_REQUEST, "dev_machine_mismatch")
+                    .into_response();
+            }
+        }
+        let machine_id = requested_machine_id.or(row_dev_machine_id);
+        if let Some(mid) = machine_id {
+            // Fetch machine via SeaORM.
+            use sea_orm::EntityTrait;
+            let machine = pidash_db::entity::dev_machine::Entity::find_by_id(mid)
+                .one(&db)
+                .await
+                .unwrap_or(None);
+            let Some(machine) = machine else {
+                return Denial::error(StatusCode::NOT_FOUND, "dev_machine_not_found")
+                    .into_response();
+            };
+            if machine.owner_id != actor_id || machine.revoked_at.is_some() {
+                return Denial::error(StatusCode::NOT_FOUND, "dev_machine_not_found")
+                    .into_response();
+            }
+            // Interactive or no machine passes; otherwise check silent.
+            if !interactive {
+                let state =
+                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        &machine.engine_sign_in_state,
+                        machine.engine_credential_expires_at.as_ref().map(
+                            |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
+                                dt.with_timezone(&chrono::Utc)
+                            },
+                        ),
+                        now,
+                    );
+                let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
+                    &db, &machine, now,
+                )
+                .await
+                .unwrap_or(false);
+                if !allowed {
+                    let desc = silent_refusal_description(&state);
+                    return Denial::Error(
+                        StatusCode::CONFLICT,
+                        serde_json::json!({
+                            "error": pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED,
+                            "engine_sign_in_state": state,
+                            "error_description": desc,
+                        })
+                        .to_string(),
+                    )
+                    .into_response();
+                }
+                machine_state = Some(state);
+            } else {
+                machine_state = Some(
+                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        &machine.engine_sign_in_state,
+                        machine.engine_credential_expires_at.as_ref().map(
+                            |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
+                                dt.with_timezone(&chrono::Utc)
+                            },
+                        ),
+                        now,
+                    ),
+                );
+            }
+            resolved_machine_id = Some(mid);
+        } else {
+            // No machine named at approval; checked at redemption.
+        }
+    }
+
+    let new_interactive = row_interactive || interactive;
+    // Save user, workspace, approved, interactive_approval, dev_machine_id.
     let update = sqlx::query(
         r#"UPDATE cli_device_codes
-           SET user_id = $1, workspace_id = $2, approved = true, updated_at = $3
-           WHERE id = $4"#,
+           SET user_id = $1, workspace_id = $2, approved = true, interactive_approval = $3, dev_machine_id = $4, updated_at = $5
+           WHERE id = $6"#,
     )
     .bind(actor_id)
     .bind(workspace_id)
+    .bind(new_interactive)
+    .bind(resolved_machine_id)
     .bind(now)
     .bind(row_id)
     .execute(&mut *tx)
@@ -671,14 +934,27 @@ async fn post_approve(
     if tx.commit().await.is_err() {
         return Denial::ServerError.into_response();
     }
-    ok_response(
-        StatusCode::OK,
-        serde_json::json!({
-            "ok": true,
-            "user_email": email,
-            "workspace_slug": workspace_slug,
-        }),
-    )
+
+    let mut body = serde_json::json!({
+        "ok": true,
+        "user_email": email,
+        "workspace_slug": workspace_slug,
+        "scope": row_scope,
+        "interactive": new_interactive,
+    });
+    if let Some(state) = machine_state {
+        if let Some(mid) = resolved_machine_id {
+            body.as_object_mut().unwrap().insert(
+                "dev_machine_id".to_owned(),
+                serde_json::Value::String(mid.to_string()),
+            );
+            body.as_object_mut().unwrap().insert(
+                "engine_sign_in_state".to_owned(),
+                serde_json::Value::String(state),
+            );
+        }
+    }
+    ok_response(StatusCode::OK, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -686,11 +962,12 @@ async fn post_approve(
 // ---------------------------------------------------------------------------
 
 /// RFC 8628 §3.4 — the CLI polls here trading `device_code` for an
-/// `APIToken` (`device.py:281-376`).
+/// `APIToken` (`device.py:281-376` + engine grants).
 ///
 /// Branch order is the Python order: blank → unknown → consumed → denied
-/// → expired → slow_down (no touch) → pending (touch) → mint + consume.
-async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
+/// → expired → engine bearer gate → slow_down (no touch) → pending
+/// (touch) → engine redemption or cli mint + consume.
+async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
@@ -723,9 +1000,10 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
         Ok(tx) => tx,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    // raw-sql: FOR UPDATE on the grant row.
     let row: Option<TokenRow> = sqlx::query_as(
         r#"SELECT id, user_id, workspace_id, approved, denied, consumed,
-                  expires_at, last_polled_at
+                  expires_at, last_polled_at, scope, dev_machine_id, interactive_approval
            FROM cli_device_codes
            WHERE device_code = $1 AND deleted_at IS NULL
            FOR UPDATE"#,
@@ -743,6 +1021,9 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
         consumed,
         expires_at,
         last_polled_at,
+        row_scope,
+        row_dev_machine_id,
+        row_interactive,
     )) = row
     else {
         return Denial::Error(
@@ -775,6 +1056,27 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
     if expires_at <= now {
         return Denial::error(StatusCode::GONE, "expired_token").into_response();
     }
+    // Engine grant: require Authorization: Bearer mt_... before
+    // slow_down/pending (`device.py` _bearer_machine_token).
+    let mut engine_machine_token: Option<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = None;
+    if row_scope == "engine" {
+        let bearer = match bearer_machine_token(&headers) {
+            Ok(b) => b,
+            Err(denial) => return denial.into_response(),
+        };
+        let machine = match resolve_machine_token_for_engine(
+            &pool,
+            state.settings().secret_key.as_bytes(),
+            &bearer,
+            now,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(denial) => return denial.into_response(),
+        };
+        engine_machine_token = Some((machine.0, machine.1, machine.2));
+    }
     // Minimum poll gap (`device.py:319-336`): the first poll is always
     // accepted; a `slow_down` rejection must NOT bump `last_polled_at`
     // or a spammer could starve the legit CLI (anti-starvation).
@@ -799,14 +1101,225 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
         return Denial::error(StatusCode::BAD_REQUEST, "authorization_pending").into_response();
     }
 
+    // Engine grant redemption (`_redeem_engine_grant`, `device.py:393-469`).
+    if row_scope == "engine" {
+        let user_id = row_user_id.expect("approved row carries a user");
+        // The Bearer token was resolved before slow_down; it must be present.
+        let Some((_tok_id, tok_user_id, tok_machine_id)) = engine_machine_token else {
+            return Denial::error(StatusCode::UNAUTHORIZED, "machine_token_required")
+                .into_response();
+        };
+        // Token without a machine => 403 dev_machine_required.
+        let Some(machine_id) = tok_machine_id else {
+            return Denial::Error(
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "error": "dev_machine_required",
+                    "error_description": "This machine token is not bound to a computer.",
+                })
+                .to_string(),
+            )
+            .into_response();
+        };
+        // Token user or machine owner is not the approver => 403 access_denied.
+        // Fetch machine for owner check.
+        let machine = {
+            use sea_orm::EntityTrait;
+            pidash_db::entity::dev_machine::Entity::find_by_id(machine_id)
+                .one(&pidash_db::pool::sea_orm_connection(&pool))
+                .await
+                .unwrap_or(None)
+        };
+        let Some(machine) = machine else {
+            return Denial::error(StatusCode::NOT_FOUND, "dev_machine_not_found").into_response();
+        };
+        if tok_user_id != user_id || machine.owner_id != user_id {
+            return Denial::Error(
+                StatusCode::FORBIDDEN,
+                serde_json::json!({
+                    "error": "access_denied",
+                    "error_description": "This computer does not belong to the approving user.",
+                })
+                .to_string(),
+            )
+            .into_response();
+        }
+        // Grant named another machine => 403 dev_machine_mismatch.
+        if let Some(grant_mid) = row_dev_machine_id {
+            if grant_mid != machine_id {
+                return Denial::Error(
+                    StatusCode::FORBIDDEN,
+                    serde_json::json!({
+                        "error": "dev_machine_mismatch",
+                        "error_description": "This grant was approved for another computer.",
+                    })
+                    .to_string(),
+                )
+                .into_response();
+            }
+        }
+        // Silent grant with !silent_issue_allowed => 409.
+        let db_conn = pidash_db::pool::sea_orm_connection(&pool);
+        if !row_interactive {
+            let state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                &machine.engine_sign_in_state,
+                machine.engine_credential_expires_at.as_ref().map(
+                    |dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc),
+                ),
+                now,
+            );
+            let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
+                &db_conn, &machine, now,
+            )
+            .await
+            .unwrap_or(false);
+            if !allowed {
+                let desc = silent_refusal_description(&state);
+                return Denial::Error(
+                    StatusCode::CONFLICT,
+                    serde_json::json!({
+                        "error": pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED,
+                        "engine_sign_in_state": state,
+                        "error_description": desc,
+                    })
+                    .to_string(),
+                )
+                .into_response();
+            }
+        }
+        // Engine profile unavailable => 409 engine_unavailable.
+        let (available, pause_reason) =
+            pidash_services::domain::engine_credential::engine_profile_for_user_available(
+                state.settings(),
+            );
+        if !available {
+            let state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                &machine.engine_sign_in_state,
+                machine.engine_credential_expires_at.as_ref().map(
+                    |dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc),
+                ),
+                now,
+            );
+            return Denial::Error(
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "error": "engine_unavailable",
+                    "reason_code": pause_reason,
+                    "engine_sign_in_state": state,
+                    "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
+                })
+                .to_string(),
+            )
+            .into_response();
+        }
+        // Issue engine credential (silent = !interactive).
+        let secret = state.settings().secret_key.clone();
+        let issued = pidash_services::domain::engine_credential::issue_engine_credential(
+            &db_conn,
+            user_id,
+            machine_id,
+            secret.as_bytes(),
+            !row_interactive,
+            now,
+        )
+        .await;
+        let issued = match issued {
+            Ok(i) => i,
+            Err(e)
+                if e.code == pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED =>
+            {
+                // Lost race: reuse silent-refused body with fresh state.
+                let fresh = {
+                    use sea_orm::EntityTrait;
+                    pidash_db::entity::dev_machine::Entity::find_by_id(machine_id)
+                        .one(&db_conn)
+                        .await
+                        .unwrap_or(None)
+                };
+                let state = fresh
+                    .map(|m| {
+                        pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                            &m.engine_sign_in_state,
+                            m.engine_credential_expires_at.as_ref().map(
+                                |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
+                                    dt.with_timezone(&chrono::Utc)
+                                },
+                            ),
+                            now,
+                        )
+                    })
+                    .unwrap_or_else(|| "never".to_owned());
+                let desc = silent_refusal_description(&state);
+                return Denial::Error(
+                    StatusCode::CONFLICT,
+                    serde_json::json!({
+                        "error": pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED,
+                        "engine_sign_in_state": state,
+                        "error_description": desc,
+                    })
+                    .to_string(),
+                )
+                .into_response();
+            }
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        // Mark consumed and store dev_machine_id.
+        let consumed = sqlx::query(
+            r#"UPDATE cli_device_codes
+               SET consumed = true, last_polled_at = $1, dev_machine_id = $2, updated_at = $3
+               WHERE id = $4"#,
+        )
+        .bind(now)
+        .bind(machine_id)
+        .bind(now)
+        .bind(row_id)
+        .execute(&mut *tx)
+        .await;
+        if consumed.is_err() || tx.commit().await.is_err() {
+            return Denial::ServerError.into_response();
+        }
+        let state_after = {
+            use sea_orm::EntityTrait;
+            let m = pidash_db::entity::dev_machine::Entity::find_by_id(machine_id)
+                .one(&db_conn)
+                .await
+                .unwrap_or(None);
+            m.map(|m| {
+                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    &m.engine_sign_in_state,
+                    m.engine_credential_expires_at.as_ref().map(
+                        |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
+                            dt.with_timezone(&chrono::Utc)
+                        },
+                    ),
+                    now,
+                )
+            })
+            .unwrap_or_else(|| "active".to_owned())
+        };
+        return ok_response(
+            StatusCode::OK,
+            serde_json::json!({
+                "engine_credential": {
+                    "token": issued.raw,
+                    "expires_at": issued.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                },
+                "engine_sign_in_state": state_after,
+                "dev_machine_id": machine_id.to_string(),
+            }),
+        );
+    }
+
     // Mint: override the default opaque-hex label so device tokens are
     // distinguishable from user-created PATs (`device.py:340-349`).
+    // A cli grant also stores row.api_token_id (`device.py:355`).
     let user_id = row_user_id.expect("approved row carries a user");
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
+    let api_token_id = uuid::Uuid::new_v4();
     let minted = pidash_services::domain::tokens::issue_device_token(
         &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::tokens::NewDeviceToken {
-            id: uuid::Uuid::new_v4(),
+            id: api_token_id,
             token: api_token.clone(),
             label: api_token_device_flow::device_flow_label(&now),
             description: api_token_device_flow::DEVICE_FLOW_DESCRIPTION.to_string(),
@@ -821,10 +1334,11 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
     }
     let consumed = sqlx::query(
         r#"UPDATE cli_device_codes
-           SET consumed = true, last_polled_at = $1, updated_at = $2
-           WHERE id = $3"#,
+           SET consumed = true, last_polled_at = $1, api_token_id = $2, updated_at = $3
+           WHERE id = $4"#,
     )
     .bind(now)
+    .bind(api_token_id)
     .bind(now)
     .bind(row_id)
     .execute(&mut *tx)
@@ -876,6 +1390,161 @@ async fn post_token(State(state): State<AppState>, body: Bytes) -> Response {
 /// `device.py:332`).
 fn poll_gap() -> chrono::Duration {
     chrono::Duration::seconds(DEVICE_CODE_MIN_POLL_GAP_SECS as i64)
+}
+
+/// `_bearer_machine_token(request)` (`device.py:393-406`): require
+/// `Authorization: Bearer <machine token>`.
+fn bearer_machine_token(headers: &HeaderMap) -> Result<String, Denial> {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let mut parts = auth.splitn(2, ' ');
+    let scheme = parts.next().unwrap_or("");
+    let token = parts.next().unwrap_or("");
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+        return Err(Denial::Error(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({
+                "error": "machine_token_required",
+                "error_description": "Redeem an engine grant with Authorization: Bearer <machine token>.",
+            })
+            .to_string(),
+        ));
+    }
+    Ok(token.to_owned())
+}
+
+/// `resolve_machine_token(raw, touch=True)` (`runner/authentication.py:60-127`)
+/// for the engine redemption path. Returns
+/// `(token_id, user_id, dev_machine_id)` on success, else a 401 with
+/// `invalid_client` and the resolver code as `error_description`.
+async fn resolve_machine_token_for_engine(
+    pool: &sqlx::PgPool,
+    secret_key: &[u8],
+    raw: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>), Denial> {
+    use sea_orm::EntityTrait;
+    if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
+        return Err(Denial::Error(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "unusable",
+            })
+            .to_string(),
+        ));
+    }
+    let token_hash = pidash_auth::token::hash_token(raw, secret_key);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::machine_token::Entity::find()
+        .filter(pidash_db::entity::machine_token::Column::TokenHash.eq(&token_hash))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(token_row) = row else {
+        return Err(Denial::Error(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "unusable",
+            })
+            .to_string(),
+        ));
+    };
+    if token_row.revoked_at.is_some() {
+        return Err(Denial::Error(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "revoked",
+            })
+            .to_string(),
+        ));
+    }
+    if let Some(exp) = token_row.expires_at {
+        if exp.with_timezone(&chrono::Utc) <= now {
+            return Err(Denial::Error(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "expired",
+                })
+                .to_string(),
+            ));
+        }
+    }
+    // User must be active.
+    let user = pidash_db::entity::users::Entity::find_by_id(token_row.user_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(user) = user else {
+        return Err(Denial::Error(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "user_inactive",
+            })
+            .to_string(),
+        ));
+    };
+    if !user.is_active {
+        return Err(Denial::Error(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "user_inactive",
+            })
+            .to_string(),
+        ));
+    }
+    if token_row.dev_machine_id.is_none() {
+        return Err(Denial::Error(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({
+                "error": "invalid_client",
+                "error_description": "unbound",
+            })
+            .to_string(),
+        ));
+    }
+    // Machine must exist and not be revoked.
+    if let Some(mid) = token_row.dev_machine_id {
+        let machine = pidash_db::entity::dev_machine::Entity::find_by_id(mid)
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        let Some(machine) = machine else {
+            return Err(Denial::Error(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "machine_revoked",
+                })
+                .to_string(),
+            ));
+        };
+        if machine.revoked_at.is_some() {
+            return Err(Denial::Error(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "machine_revoked",
+                })
+                .to_string(),
+            ));
+        }
+    }
+    // Touch last_used_at.
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &db,
+        token_row.id,
+        now,
+    )
+    .await;
+    Ok((token_row.id, token_row.user_id, token_row.dev_machine_id))
 }
 
 #[cfg(test)]
@@ -991,7 +1660,8 @@ mod tests {
                 "user_code",
                 "verification_uri",
                 "expires_in",
-                "interval"
+                "interval",
+                "scope"
             ]
         );
         assert_eq!(

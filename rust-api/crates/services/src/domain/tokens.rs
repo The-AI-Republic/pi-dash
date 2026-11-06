@@ -784,6 +784,7 @@ fn machine_token_row(params: &NewMachineToken) -> machine_token::ActiveModel {
         created_at: Set(at(params.created_at)),
         last_used_at: Set(None),
         revoked_at: Set(None),
+        expires_at: Set(None),
     }
 }
 
