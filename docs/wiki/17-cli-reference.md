@@ -347,13 +347,13 @@ pidash issue list --project <P> [--cursor <C>] [--per-page <N>] [--order-by <F>]
 | `--per-page <N>`    | Items per page. Server default if omitted.                                                                       |
 | `--order-by <F>`    | Sort field, e.g. `-created_at` (default), `priority`, `state__name`.                                             |
 | `--state <S>`       | State names (case-insensitive) and/or UUIDs, comma-separated. An unknown name fails with the valid names listed. |
-| `--state-group <G>` | `backlog` \| `unstarted` \| `started` \| `review` \| `test` \| `completed` \| `cancelled`, comma-separated.      |
+| `--state-group <G>` | `backlog` \| `unstarted` \| `started` \| `review` \| `test` \| `completed` \| `cancelled`, comma-separated, plus shortcuts `open` (`backlog,unstarted,started,review,test`), `closed` (`completed,cancelled`) and `all` (no filter). Aliases may be mixed with concrete groups. Defaults to `open` when neither `--state` nor `--state-group` is given. |
 | `--parent <P>`      | Sub-issues of this parent (`PROJ-123`, resolved to a UUID client-side, or a UUID); `none` for top-level only.    |
 | `--label <L>`       | Label names (case-insensitive) and/or UUIDs, comma-separated.                                                    |
 | `--priority <P>`    | `urgent` \| `high` \| `medium` \| `low` \| `none`, comma-separated.                                              |
 | `--fields <F>`      | Return only these fields per item, e.g. `id,sequence_id,name,state,parent`.                                      |
 
-Values within one flag OR together; different flags AND together. Example — Backlog sub-issues of an epic, small payload:
+Values within one flag OR together; different flags AND together. With neither `--state` nor `--state-group`, `issue list` defaults to `open` (`backlog,unstarted,started,review,test`); the response includes `"state_group": "open"` so agents know closed items were excluded. Use `--state-group closed` for done/cancelled, or `--state-group all` for today's behaviour (every item). An explicit `--state` or `--state-group` disables the default. Example — Backlog sub-issues of an epic, small payload:
 
 ```
 pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state
