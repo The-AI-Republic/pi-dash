@@ -114,6 +114,33 @@ type LlmFullRowTuple = (
     DateTime<Utc>,
 );
 
+/// SeaORM form of the config read: all 9 columns by `user_id` (`LIMIT 1`
+/// semantics via `one()`), for pool- and transaction-held callers that can
+/// hand a SeaORM connection (`sea_orm_connection` on a pool, `TxConn` on an
+/// sqlx transaction). `get_config` below reads through this.
+pub async fn fetch_llm_config_full_conn(
+    db: &impl sea_orm::ConnectionTrait,
+    user_id: Uuid,
+) -> Result<Option<LlmConfigFullRow>, sqlx::Error> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let row = pidash_db::entity::assistant_user_llm_config::Entity::find()
+        .filter(pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(user_id))
+        .one(db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(row.map(|row| LlmConfigFullRow {
+        id: row.id,
+        user_id: row.user_id,
+        provider_kind: row.provider_kind,
+        base_url: row.base_url,
+        model_name: row.model_name,
+        api_key_encrypted: row.api_key_encrypted,
+        last_verified_at: row.last_verified_at.map(|v| v.with_timezone(&Utc)),
+        created_at: row.created_at.with_timezone(&Utc),
+        updated_at: row.updated_at.with_timezone(&Utc),
+    }))
+}
+
 /// `UserLLMConfig.objects.filter(user=...)` (`models.py:238-262`):
 /// the caller's config row, all 9 columns, if any. Generic over pool
 /// and connection: the overlay's select/adopt/get-or-create arms call
@@ -121,6 +148,13 @@ type LlmFullRowTuple = (
 /// PIDASHCONV-1651). `user_id` is unique (the `OneToOneField`), so at
 /// most one row matches; the `LIMIT 1` is the moved `get_config`
 /// predicate verbatim.
+///
+/// Kept as the generic `sqlx::Executor` entry point because the overlay's
+/// transaction callers pass a bare `&mut PgConnection`; a SeaORM read needs
+/// a `ConnectionTrait` wrapper (`TxConn`) at the call site, which would
+/// change this shared helper's bound and those out-of-scope callers. Pool
+/// readers should prefer [`fetch_llm_config_full_conn`] (and `get_config`
+/// does). See the `// raw-sql:` note on the query below.
 pub async fn fetch_llm_config_full<'e, E>(
     ex: E,
     user_id: Uuid,
@@ -128,6 +162,7 @@ pub async fn fetch_llm_config_full<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    // raw-sql: generic sqlx Executor contract shared with the overlay's &mut PgConnection callers; a SeaORM read would need a ConnectionTrait wrapper at every call site.
     let row: Option<LlmFullRowTuple> = sqlx::query_as(
         r#"SELECT id, user_id, provider_kind, base_url, model_name, api_key_encrypted, last_verified_at, created_at, updated_at
            FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1"#,
@@ -165,7 +200,8 @@ where
 /// [`fetch_llm_config_full`], projected to the narrow row the HTTP
 /// shell renders.
 pub async fn get_config(pool: &PgPool, user_id: Uuid) -> Result<Option<LlmConfigRow>, sqlx::Error> {
-    Ok(fetch_llm_config_full(pool, user_id)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    Ok(fetch_llm_config_full_conn(&db, user_id)
         .await?
         .map(|full| LlmConfigRow {
             provider_kind: full.provider_kind,
@@ -219,7 +255,7 @@ pub async fn put_config(
         .unwrap_or_else(|| user_llm_config::DEFAULT_PROVIDER_KIND.as_str().to_owned());
     let model_name = validated.model_name.or(stored_model).unwrap_or_default();
     domain::save_llm_config(
-        deps.pool,
+        &pidash_db::pool::sea_orm_connection(deps.pool),
         &domain::LlmConfigSave {
             user_id,
             provider_kind: &provider_kind,
@@ -242,5 +278,21 @@ pub async fn put_config(
 
 /// `DELETE users/me/ai-assistant/config/` (`llm_config.py:76-78`).
 pub async fn delete_config(pool: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
-    domain::delete_llm_config(pool, user_id).await
+    domain::delete_llm_config(&pidash_db::pool::sea_orm_connection(pool), user_id).await
+}
+
+#[cfg(test)]
+mod tests_assistant_orm {
+    #[test]
+    fn fetch_config_seaorm_shape_pins_user_filter() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryTrait};
+        let sql = pidash_db::entity::assistant_user_llm_config::Entity::find()
+            .filter(
+                pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(uuid::Uuid::nil()),
+            )
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("assistant_user_llm_config"), "table: {sql}");
+        assert!(sql.contains("user_id"), "filter: {sql}");
+    }
 }

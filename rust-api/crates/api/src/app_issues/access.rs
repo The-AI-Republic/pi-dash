@@ -61,6 +61,29 @@ pub async fn project_role(
         .await
 }
 
+/// The actor's active, live workspace membership role in this slug, if
+/// any (one live row per workspace and member).
+pub async fn workspace_role(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    user_id: Uuid,
+) -> Result<Option<i16>, DbErr> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await
+}
+
 /// An active, live workspace ADMIN (role 20) membership in this slug.
 pub async fn is_workspace_admin(
     db: &impl ConnectionTrait,
@@ -383,6 +406,18 @@ mod tests {
         assert!(allows(&db, "acme", project, admin, &[20])
             .await
             .expect("gate"));
+        assert_eq!(
+            workspace_role(&db, "acme", admin).await.expect("role"),
+            Some(20)
+        );
+        assert_eq!(
+            workspace_role(&db, "other", admin).await.expect("role"),
+            None
+        );
+        assert_eq!(
+            workspace_role(&db, "acme", guest).await.expect("role"),
+            None
+        );
         // A soft-deleted membership does not count.
         assert_eq!(
             project_role(&db, "acme", project, stranger)

@@ -121,6 +121,21 @@ pub fn is_integrity_violation(error: &DbErr) -> bool {
     }
 }
 
+/// The sqlx error behind a SeaORM failure, for callers that classify
+/// SQLSTATE codes on [`sqlx::Error`] (unique violations, FK misses): the
+/// wrapped driver error when there is one, else the SeaORM text as a
+/// protocol error. A function moved onto SeaORM keeps its
+/// `Result<_, sqlx::Error>` signature through this, so its callers'
+/// classification is unchanged.
+pub fn into_sqlx(error: DbErr) -> sqlx::Error {
+    match error {
+        DbErr::Exec(RuntimeErr::SqlxError(inner))
+        | DbErr::Query(RuntimeErr::SqlxError(inner))
+        | DbErr::Conn(RuntimeErr::SqlxError(inner)) => inner,
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

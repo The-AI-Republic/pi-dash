@@ -6,25 +6,27 @@
 
 mod about;
 mod account_settings;
+mod app_paths;
 mod chat;
 mod chat_history;
+mod daemon;
 mod desktop_http;
 // build.rs owns this module; it is compiled here only so its tests run.
 #[cfg(test)]
 #[path = "../dist_guard.rs"]
 mod dist_guard;
-mod ipc;
-mod managed_runner;
+mod migration;
 mod pidash_cli;
+mod setup;
 mod updates;
 
 use std::sync::Mutex;
 
 use tauri::{
     Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
-    webview::NewWindowResponse,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    webview::NewWindowResponse,
 };
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
@@ -413,7 +415,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     } else {
         // Same condition Tauri uses to pick the dev server over `tauri://`.
-        let dev_url = context.config().build.dev_url.as_ref().filter(|_| tauri::is_dev());
+        let dev_url = context
+            .config()
+            .build
+            .dev_url
+            .as_ref()
+            .filter(|_| tauri::is_dev());
         Some(bundle_root_for(dev_url))
     };
     // Auto-update is opt-in per build: a distributor that publishes signed
@@ -452,8 +459,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .manage(ZoomState(Mutex::new(1.0)))
         .manage(desktop_http)
-        .manage(AppConfig { target_url, bundle_root, web_base })
-        .manage(managed_runner::DaemonState::default())
+        .manage(AppConfig {
+            target_url,
+            bundle_root,
+            web_base,
+        })
         .manage(chat::ChatState::default())
         .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
@@ -473,22 +483,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chat::chat_cancel,
             chat::chat_close,
             chat::chat_decide,
-            // Built-in agent engine: the overlay JS holds the session and
-            // makes the authenticated calls, then hands the results to these
-            // commands, which own the local files and the daemon process.
-            managed_runner::managed_paths,
-            managed_runner::managed_bootstrap,
-            managed_runner::managed_enroll,
-            managed_runner::managed_write_engine_config,
-            managed_runner::managed_write_model_token,
-            managed_runner::managed_start_daemon,
-            managed_runner::managed_stop_daemon,
-            managed_runner::managed_sign_out,
+            // The computer's Pi Dash daemon (design §4.4–§4.8, §10, §12):
+            // the app is a client over its standard control socket and never
+            // starts, stops or re-roots it.
+            daemon::daemon_discover,
+            daemon::daemon_status,
+            daemon::daemon_engine_status,
+            daemon::daemon_engine_set_paused,
+            daemon::daemon_engine_settings_get,
+            daemon::daemon_engine_settings_set,
+            daemon::daemon_engine_runner_add,
+            daemon::daemon_engine_runner_remove,
+            daemon::daemon_engine_runner_rebind,
+            daemon::daemon_runners,
+            daemon::daemon_credentials_reload,
+            // Set-up, update and sign-in, each through the installed CLI and
+            // only on the user's say-so.
+            setup::daemon_install_service,
+            setup::daemon_ensure_engine,
+            setup::daemon_update_cli,
+            setup::pidash_cli_engine_login,
+            setup::pidash_cli_logout,
+            // Moving older builds' private daemon trees to the shared daemon.
+            migration::legacy_scan,
+            migration::legacy_finish,
+            migration::legacy_restore_folder,
             desktop_clear_web_data,
             updates::desktop_pending_update,
             updates::desktop_install_update,
             about::desktop_about,
-            managed_runner::managed_doctor,
             // Direct local chat history: stored on this machine only, per
             // account, never relayed to or stored by the Pi Dash server.
             chat_history::chat_create_session,
@@ -505,6 +528,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // sign-out wipes.
             account_settings::chat_approval_modes_save,
             account_settings::chat_approval_modes_load,
+            // One-time notices (migration, PO-11) and declined "Replace it"
+            // prompts, kept with the per-account settings.
+            account_settings::desktop_notices_load,
+            account_settings::desktop_notices_record,
+            account_settings::desktop_notices_dismiss,
         ])
         // Fallback for the navigation policy below: if a server-host page
         // does get through (e.g. a redirect the policy hook didn't see),
@@ -514,17 +542,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             let config = webview.state::<AppConfig>();
-            let Some(root) = &config.bundle_root else { return };
+            let Some(root) = &config.bundle_root else {
+                return;
+            };
             if let Some(target) = bundle_redirect_for(payload.url(), &config.target_url, root) {
-                eprintln!("nav: server host page loaded ({}), bouncing to bundle", payload.url());
+                eprintln!(
+                    "nav: server host page loaded ({}), bouncing to bundle",
+                    payload.url()
+                );
                 if let Err(e) = webview.navigate(target) {
                     eprintln!("nav: bounce failed: {e}");
                 }
             }
         })
         .setup(move |app| {
-            let api_origin = app.state::<desktop_http::DesktopHttp>()
-                .api_url.origin().ascii_serialization();
+            let api_origin = app
+                .state::<desktop_http::DesktopHttp>()
+                .api_url
+                .origin()
+                .ascii_serialization();
             let mut window = WebviewWindowBuilder::new(app, "main", initial_webview)
                 .initialization_script(format!(
                     "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});",
@@ -537,7 +573,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let open_app = app.handle().clone();
             window = window.on_new_window(move |url, _features| {
                 let config = open_app.state::<AppConfig>();
-                match browser_url_for_new_window(&url, config.bundle_root.as_ref(), &config.web_base) {
+                match browser_url_for_new_window(
+                    &url,
+                    config.bundle_root.as_ref(),
+                    &config.web_base,
+                ) {
                     Some(target) => {
                         if let Err(e) = open_app.opener().open_url(target.as_str(), None::<&str>) {
                             eprintln!("new-window: opening {target} in the browser failed: {e}");
@@ -553,7 +593,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let bounce_app = app.handle().clone();
                 window = window.on_navigation(move |url| {
                     let config = bounce_app.state::<AppConfig>();
-                    let Some(root) = &config.bundle_root else { return true };
+                    let Some(root) = &config.bundle_root else {
+                        return true;
+                    };
                     let Some(target) = bundle_redirect_for(url, &config.target_url, root) else {
                         return true;
                     };
@@ -600,8 +642,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build(app)?;
 
             let view = {
-                let b = SubmenuBuilder::new(app, "View")
-                    .items(&[&zoom_in, &zoom_out, &zoom_reset]);
+                let b = SubmenuBuilder::new(app, "View").items(&[&zoom_in, &zoom_out, &zoom_reset]);
                 #[cfg(not(target_os = "macos"))]
                 let b = b.items(&[&zoom_in_shift, &zoom_in_numpad]);
                 b.build()?
@@ -690,20 +731,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tauri::async_runtime::spawn(updates::run_daily_checks(app.handle().clone()));
             }
 
-            // The agent uses the bundled CLI. Launching the desktop must not
-            // install a second CLI into the user's PATH or personal config.
+            // Launching the app installs and starts nothing: the CLI and its
+            // service are set up only from the consent screen (design §4.7).
 
             Ok(())
         })
+        // The daemon is the computer's, not the app's: closing the app
+        // leaves it and its runners running (design §4.1).
         .build(context)?
-        .run(|app, event| {
-            // Stop the bundled daemon when the app exits. Without this it
-            // outlives the window: the server would keep the runner ONLINE and
-            // dispatch work to a machine whose user has closed Pi Dash.
-            if let tauri::RunEvent::Exit = event {
-                managed_runner::shutdown(app);
-            }
-        });
+        .run(|_app, _event| {});
 
     Ok(())
 }
@@ -736,14 +772,18 @@ mod tests {
         // dev-prep.sh bakes this default into the SPA when VITE_API_BASE_URL
         // is unset, whatever PI_DASH_URL says; the two must not drift apart.
         assert!(
-            include_str!("../../scripts/dev-prep.sh")
-                .contains(&format!("API_BASE=\"${{VITE_API_BASE_URL:-{DEV_API_BASE}}}\"")),
+            include_str!("../../scripts/dev-prep.sh").contains(&format!(
+                "API_BASE=\"${{VITE_API_BASE_URL:-{DEV_API_BASE}}}\""
+            )),
             "dev-prep.sh no longer defaults API_BASE to {DEV_API_BASE}"
         );
         let target = "https://pidash.example.com";
         assert_eq!(api_base_for(None, target, true), DEV_API_BASE);
         assert_eq!(api_base_for(Some(""), target, true), DEV_API_BASE);
-        assert_eq!(api_base_for(Some("https://api.example.com"), target, true), "https://api.example.com");
+        assert_eq!(
+            api_base_for(Some("https://api.example.com"), target, true),
+            "https://api.example.com"
+        );
         // Hot-reload and release keep following the server target.
         assert_eq!(api_base_for(None, target, false), target);
     }
@@ -752,7 +792,10 @@ mod tests {
     fn baked_api_base_mismatch_compares_origins() {
         let api = Url::parse("http://localhost:8000").unwrap();
         assert_eq!(baked_api_base_mismatch(None, &api), None);
-        assert_eq!(baked_api_base_mismatch(Some("http://localhost:8000/"), &api), None);
+        assert_eq!(
+            baked_api_base_mismatch(Some("http://localhost:8000/"), &api),
+            None
+        );
         assert_eq!(
             baked_api_base_mismatch(Some("https://pidash.example.com"), &api),
             Some("https://pidash.example.com")
@@ -779,8 +822,14 @@ mod tests {
         // `window.open("/acme/browse/PROJ-12/", "_blank")` as the webview
         // resolves it on macOS/Linux and on Windows.
         for (url, bundle_root) in [
-            ("tauri://localhost/acme/browse/PROJ-12/", "tauri://localhost"),
-            ("http://tauri.localhost/acme/browse/PROJ-12/", "http://tauri.localhost"),
+            (
+                "tauri://localhost/acme/browse/PROJ-12/",
+                "tauri://localhost",
+            ),
+            (
+                "http://tauri.localhost/acme/browse/PROJ-12/",
+                "http://tauri.localhost",
+            ),
         ] {
             assert_eq!(
                 new_window(url, bundle_root).as_deref(),
@@ -793,22 +842,42 @@ mod tests {
     #[test]
     fn new_window_in_app_path_keeps_query_and_fragment() {
         assert_eq!(
-            new_window("tauri://localhost/acme/projects/p1/cycles/c1?peek=1#comment", "tauri://localhost").as_deref(),
+            new_window(
+                "tauri://localhost/acme/projects/p1/cycles/c1?peek=1#comment",
+                "tauri://localhost"
+            )
+            .as_deref(),
             Some("https://pidash.airepublic.com/acme/projects/p1/cycles/c1?peek=1#comment")
         );
     }
 
     #[test]
     fn new_window_external_links_open_unchanged() {
-        for u in ["https://example.com/docs?a=1#b", "http://intranet.example/wiki"] {
-            assert_eq!(new_window(u, "tauri://localhost").as_deref(), Some(u), "{u}");
-            assert_eq!(new_window(u, "http://tauri.localhost").as_deref(), Some(u), "{u}");
+        for u in [
+            "https://example.com/docs?a=1#b",
+            "http://intranet.example/wiki",
+        ] {
+            assert_eq!(
+                new_window(u, "tauri://localhost").as_deref(),
+                Some(u),
+                "{u}"
+            );
+            assert_eq!(
+                new_window(u, "http://tauri.localhost").as_deref(),
+                Some(u),
+                "{u}"
+            );
         }
     }
 
     #[test]
     fn new_window_refuses_non_web_schemes() {
-        for u in ["file:///etc/passwd", "javascript:alert(1)", "mailto:sales@example.com", "tauri://elsewhere/x"] {
+        for u in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "mailto:sales@example.com",
+            "tauri://elsewhere/x",
+        ] {
             assert_eq!(new_window(u, "tauri://localhost"), None, "{u}");
         }
     }
@@ -829,7 +898,9 @@ mod tests {
 
     #[test]
     fn api_paths_on_server_host_pass_through() {
-        let url = Url::parse("https://pidash.example.com/api/auth/desktop-exchange/?code=x&state=y").unwrap();
+        let url =
+            Url::parse("https://pidash.example.com/api/auth/desktop-exchange/?code=x&state=y")
+                .unwrap();
         assert_eq!(bundle_redirect_for(&url, &server(), &root()), None);
     }
 
@@ -845,7 +916,11 @@ mod tests {
 
     #[test]
     fn bundle_and_foreign_origins_pass_through() {
-        for u in ["tauri://localhost/", "https://login.example.com/x", "http://pidash.example.com/"] {
+        for u in [
+            "tauri://localhost/",
+            "https://login.example.com/x",
+            "http://pidash.example.com/",
+        ] {
             let url = Url::parse(u).unwrap();
             assert_eq!(bundle_redirect_for(&url, &server(), &root()), None, "{u}");
         }
@@ -855,7 +930,10 @@ mod tests {
     fn bundle_root_is_the_dev_server_only_when_tauri_serves_from_one() {
         let dev_url = Url::parse("http://127.0.0.1:1430/").unwrap();
         assert_eq!(bundle_root_for(Some(&dev_url)), dev_url);
-        assert_eq!(bundle_root_for(None).as_str().trim_end_matches('/'), BUNDLE_ORIGIN);
+        assert_eq!(
+            bundle_root_for(None).as_str().trim_end_matches('/'),
+            BUNDLE_ORIGIN
+        );
     }
 
     #[test]
@@ -874,9 +952,13 @@ mod tests {
 
     #[test]
     fn exchange_failure_redirect_lands_on_bundle_sign_in() {
-        let url = Url::parse("https://pidash.example.com/sign-in?error=state_flow_mismatch").unwrap();
+        let url =
+            Url::parse("https://pidash.example.com/sign-in?error=state_flow_mismatch").unwrap();
         let target = bundle_redirect_for(&url, &server(), &root()).unwrap();
-        assert_eq!(target.as_str(), "tauri://localhost/sign-in?error=state_flow_mismatch");
+        assert_eq!(
+            target.as_str(),
+            "tauri://localhost/sign-in?error=state_flow_mismatch"
+        );
     }
 
     #[test]
@@ -888,14 +970,20 @@ mod tests {
 
     #[test]
     fn deep_link_error_url_is_bundle_sign_in() {
-        assert_eq!(bundle_url(&root(), "/sign-in").as_str(), "tauri://localhost/sign-in");
+        assert_eq!(
+            bundle_url(&root(), "/sign-in").as_str(),
+            "tauri://localhost/sign-in"
+        );
     }
 
     #[test]
     fn marketing_routes_bounce_too() {
         for p in ["/home", "/docs", "/pricing"] {
             let url = Url::parse(&format!("https://pidash.example.com{p}")).unwrap();
-            assert!(bundle_redirect_for(&url, &server(), &root()).is_some(), "{p}");
+            assert!(
+                bundle_redirect_for(&url, &server(), &root()).is_some(),
+                "{p}"
+            );
         }
     }
 }

@@ -187,6 +187,13 @@ class IssueSerializer(BaseSerializer):
         ):
             raise serializers.ValidationError("Start date cannot exceed target date")
 
+        # Runner is the only executor (built_engine_as_runner §6): translate
+        # ``managed_runner`` / ``cloud_agent`` from older clients to
+        # ``local_runner``, pod-level.
+        from pi_dash.runner.services.issue_assignment import normalize_issue_executor
+
+        normalize_issue_executor(data, instance=self.instance)
+
         # ``assigned_pod`` is the pod this issue's agent runs dispatch to. It is
         # optional — omitting it lets ``Issue.save`` resolve the project's default
         # pod. Mirrors the guards the app-tier serializer already enforces.

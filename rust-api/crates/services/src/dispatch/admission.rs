@@ -25,7 +25,7 @@
 //!   [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`] / [`ONLINE_MANAGED_RUNNER_SQL`] +
 //!   [`managed_runner_availability`].
 //! * `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`)
-//!   → [`managed_runner_configuration_check`] (E001/E003/E004 + the data-driven
+//!   → [`managed_runner_configuration_check`] (E001/E004 + the data-driven
 //!   E002 recipe cross-check over [`PhaseTemplate`] rows).
 //! * `IsDesktopSession` (`permissions.py:12-28`) → [`is_desktop_session`] +
 //!   [`DesktopSessionRequiredBody`].
@@ -437,6 +437,59 @@ pub const ONLINE_MANAGED_RUNNER_SQL: &str = "SELECT runner.id FROM runner INNER 
 /// `$2` project id (uuid), `$3` workspace id (uuid).
 pub const ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.paused_at IS NOT NULL LIMIT 1";
 
+/// Which managed-runner probe [`managed_runner_probe`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedRunnerProbe {
+    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`].
+    Enrolled,
+    /// [`ONLINE_MANAGED_RUNNER_SQL`], heartbeat at or after the bound.
+    Online(chrono::DateTime<chrono::Utc>),
+    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`].
+    Paused,
+}
+
+/// The SeaORM form of the three managed-runner probes: the matching
+/// runner's id (the newest heartbeat first for [`ManagedRunnerProbe::Online`]),
+/// or `None`. Non-revoked desktop-bundled runners the owner holds on the
+/// project's pod (`runner INNER JOIN pod`), in this workspace.
+pub async fn managed_runner_probe(
+    db: &impl sea_orm::ConnectionTrait,
+    probe: ManagedRunnerProbe,
+    owner_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, sea_orm::DbErr> {
+    use pidash_db::entity::{pod, runner};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect};
+    let to_pod: sea_orm::RelationDef = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    let mut query = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .join(JoinType::InnerJoin, to_pod)
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .filter(runner::Column::RevokedAt.is_null());
+    match probe {
+        ManagedRunnerProbe::Enrolled => {}
+        ManagedRunnerProbe::Online(bound) => {
+            query = query
+                .filter(runner::Column::Status.eq("online"))
+                .filter(runner::Column::LastHeartbeatAt.gte(bound))
+                .filter(runner::Column::PausedAt.is_null())
+                .order_by_desc(runner::Column::LastHeartbeatAt);
+        }
+        ManagedRunnerProbe::Paused => {
+            query = query.filter(runner::Column::PausedAt.is_not_null());
+        }
+    }
+    query.into_tuple().one(db).await
+}
+
 // ---------------------------------------------------------------------------
 // Desktop-only permission (`permissions.py:12-28`)
 // ---------------------------------------------------------------------------
@@ -645,7 +698,8 @@ pub struct PhaseTemplate<'a> {
 
 /// `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`).
 ///
-/// E001/E003/E004 plus the orchestration-`PHASES` × `MANAGED_RECIPES`
+/// E001/E004 (E003 removed with the `MANAGED_RUNNER_MAX_PER_USER_PROJECT`
+/// cap, #2910) plus the orchestration-`PHASES` × `MANAGED_RECIPES`
 /// cross-check as a data-driven rule (`checks.py:42-49`): one E002 per phase
 /// (in phase order) whose `template_name` has no recipe-table entry. Both
 /// tables arrive as data — `managed_recipes` is shaped like
@@ -663,12 +717,6 @@ pub fn managed_runner_configuration_check(
             id: "managed.E001",
             message: "DEFAULT_AGENT_EXECUTOR=managed_runner requires MANAGED_RUNNER_ENABLED"
                 .to_string(),
-        });
-    }
-    if managed.max_per_user_project < 1 {
-        errors.push(ConfigurationError {
-            id: "managed.E003",
-            message: "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1".to_string(),
         });
     }
     if managed.queued_max_age_secs <= 0 {
@@ -859,7 +907,6 @@ mod tests {
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,
@@ -1380,22 +1427,10 @@ mod tests {
             check_pairs(&errors),
             vec![("managed.E001", golden["E001"].as_str().expect("msg"),)]
         );
-        // E003/E004: the fixture entries gloss the trigger ("(< 1)", "(<= 0)");
-        // — the messages below are verbatim from `checks.py:30-37`.
-        assert_eq!(
-            golden["E003"],
-            "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1 (< 1)"
-        );
-        let mut managed = django_managed_settings();
-        managed.max_per_user_project = 0;
-        let errors = managed_runner_configuration_check(&managed, "local_runner", &phases, recipes);
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                "managed.E003",
-                "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1",
-            )]
-        );
+        // E004: the fixture entry glosses the trigger ("(<= 0)");
+        // — the message below is verbatim from `checks.py:30-37`.
+        // E003 is gone with the cap (#2910): no check references the removed
+        // setting, so a default-constructed settings value passes clean.
         assert_eq!(
             golden["E004"],
             "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive (<= 0)"

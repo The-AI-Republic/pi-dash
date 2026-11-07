@@ -59,12 +59,15 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
+use pidash_db::entity::{api_tokens, dev_machine, machine_token, workspace_members};
 use pidash_db::redis::client_from_settings;
 use pidash_db::v1_cli_auth::queries::runner_lookup;
 use pidash_jobs::runner_enroll::{fire_revoke_bundle, revoke, RevokeCtx, RevokeScope};
@@ -170,9 +173,38 @@ async fn authenticate(
     }
 }
 
-/// One `api_tokens` row for the lookup: `(id, user_id, is_active,
-/// expired_at)`.
-type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    id: Uuid,
+    user_id: Uuid,
+    is_active: bool,
+    expired_at: Option<DateTime<Utc>>,
+}
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS NULL`,
+/// the `SoftDeletionManager` scope): a soft-deleted token is a miss.
+async fn live_api_token(
+    pool: &PgPool,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::Id,
+            api_tokens::Column::UserId,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())
+}
 
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token
 /// match, `is_active`, unexpired (`expired_at__gt=now` or null) — then
@@ -180,14 +212,14 @@ type ApiTokenLookupRow = (Uuid, Uuid, bool, Option<DateTime<Utc>>);
 /// `SoftDeleteModel` manager Python filters through.
 async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Response> {
     let now = Utc::now();
-    let row: Option<ApiTokenLookupRow> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let Some((id, user_id, is_active, expired_at)) = row else {
+    let row = live_api_token(pool, presented).await?;
+    let Some(ApiTokenLookup {
+        id,
+        user_id,
+        is_active,
+        expired_at,
+    }) = row
+    else {
         return Err(invalid_token());
     };
     if !is_active {
@@ -199,9 +231,13 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
         }
     }
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -209,17 +245,57 @@ async fn authenticate_api(pool: &PgPool, presented: &str) -> Result<Caller, Resp
 }
 
 /// One `machine_token` row for the lookup, with the linked dev-machine
-/// revocation flag: `(id, user_id, workspace_id, revoked_at,
-/// dev_machine_id, dev_machine_revoked, dev_machine_found)`.
-type MachineTokenLookupRow = (
-    Uuid,
-    Uuid,
-    Uuid,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-);
+/// revocation state (all three come from the `LEFT JOIN`: a token with
+/// no device reads `None` for each).
+#[derive(Debug, FromQueryResult)]
+struct MachineTokenLookup {
+    id: Uuid,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    revoked_at: Option<DateTime<Utc>>,
+    dev_machine_id: Option<Uuid>,
+    dm_revoked: Option<DateTime<Utc>>,
+    dm_found: Option<Uuid>,
+}
+
+/// `machine_token` by hash, LEFT JOIN `dev_machine` for its id and
+/// revocation (`api_authentication.py:47-70`). No liveness scope: the
+/// tables have no soft delete.
+async fn machine_token_with_device(
+    pool: &PgPool,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::DevMachineId,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)),
+            "dm_revoked",
+        )
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::Id)),
+            "dm_found",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())
+}
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
 /// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
@@ -233,18 +309,16 @@ async fn authenticate_machine(
 ) -> Result<Caller, Response> {
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookupRow> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at, dm.id
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let Some((id, user_id, workspace_id, revoked_at, dev_machine_id, dm_revoked, dm_found)) = row
+    let row = machine_token_with_device(pool, &token_hash).await?;
+    let Some(MachineTokenLookup {
+        id,
+        user_id,
+        workspace_id,
+        revoked_at,
+        dev_machine_id,
+        dm_revoked,
+        dm_found,
+    }) = row
     else {
         return Err(invalid_token());
     };
@@ -265,15 +339,23 @@ async fn authenticate_machine(
     if !is_member(pool, workspace_id, user_id).await? {
         // `machine_token.revoke()` on the way out (`revoked_at` is `None`
         // here, so the guard is a no-op and the write always lands).
-        pidash_services::domain::tokens::revoke_machine_token_by_id(pool, id, now)
-            .await
-            .map_err(|_| server_error())?;
+        pidash_services::domain::tokens::revoke_machine_token_by_id(
+            &pidash_db::pool::sea_orm_connection(pool),
+            id,
+            now,
+        )
+        .await
+        .map_err(|_| server_error())?;
         return Err(invalid_token());
     }
     // `MachineToken.objects.filter(pk=...).update(last_used_at=now)`.
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(pool, id, now)
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -285,16 +367,20 @@ async fn authenticate_machine(
 /// for `(workspace, member)` (the manager's `deleted_at IS NULL`
 /// included, like the `v1_projects` copy).
 async fn is_member(pool: &PgPool, workspace_id: Uuid, user_id: Uuid) -> Result<bool, Response> {
-    let exists: Option<bool> = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    Ok(exists.unwrap_or(false))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit: Option<Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(hit.is_some())
 }
 
 // ---------------------------------------------------------------------------

@@ -475,12 +475,21 @@ impl From<pidash_db::entity::pod::Model> for PodOwned {
 
 /// Owned `dev_machine` row + the M3/M5 annotations (`COLUMNS` order plus
 /// `runner_count`, `online_runner_count`, `last_heartbeat_at`,
-/// `control_online`).
+/// `control_online`; #2910 engine state).
 struct DevMachineOwned {
     id: Uuid,
     host_label: String,
     label: String,
     visibility: i16,
+    provisioning: String,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<DateTime<Utc>>,
+    engine_state: Value,
+    engine_state_reported_at: Option<DateTime<Utc>>,
+    merged_into_id: Option<Uuid>,
     last_seen_at: Option<DateTime<Utc>>,
     revoked_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -498,6 +507,15 @@ impl From<manage_reads::MachineListRow> for DevMachineOwned {
             host_label: row.host_label,
             label: row.label,
             visibility: row.visibility,
+            provisioning: row.provisioning,
+            engine_paused_by_owner: row.engine_paused_by_owner,
+            engine_auto_pause_reason: row.engine_auto_pause_reason,
+            engine_team_runs: row.engine_team_runs,
+            engine_sign_in_state: row.engine_sign_in_state,
+            engine_credential_expires_at: row.engine_credential_expires_at,
+            engine_state: row.engine_state,
+            engine_state_reported_at: row.engine_state_reported_at,
+            merged_into_id: row.merged_into_id,
             last_seen_at: row.last_seen_at,
             revoked_at: row.revoked_at,
             created_at: row.created_at,
@@ -521,6 +539,7 @@ struct RunnerOwned {
     name: String,
     host_label: String,
     provisioning: String,
+    pod_dispatch: String,
     visibility: i16,
     enrolled_at: Option<DateTime<Utc>>,
     capabilities: Value,
@@ -550,6 +569,7 @@ fn runner_of(row: &RunnerJoinRow) -> RunnerOwned {
         name: row.name.clone(),
         host_label: row.host_label.clone(),
         provisioning: row.provisioning.clone(),
+        pod_dispatch: row.pod_dispatch.clone(),
         visibility: row.visibility,
         enrolled_at: row.enrolled_at,
         capabilities: row.capabilities.clone(),
@@ -584,21 +604,47 @@ fn pod_of(row: &RunnerJoinRow) -> PodOwned {
     }
 }
 
-/// Owned `dev_machine` mini (`serializers.py:145-153`).
+/// Owned `dev_machine` mini (`serializers.py:145-153` + #2910 trio).
 struct DevMachineMiniOwned {
     id: String,
     host_label: String,
     label: String,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<DateTime<Utc>>,
+}
+
+/// `DevMachine.display_name` (`models.py:493`): label or host_label or
+/// "This computer".
+fn machine_display_name(label: &str, host_label: &str) -> String {
+    if !label.is_empty() {
+        label.to_owned()
+    } else if !host_label.is_empty() {
+        host_label.to_owned()
+    } else {
+        "This computer".to_owned()
+    }
 }
 
 /// The dev-machine mini of an R1/R2 row, or `None` when the `LEFT JOIN`
 /// missed (legacy `pidash connect` enrollments with no `dev_machine` FK).
+/// The stored sign-in state is carried raw; rendering derives it.
 fn machine_mini_of(row: &RunnerJoinRow) -> Option<DevMachineMiniOwned> {
     let id = row.dm_id?;
     Some(DevMachineMiniOwned {
         id: id.to_string(),
         host_label: row.dm_host_label.clone().unwrap_or_default(),
         label: row.dm_label.clone().unwrap_or_default(),
+        engine_paused_by_owner: row.dm_engine_paused_by_owner.unwrap_or(false),
+        engine_auto_pause_reason: row.dm_engine_auto_pause_reason.clone().unwrap_or_default(),
+        engine_team_runs: row.dm_engine_team_runs.unwrap_or(false),
+        engine_sign_in_state: row
+            .dm_engine_sign_in_state
+            .clone()
+            .unwrap_or_else(|| "never".to_owned()),
+        engine_credential_expires_at: row.dm_engine_credential_expires_at,
     })
 }
 
@@ -802,11 +848,20 @@ struct DevMachineRender {
     host_label: String,
     label: String,
     visibility: i64,
-    runner_count: i64,
-    online_runner_count: i64,
-    control_online: bool,
+    provisioning: String,
+    runner_count: Option<i64>,
+    online_runner_count: Option<i64>,
+    control_online: Option<bool>,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<String>,
+    engine_state: Value,
+    engine_state_reported_at: Option<String>,
+    merged_into: Option<String>,
     last_seen_at: Option<String>,
-    last_heartbeat_at: Option<String>,
+    last_heartbeat_at: Option<Option<String>>,
     revoked_at: Option<String>,
     created_at: String,
     updated_at: String,
@@ -819,11 +874,20 @@ impl DevMachineRender {
             host_label: &self.host_label,
             label: &self.label,
             visibility: self.visibility,
-            runner_count: Some(self.runner_count),
-            online_runner_count: Some(self.online_runner_count),
-            control_online: Some(self.control_online),
+            provisioning: &self.provisioning,
+            runner_count: self.runner_count,
+            online_runner_count: self.online_runner_count,
+            control_online: self.control_online,
+            engine_paused_by_owner: self.engine_paused_by_owner,
+            engine_auto_pause_reason: &self.engine_auto_pause_reason,
+            engine_team_runs: self.engine_team_runs,
+            engine_sign_in_state: &self.engine_sign_in_state,
+            engine_credential_expires_at: self.engine_credential_expires_at.as_deref(),
+            engine_state: &self.engine_state,
+            engine_state_reported_at: self.engine_state_reported_at.as_deref(),
+            merged_into: self.merged_into.as_deref(),
             last_seen_at: self.last_seen_at.as_deref(),
-            last_heartbeat_at: Some(self.last_heartbeat_at.as_deref()),
+            last_heartbeat_at: self.last_heartbeat_at.as_ref().map(|opt| opt.as_deref()),
             revoked_at: self.revoked_at.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
@@ -834,22 +898,45 @@ impl DevMachineRender {
 }
 
 fn render_machine(machine: &DevMachineOwned) -> Result<String, Response> {
+    let now = Utc::now();
+    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+        &machine.engine_sign_in_state,
+        machine.engine_credential_expires_at,
+        now,
+    );
     DevMachineRender {
         id: machine.id.to_string(),
         host_label: machine.host_label.clone(),
         label: machine.label.clone(),
         visibility: i64::from(machine.visibility),
-        runner_count: machine.runner_count,
-        online_runner_count: machine.online_runner_count,
-        control_online: machine.control_online,
+        provisioning: machine.provisioning.clone(),
+        runner_count: Some(machine.runner_count),
+        online_runner_count: Some(machine.online_runner_count),
+        control_online: Some(machine.control_online),
+        engine_paused_by_owner: machine.engine_paused_by_owner,
+        engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+        engine_team_runs: machine.engine_team_runs,
+        engine_sign_in_state: sign_in_state,
+        engine_credential_expires_at: machine
+            .engine_credential_expires_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        engine_state: machine.engine_state.clone(),
+        engine_state_reported_at: machine
+            .engine_state_reported_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        merged_into: machine.merged_into_id.map(|id| id.to_string()),
         last_seen_at: machine
             .last_seen_at
             .as_ref()
             .map(crate::serializer::render_datetime),
-        last_heartbeat_at: machine
-            .last_heartbeat_at
-            .as_ref()
-            .map(crate::serializer::render_datetime),
+        last_heartbeat_at: Some(
+            machine
+                .last_heartbeat_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+        ),
         revoked_at: machine
             .revoked_at
             .as_ref()
@@ -866,7 +953,12 @@ struct RunnerRender {
     name: String,
     status: String,
     host_label: String,
+    is_engine: bool,
+    engine_paused: bool,
+    dispatch_paused: bool,
+    machine_display_name: String,
     provisioning: String,
+    pod_dispatch: String,
     os: String,
     arch: String,
     runner_version: String,
@@ -908,14 +1000,34 @@ impl RunnerRender {
             project: &self.pod_detail.project,
             project_identifier: &self.pod_detail.project_identifier,
         };
-        let dev_machine =
-            self.dev_machine_detail
-                .as_ref()
-                .map(|detail| shapes::DevMachineMiniRow {
+        let now = Utc::now();
+        let dev_mini_state;
+        let dev_mini_expires;
+        let dev_machine = match self.dev_machine_detail.as_ref() {
+            Some(detail) => {
+                dev_mini_state =
+                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        &detail.engine_sign_in_state,
+                        detail.engine_credential_expires_at,
+                        now,
+                    );
+                dev_mini_expires = detail
+                    .engine_credential_expires_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime);
+                Some(shapes::DevMachineMiniRow {
                     id: &detail.id,
                     host_label: &detail.host_label,
                     label: &detail.label,
-                });
+                    engine_paused_by_owner: detail.engine_paused_by_owner,
+                    engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                    engine_team_runs: detail.engine_team_runs,
+                    engine_sign_in_state: &dev_mini_state,
+                    engine_credential_expires_at: dev_mini_expires.as_deref(),
+                })
+            }
+            None => None,
+        };
         let live_state = self.live_state.as_ref().map(|live| shapes::LiveStateRow {
             observed_run_id: live.observed_run_id.as_deref(),
             last_event_at: live.last_event_at.as_deref(),
@@ -936,7 +1048,12 @@ impl RunnerRender {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
+            is_engine: self.is_engine,
+            engine_paused: self.engine_paused,
+            dispatch_paused: self.dispatch_paused,
+            machine_display_name: &self.machine_display_name,
             provisioning: &self.provisioning,
+            pod_dispatch: &self.pod_dispatch,
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
@@ -972,12 +1089,37 @@ fn runner_render(
     dev_machine_detail: Option<DevMachineMiniOwned>,
     live_state: Option<LiveStateOwned>,
 ) -> RunnerRender {
+    // `Runner.is_engine` / `engine_paused` / `machine_display_name`
+    // (`models.py:740-755`): engine-ness from provisioning, pause from
+    // the machine's engine pair, display from the machine when bound.
+    let is_engine = runner.provisioning == "desktop_bundled";
+    let engine_paused = match &dev_machine_detail {
+        Some(machine) if is_engine => {
+            machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty()
+        }
+        _ => false,
+    };
+    let machine_display_name = match &dev_machine_detail {
+        Some(machine) => machine_display_name(&machine.label, &machine.host_label),
+        None => {
+            if !runner.host_label.is_empty() {
+                runner.host_label.clone()
+            } else {
+                runner.name.clone()
+            }
+        }
+    };
     RunnerRender {
         id: runner.id.to_string(),
         name: runner.name.clone(),
         status: runner.status.clone(),
         host_label: runner.host_label.clone(),
+        is_engine,
+        engine_paused,
+        dispatch_paused: runner.paused_at.is_some(),
+        machine_display_name,
         provisioning: runner.provisioning.clone(),
+        pod_dispatch: runner.pod_dispatch.clone(),
         os: runner.os.clone(),
         arch: runner.arch.clone(),
         runner_version: runner.runner_version.clone(),
@@ -1053,6 +1195,16 @@ async fn render_runner_row(pool: &PgPool, row: &RunnerJoinRow) -> Result<String,
 // Dev-machine list (`runners.py:62-125`)
 // ---------------------------------------------------------------------------
 
+/// `{"error":"dev_machine_revoked"}` — 409 (`machine_identity.py`).
+pub const DEV_MACHINE_REVOKED_BODY: &str = r#"{"error":"dev_machine_revoked"}"#;
+
+/// `{"error": <message>}` for a machine-controls parse failure.
+fn machine_control_denial(message: &str) -> Response {
+    bad_request(
+        &serde_json::to_string(&serde_json::json!({"error": message})).expect("error body renders"),
+    )
+}
+
 /// `GET /api/runners/dev-machines/` (`runners.py:62-125`): workspace
 /// required/member gate, the runner+token machine-id union with the
 /// three annotations + `control_online`, `-last_seen_at, -created_at`
@@ -1109,6 +1261,252 @@ pub async fn dev_machines_list(
     json_response(StatusCode::OK, format!("[{}]", bodies.join(",")))
 }
 
+/// The raw (unstripped) body `workspace` for
+/// [`manage_reads::request_workspace_id`]: falsy maps to `None` (the
+/// or-chain falls through to the query value), strings pass through,
+/// truthy non-strings are the source's `AttributeError` → 500.
+fn body_opt_raw(value: Option<&JVal>) -> Result<Option<String>, Response> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !j_truthy(value) {
+        return Ok(None);
+    }
+    match value {
+        JVal::Str(text) => Ok(Some(text.to_lossy_string())),
+        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
+            Err(server_error())
+        }
+    }
+}
+
+/// The M4 scope read for the machine PATCH (`_machine_is_in_workspace_scope`):
+/// miss or out-of-scope → 404 `not found`.
+async fn scope_machine_patch(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    machine_id: Uuid,
+) -> Result<bool, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let machine = manage_reads::machine_gate(&db, machine_id)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(machine) = machine else {
+        return Ok(false);
+    };
+    let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
+        workspace: WorkspaceId::from(workspace_id.to_string()),
+        authenticated: true,
+        visibility: i32::from(machine.visibility),
+        owned_by_requester: machine.owner_id == user_id,
+    });
+    if !can_view {
+        return Ok(false);
+    }
+    let runner_hit =
+        manage_reads::machine_scope_runner_exists(&db, machine_id, user_id, workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    let token_hit =
+        manage_reads::machine_scope_token_exists(&db, machine_id, user_id, workspace_id)
+            .await
+            .map_err(|_| server_error())?;
+    Ok(runner_hit || token_hit)
+}
+
+/// `PATCH /api/runners/dev-machines/<machine_id>/` (`runners.py`
+/// `DevMachineDeleteEndpoint.patch` + `machine_identity.py`): owner
+/// controls (`engine_paused_by_owner` / `engine_team_runs` / `label`).
+/// Flow: workspace 400, membership 403, parse 400, scope 404, update
+/// errors; the response is the annotated `_serialize_dev_machine`.
+pub async fn dev_machine_patch(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    Query(params): Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let body_raw = match data_get(&data, "workspace") {
+        Ok(value) => match body_opt_raw(value) {
+            Ok(raw) => raw,
+            Err(response) => return response,
+        },
+        Err(response) => return response,
+    };
+    let query_raw = crate::license::query_last(&params, "workspace");
+    let picked = manage_reads::request_workspace_id(body_raw.as_deref(), query_raw.as_deref());
+    if picked.is_empty() {
+        return bad_request(WORKSPACE_REQUIRED_BODY);
+    }
+    let workspace_id = match parse_uuid(&picked) {
+        Ok(workspace_id) => workspace_id,
+        Err(response) => return response,
+    };
+    let role = match workspace_role(&pool, workspace_id, user_id).await {
+        Ok(role) => role,
+        Err(response) => return response,
+    };
+    if !membership::is_workspace_member(role) {
+        return forbidden();
+    }
+    // Parse the controls from the JSON body (unknown-key/label/bool
+    // validation). A non-object body already 500'd at the workspace
+    // read above.
+    let JVal::Object(object) = &data else {
+        return server_error();
+    };
+    let map = crate::v1_cycles_modules::json::to_serde_publish_map(object);
+    let values = match pidash_services::runner_enroll::machine_controls::parse_machine_controls(
+        &map,
+        &pidash_services::runner_enroll::machine_controls::WEB_FIELDS,
+    ) {
+        Ok(values) => values,
+        Err(message) => return machine_control_denial(&message),
+    };
+    match scope_machine_patch(&pool, user_id, workspace_id, machine_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let updated = {
+        let conn = TxConn::new(&mut tx);
+        pidash_services::runner_enroll::machine_controls::update_machine_controls(
+            &conn,
+            machine_id,
+            user_id,
+            &values,
+            now_micros(),
+        )
+        .await
+    };
+    let updated = match updated {
+        Ok(updated) => {
+            if tx.commit().await.is_err() {
+                return server_error();
+            }
+            updated
+        }
+        Err(pidash_services::runner_enroll::machine_controls::UpdateError::Failure(failure)) => {
+            let _ = tx.rollback().await;
+            return match failure {
+                pidash_services::runner_enroll::machine_controls::MachineControlFailure::NotFound => {
+                    not_found()
+                }
+                pidash_services::runner_enroll::machine_controls::MachineControlFailure::Forbidden => {
+                    forbidden()
+                }
+                pidash_services::runner_enroll::machine_controls::MachineControlFailure::Revoked => {
+                    conflict(DEV_MACHINE_REVOKED_BODY)
+                }
+            };
+        }
+        Err(pidash_services::runner_enroll::machine_controls::UpdateError::Db(_)) => {
+            return server_error();
+        }
+    };
+    // `_serialize_dev_machine`: the M5 annotated re-read, falling back
+    // to the unannotated in-memory instance when the row vanished.
+    let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
+    let cutoff =
+        now_micros() - chrono::Duration::seconds(manage_reads::CONTROL_PRESENCE_WINDOW_SECS);
+    let row = match manage_reads::machine_serialize(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        machine_id,
+        user_id,
+        workspace_id,
+        visibility,
+        cutoff,
+    )
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return server_error(),
+    };
+    match row {
+        Some(row) => match render_machine(&DevMachineOwned::from(row)) {
+            Ok(body) => json_response(StatusCode::OK, body),
+            Err(response) => response,
+        },
+        None => {
+            // Unannotated fallback: omit the annotation keys, engine
+            // fields from the updated model.
+            let now = Utc::now();
+            let sign_in_state =
+                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    &updated.model.engine_sign_in_state,
+                    updated
+                        .model
+                        .engine_credential_expires_at
+                        .map(|at| at.with_timezone(&Utc)),
+                    now,
+                );
+            let render = DevMachineRender {
+                id: updated.model.id.to_string(),
+                host_label: updated.model.host_label.clone(),
+                label: updated.model.label.clone(),
+                visibility: i64::from(updated.model.visibility),
+                provisioning: updated.model.provisioning.clone(),
+                runner_count: None,
+                online_runner_count: None,
+                control_online: None,
+                engine_paused_by_owner: updated.model.engine_paused_by_owner,
+                engine_auto_pause_reason: updated.model.engine_auto_pause_reason.clone(),
+                engine_team_runs: updated.model.engine_team_runs,
+                engine_sign_in_state: sign_in_state,
+                engine_credential_expires_at: updated
+                    .model
+                    .engine_credential_expires_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                engine_state: updated.model.engine_state.clone(),
+                engine_state_reported_at: updated
+                    .model
+                    .engine_state_reported_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                merged_into: updated.model.merged_into_id.map(|id| id.to_string()),
+                last_seen_at: updated
+                    .model
+                    .last_seen_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                last_heartbeat_at: None,
+                revoked_at: updated
+                    .model
+                    .revoked_at
+                    .as_ref()
+                    .map(|at| crate::serializer::render_datetime(&at.with_timezone(&Utc))),
+                created_at: crate::serializer::render_datetime(
+                    &updated.model.created_at.with_timezone(&Utc),
+                ),
+                updated_at: crate::serializer::render_datetime(
+                    &updated.model.updated_at.with_timezone(&Utc),
+                ),
+            };
+            match render.to_json() {
+                Ok(body) => json_response(StatusCode::OK, body),
+                Err(response) => response,
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runner list (`runners.py:289-333`)
 // ---------------------------------------------------------------------------
@@ -1156,9 +1554,8 @@ pub async fn runners_list(
             Err(response) => return response,
         }
     }
-    let exclude_bundled = !manage_reads::include_bundled(
-        crate::license::query_last(&params, "include_bundled").as_deref(),
-    );
+    // Engine runners are listed like any other runner (#2910);
+    // `?include_bundled` is ignored.
     let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
     let rows = match manage_reads::runner_list(
         &pidash_db::pool::sea_orm_connection(&pool),
@@ -1166,7 +1563,7 @@ pub async fn runners_list(
         user_id,
         visibility,
         pod_id,
-        exclude_bundled.then_some("desktop_bundled"),
+        None,
         project_id,
     )
     .await
@@ -2429,6 +2826,15 @@ mod tests {
             host_label: "mac-mini".to_owned(),
             label: String::new(),
             visibility: 0,
+            provisioning: "manual".to_owned(),
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: String::new(),
+            engine_team_runs: false,
+            engine_sign_in_state: "never".to_owned(),
+            engine_credential_expires_at: None,
+            engine_state: serde_json::json!({}),
+            engine_state_reported_at: None,
+            merged_into_id: None,
             last_seen_at: None,
             revoked_at: None,
             created_at: moment("2026-10-01T12:34:56.789012+00:00"),
@@ -2440,7 +2846,7 @@ mod tests {
         };
         assert_eq!(
             render_machine(&machine).unwrap(),
-            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"runner_count":1,"online_runner_count":0,"control_online":false,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"provisioning":"manual","runner_count":1,"online_runner_count":0,"control_online":false,"engine_paused_by_owner":false,"engine_auto_pause_reason":"","engine_paused":false,"engine_team_runs":false,"engine_sign_in_state":"never","engine_credential_expires_at":null,"engine_state":{},"engine_state_reported_at":null,"merged_into":null,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 
@@ -2455,6 +2861,7 @@ mod tests {
             name: "r1".to_owned(),
             host_label: "h".to_owned(),
             provisioning: "manual".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
             visibility: 0,
             enrolled_at: None,
             capabilities: serde_json::json!([]),
@@ -2492,7 +2899,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             body,
-            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","provisioning":"manual","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","is_engine":false,"engine_paused":false,"dispatch_paused":false,"machine_display_name":"h","provisioning":"manual","pod_dispatch":"pod_member","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 }

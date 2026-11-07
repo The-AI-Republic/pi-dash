@@ -4228,6 +4228,12 @@ describe("dev-machines contracts", () => {
     expect(params.searchParams.get("workspace")).toBe(UUID2);
   });
 
+  it("preserves legacy machine provisioning for engine availability", async () => {
+    const legacy = { ...machine, provisioning: "desktop_bundled", engine_sign_in_state: "never" };
+    const client = createClient({ baseUrl: "https://api.test", transport: json([legacy]) });
+    expect(await listDevMachines(client, UUID2)).toEqual([legacy]);
+  });
+
   it("rotates with the workspace in the body", async () => {
     const transport = mutating(machine);
     const client = createClient({ baseUrl: "https://api.test", transport });

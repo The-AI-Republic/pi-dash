@@ -843,8 +843,8 @@ pub async fn count_pod_runners(db: &impl ConnectionTrait, pod_id: Uuid) -> Resul
         .await
 }
 
-/// A reused desktop runner `(id, name, refresh_token_generation)`.
-pub type ReuseHitRow = (Uuid, String, i32);
+/// A reused desktop runner `(id, name, refresh_token_generation, pod_dispatch)`.
+pub type ReuseHitRow = (Uuid, String, i32, String);
 
 /// E7 reuse probe ([`desktop_reuse_probe_sql`]): the live bundled runner
 /// for this machine / owner / pod / workspace, `Meta.ordering`, locked.
@@ -862,6 +862,7 @@ pub async fn desktop_reuse_probe(
             runner::Column::Id,
             runner::Column::Name,
             runner::Column::RefreshTokenGeneration,
+            runner::Column::PodDispatch,
         ])
         .filter(runner::Column::DevMachineId.eq(dev_machine_id))
         .filter(runner::Column::OwnerId.eq(owner_id))
@@ -926,6 +927,11 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
         name: Set(new.name.to_owned()),
         host_label: Set(new.host_label.to_owned()),
         provisioning: Set(new.provisioning.to_owned()),
+        pod_dispatch: Set(if new.provisioning == "desktop_bundled" {
+            "pinned_only".to_owned()
+        } else {
+            "pod_member".to_owned()
+        }),
         visibility: Set(0),
         refresh_token_hash: Set(String::new()),
         refresh_token_fingerprint: Set(String::new()),
@@ -953,6 +959,119 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
     .exec_without_returning(db)
     .await
     .map(drop)
+}
+
+/// `live_engine_runner_for` (#2910): the machine's live engine runner on
+/// the project, oldest first, optionally locked. Returns `(id, name,
+/// generation, pod_id)`.
+pub struct LiveEngineHit {
+    pub id: Uuid,
+    pub name: String,
+    pub generation: i32,
+    pub pod_id: Uuid,
+}
+
+pub async fn live_engine_runner_for(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<LiveEngineHit>, DbErr> {
+    use pidash_db::entity::{pod, runner};
+    // The machine's live engine runners, oldest first (locked). The
+    // project filter is applied in memory via the pod row: a `JOIN`
+    // alias renders the unaliased `pod.project_id` reference, which
+    // Postgres rejects (`invalid reference to FROM-clause entry`).
+    let rows = runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::Name,
+            runner::Column::RefreshTokenGeneration,
+            runner::Column::PodId,
+        ])
+        .filter(runner::Column::DevMachineId.eq(machine_id))
+        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
+        .filter(runner::Column::RevokedAt.is_null())
+        .order_by_asc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .into_tuple()
+        .all(db)
+        .await?;
+    for (id, name, generation, pod_id) in rows {
+        let pod_row = pod::Entity::find_by_id(pod_id).one(db).await?;
+        if let Some(pod_row) = pod_row {
+            if pod_row.project_id == project_id {
+                return Ok(Some(LiveEngineHit {
+                    id,
+                    name,
+                    generation,
+                    pod_id,
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `_taken_names` (#2910): machine live names + every pod runner name
+/// (revoked included), optionally excluding one runner.
+pub async fn taken_names(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    pod_id: Uuid,
+    exclude_runner_id: Option<Uuid>,
+) -> Result<std::collections::HashSet<String>, DbErr> {
+    use pidash_db::entity::runner;
+    let query = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Name)
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    sea_orm::Condition::all()
+                        .add(runner::Column::DevMachineId.eq(machine_id))
+                        .add(runner::Column::RevokedAt.is_null()),
+                )
+                .add(runner::Column::PodId.eq(pod_id)),
+        );
+    let rows = query.into_tuple().all(db).await?;
+    let mut names: std::collections::HashSet<String> = rows.into_iter().map(|(n,)| n).collect();
+    if let Some(exclude) = exclude_runner_id {
+        if let Some(row) = runner::Entity::find_by_id(exclude)
+            .select_only()
+            .column(runner::Column::Name)
+            .into_tuple::<String>()
+            .one(db)
+            .await?
+        {
+            names.remove(&row);
+        }
+    }
+    Ok(names)
+}
+
+/// `unique_runner_name` (#2910) over the ORM taken set.
+pub fn unique_runner_name(base: &str, taken: &std::collections::HashSet<String>) -> String {
+    use crate::runner_enroll::engine_naming::with_suffix;
+    if !taken.contains(base) {
+        return base.to_owned();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = with_suffix(base, n);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// `engine_runner_name` (#2910): base + uniqueness.
+pub fn engine_runner_name_from_base(
+    base: &str,
+    taken: &std::collections::HashSet<String>,
+) -> String {
+    unique_runner_name(base, taken)
 }
 
 /// The session-auth user row `(id, password, is_active)`.
@@ -1148,6 +1267,7 @@ mod tests {
         "name",
         "host_label",
         "provisioning",
+        "pod_dispatch",
         "visibility",
         "refresh_token_hash",
         "refresh_token_fingerprint",
@@ -1191,6 +1311,15 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
+        "engine_sign_in_state",
+        "engine_credential_expires_at",
+        "engine_state",
+        "engine_state_reported_at",
+        "merged_into_id",
+        "merge_result",
         "last_seen_at",
         "revoked_at",
         "created_at",

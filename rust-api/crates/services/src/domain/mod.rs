@@ -30,10 +30,9 @@
 //! transaction cannot adopt an `sqlx::Transaction` (`InnerConnection` is
 //! `pub(crate)` in 1.1.20), so every statement inside a domain write runs
 //! on the SeaORM transaction — entity calls directly, existing sea-query
-//! builders through [`txn::WriteTxn::exec_builder`], the remaining raw SQL
-//! (advisory locks, `SELECT … FOR UPDATE`) through
-//! [`txn::WriteTxn::exec_raw`]. Domain writes never mix in sqlx
-//! transactions. Reads stay on sqlx.
+//! builders through [`txn::WriteTxn::exec_builder`], the advisory lock
+//! through [`txn::WriteTxn::advisory_xact_lock`]. Domain writes never mix
+//! in sqlx transactions.
 //!
 //! After-commit queue: [`txn::CommitQueue`] keeps the
 //! [`pidash_db::tx::AfterCommit`] semantics (steps run in order,
@@ -56,6 +55,7 @@ pub mod assistant;
 pub mod clock;
 pub mod comments;
 pub mod ctx;
+pub mod engine_credential;
 pub mod error;
 pub mod identity;
 pub mod issues;
@@ -66,6 +66,7 @@ pub mod relations;
 pub mod tokens;
 pub mod transition;
 pub mod txn;
+pub mod user_saves;
 pub mod workspaces;
 
 pub use ctx::{WriteActor, WriteCtx, WriteOptions, WriteScope};

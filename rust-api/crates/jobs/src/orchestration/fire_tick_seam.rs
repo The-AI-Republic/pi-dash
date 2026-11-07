@@ -43,14 +43,25 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait, RelationTrait, Set,
+};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::entity::comment_hooks::description_stripped_for;
-use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
+use pidash_db::entity::{
+    agent_run, issue_activities, issue_agent_ticker, issue_assignees, issues, project_members,
+    projects, states, users, workspace_members, workspaces,
+};
+use pidash_db::orchestration::runs::ACTIVE_STATUSES;
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
+use pidash_services::dispatch::admission::{managed_runner_probe, ManagedRunnerProbe};
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
 };
@@ -62,18 +73,13 @@ use pidash_services::domain::identity::{
     AGENT_USER_FIRST_NAME, AGENT_USER_LAST_NAME,
 };
 use pidash_services::domain::issues as domain_issues;
-use pidash_services::orchestration::clock::{ClockWrite, LOCK_TICKER_PARAMS};
+use pidash_services::orchestration::clock::ClockWrite;
 use pidash_services::orchestration::dispatch::{
     BounceOutcome, CandidateUser, ContinuationDispatchOutcome, DispatchError, DispatchSeam,
     HumanRunAiOutcome, LogLine, NewIssueComment, NewWaitActivity, PauseOutcome, PodRunnerMatcher,
     PreflightOutcome, RetickOutcome, RunAiOutcome, ThinRunAiOutcome, WaitOutcome,
 };
-use pidash_services::orchestration::dispatch::{
-    BACKLOG_TARGET_SQL, IN_PROGRESS_STATE_SQL, LIVE_ASSIGNEE_CANDIDATES_SQL, PAUSED_STATE_SQL,
-    PAUSE_ISSUE_LOCK_SQL, PROJECT_CLOCK_POLICY_SQL, PROJECT_DEFAULT_STATE_SQL,
-    PROJECT_ROLE_FACTS_SQL, RETICK_ISSUE_LOCK_SQL, WAIT_ACTIVITY_INSERT_SQL, WAIT_REARM_UPDATE_SQL,
-    WAIT_UPDATE_SQL, WORKSPACE_SLUG_SQL,
-};
+use pidash_services::orchestration::entries::clock_policy;
 use pidash_types::orchestration::{
     cadence_fields_for, is_ticking_state, StateRef, PAUSED_STATE_NAME,
 };
@@ -109,96 +115,6 @@ pub struct DispatchOutcome<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Row mappers
-// ---------------------------------------------------------------------------
-
-pub(crate) fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
-    Ok(IssueAgentTicker {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        issue_id: row.try_get("issue_id")?,
-        used: row.try_get("used")?,
-        granted: row.try_get("granted")?,
-        waited: row.try_get("waited")?,
-        user_disabled: row.try_get("user_disabled")?,
-        next_run_at: row.try_get("next_run_at")?,
-        last_tick_at: row.try_get("last_tick_at")?,
-        enabled: row.try_get("enabled")?,
-        disarm_reason: row.try_get("disarm_reason")?,
-        pending_entry: row.try_get("pending_entry")?,
-        pending_entry_free: row.try_get("pending_entry_free")?,
-        pending_entry_actor_id: row.try_get("pending_entry_actor_id")?,
-        pending_entry_trigger: row.try_get("pending_entry_trigger")?,
-        resume_parent_run_id: row.try_get("resume_parent_run_id")?,
-    })
-}
-
-fn map_dispatch_state(
-    row: &PgRow,
-) -> Result<pidash_services::orchestration::creation::StateView, sqlx::Error> {
-    Ok(pidash_services::orchestration::creation::StateView {
-        id: row.try_get("id")?,
-        name: row.try_get("name")?,
-        group: row.try_get("group")?,
-    })
-}
-
-pub(crate) fn map_policy(
-    row: &PgRow,
-) -> Result<pidash_services::orchestration::clock::ProjectClockPolicy, sqlx::Error> {
-    // The cadence columns are INT4; the policy widens them to i64
-    // (same values L6's `map_project` reads as i32).
-    let interval_impl: Option<i32> = row.try_get("agent_default_interval_seconds")?;
-    let interval_review: Option<i32> = row.try_get("agent_review_default_interval_seconds")?;
-    let interval_test: Option<i32> = row.try_get("agent_test_default_interval_seconds")?;
-    Ok(pidash_services::orchestration::clock::ProjectClockPolicy {
-        agent_ticking_enabled: row.try_get("agent_ticking_enabled")?,
-        agent_default_max_ticks: row.try_get("agent_default_max_ticks")?,
-        agent_default_interval_seconds: interval_impl.map(i64::from),
-        agent_review_default_interval_seconds: interval_review.map(i64::from),
-        agent_test_default_interval_seconds: interval_test.map(i64::from),
-    })
-}
-
-fn map_candidate(row: &PgRow) -> Result<CandidateUser, sqlx::Error> {
-    Ok(CandidateUser {
-        id: row.try_get("id")?,
-        is_active: row.try_get("is_active")?,
-        is_bot: row.try_get("is_bot")?,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Clock SQL translation (`:name` → `$n`)
-// ---------------------------------------------------------------------------
-
-/// Translate an L5 clock statement's `:name` placeholders to positional
-/// `$n` in `params` order (the documented handler contract in
-/// `services::orchestration::clock`; never a fork — the text still comes
-/// from the L5 consts). Longer names first so `:id` never corrupts
-/// `:issue_id`.
-fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
-    let mut ordered: Vec<(usize, &&str)> = params.iter().enumerate().collect();
-    ordered.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
-    let mut out = sql.to_owned();
-    for (index, name) in ordered {
-        out = out.replace(&format!(":{name}"), &format!("${}", index + 1));
-    }
-    out
-}
-
-pub(crate) fn lock_ticker_by_issue_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::lock_ticker_sql(),
-        LOCK_TICKER_PARAMS,
-    )
-}
-
-// ---------------------------------------------------------------------------
 // DispatchSeam over the L6 store
 // ---------------------------------------------------------------------------
 
@@ -216,11 +132,17 @@ where
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<pidash_services::orchestration::creation::IssueView>, DispatchError> {
-        let locked: Option<Uuid> = sqlx::query_scalar(RETICK_ISSUE_LOCK_SQL)
-            .bind(issue_id)
-            .fetch_optional(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        let locked = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            issues::Entity::find_by_id(issue_id)
+                .select_only()
+                .column(issues::Column::Id)
+                .lock_exclusive()
+                .into_tuple::<Uuid>()
+                .one(&conn)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
         match locked {
             None => Ok(None),
             Some(id) => Ok(Some(
@@ -233,49 +155,70 @@ where
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<IssueAgentTicker>, DispatchError> {
-        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
-            .bind(issue_id)
-            .fetch_optional(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
-        row.map(|row| map_ticker(&row)).transpose().map_err(db)
+        let model = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            issue_agent_ticker::Entity::find()
+                .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+                .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+                .order_by_asc(issue_agent_ticker::Column::Id)
+                .lock_exclusive()
+                .one(&conn)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
+        Ok(model.map(IssueAgentTicker::from))
     }
 
     async fn ticker_for_issue(
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<IssueAgentTicker>, DispatchError> {
-        let row: Option<PgRow> =
-            sqlx::query(&pidash_services::orchestration::dispatch::ticker_select_by_issue_sql())
-                .bind(issue_id)
-                .fetch_optional(&mut **self.dispatch_tx().inner())
+        let model = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            issue_agent_ticker::Entity::find()
+                .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+                .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+                .order_by_asc(issue_agent_ticker::Column::Id)
+                .one(&conn)
                 .await
-                .map_err(db)?;
-        row.map(|row| map_ticker(&row)).transpose().map_err(db)
+                .map_err(|error| db(into_sqlx(error)))?
+        };
+        Ok(model.map(IssueAgentTicker::from))
     }
 
     async fn lock_ticker_by_id(
         &mut self,
         ticker_id: Uuid,
     ) -> Result<Option<IssueAgentTicker>, DispatchError> {
-        let row: Option<PgRow> =
-            sqlx::query(&pidash_services::orchestration::dispatch::ticker_lock_by_id_sql())
-                .bind(ticker_id)
-                .fetch_optional(&mut **self.dispatch_tx().inner())
+        let model = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            issue_agent_ticker::Entity::find()
+                .filter(issue_agent_ticker::Column::Id.eq(ticker_id))
+                .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+                .order_by_asc(issue_agent_ticker::Column::Id)
+                .lock_exclusive()
+                .one(&conn)
                 .await
-                .map_err(db)?;
-        row.map(|row| map_ticker(&row)).transpose().map_err(db)
+                .map_err(|error| db(into_sqlx(error)))?
+        };
+        Ok(model.map(IssueAgentTicker::from))
     }
 
     async fn lock_issue_by_id(
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<pidash_services::orchestration::creation::IssueView>, DispatchError> {
-        let locked: Option<Uuid> = sqlx::query_scalar(PAUSE_ISSUE_LOCK_SQL)
-            .bind(issue_id)
-            .fetch_optional(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        let locked = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            issues::Entity::find_by_id(issue_id)
+                .select_only()
+                .column(issues::Column::Id)
+                .lock_exclusive()
+                .into_tuple::<Uuid>()
+                .one(&conn)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
         match locked {
             None => Ok(None),
             Some(id) => Ok(Some(
@@ -290,7 +233,7 @@ where
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
         apply_clock_write(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &ClockWrite::Update,
             ticker,
             now,
@@ -305,7 +248,7 @@ where
         // the pre-consolidation bind); pass the row stamp so the call
         // reads honestly.
         apply_clock_write(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &ClockWrite::Insert,
             ticker,
             ticker.created_at,
@@ -321,23 +264,40 @@ where
         now: DateTime<Utc>,
         rearmed: bool,
     ) -> Result<(), DispatchError> {
+        let conn = TxConn::new(self.dispatch_tx().inner());
         if rearmed {
-            sqlx::query(WAIT_REARM_UPDATE_SQL)
-                .bind(ticker.waited)
-                .bind(now)
-                .bind(ticker.next_run_at)
-                .bind(ticker.id)
-                .execute(&mut **self.dispatch_tx().inner())
+            issue_agent_ticker::Entity::update_many()
+                .col_expr(
+                    issue_agent_ticker::Column::Waited,
+                    Expr::value(ticker.waited),
+                )
+                .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(now))
+                .col_expr(issue_agent_ticker::Column::Enabled, Expr::value(true))
+                .col_expr(
+                    issue_agent_ticker::Column::DisarmReason,
+                    Expr::value(String::new()),
+                )
+                .col_expr(
+                    issue_agent_ticker::Column::NextRunAt,
+                    Expr::value(ticker.next_run_at),
+                )
+                .filter(issue_agent_ticker::Column::Id.eq(ticker.id))
+                .exec(&conn)
                 .await
-                .map_err(db)?;
+                .map(|_| ())
+                .map_err(|error| db(into_sqlx(error)))?;
         } else {
-            sqlx::query(WAIT_UPDATE_SQL)
-                .bind(ticker.waited)
-                .bind(now)
-                .bind(ticker.id)
-                .execute(&mut **self.dispatch_tx().inner())
+            issue_agent_ticker::Entity::update_many()
+                .col_expr(
+                    issue_agent_ticker::Column::Waited,
+                    Expr::value(ticker.waited),
+                )
+                .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(now))
+                .filter(issue_agent_ticker::Column::Id.eq(ticker.id))
+                .exec(&conn)
                 .await
-                .map_err(db)?;
+                .map(|_| ())
+                .map_err(|error| db(into_sqlx(error)))?;
         }
         Ok(())
     }
@@ -346,15 +306,33 @@ where
         &mut self,
         project_id: Uuid,
     ) -> Result<Option<pidash_services::orchestration::creation::StateView>, DispatchError> {
-        let row: Option<PgRow> = sqlx::query(BACKLOG_TARGET_SQL)
-            .bind(project_id)
-            .bind("backlog")
-            .fetch_optional(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
-        row.map(|row| map_dispatch_state(&row))
-            .transpose()
-            .map_err(db)
+        let model = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            states::Entity::find()
+                .select_only()
+                .columns([
+                    states::Column::Id,
+                    states::Column::Name,
+                    states::Column::Group,
+                ])
+                .filter(states::Column::ProjectId.eq(project_id))
+                .filter(states::Column::Group.eq("backlog"))
+                .filter(states::Column::DeletedAt.is_null())
+                .order_by_desc(states::Column::Default)
+                .order_by_asc(states::Column::Sequence)
+                .limit(1)
+                .into_tuple::<(Uuid, String, String)>()
+                .one(&conn)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
+        Ok(model.map(
+            |(id, name, group)| pidash_services::orchestration::creation::StateView {
+                id,
+                name,
+                group,
+            },
+        ))
     }
 
     async fn in_progress_state_for_project(
@@ -363,31 +341,65 @@ where
         group: &str,
         state_name: &str,
     ) -> Result<Option<pidash_services::orchestration::creation::StateView>, DispatchError> {
-        let row: Option<PgRow> = sqlx::query(IN_PROGRESS_STATE_SQL)
-            .bind(project_id)
-            .bind(group)
-            .bind(state_name)
-            .fetch_optional(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
-        row.map(|row| map_dispatch_state(&row))
-            .transpose()
-            .map_err(db)
+        let model = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            states::Entity::find()
+                .select_only()
+                .columns([
+                    states::Column::Id,
+                    states::Column::Name,
+                    states::Column::Group,
+                ])
+                .filter(states::Column::ProjectId.eq(project_id))
+                .filter(states::Column::Group.eq(group.to_owned()))
+                .filter(states::Column::Name.eq(state_name.to_owned()))
+                .filter(states::Column::DeletedAt.is_null())
+                .order_by_asc(states::Column::Sequence)
+                .limit(1)
+                .into_tuple::<(Uuid, String, String)>()
+                .one(&conn)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
+        Ok(model.map(
+            |(id, name, group)| pidash_services::orchestration::creation::StateView {
+                id,
+                name,
+                group,
+            },
+        ))
     }
 
     async fn paused_state_for_project(
         &mut self,
         project_id: Uuid,
     ) -> Result<Option<pidash_services::orchestration::creation::StateView>, DispatchError> {
-        let row: Option<PgRow> = sqlx::query(PAUSED_STATE_SQL)
-            .bind(project_id)
-            .bind(PAUSED_STATE_NAME)
-            .fetch_optional(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
-        row.map(|row| map_dispatch_state(&row))
-            .transpose()
-            .map_err(db)
+        let model = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            states::Entity::find()
+                .select_only()
+                .columns([
+                    states::Column::Id,
+                    states::Column::Name,
+                    states::Column::Group,
+                ])
+                .filter(states::Column::ProjectId.eq(project_id))
+                .filter(states::Column::Name.eq(PAUSED_STATE_NAME))
+                .filter(states::Column::DeletedAt.is_null())
+                .order_by_asc(states::Column::Sequence)
+                .limit(1)
+                .into_tuple::<(Uuid, String, String)>()
+                .one(&conn)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
+        Ok(model.map(
+            |(id, name, group)| pidash_services::orchestration::creation::StateView {
+                id,
+                name,
+                group,
+            },
+        ))
     }
 
     async fn default_state_id_for_project(
@@ -397,11 +409,16 @@ where
         // A missing row AND a NULL column both mean "no fallback"
         // (`scheduling.py:1093-1096` reads `issue.project.default_state`,
         // None-tolerant).
-        let row: Option<Option<Uuid>> = sqlx::query_scalar(PROJECT_DEFAULT_STATE_SQL)
-            .bind(project_id)
-            .fetch_optional(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+        let row = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            projects::Entity::find_by_id(project_id)
+                .select_only()
+                .column(projects::Column::DefaultStateId)
+                .into_tuple::<Option<Uuid>>()
+                .one(&conn)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
         Ok(row.flatten())
     }
 
@@ -409,12 +426,23 @@ where
         &mut self,
         project_id: Uuid,
     ) -> Result<pidash_services::orchestration::clock::ProjectClockPolicy, DispatchError> {
-        let row: PgRow = sqlx::query(PROJECT_CLOCK_POLICY_SQL)
-            .bind(project_id)
-            .fetch_one(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
-        map_policy(&row).map_err(db)
+        let row = {
+            let conn = TxConn::new(self.dispatch_tx().inner());
+            clock_policy(&conn, project_id)
+                .await
+                .map_err(|error| db(into_sqlx(error)))?
+        };
+        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
+        else {
+            return Err(db(sqlx::Error::RowNotFound));
+        };
+        Ok(pidash_services::orchestration::clock::ProjectClockPolicy {
+            agent_ticking_enabled: Some(ticking_enabled),
+            agent_default_max_ticks: Some(max_ticks),
+            agent_default_interval_seconds: Some(i64::from(interval)),
+            agent_review_default_interval_seconds: Some(i64::from(interval_review)),
+            agent_test_default_interval_seconds: Some(i64::from(interval_test)),
+        })
     }
 
     async fn update_issue_state(
@@ -424,7 +452,7 @@ where
         now: DateTime<Utc>,
     ) -> Result<(), DispatchError> {
         domain_issues::update_issue_state_no_audit(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             issue_id,
             state_id,
             now,
@@ -438,9 +466,12 @@ where
         // `get_agent_system_user` (`workpad.py:44-71`): find by reserved
         // username; create the service bot when missing; refuse when a
         // human holds the name.
-        if let Some(found) = find_agent_user(&mut **self.dispatch_tx().inner(), AGENT_USERNAME)
-            .await
-            .map_err(db)?
+        if let Some(found) = find_agent_user(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            AGENT_USERNAME,
+        )
+        .await
+        .map_err(db)?
         {
             if !found.is_bot {
                 return Err(AgentUserCollisionError.into());
@@ -453,7 +484,7 @@ where
         // evaluates `timezone.now`; the unusable hash lands right after
         // (`workpad.py:62-65`).
         let id = create_bot_user(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             &NewBotUser {
                 id: None,
                 username: AGENT_USERNAME,
@@ -470,7 +501,7 @@ where
         .await
         .map_err(db)?;
         stamp_bot_unusable_password(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             id,
             &make_unusable_password(),
         )
@@ -522,14 +553,20 @@ where
             labels: &empty_list,
             edited_at: None,
         };
-        comment_domain::insert_comment_row(&mut **self.dispatch_tx().inner(), &rows)
-            .await
-            .map_err(db)?;
-        comment_domain::insert_description_row(&mut **self.dispatch_tx().inner(), &rows)
-            .await
-            .map_err(db)?;
+        comment_domain::insert_comment_row(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            &rows,
+        )
+        .await
+        .map_err(db)?;
+        comment_domain::insert_description_row(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            &rows,
+        )
+        .await
+        .map_err(db)?;
         comment_domain::link_comment_description(
-            &mut **self.dispatch_tx().inner(),
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             rows.id,
             rows.description_id,
         )
@@ -543,26 +580,37 @@ where
         activity: &NewWaitActivity,
     ) -> Result<(), DispatchError> {
         use pidash_services::orchestration::dispatch::wait_activity_comment;
-        sqlx::query(WAIT_ACTIVITY_INSERT_SQL)
-            .bind(activity.now)
-            .bind(activity.now)
-            .bind(activity.id)
-            .bind(activity.project_id)
-            .bind(activity.workspace_id)
-            .bind(activity.issue_id)
-            .bind(activity.pool.to_string())
-            .bind(activity.waited.to_string())
-            .bind(wait_activity_comment(
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        issue_activities::ActiveModel {
+            created_at: Set(activity.now.fixed_offset()),
+            updated_at: Set(activity.now.fixed_offset()),
+            id: Set(activity.id),
+            verb: Set("updated".to_owned()),
+            field: Set(Some("agent_wait".to_owned())),
+            old_value: Set(Some(activity.pool.to_string())),
+            new_value: Set(Some(activity.waited.to_string())),
+            comment: Set(wait_activity_comment(
                 activity.pool,
                 activity.waited,
                 activity.run_id.as_ref(),
-            ))
-            .bind(activity.actor_id)
-            .bind(activity.epoch_secs)
-            .bind(activity.created_by)
-            .execute(&mut **self.dispatch_tx().inner())
-            .await
-            .map_err(db)?;
+            )),
+            attachments: Set(Vec::new()),
+            created_by_id: Set(activity.created_by),
+            issue_id: Set(Some(activity.issue_id)),
+            issue_comment_id: Set(None),
+            project_id: Set(activity.project_id),
+            updated_by_id: Set(None),
+            workspace_id: Set(activity.workspace_id),
+            actor_id: Set(Some(activity.actor_id)),
+            new_identifier: Set(None),
+            old_identifier: Set(None),
+            epoch: Set(Some(activity.epoch_secs)),
+            deleted_at: Set(None),
+        }
+        .insert(&conn)
+        .await
+        .map(|_| ())
+        .map_err(|error| db(into_sqlx(error)))?;
         Ok(())
     }
 
@@ -570,23 +618,52 @@ where
         &mut self,
         issue_id: Uuid,
     ) -> Result<Vec<CandidateUser>, DispatchError> {
-        let rows: Vec<PgRow> = sqlx::query(LIVE_ASSIGNEE_CANDIDATES_SQL)
-            .bind(issue_id)
-            .fetch_all(&mut **self.dispatch_tx().inner())
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        // `users u WHERE u.id IN (SELECT assignee_id FROM
+        // issue_assignees WHERE issue_id = $1 AND deleted_at IS NULL)
+        // ORDER BY u.id ASC` as one statement: the assignee subselect
+        // is the `issue_assignees` projection, the outer read is the
+        // users projection ordered by id.
+        let subquery = issue_assignees::Entity::find()
+            .select_only()
+            .column(issue_assignees::Column::AssigneeId)
+            .filter(issue_assignees::Column::IssueId.eq(issue_id))
+            .filter(issue_assignees::Column::DeletedAt.is_null())
+            .into_query();
+        let models = users::Entity::find()
+            .select_only()
+            .columns([
+                users::Column::Id,
+                users::Column::IsActive,
+                users::Column::IsBot,
+            ])
+            .filter(Expr::col((users::Entity, users::Column::Id)).in_subquery(subquery))
+            .order_by_asc(users::Column::Id)
+            .into_tuple::<(Uuid, bool, bool)>()
+            .all(&conn)
             .await
-            .map_err(db)?;
-        rows.iter()
-            .map(map_candidate)
-            .collect::<Result<_, _>>()
-            .map_err(db)
+            .map_err(|error| db(into_sqlx(error)))?;
+        Ok(models
+            .into_iter()
+            .map(|(id, is_active, is_bot)| CandidateUser {
+                id,
+                is_active,
+                is_bot,
+            })
+            .collect())
     }
 
     async fn workspace_slug(&mut self, workspace_id: Uuid) -> Result<String, DispatchError> {
-        sqlx::query_scalar(WORKSPACE_SLUG_SQL)
-            .bind(workspace_id)
-            .fetch_one(&mut **self.dispatch_tx().inner())
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        let slug = workspaces::Entity::find_by_id(workspace_id)
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .into_tuple::<String>()
+            .one(&conn)
             .await
-            .map_err(db)
+            .map_err(|error| db(into_sqlx(error)))?
+            .ok_or_else(|| db(sqlx::Error::RowNotFound))?;
+        Ok(slug)
     }
 
     async fn project_role_facts(
@@ -595,17 +672,74 @@ where
         workspace_slug: &str,
         project_id: Uuid,
     ) -> Result<pidash_services::orchestration::dispatch::RoleVerdict, DispatchError> {
-        let row: (bool, bool, bool) = sqlx::query_as(PROJECT_ROLE_FACTS_SQL)
-            .bind(user_id)
-            .bind(workspace_slug)
-            .bind(project_id)
-            .fetch_one(&mut **self.dispatch_tx().inner())
+        // `check_project_role` EXISTS trio, each as its own
+        // LIMIT-1 existence select over the same predicates as the
+        // single combined statement (`pm.role IN (20, 15, 5)` /
+        // any-role / `wm.role = 20`, each under the soft-delete
+        // scope and the workspace-slug join). Module-private SeaORM
+        // so the db `querysets` kernel (ORCH-3) stays untouched.
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        let has_allowed_role = project_members::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .column(project_members::Column::Id)
+            .filter(project_members::Column::DeletedAt.is_null())
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::MemberId.eq(user_id))
+            .filter(project_members::Column::ProjectId.eq(project_id))
+            .filter(project_members::Column::Role.is_in([20_i16, 15, 5]))
+            .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+            .limit(1)
+            .into_tuple::<Uuid>()
+            .one(&conn)
             .await
-            .map_err(db)?;
+            .map_err(|error| db(into_sqlx(error)))?
+            .is_some();
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        let is_project_member = project_members::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .column(project_members::Column::Id)
+            .filter(project_members::Column::DeletedAt.is_null())
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::MemberId.eq(user_id))
+            .filter(project_members::Column::ProjectId.eq(project_id))
+            .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+            .limit(1)
+            .into_tuple::<Uuid>()
+            .one(&conn)
+            .await
+            .map_err(|error| db(into_sqlx(error)))?
+            .is_some();
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        let is_workspace_admin = workspace_members::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspace_members::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .column(workspace_members::Column::Id)
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::Role.eq(20_i16))
+            .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+            .limit(1)
+            .into_tuple::<Uuid>()
+            .one(&conn)
+            .await
+            .map_err(|error| db(into_sqlx(error)))?
+            .is_some();
         Ok(pidash_services::orchestration::dispatch::RoleVerdict {
-            has_allowed_role: row.0,
-            is_project_member: row.1,
-            is_workspace_admin: row.2,
+            has_allowed_role,
+            is_project_member,
+            is_workspace_admin,
         })
     }
 
@@ -615,15 +749,17 @@ where
         user_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<bool, DispatchError> {
-        sqlx::query_scalar(
-            pidash_services::dispatch::admission::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL,
+        let conn = TxConn::new(self.dispatch_tx().inner());
+        managed_runner_probe(
+            &conn,
+            ManagedRunnerProbe::Enrolled,
+            user_id,
+            project_id,
+            workspace_id,
         )
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&mut **self.dispatch_tx().inner())
         .await
-        .map_err(db)
+        .map(|probe| probe.is_some())
+        .map_err(|error| db(into_sqlx(error)))
     }
 
     fn managed_runner_enabled(&self) -> bool {
@@ -1018,7 +1154,7 @@ pub fn shim_tick_interval_seconds(state: Option<&StateView>, project: &ProjectTi
         _ => None,
     };
     // The cadence columns decode at INT4 width; widen to i64 for the
-    // pure resolver (same boundary rule as `map_policy` above).
+    // pure resolver.
     pidash_db::tasks_ticker::resolve_project_interval(value.map(i64::from))
 }
 
@@ -1051,11 +1187,22 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
         Box::pin(async move {
-            let sql = format!("SELECT EXISTS({})", active_run_sql());
-            sqlx::query_scalar(&sql)
-                .bind(issue_id)
-                .fetch_one(&pool)
+            let conn = sea_orm_connection(&pool);
+            let statuses: Vec<String> = ACTIVE_STATUSES
+                .iter()
+                .map(|status| status.value().to_string())
+                .collect();
+            let found = agent_run::Entity::find()
+                .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+                .filter(agent_run::Column::Status.is_in(statuses))
+                .select_only()
+                .column(agent_run::Column::Id)
+                .limit(1)
+                .into_tuple::<Uuid>()
+                .one(&conn)
                 .await
+                .map_err(into_sqlx)?;
+            Ok(found.is_some())
         })
     }
 
@@ -1065,11 +1212,17 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
         Box::pin(async move {
-            let sql = format!("SELECT EXISTS({})", latest_prior_run_sql());
-            sqlx::query_scalar(&sql)
-                .bind(issue_id)
-                .fetch_one(&pool)
+            let conn = sea_orm_connection(&pool);
+            let found = agent_run::Entity::find()
+                .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+                .select_only()
+                .column(agent_run::Column::Id)
+                .limit(1)
+                .into_tuple::<Uuid>()
+                .one(&conn)
                 .await
+                .map_err(into_sqlx)?;
+            Ok(found.is_some())
         })
     }
 
@@ -1122,17 +1275,6 @@ mod tests {
     // -- offline -----------------------------------------------------------
 
     #[test]
-    fn clock_sql_translation() {
-        // `:name` → `$n` in PARAMS order, longest names first. The
-        // save/create goldens moved to `domain::clock` with the
-        // shared write; the seams keep only the lock query.
-        assert_eq!(
-            lock_ticker_by_issue_sql(),
-            pidash_services::orchestration::clock::lock_ticker_sql().replace(":issue_id", "$1")
-        );
-    }
-
-    #[test]
     fn shim_ticking_vectors() {
         let started = StateView {
             id: Uuid::nil(),
@@ -1159,6 +1301,140 @@ mod tests {
         };
         assert!(!shim_is_ticking_state(Some(&paused)));
         assert!(!shim_is_ticking_state(None));
+    }
+
+    #[test]
+    fn dispatch_statements_pin_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        // The Retick/pause issue locks: pk + FOR UPDATE.
+        let issue_id = Uuid::from_u128(1);
+        let lock = issues::Entity::find_by_id(issue_id)
+            .select_only()
+            .column(issues::Column::Id)
+            .lock_exclusive()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(lock.contains("\"issues\""), "{lock}");
+        assert!(lock.contains("FOR UPDATE"), "{lock}");
+        // The ticker lock: soft-delete scope + id asc + FOR UPDATE.
+        let ticker_lock = issue_agent_ticker::Entity::find()
+            .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+            .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+            .order_by_asc(issue_agent_ticker::Column::Id)
+            .lock_exclusive()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            ticker_lock.contains("\"issue_agent_ticker\""),
+            "{ticker_lock}"
+        );
+        assert!(
+            ticker_lock.contains("\"deleted_at\" IS NULL"),
+            "{ticker_lock}"
+        );
+        assert!(ticker_lock.contains("ORDER BY"), "{ticker_lock}");
+        assert!(ticker_lock.contains("FOR UPDATE"), "{ticker_lock}");
+        // The Backlog target: default DESC, sequence ASC, LIMIT 1.
+        let backlog = states::Entity::find()
+            .select_only()
+            .columns([
+                states::Column::Id,
+                states::Column::Name,
+                states::Column::Group,
+            ])
+            .filter(states::Column::ProjectId.eq(issue_id))
+            .filter(states::Column::Group.eq("backlog"))
+            .filter(states::Column::DeletedAt.is_null())
+            .order_by_desc(states::Column::Default)
+            .order_by_asc(states::Column::Sequence)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(backlog.contains("\"states\""), "{backlog}");
+        assert!(backlog.contains("ORDER BY"), "{backlog}");
+        assert!(backlog.contains("LIMIT"), "{backlog}");
+        // The live-assignee subquery: IN (SELECT assignee_id ...).
+        let assignees = issue_assignees::Entity::find()
+            .select_only()
+            .column(issue_assignees::Column::AssigneeId)
+            .filter(issue_assignees::Column::IssueId.eq(issue_id))
+            .filter(issue_assignees::Column::DeletedAt.is_null())
+            .into_query();
+        let users_sql = users::Entity::find()
+            .select_only()
+            .columns([
+                users::Column::Id,
+                users::Column::IsActive,
+                users::Column::IsBot,
+            ])
+            .filter(Expr::col((users::Entity, users::Column::Id)).in_subquery(assignees))
+            .order_by_asc(users::Column::Id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(users_sql.contains("\"users\""), "{users_sql}");
+        assert!(users_sql.contains("IN (SELECT"), "{users_sql}");
+        assert!(users_sql.contains("\"assignee_id\""), "{users_sql}");
+        // The wait update: waited/updated_at by id.
+        let wait_update = issue_agent_ticker::Entity::update_many()
+            .col_expr(issue_agent_ticker::Column::Waited, Expr::value(1))
+            .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(now()))
+            .filter(issue_agent_ticker::Column::Id.eq(issue_id))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            wait_update.contains("UPDATE \"issue_agent_ticker\""),
+            "{wait_update}"
+        );
+        assert!(wait_update.contains("\"waited\""), "{wait_update}");
+        // The shim exists probes: work_item + status IN, LIMIT 1.
+        let statuses: Vec<String> = ACTIVE_STATUSES
+            .iter()
+            .map(|s| s.value().to_string())
+            .collect();
+        let active = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+            .filter(agent_run::Column::Status.is_in(statuses.clone()))
+            .select_only()
+            .column(agent_run::Column::Id)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(active.contains("\"agent_run\""), "{active}");
+        assert!(active.contains("\"work_item_id\""), "{active}");
+        assert!(active.contains("\"status\" IN"), "{active}");
+        let prior = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+            .select_only()
+            .column(agent_run::Column::Id)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!prior.contains("\"status\" IN"), "{prior}");
+        // The role-facts trio: INNER JOIN workspaces, role IN (20,15,5),
+        // is_active, deleted_at scope, slug filter.
+        let role = project_members::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .column(project_members::Column::Id)
+            .filter(project_members::Column::DeletedAt.is_null())
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::MemberId.eq(issue_id))
+            .filter(project_members::Column::ProjectId.eq(issue_id))
+            .filter(project_members::Column::Role.is_in([20_i16, 15, 5]))
+            .filter(workspaces::Column::Slug.eq("ws".to_owned()))
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(role.contains("INNER JOIN"), "{role}");
+        assert!(role.contains("\"workspaces\""), "{role}");
+        assert!(role.contains("\"role\" IN"), "{role}");
+        assert!(role.contains("\"slug\""), "{role}");
+        assert!(role.contains("\"is_active\""), "{role}");
+        assert!(role.contains("\"deleted_at\" IS NULL"), "{role}");
+        assert!(role.contains("LIMIT"), "{role}");
     }
 
     #[test]
@@ -1283,7 +1559,6 @@ mod tests {
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,
@@ -3073,6 +3348,173 @@ mod tests {
         assert_eq!(status, "queued");
         assert_eq!(trigger, "tick");
         assert_eq!(parent, Some(prior));
+    }
+
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    #[tokio::test]
+    async fn live_migrated_reads_backlog_slug_policy_assignees() {
+        // Direct SeaORM coverage for the migrated seam reads: backlog
+        // ordering (default DESC, sequence ASC), workspace slug,
+        // clock policy, live-assignee subquery and the role-facts trio.
+        let _serial = LIVE_SERIAL.lock().await;
+        let pool = pool().await;
+        let graph = seed_graph(&pool, "migread").await;
+        ensure_agent_user(&pool).await;
+        let tx = Transaction::begin(&pool).await.expect("begin");
+        let mut store = LiveCreationStore::new(tx, &pool, deps());
+        let backlog =
+            pidash_services::orchestration::dispatch::DispatchSeam::backlog_target_for_project(
+                &mut store,
+                graph.project,
+            )
+            .await
+            .expect("backlog");
+        assert_eq!(
+            backlog.map(|state| state.id),
+            Some(graph.states["BacklogHi"])
+        );
+        let in_progress =
+            pidash_services::orchestration::dispatch::DispatchSeam::in_progress_state_for_project(
+                &mut store,
+                graph.project,
+                "started",
+                "In Progress",
+            )
+            .await
+            .expect("in progress");
+        assert_eq!(
+            in_progress.map(|state| state.id),
+            Some(graph.states["In Progress"])
+        );
+        let paused =
+            pidash_services::orchestration::dispatch::DispatchSeam::paused_state_for_project(
+                &mut store,
+                graph.project,
+            )
+            .await
+            .expect("paused");
+        assert_eq!(paused.map(|state| state.id), Some(graph.states["Paused"]));
+        let slug = pidash_services::orchestration::dispatch::DispatchSeam::workspace_slug(
+            &mut store, graph.ws,
+        )
+        .await
+        .expect("slug");
+        assert!(slug.starts_with("fx8-ws-"));
+        let policy =
+            pidash_services::orchestration::dispatch::DispatchSeam::clock_policy_for_project(
+                &mut store,
+                graph.project,
+            )
+            .await
+            .expect("policy");
+        assert_eq!(policy.agent_ticking_enabled, Some(true));
+        assert_eq!(policy.agent_default_max_ticks, Some(10));
+        assert_eq!(policy.agent_default_interval_seconds, Some(10800));
+        // Assignees: seed one live assignment + one tombstoned row.
+        sqlx::query(
+            "INSERT INTO issue_assignees (id, created_at, updated_at, assignee_id, issue_id, project_id, workspace_id) \
+             VALUES ($1, $2, $2, $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now())
+        .bind(graph.user)
+        .bind(graph.issue)
+        .bind(graph.project)
+        .bind(graph.ws)
+        .execute(&pool)
+        .await
+        .expect("seed assignee");
+        // A tombstoned (soft-deleted) assignment must stay excluded.
+        let tombstoned_user = seed_user(&pool, "migread-tomb").await;
+        sqlx::query(
+            "INSERT INTO issue_assignees (id, created_at, updated_at, assignee_id, issue_id, project_id, workspace_id, deleted_at) \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, $2)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now())
+        .bind(tombstoned_user)
+        .bind(graph.issue)
+        .bind(graph.project)
+        .bind(graph.ws)
+        .execute(&pool)
+        .await
+        .expect("seed tombstoned assignee");
+        let candidates =
+            pidash_services::orchestration::dispatch::DispatchSeam::live_assignee_candidates(
+                &mut store,
+                graph.issue,
+            )
+            .await
+            .expect("candidates");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, graph.user);
+        let facts = pidash_services::orchestration::dispatch::DispatchSeam::project_role_facts(
+            &mut store,
+            graph.user,
+            &slug.clone(),
+            graph.project,
+        )
+        .await
+        .expect("role facts");
+        assert!(!facts.has_allowed_role);
+        assert!(!facts.is_project_member);
+        assert!(!facts.is_workspace_admin);
+        // True branches: inactive membership stays false, active ADMIN
+        // membership and workspace ADMIN answer true.
+        sqlx::query(
+            "INSERT INTO project_members (id, created_at, updated_at, role, member_id, project_id, workspace_id, view_props, default_props, sort_order, preferences, is_active) \
+             VALUES ($1, $2, $2, 20, $3, $4, $5, '{}', '{}', 0, '{}', false)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now())
+        .bind(graph.user)
+        .bind(graph.project)
+        .bind(graph.ws)
+        .execute(&pool)
+        .await
+        .expect("seed inactive membership");
+        let inactive = pidash_services::orchestration::dispatch::DispatchSeam::project_role_facts(
+            &mut store,
+            graph.user,
+            &slug.clone(),
+            graph.project,
+        )
+        .await
+        .expect("inactive facts");
+        assert!(!inactive.has_allowed_role);
+        assert!(!inactive.is_project_member);
+        sqlx::query(
+            "UPDATE project_members SET is_active = true WHERE member_id = $1 AND project_id = $2",
+        )
+        .bind(graph.user)
+        .bind(graph.project)
+        .execute(&pool)
+        .await
+        .expect("activate membership");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, created_at, updated_at, role, member_id, workspace_id, view_props, default_props, issue_props, is_active, explored_features, getting_started_checklist, tips) \
+             VALUES ($1, $2, $2, 20, $3, $4, '{}', '{}', '{}', true, '{}', '{}', '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now())
+        .bind(graph.user)
+        .bind(graph.ws)
+        .execute(&pool)
+        .await
+        .expect("seed workspace admin");
+        let active = pidash_services::orchestration::dispatch::DispatchSeam::project_role_facts(
+            &mut store,
+            graph.user,
+            &slug.clone(),
+            graph.project,
+        )
+        .await
+        .expect("active facts");
+        assert!(active.has_allowed_role);
+        assert!(active.is_project_member);
+        assert!(active.is_workspace_admin);
+        let (tx, _, _, _, _, _) = store.into_parts();
+        tx.rollback().await.expect("rollback");
     }
 
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]

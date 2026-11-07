@@ -49,6 +49,8 @@ export interface IProject extends IPartialProject {
     kind: "local_runner" | "cloud_agent" | "managed_runner";
     available: boolean;
     reason_code: string;
+    /** True for entries kept only for older clients; hide them. */
+    deprecated?: boolean;
   }[];
   archive_in?: number;
   close_in?: number;

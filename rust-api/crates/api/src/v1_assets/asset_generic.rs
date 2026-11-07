@@ -46,7 +46,7 @@
 //!   the generic 500, matching the `AttributeError` the view's `.get`
 //!   raises on a list/scalar.
 //! * Reads reuse `pidash_db::v1_assets::asset_queries`
-//!   (`generic_detail_select_sql`, `external_dedupe_select_sql`); the
+//!   (`generic_detail_select`, `external_dedupe_select`); the
 //!   workspace-first lookup order is handler-owned (a missing workspace
 //!   answers `Workspace not found` before the asset lookup runs).
 //!   Writes are inline single statements with the same column semantics
@@ -103,9 +103,13 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use hmac::{Hmac, Mac};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, Set,
+};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::license::form_body::{select_body_kind, BodyKind};
@@ -115,6 +119,9 @@ use pidash_auth::token as auth_token;
 use pidash_compat::py::py_json_string;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_compat::response::{json_response as raw, json_value as json_body, no_content};
+use pidash_db::entity::{
+    api_tokens, dev_machine, file_assets, machine_token, users, workspace_members, workspaces,
+};
 use pidash_db::v1_assets::asset_queries;
 
 // ---------------------------------------------------------------------------
@@ -372,13 +379,16 @@ pub async fn authenticate(
 /// name, loaded but NOT parsed — parsing happens after authentication in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Option<String>, Denial> {
-    let zone: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(zone.and_then(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let zone: Option<String> = users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(zone)
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -399,17 +409,46 @@ fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
     }
 }
 
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    user_id: Uuid,
+    is_active: bool,
+    expired_at: Option<DateTime<Utc>>,
+}
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS NULL`,
+/// the `SoftDeletionManager` scope, `db/mixins.py:56-66`: a soft-deleted
+/// token 403s instead of authenticating).
+async fn live_api_token(
+    pool: &sqlx::PgPool,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::UserId,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
-    // `deleted_at IS NULL` is the `SoftDeletionManager` scope
-    // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
-    // rows, so a soft-deleted token 403s instead of authenticating.
-    let row: Option<(Uuid, bool, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL")
-            .bind(presented)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((user_id, is_active, expired_at)) = row else {
+    let row = live_api_token(pool, presented).await?;
+    let Some(ApiTokenLookup {
+        user_id,
+        is_active,
+        expired_at,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now = Utc::now();
@@ -423,10 +462,71 @@ async fn authenticate_api_token(pool: &sqlx::PgPool, presented: &str) -> Result<
     auth_token::validate_api_token(Some(&kernel_row), presented, now.timestamp())
         .map_err(|_| Denial::InvalidToken)?;
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, presented)
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+        &pidash_db::pool::sea_orm_connection(pool),
+        presented,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(user_id)
+}
+
+/// `machine_token` by hash, LEFT JOIN `dev_machine` for its revocation
+/// (`api_authentication.py:47-70`). No liveness scope: the tables have
+/// no soft delete.
+async fn machine_token_with_device(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::DevMachineId,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)),
+            "dev_revoked_at",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`):
+/// an active, live `workspace_members` row.
+async fn is_active_workspace_member(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit: Option<Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(user_id)
+    Ok(hit.is_some())
 }
 
 async fn authenticate_machine_token(
@@ -435,17 +535,7 @@ async fn authenticate_machine_token(
     secret_key: &[u8],
 ) -> Result<Uuid, Denial> {
     let token_hash = auth_token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at AS dev_revoked_at
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = machine_token_with_device(pool, &token_hash).await?;
     let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
@@ -458,29 +548,26 @@ async fn authenticate_machine_token(
         .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: a non-member is revoked
     // first, then denied — exactly like Python.
-    let member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members
-          WHERE workspace_id = $1 AND member_id = $2 AND is_active
-          AND deleted_at IS NULL)",
-    )
-    .bind(row.workspace_id)
-    .bind(row.user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let member = is_active_workspace_member(pool, row.workspace_id, row.user_id).await?;
     if !member {
-        pidash_services::domain::tokens::revoke_machine_token_by_id_now(pool, row.id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        return Err(Denial::InvalidToken);
-    }
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(pool, row.id)
+        pidash_services::domain::tokens::revoke_machine_token_by_id_now(
+            &pidash_db::pool::sea_orm_connection(pool),
+            row.id,
+        )
         .await
         .map_err(|_| Denial::ServerError)?;
+        return Err(Denial::InvalidToken);
+    }
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(row.user_id)
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct MachineTokenLookup {
     id: Uuid,
     user_id: Uuid,
@@ -790,13 +877,16 @@ fn patch_project_id(value: Option<&Value>) -> ProjectOutcome {
 /// `Workspace.objects.get(slug=slug)` (`asset.py:428,532`): the manager
 /// read scopes live rows, so a soft-deleted workspace reads as missing —
 /// exactly what both units need. Returns the workspace id.
-async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<Option<Uuid>, sqlx::Error> {
-    let row: Option<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|row| row.0))
+async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<Option<Uuid>, sea_orm::DbErr> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
 }
 
 fn host_of(headers: &HeaderMap) -> Option<String> {
@@ -834,17 +924,20 @@ struct AssetRow {
     issue_id: Option<Uuid>,
 }
 
-fn asset_row(row: &sqlx::postgres::PgRow) -> Result<AssetRow, sqlx::Error> {
-    Ok(AssetRow {
-        id: row.try_get("id")?,
-        entity_type: row.try_get("entity_type")?,
-        is_uploaded: row.try_get("is_uploaded")?,
-        storage_metadata: row.try_get("storage_metadata")?,
-        attributes: row.try_get("attributes")?,
-        asset_key: row.try_get("asset")?,
-        project_id: row.try_get("project_id")?,
-        issue_id: row.try_get("issue_id")?,
-    })
+fn asset_from_model(model: &file_assets::Model) -> AssetRow {
+    AssetRow {
+        id: model.id,
+        entity_type: model.entity_type.clone(),
+        is_uploaded: model.is_uploaded,
+        storage_metadata: model.storage_metadata.clone(),
+        // `attributes` is NOT NULL in the entity, so the decode is
+        // always present — the old `Option<Value>` read only ever
+        // delivered `Some`.
+        attributes: Some(model.attributes.clone()),
+        asset_key: model.asset.clone(),
+        project_id: model.project_id,
+        issue_id: model.issue_id,
+    }
 }
 
 /// `FileAsset.asset_url` (`db/models/asset.py:80-100`) for the property
@@ -948,22 +1041,15 @@ async fn generic_get(
     };
     let _ = workspace;
     // `asset = FileAsset.objects.get(id, workspace_id, is_deleted=False)`.
-    let row = match sqlx::query(&asset_queries::generic_detail_select_sql())
-        .bind(asset_id)
-        .bind(&slug)
-        .fetch_optional(pool)
-        .await
-    {
-        Ok(row) => row,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = match asset_queries::fetch_generic_detail(&db, asset_id, &slug).await {
+        Ok(model) => model,
         Err(error) => return get_server_error(error),
     };
-    let Some(row) = row else {
+    let Some(model) = model else {
         return Denial::AssetNotFound.into_response();
     };
-    let asset = match asset_row(&row) {
-        Ok(asset) => asset,
-        Err(error) => return get_server_error(error),
-    };
+    let asset = asset_from_model(&model);
     if !asset.is_uploaded {
         return Denial::NotUploaded.into_response();
     }
@@ -1092,21 +1178,20 @@ async fn generic_post(
     if is_truthy(data.get("external_id")) && is_truthy(data.get("external_source")) {
         let external_id = python_str(data.get("external_id").expect("truthy"));
         let external_source = python_str(data.get("external_source").expect("truthy"));
-        let existing = match sqlx::query(&asset_queries::external_dedupe_select_sql())
-            .bind(&external_id)
-            .bind(&external_source)
-            .bind(&slug)
-            .fetch_optional(pool)
-            .await
+        let dedupe_db = pidash_db::pool::sea_orm_connection(pool);
+        let existing = match asset_queries::fetch_external_dedupe(
+            &dedupe_db,
+            &external_id,
+            &external_source,
+            &slug,
+        )
+        .await
         {
-            Ok(row) => row,
+            Ok(model) => model,
             Err(error) => return server_error(error),
         };
-        if let Some(row) = existing {
-            let asset = match asset_row(&row) {
-                Ok(asset) => asset,
-                Err(error) => return server_error(error),
-            };
+        if let Some(model) = existing {
+            let asset = asset_from_model(&model);
             return json_body(
                 StatusCode::CONFLICT,
                 serde_json::json!({
@@ -1141,31 +1226,36 @@ async fn generic_post(
     });
     let asset_id = Uuid::new_v4();
     let now = Utc::now();
+    let typed_now: chrono::DateTime<chrono::FixedOffset> = now.into();
     // `FileAsset.objects.create(...)` (`asset.py:551-563`).
-    let inserted = sqlx::query(
-        r#"INSERT INTO "file_assets" ("id", "created_at", "updated_at", "created_by_id", "attributes", "asset", "size", "workspace_id", "project_id", "external_id", "external_source", "entity_type", "is_deleted", "is_archived", "is_uploaded", "storage_metadata") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false, false, false, '{}')"#,
-    )
-    .bind(asset_id)
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(sqlx::types::Json(attributes))
-    .bind(&asset_key)
-    .bind(size_limit as f64)
-    .bind(workspace)
-    .bind(project_id)
-    .bind(external_id)
-    .bind(external_source)
-    .bind(GENERIC_ENTITY_TYPE)
-    .execute(pool)
-    .await;
+    let record = file_assets::ActiveModel {
+        id: Set(asset_id),
+        created_at: Set(typed_now),
+        updated_at: Set(typed_now),
+        created_by_id: Set(Some(actor.id)),
+        attributes: Set(attributes),
+        asset: Set(asset_key.clone()),
+        size: Set(size_limit as f64),
+        workspace_id: Set(Some(workspace)),
+        project_id: Set(project_id),
+        external_id: Set(external_id),
+        external_source: Set(external_source),
+        entity_type: Set(Some(GENERIC_ENTITY_TYPE.to_owned())),
+        is_deleted: Set(false),
+        is_archived: Set(false),
+        is_uploaded: Set(false),
+        storage_metadata: Set(None),
+        ..Default::default()
+    };
+    let inserted = record
+        .insert(&pidash_db::pool::sea_orm_connection(pool))
+        .await;
     if let Err(error) = inserted {
         // `handle_exception` (`base.py:142-146`): Django raises
         // `IntegrityError` for SQLSTATE class 23 (unknown-UUID FKs,
         // NOT NULL, check violations) → 400; every other column error
         // (class 22 casts, overlong keys, connection loss) → generic 500.
-        let integrity = matches!(&error, sqlx::Error::Database(db) if db.code().is_some_and(|code| code.starts_with("23")));
-        if integrity {
+        if pidash_db::orm_tx::is_integrity_violation(&error) {
             return Denial::BadPayload.into_response();
         }
         return server_error(error);
@@ -1241,16 +1331,12 @@ async fn generic_patch(
     // The lookup runs BEFORE `request.data` is touched (DRF parses
     // lazily): a missing asset 404s even with a malformed body.
     // `FileAsset.objects.get(id, workspace__slug, is_deleted=False)`.
-    let row = match sqlx::query(&asset_queries::generic_detail_select_sql())
-        .bind(asset_id)
-        .bind(&slug)
-        .fetch_optional(pool)
-        .await
-    {
-        Ok(row) => row,
+    let patch_db = pidash_db::pool::sea_orm_connection(pool);
+    let model = match asset_queries::fetch_generic_detail(&patch_db, asset_id, &slug).await {
+        Ok(model) => model,
         Err(error) => return server_error(error),
     };
-    let Some(row) = row else {
+    let Some(model) = model else {
         return Denial::AssetNotFound.into_response();
     };
     // `request.data` parses here — after the lookup, like Python.
@@ -1265,10 +1351,7 @@ async fn generic_patch(
                 .into_response();
         }
     };
-    let asset = match asset_row(&row) {
-        Ok(asset) => asset,
-        Err(error) => return server_error(error),
-    };
+    let asset = asset_from_model(&model);
     // `asset.is_uploaded = request.data.get("is_uploaded", current)`.
     let is_uploaded = match patch_is_uploaded(data.get("is_uploaded")) {
         UploadedOutcome::Keep => asset.is_uploaded,
@@ -1292,12 +1375,11 @@ async fn generic_patch(
     // ONLY that column: Django 4.2 `_save_table` filters `non_pks` by
     // `update_fields` and never adds the `auto_now` `updated_at`, so the
     // stored column is left untouched.
-    if let Err(error) =
-        sqlx::query(r#"UPDATE "file_assets" SET "is_uploaded" = $1 WHERE "id" = $2"#)
-            .bind(is_uploaded)
-            .bind(asset_id)
-            .execute(pool)
-            .await
+    if let Err(error) = file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsUploaded, Expr::value(is_uploaded))
+        .filter(file_assets::Column::Id.eq(asset_id))
+        .exec(&patch_db)
+        .await
     {
         return server_error(error);
     }
@@ -2165,11 +2247,14 @@ mod tests {
     // pin the bind contract the handlers rely on.
     #[test]
     fn query_builders_carry_both_binds() {
-        let detail = asset_queries::generic_detail_select_sql();
+        use sea_query::PostgresQueryBuilder;
+        let detail = asset_queries::generic_detail_select(Uuid::new_v4(), "acme")
+            .to_string(PostgresQueryBuilder);
         assert!(detail.contains("\"file_assets\""));
-        assert!(detail.contains("$1") && detail.contains("$2"));
-        let dedupe = asset_queries::external_dedupe_select_sql();
-        assert!(dedupe.contains("$1") && dedupe.contains("$2") && dedupe.contains("$3"));
+        assert!(detail.contains("= 'acme'"));
+        let dedupe = asset_queries::external_dedupe_select("e1", "s3", "acme")
+            .to_string(PostgresQueryBuilder);
+        assert!(dedupe.contains("'e1'") && dedupe.contains("'s3'") && dedupe.contains("'acme'"));
         assert!(dedupe.contains("LIMIT 1"));
     }
 

@@ -351,7 +351,7 @@ describe("PSET-005 read view", () => {
     expect(field("Repository URL")).toHaveValue("");
     expect(screen.getByTestId("general-visibility")).toHaveTextContent("Public");
     expect(screen.getByTestId("general-timezone")).toHaveTextContent("Europe/Lisbon");
-    expect(screen.getByTestId("general-executor")).toHaveTextContent("Local runner");
+    expect(screen.getByTestId("general-execution-target-note")).toHaveTextContent("runs on runners");
     expect(screen.getByRole("spinbutton", { name: "Run budget per work item" })).toHaveValue(7);
     expect(screen.getByTestId("general-cadence")).toHaveTextContent("6 hours");
     expect(screen.queryByTestId("general-banner")?.className).not.toMatch(/cover/);
@@ -540,7 +540,6 @@ describe("PSET-006 save and validation", () => {
     expect(field("Base branch")).toBeDisabled();
     expect(field("Repository URL")).toBeDisabled();
     expect(screen.getByTestId("general-visibility-trigger")).toBeDisabled();
-    expect(screen.getByTestId("general-executor-trigger")).toBeDisabled();
     expect(screen.getByTestId("general-ticking")).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByTestId("general-repo-bind")).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Update project" })).not.toBeInTheDocument();
@@ -772,24 +771,14 @@ describe("PSET-008 repository bind", () => {
 });
 
 describe("PSET-009 execution policy", () => {
-  it("disables an unavailable family but never the local runner", async () => {
-    const user = userEvent.setup();
-    await renderLoaded();
-    await user.click(screen.getByTestId("general-executor-trigger"));
-    expect(screen.getByRole("option", { name: "Local runner" })).toBeEnabled();
-    expect(screen.getByRole("option", { name: "Cloud agent" })).toBeEnabled();
-    expect(screen.getByRole("option", { name: "Desktop agent" })).toBeDisabled();
-  });
-
-  it("saves a switched execution target", async () => {
-    const user = userEvent.setup();
+  it("offers no executor choice and never writes one", async () => {
     const { calls } = await renderLoaded();
-    await user.click(screen.getByTestId("general-executor-trigger"));
-    await user.click(screen.getByRole("option", { name: "Cloud agent" }));
-    expect(screen.getByTestId("general-executor")).toHaveTextContent("Cloud agent");
+    expect(screen.queryByTestId("general-executor-trigger")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Cloud agent" })).not.toBeInTheDocument();
+    fireEvent.change(field("Project name"), { target: { value: "Renamed" } });
     save();
     await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
-    expect(patchBodyAt(calls).default_agent_executor).toBe("cloud_agent");
+    expect("default_agent_executor" in patchBodyAt(calls)).toBe(false);
   });
 
   it("leaves the policy visible but inert while automated runs are off", async () => {

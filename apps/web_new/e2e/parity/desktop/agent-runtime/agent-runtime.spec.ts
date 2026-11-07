@@ -285,7 +285,11 @@ test(
       );
     });
 
-    await test.step("pinning the desktop target is refused with its reason", async () => {
+    await test.step("an old client's desktop pin is translated to the runner executor", async () => {
+      // Runner is the only executor (built-in engine design §6): the server
+      // accepts `managed_runner` from older desktop builds and stores
+      // `local_runner` (pinned to the caller's online engine when one exists;
+      // the scratch stack has none, so the issue stays pod-level).
       const issue = await ownIssueId(seed, session, `Oracle desk pin ${Date.now()}`);
       try {
         const outcome = await serverDeskRuntimePinIssueExecutorStatus(
@@ -295,8 +299,10 @@ test(
           "managed_runner",
           session
         );
-        expect(outcome.status).toBe(400);
-        expect(outcome.body).toContain("agent_executor");
+        expect(outcome.status).toBeLessThan(400);
+        expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(
+          "local_runner"
+        );
       } finally {
         await deleteIssue(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => undefined);
       }
@@ -909,7 +915,9 @@ async function desk004Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     );
   });
 
-  await test.step("pinning the refusal stays impossible", async () => {
+  await test.step("an old client's desktop pin is translated to the runner executor", async () => {
+    // Runner is the only executor (built-in engine design §6): `managed_runner`
+    // from older builds is stored as `local_runner`.
     const outcome = await serverDeskRuntimePinIssueExecutorStatus(
       seed.workspaceSlug,
       seed.projectId,
@@ -917,26 +925,21 @@ async function desk004Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
       "managed_runner",
       session
     );
-    expect(outcome.status).toBe(400);
-    expect(outcome.body).toContain("agent_executor");
+    expect(outcome.status).toBeLessThan(400);
+    expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(
+      "local_runner"
+    );
   });
 
-  await test.step("the execution picker shows the managed row disabled with its reason", async () => {
+  await test.step("the execution picker offers no desktop executor row", async () => {
     await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
     await expect.poll(() => driver.issueDetailTitle(), RUNTIME_POLL).not.toBeNull();
     // The trigger carries the current selection, not a fixed label.
     await driver.page.getByRole("group", { name: "Runs on" }).getByRole("button").first().click();
     const list = driver.page.getByRole("listbox", { name: "Execution targets" });
     await expect.poll(() => list.count(), RUNTIME_POLL).toBe(1);
-    const row = list.getByRole("option", { name: /Pi Dash Agent \(desktop\)/ });
-    await expect.poll(() => row.count(), RUNTIME_POLL).toBe(1);
-    await expect.poll(() => row.first().isDisabled(), RUNTIME_POLL).toBe(true);
-    expect(
-      ((await row
-        .first()
-        .innerText()
-        .catch(() => "")) ?? "") as string
-    ).toContain("The built-in agent is switched off on this server.");
+    // The deprecated entry is hidden; the engine is picked as a runner.
+    expect(await list.getByRole("option", { name: /Pi Dash Agent \(desktop\)/ }).count()).toBe(0);
     await driver.page.keyboard.press("Escape").catch(() => undefined);
   });
 

@@ -609,7 +609,11 @@ async fn user_entity_save(
                 now,
             );
             pidash_services::domain::identity::link_avatar_asset(
-                pool, *owner_id, *asset_id, &write, now,
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                *asset_id,
+                &write,
+                now,
             )
             .await
             .map_err(|_| server_error())?;
@@ -648,7 +652,11 @@ async fn user_entity_save(
                 now,
             );
             pidash_services::domain::identity::link_cover_asset(
-                pool, *owner_id, *asset_id, &write, now,
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                *asset_id,
+                &write,
+                now,
             )
             .await
             .map_err(|_| server_error())?;
@@ -694,9 +702,14 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            pidash_services::domain::identity::unlink_avatar_asset(pool, *owner_id, &write, now)
-                .await
-                .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_avatar_asset(
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                &write,
+                now,
+            )
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::ClearCover => {
@@ -724,9 +737,14 @@ async fn user_entity_delete(
                 &user_save::new_user_token(),
                 now,
             );
-            pidash_services::domain::identity::unlink_cover_asset(pool, *owner_id, &write, now)
-                .await
-                .map_err(|_| server_error())?;
+            pidash_services::domain::identity::unlink_cover_asset(
+                &pidash_db::pool::sea_orm_connection(pool),
+                *owner_id,
+                &write,
+                now,
+            )
+            .await
+            .map_err(|_| server_error())?;
             Ok(())
         }
         q::UserDeleteAction::Noop => Ok(()),
@@ -768,7 +786,7 @@ async fn workspace_entity_save(
                     .map_err(|_| server_error())?;
             }
             pidash_services::domain::workspaces::stamp_logo(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 workspace_id,
                 *asset_id,
                 now,
@@ -796,7 +814,11 @@ async fn workspace_entity_save(
                     .map_err(|_| server_error())?;
             }
             pidash_services::domain::projects::stamp_cover_image(
-                pool, project_id, *asset_id, now, actor_id,
+                &pidash_db::pool::sea_orm_connection(pool),
+                project_id,
+                *asset_id,
+                now,
+                actor_id,
             )
             .await
             .map_err(|_| server_error())?;
@@ -837,7 +859,7 @@ async fn workspace_entity_delete(
             .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
             pidash_services::domain::workspaces::clear_logo_asset(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 workspace_id,
                 now,
                 actor_id,
@@ -859,7 +881,10 @@ async fn workspace_entity_delete(
             .map_err(|_| server_error())?;
             let Some(_) = row else { return Ok(()) };
             pidash_services::domain::projects::clear_cover_image_asset(
-                pool, project_id, now, actor_id,
+                &pidash_db::pool::sea_orm_connection(pool),
+                project_id,
+                now,
+                actor_id,
             )
             .await
             .map_err(|_| server_error())?;

@@ -21,7 +21,7 @@ from django.utils import timezone
 from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.managed_runner.errors import ManagedRunnerReason
 from pi_dash.managed_runner.tasks import expire_waiting_runs
-from pi_dash.runner.models import AgentRun, AgentRunStatus, RunnerStatus
+from pi_dash.runner.models import AgentRun, AgentRunStatus, RunnerPodDispatch, RunnerStatus
 
 from .conftest import MANAGED_SETTINGS
 
@@ -29,6 +29,8 @@ pytestmark = pytest.mark.unit
 
 
 def _managed_issue(issue, project):
+    """An issue still carrying the legacy ``managed_runner`` value (one the
+    data migration has not reached, or written by an old path)."""
     issue.agent_executor = AgentExecutorKind.MANAGED_RUNNER
     issue.save(update_fields=["agent_executor"])
     return issue
@@ -50,60 +52,47 @@ def _preflight(issue, user, project, triggered_by="tick"):
 # --------------------------------------------------------------------------
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_allows_a_closed_laptop(
-    project, create_user, openhub_lane, bundled_runner, issue_for_project
-):
-    """Offline must pass the preflight so the run is created and waits.
+def test_preflight_allows_a_closed_laptop_in_the_pod(project, create_user, bundled_runner, issue_for_project):
+    """A legacy ``managed_runner`` issue is a pod issue now (§13). With the
+    owner's engine a pod member, offline must pass the preflight so the run
+    is created and waits in the pod.
 
     If this bounced, every issue whose owner shut their laptop would be moved
     back to Backlog and the ticker disarmed — losing the schedule, not just
     the run.
     """
     issue = _managed_issue(issue_for_project, project)
+    bundled_runner.pod_dispatch = RunnerPodDispatch.POD_MEMBER
     bundled_runner.status = RunnerStatus.OFFLINE
-    bundled_runner.save(update_fields=["status"])
+    bundled_runner.save(update_fields=["pod_dispatch", "status"])
     original_state = issue.state_id
     assert _preflight(issue, create_user, project) is True
     issue.refresh_from_db()
     assert issue.state_id == original_state
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_bounces_when_nothing_is_enrolled(
-    project, create_user, openhub_lane, issue_for_project
+def test_preflight_bounces_when_nothing_is_enrolled(project, create_user, issue_for_project):
+    issue = _managed_issue(issue_for_project, project)
+    assert _preflight(issue, create_user, project) is False
+
+
+def test_preflight_bounces_when_the_only_engine_has_pod_work_off(
+    project, create_user, bundled_runner, issue_for_project
 ):
+    """Scenario 18 and 20: a ``pinned_only`` engine never takes new issue
+    work, so counting it would leave the issue queued for ever."""
     issue = _managed_issue(issue_for_project, project)
+    assert bundled_runner.pod_dispatch == RunnerPodDispatch.PINNED_ONLY
     assert _preflight(issue, create_user, project) is False
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_bounces_a_byok_creator(project, create_user, byok_lane, bundled_runner, issue_for_project):
-    """Waiting cannot give the user a supported provider, so this is loud."""
-    issue = _managed_issue(issue_for_project, project)
-    assert _preflight(issue, create_user, project) is False
-
-
-@override_settings(MANAGED_RUNNER_ENABLED=False)
-def test_preflight_bounces_when_the_instance_disables_the_feature(
-    project, create_user, openhub_lane, bundled_runner, issue_for_project
-):
-    issue = _managed_issue(issue_for_project, project)
-    assert _preflight(issue, create_user, project) is False
-
-
-@override_settings(**MANAGED_SETTINGS)
-def test_preflight_bounces_without_a_creator(project, openhub_lane, bundled_runner, issue_for_project):
+def test_preflight_bounces_without_a_creator(project, bundled_runner, issue_for_project):
     issue = _managed_issue(issue_for_project, project)
     assert _preflight(issue, None, project) is False
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_local_issues_are_unaffected_by_the_managed_branch(
-    project, create_user, manual_runner, issue_for_project
-):
-    """Regression guard: the new branch must not change local-runner
-    preflight, which has its own eligibility rules."""
+def test_local_issues_are_unaffected(project, create_user, manual_runner, issue_for_project):
+    """Regression guard: own-agent runners keep their eligibility rules."""
     assert _preflight(issue_for_project, create_user, project) is True
 
 
@@ -112,32 +101,11 @@ def test_local_issues_are_unaffected_by_the_managed_branch(
 # --------------------------------------------------------------------------
 
 
-@override_settings(**MANAGED_SETTINGS)
-def test_creator_resolution_never_picks_a_user_without_a_desktop(
-    project, create_user, openhub_lane, issue_for_project, monkeypatch
-):
-    """A candidate with a provider but no enrolled desktop could never serve a
-    managed run — choosing them would mint a run that waits forever."""
+def test_creator_resolution_for_a_legacy_managed_issue_is_the_actor(project, create_user, issue_for_project):
+    """A legacy managed issue resolves like any runner issue: no desktop is
+    required of the principal any more (the pod decides who runs it)."""
     from pi_dash.orchestration import scheduling
 
-    monkeypatch.setattr("pi_dash.core.agent_execution.user_has_llm_config", lambda u: True)
-    issue = _managed_issue(issue_for_project, project)
-    resolved = scheduling._resolve_creator_for_trigger(
-        issue, triggered_by=scheduling.TRIGGER_RUN_AI, actor=create_user
-    )
-    assert resolved is None
-
-
-@override_settings(**MANAGED_SETTINGS)
-def test_creator_resolution_picks_the_desktop_owner(
-    project, create_user, openhub_lane, bundled_runner, issue_for_project, monkeypatch
-):
-    """The mirror of the test above: with a desktop enrolled, the same
-    candidate is accepted — so the new gate narrows the set rather than
-    emptying it."""
-    from pi_dash.orchestration import scheduling
-
-    monkeypatch.setattr("pi_dash.core.agent_execution.user_has_llm_config", lambda u: True)
     issue = _managed_issue(issue_for_project, project)
     resolved = scheduling._resolve_creator_for_trigger(
         issue, triggered_by=scheduling.TRIGGER_RUN_AI, actor=create_user

@@ -93,8 +93,10 @@ def _cloud_run(issue, create_user, **overrides):
 
 @pytest.mark.unit
 @override_settings(DEFAULT_AGENT_EXECUTOR="cloud_agent")
-def test_setting_backed_project_default_callable():
-    assert get_default_agent_executor() == AgentExecutorKind.CLOUD_AGENT
+def test_setting_backed_project_default_accepts_only_local_runner():
+    # Runner is the only executor for new projects (built_engine_as_runner
+    # §6): another configured default is ignored, and flagged by managed.W001.
+    assert get_default_agent_executor() == AgentExecutorKind.LOCAL_RUNNER
 
 
 @pytest.mark.unit
@@ -553,7 +555,10 @@ def test_executor_options_report_cloud_and_local_independently(project):
         "kind": AgentExecutorKind.LOCAL_RUNNER,
         "available": False,
         "reason_code": "no_local_runner",
+        "deprecated": False,
     }
+    # The Cloud Agent entry stays for older clients, flagged as deprecated.
+    assert options["cloud_agent"]["deprecated"] is True
 
 
 @pytest.mark.unit

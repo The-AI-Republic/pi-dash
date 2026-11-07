@@ -717,6 +717,14 @@ export default {
     "Create a runner on a connected dev machine, or generate a `pidash runner add` command to run manually.",
   "Dev machine": "Dev machine",
   "Run `pidash runner add` manually": "Run `pidash runner add` manually",
+  "This computer": "This computer",
+  "Pi Dash is not set up on this computer yet.": "Pi Dash is not set up on this computer yet.",
+  "Set up this computer": "Set up this computer",
+  "Use the built-in engine": "Use the built-in engine",
+  "Turns the built-in engine on for this project on this computer. No agent to install.":
+    "Turns the built-in engine on for this project on this computer. No agent to install.",
+  "Turn on the built-in engine": "Turn on the built-in engine",
+  "Browse…": "Browse…",
   "Connected dev machines can create the runner directly — no copy-paste needed.":
     "Connected dev machines can create the runner directly — no copy-paste needed.",
   first: "first",

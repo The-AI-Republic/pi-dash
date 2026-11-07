@@ -35,10 +35,10 @@
 //!   session issuance, 302s).
 //!
 //! The three plain-view POSTs sit behind `CsrfViewMiddleware` (unlike the
-//! DRF units, which use the CSRF-exempt session auth): a missing cookie
-//! or token answers the 200 `csrf_failure` page, never the view. The gate
-//! mirrors `auth_session/email.rs` and renders the shared
-//! [`crate::auth_session::render::render_csrf_failure`] page.
+//! DRF units, which use the CSRF-exempt session auth): a foreign Origin
+//! or a missing cookie or token answers the 200 `csrf_failure` page,
+//! never the view. The gate mirrors `auth_session/email.rs` and renders
+//! the shared [`crate::auth_session::render::render_csrf_failure`] page.
 //!
 //! Layering: this module owns the HTTP shell (routes, session auth, the
 //! `InstanceAdminPermission` gate, SQL text, row fetching). Output shapes
@@ -93,6 +93,7 @@ use super::form_body::{
 };
 use super::handlers_auth_forms as forms;
 use super::{file_asset_url, AssetUrl};
+use crate::auth_session::csrf_origin_gate;
 use crate::auth_session::multipart::parse_fields;
 use crate::auth_session::render::render_csrf_failure;
 use crate::edge;
@@ -1205,20 +1206,6 @@ async fn session(
     ))
 }
 
-/// Client IP (`ip_address.py:get_client_ip`): first `X-Forwarded-For`
-/// entry, else the peer address — which axum handlers do not see without
-/// `ConnectInfo`, so absent means empty (sign-out is untested; the shape
-/// of the stamp matters, not the value).
-fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|forwarded| forwarded.split(',').next())
-        .map(str::trim)
-        .unwrap_or("")
-        .to_owned()
-}
-
 /// Safe sign-out target (`host.py:base_host` with `is_admin=True` through
 /// `path_validator.py:get_safe_redirect_url` with an empty next path):
 /// `(ADMIN_BASE_URL or (WEB_URL or APP_BASE_URL)) + ADMIN_BASE_PATH`,
@@ -1253,13 +1240,31 @@ fn sign_out_redirect(
 async fn sign_out(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
+    req: Request,
 ) -> Result<Response, Denial> {
+    let (parts, body) = req.into_parts();
+    let headers = &parts.headers;
+    let body = match read_request_bytes(body).await {
+        Ok(body) => body,
+        Err(response) => return Ok(response),
+    };
+    // `ConnectInfo` peer for the `get_client_ip` fallback (NEWPIDASH-42):
+    // without it a direct sign-out stamped `last_logout_ip = ''` where
+    // Django stamps `REMOTE_ADDR`.
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip().to_string());
     // `CsrfViewMiddleware` runs before the view body: a token-less POST
-    // never reaches `admin.py:385`.
-    let pairs = form_pairs(content_type_of(&headers), &body);
-    if csrf_gate(&headers, &pairs).is_err() {
+    // never reaches `admin.py:385`. Origin/Referer first, before the
+    // cookie and token checks (`process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
+    let pairs = form_pairs(content_type_of(headers), &body);
+    if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
             &failure_root_url(&state),
         )));
@@ -1281,10 +1286,16 @@ async fn sign_out(
             .await?
             .ok_or(Denial::ServerError)?;
         let now = Utc::now();
-        let ip = client_ip(&headers);
-        identity::stamp_logout(pool, actor, Some(ip.as_str()), now)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+        let ip = forms::client_ip(forwarded, peer.as_deref());
+        identity::stamp_logout(
+            &pidash_db::pool::sea_orm_connection(pool),
+            actor,
+            ip.as_deref(),
+            now,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
         // `logout()`: `Session.flush()` drops the presented row (this
         // route always reads the admin cookie); the middleware then
         // answers the cookie deletion because the session reads empty.
@@ -1767,7 +1778,7 @@ async fn apply_login_stamps(
 ) -> Result<(), Denial> {
     let rotated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         *user_id,
         &identity::LoginStamps {
             // The license stamps never assign the medium (it keeps the
@@ -1812,7 +1823,7 @@ fn client_ip_ua(headers: &HeaderMap, peer: Option<&str>) -> (Option<String>, Opt
 /// `user_login` replay) so both success paths and that failure path
 /// match.
 async fn stamp_last_login(pool: &PgPool, user_id: &Uuid, now: DateTime<Utc>) -> Result<(), Denial> {
-    identity::stamp_last_login(pool, *user_id, now)
+    identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), *user_id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1925,6 +1936,13 @@ async fn sign_up(State(state): State<AppState>, req: Request) -> Result<Response
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
+    // Origin/Referer before the cookie and token checks
+    // (`CsrfViewMiddleware.process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
@@ -2049,6 +2067,13 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip().to_string());
+    // Origin/Referer before the cookie and token checks
+    // (`CsrfViewMiddleware.process_view`, NEWPIDASH-12).
+    if csrf_origin_gate(state.settings(), headers).is_err() {
+        return Ok(csrf_failure_response(render_csrf_failure(
+            &failure_root_url(&state),
+        )));
+    }
     let pairs = form_pairs(content_type_of(headers), &body);
     if csrf_gate(headers, &pairs).is_err() {
         return Ok(csrf_failure_response(render_csrf_failure(
@@ -2095,9 +2120,13 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
                 if let Some(new_hash) =
                     pidash_auth::password::rehash_if_outdated(candidate, password_field)
                 {
-                    identity::rehash_password(pool, *id, &new_hash)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
+                    identity::rehash_password(
+                        &pidash_db::pool::sea_orm_connection(pool),
+                        *id,
+                        &new_hash,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
                     *password_field = new_hash;
                 }
             }
@@ -2416,17 +2445,6 @@ mod tests {
         );
         // No base anywhere: Python raises `TypeError` out of the view (500).
         assert!(sign_out_redirect(None, Some(""), None, "/god-mode/").is_err());
-    }
-
-    #[test]
-    fn client_ip_prefers_first_forwarded_entry() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            "203.0.113.7, 70.41.3.18".parse().unwrap(),
-        );
-        assert_eq!(client_ip(&headers), "203.0.113.7");
-        assert_eq!(client_ip(&HeaderMap::new()), "");
     }
 
     #[test]

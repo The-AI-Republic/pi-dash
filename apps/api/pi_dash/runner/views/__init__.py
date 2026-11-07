@@ -22,6 +22,17 @@ from .chat import (
     chat_event_stream,
 )
 from .desktop import DesktopEnrollEndpoint
+from .engine import (
+    EngineCredentialRevokeEndpoint,
+    EngineModelTokenEndpoint,
+    EngineProfileEndpoint,
+)
+from .machines import (
+    DaemonDevMachineEndpoint,
+    DevMachineEngineSignOutEndpoint,
+    DevMachineMergeEndpoint,
+    DevMachineReplaceCandidatesEndpoint,
+)
 from .enrollment import (
     MachineTokenRedeemEndpoint,
     MachineTokenTicketEndpoint,
@@ -85,6 +96,13 @@ from .sessions import (
 )
 
 __all__ = [
+    "DaemonDevMachineEndpoint",
+    "DevMachineEngineSignOutEndpoint",
+    "DevMachineMergeEndpoint",
+    "DevMachineReplaceCandidatesEndpoint",
+    "EngineCredentialRevokeEndpoint",
+    "EngineModelTokenEndpoint",
+    "EngineProfileEndpoint",
     "ApprovalDecideEndpoint",
     "ApprovalListEndpoint",
     "AgentChatApprovalDecideEndpoint",

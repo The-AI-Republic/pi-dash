@@ -103,12 +103,25 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use sea_orm::sea_query::{Condition, Expr, Func, Query as SeaQuery, SimpleExpr};
+use sea_orm::{
+    ActiveValue::{NotSet, Set},
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::entity::{
+    file_assets, labels, pages, project_members, project_pages, projects, user_favorites, users,
+    workspaces,
+};
+use pidash_db::orm_tx::{is_integrity_violation, TxConn};
+use pidash_db::pool::sea_orm_connection;
+use pidash_services::read;
 use pidash_services::v1_work_items::shape_issue::BASE_EXPANSION_NAMES;
 use pidash_services::v1_work_items::shape_labels::{
     name_lookup_key, parent_lookup_key, render_issue_lite, render_label, validate_label_write,
@@ -124,7 +137,6 @@ use pidash_services::v1_work_items::{filter_fields, FieldSpec};
 use super::perms::{check_can_archive, decide, gate_for, ArchiveDecision, V1WorkItemsRoute};
 use crate::state::AppState;
 use ego_tree::NodeRef;
-use pidash_compat::db::is_integrity_error;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
@@ -398,24 +410,6 @@ pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 // Authentication
 // ---------------------------------------------------------------------------
 
-/// Decoded `api_tokens` row for [`resolve_api_token`].
-type ApiTokenLookup = (
-    String,
-    bool,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-);
-
-/// Decoded `machine_token` row for [`resolve_machine_token`].
-type MachineTokenLookup = (
-    String,
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<bool>,
-);
-
 /// The authenticated actor: user id plus the stored time zone name, loaded
 /// but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`] (the PIDASHCONV-737 fixed preamble).
@@ -448,8 +442,11 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ =
-            pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, raw).await;
+        let _ = pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(pool),
+            raw,
+        )
+        .await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -465,14 +462,17 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "api-token-lookup"))?;
-    let Some((token, is_active, expired_at, user_id)) = row else {
+    let row =
+        super::auth_reads::live_api_token(&pidash_db::pool::sea_orm_connection(pool), presented)
+            .await
+            .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let Some(super::auth_reads::ApiTokenLookup {
+        token,
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now_unix = chrono::Utc::now().timestamp();
@@ -499,17 +499,20 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
+    let row = super::auth_reads::machine_token_with_device(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
     )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
     .await
     .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
+    let Some(super::auth_reads::MachineTokenLookup {
+        token_hash,
+        user_id,
+        workspace_id,
+        revoked_at,
+        dev_revoked,
+        ..
+    }) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -524,25 +527,25 @@ async fn resolve_machine_token(
         .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
-    let member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
+    let member = super::auth_reads::is_active_workspace_member(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
-    .map_err(|error| db_error(error, "machine-token-member"))?
-    .unwrap_or(false);
+    .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ =
-            pidash_services::domain::tokens::revoke_machine_token_by_hash(pool, &presented_hash)
-                .await;
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
+        )
+        .await;
         return Err(Denial::InvalidToken);
     }
     let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &presented_hash,
     )
     .await;
@@ -553,13 +556,9 @@ async fn resolve_machine_token(
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let name: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "request-timezone"))?;
-    Ok(name.unwrap_or(None))
+    super::auth_reads::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -604,13 +603,10 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
+    let workspace_id =
+        super::auth_reads::workspace_id_by_slug(&pidash_db::pool::sea_orm_connection(&pool), slug)
             .await
-            .map_err(|error| db_error(error, "preamble-workspace"))?
-            .flatten();
+            .map_err(|error| db_error(error, "preamble-workspace"))?;
     Ok(Preamble {
         pool,
         actor,
@@ -638,10 +634,12 @@ pub async fn rewrite_project_id(
     };
     match classify_lookup(raw) {
         ProjectLookup::Pk(id) => Ok(id),
-        ProjectLookup::Identifier(_) => q::fetch_project_id(pool, &scope, raw)
-            .await
-            .map_err(|error| db_error(error, "rewrite-project"))?
-            .ok_or(Denial::ProjectNotFound),
+        ProjectLookup::Identifier(_) => {
+            q::fetch_project_id(&pidash_db::pool::sea_orm_connection(pool), &scope, raw)
+                .await
+                .map_err(|error| db_error(error, "rewrite-project"))?
+                .ok_or(Denial::ProjectNotFound)
+        }
     }
 }
 
@@ -660,37 +658,28 @@ async fn gate_facts(
     user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
 ) -> Result<(project::ProjectFacts, bool), Denial> {
+    let db = sea_orm_connection(pool);
     // Project-scoped roles (Entity SAFE + every unsafe arm).
-    let roles: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "gate-roles"))?;
+    let roles = super::auth_reads::project_member_roles(&db, *workspace_id, *user_id, *project_id)
+        .await
+        .map_err(|error| db_error(error, "gate-roles"))?;
     // Workspace-scoped project membership (Member SAFE, BUG-5 —
     // `project.py:62-65` deliberately omits `project_id`).
-    let workspace_scoped_member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
+    let workspace_scoped_member = super::auth_reads::project_membership_exists(
+        &db,
+        *user_id,
+        super::auth_reads::MembershipScope {
+            workspace_id: Some(*workspace_id),
+            ..Default::default()
+        },
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
-    .map_err(|error| db_error(error, "gate-ws-member"))?
-    .unwrap_or(false);
+    .map_err(|error| db_error(error, "gate-ws-member"))?;
     // Workspace admin-or-member (Member POST, `project.py:67-73`).
-    let workspace_admin_or_member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "role" IN (20, 15) AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "gate-ws-roles"))?
-    .unwrap_or(false);
+    let workspace_admin_or_member =
+        super::auth_reads::workspace_role_exists(&db, *workspace_id, *user_id, &[20, 15])
+            .await
+            .map_err(|error| db_error(error, "gate-ws-roles"))?;
     Ok((
         project::ProjectFacts {
             workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
@@ -748,81 +737,74 @@ async fn require_gate(
 // Lookups
 // ---------------------------------------------------------------------------
 
-fn row_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
+/// `(SELECT "id" FROM "workspaces" WHERE "slug" = :slug)`: the scalar
+/// subquery every label/page queryset scopes `workspace_id` on.
+fn workspace_id_subquery(slug: &str) -> SimpleExpr {
+    SimpleExpr::SubQuery(
+        None,
+        Box::new(
+            SeaQuery::select()
+                .column((workspaces::Entity, workspaces::Column::Id))
+                .from(workspaces::Entity)
+                .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+                .take()
+                .into_sub_query_statement(),
+        ),
+    )
 }
 
-fn row_uuid_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<Uuid>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
+/// Label list/detail queryset (`views/issue.py:1322-1336`): the recorded
+/// F18-07 predicates — live rows for this project/slug, an active
+/// membership of the caller on the project (no `deleted_at` scope on the
+/// join span — fixture-verbatim), a live project — `SELECT DISTINCT`,
+/// `-created_at`. `.order_by()` reads `self.kwargs`, which never carries
+/// `order_by`, so `?order_by=` is ignored (BUG-1).
+fn label_scope(slug: &str, project_id: &Uuid, user_id: &Uuid) -> sea_orm::Select<labels::Entity> {
+    let membership = SeaQuery::select()
+        .expr(Expr::value(1))
+        .from(project_members::Entity)
+        .and_where(
+            Expr::col((project_members::Entity, project_members::Column::ProjectId))
+                .equals((labels::Entity, labels::Column::ProjectId)),
+        )
+        .and_where(
+            Expr::col((project_members::Entity, project_members::Column::MemberId)).eq(*user_id),
+        )
+        .and_where(Expr::col((project_members::Entity, project_members::Column::IsActive)).eq(true))
+        .take();
+    let live_project = SeaQuery::select()
+        .expr(Expr::value(1))
+        .from(projects::Entity)
+        .and_where(
+            Expr::col((projects::Entity, projects::Column::Id))
+                .equals((labels::Entity, labels::Column::ProjectId)),
+        )
+        .and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
+        .take();
+    labels::Entity::find()
+        .distinct()
+        .filter(labels::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((labels::Entity, labels::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(labels::Column::ProjectId.eq(*project_id))
+        .filter(Expr::exists(membership))
+        .filter(Expr::exists(live_project))
+        .order_by_desc(labels::Column::CreatedAt)
 }
 
-fn row_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_string_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<String>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Result<DateTime<Utc>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_datetime_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-) -> Result<Option<DateTime<Utc>>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_bool(row: &sqlx::postgres::PgRow, column: &str) -> Result<bool, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_f64(row: &sqlx::postgres::PgRow, column: &str) -> Result<f64, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_i16(row: &sqlx::postgres::PgRow, column: &str) -> Result<i16, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_date_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-) -> Result<Option<chrono::NaiveDate>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-/// Label list/detail rows (`views/issue.py:1322-1336`): the recorded F18-07
-/// predicates — live rows for this project/slug, an active membership of
-/// the caller on the project (no `deleted_at` scope on the join span —
-/// fixture-verbatim), a live project. Order is always `-created_at`:
-/// `.order_by()` reads `self.kwargs`, which never carries `order_by`, so
-/// `?order_by=` is ignored (BUG-1).
+/// Label list rows: [`label_scope`], every column.
 async fn fetch_label_rows(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT DISTINCT l.* FROM "labels" l
-           WHERE l."deleted_at" IS NULL
-             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND l."project_id" = $2
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = l."project_id" AND pm."member_id" = $3 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = l."project_id" AND p."archived_at" IS NULL)
-           ORDER BY l."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "label-list"))
+) -> Result<Vec<labels::Model>, Denial> {
+    label_scope(slug, project_id, user_id)
+        .all(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "label-list"))
 }
 
 /// Label detail row (`:1468`, `:1499`, `:1544`): the list chain plus `id=pk`.
@@ -832,62 +814,85 @@ async fn fetch_label_detail(
     project_id: &Uuid,
     user_id: &Uuid,
     pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT DISTINCT l.* FROM "labels" l
-           WHERE l."deleted_at" IS NULL
-             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND l."project_id" = $2
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = l."project_id" AND pm."member_id" = $3 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = l."project_id" AND p."archived_at" IS NULL)
-             AND l."id" = $4
-           ORDER BY l."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "label-detail"))
+) -> Result<Option<labels::Model>, Denial> {
+    label_scope(slug, project_id, user_id)
+        .filter(labels::Column::Id.eq(*pk))
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "label-detail"))
 }
 
-/// Page list rows (`views/page.py:180-197,267-273`): the F18-08 visibility
-/// chain — live rows for this slug, the `Exists` over the through table
-/// (member + live project, no row fan-out), public-or-owned — plus the
-/// `include_archived` arm. Order is always `-created_at`.
+/// Page visibility queryset (`views/page.py:180-197`): the F18-08 chain —
+/// live rows for this slug, the `Exists` over the through table (member +
+/// live project, no row fan-out), public-or-owned — `-created_at`.
+fn page_scope(slug: &str, project_id: &Uuid, user_id: &Uuid) -> sea_orm::Select<pages::Entity> {
+    let visible = SeaQuery::select()
+        .expr(Expr::value(1))
+        .from(project_pages::Entity)
+        .inner_join(
+            projects::Entity,
+            Expr::col((project_pages::Entity, project_pages::Column::ProjectId))
+                .equals((projects::Entity, projects::Column::Id)),
+        )
+        .inner_join(
+            project_members::Entity,
+            Expr::col((projects::Entity, projects::Column::Id))
+                .equals((project_members::Entity, project_members::Column::ProjectId)),
+        )
+        .and_where(Expr::col((project_pages::Entity, project_pages::Column::DeletedAt)).is_null())
+        .and_where(
+            Expr::col((project_pages::Entity, project_pages::Column::PageId))
+                .equals((pages::Entity, pages::Column::Id)),
+        )
+        .and_where(
+            Expr::col((project_pages::Entity, project_pages::Column::ProjectId)).eq(*project_id),
+        )
+        .and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((project_members::Entity, project_members::Column::IsActive)).eq(true))
+        .and_where(
+            Expr::col((project_members::Entity, project_members::Column::MemberId)).eq(*user_id),
+        )
+        .take();
+    pages::Entity::find()
+        .filter(pages::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((pages::Entity, pages::Column::WorkspaceId)).eq(workspace_id_subquery(slug)),
+        )
+        .filter(Expr::exists(visible))
+        .filter(
+            Condition::any()
+                .add(pages::Column::Access.eq(0_i16))
+                .add(pages::Column::OwnedById.eq(*user_id)),
+        )
+        .order_by_desc(pages::Column::CreatedAt)
+}
+
+/// Page list statement (`:267-273`): [`page_scope`] plus the
+/// `include_archived` arm (`archived_at IS NULL` unless requested).
+fn page_list_query(
+    slug: &str,
+    project_id: &Uuid,
+    user_id: &Uuid,
+    include_archived: bool,
+) -> sea_orm::Select<pages::Entity> {
+    let scope = page_scope(slug, project_id, user_id);
+    if include_archived {
+        scope
+    } else {
+        scope.filter(pages::Column::ArchivedAt.is_null())
+    }
+}
+
+/// Page list rows, every column, in `-created_at` order.
 async fn fetch_page_rows(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     user_id: &Uuid,
     include_archived: bool,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    let archived = if include_archived {
-        ""
-    } else {
-        r#" AND p."archived_at" IS NULL"#
-    };
-    let sql = format!(
-        r#"SELECT p.* FROM "pages" p
-           WHERE p."deleted_at" IS NULL
-             AND p."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND EXISTS (SELECT 1 FROM "project_pages" pp
-                         INNER JOIN "projects" pr ON pp."project_id" = pr."id"
-                         INNER JOIN "project_members" pm ON pr."id" = pm."project_id"
-                         WHERE pp."deleted_at" IS NULL AND pp."page_id" = p."id"
-                           AND pp."project_id" = $2 AND pr."archived_at" IS NULL
-                           AND pm."is_active" AND pm."member_id" = $3)
-             AND (p."access" = 0 OR p."owned_by_id" = $3){archived}
-           ORDER BY p."created_at" DESC"#,
-    );
-    sqlx::query(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(user_id)
-        .fetch_all(pool)
+) -> Result<Vec<pages::Model>, Denial> {
+    page_list_query(slug, project_id, user_id, include_archived)
+        .all(&sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "page-list"))
 }
@@ -901,28 +906,18 @@ async fn fetch_visible_page(
     project_id: &Uuid,
     user_id: &Uuid,
     page_id: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT p.* FROM "pages" p
-           WHERE p."deleted_at" IS NULL
-             AND p."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND EXISTS (SELECT 1 FROM "project_pages" pp
-                         INNER JOIN "projects" pr ON pp."project_id" = pr."id"
-                         INNER JOIN "project_members" pm ON pr."id" = pm."project_id"
-                         WHERE pp."deleted_at" IS NULL AND pp."page_id" = p."id"
-                           AND pp."project_id" = $2 AND pr."archived_at" IS NULL
-                           AND pm."is_active" AND pm."member_id" = $3)
-             AND (p."access" = 0 OR p."owned_by_id" = $3)
-             AND p."id" = $4
-           ORDER BY p."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .bind(page_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "page-visible"))
+) -> Result<Option<pages::Model>, Denial> {
+    page_scope(slug, project_id, user_id)
+        .filter(pages::Column::Id.eq(*page_id))
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "page-visible"))
+}
+
+/// Render a stored `timestamptz` in the request zone (SeaORM decodes
+/// `DateTime<FixedOffset>`; the renderer takes the UTC instant).
+fn render_dt(dt: &DateTime<chrono::FixedOffset>, tz: &Tz) -> String {
+    crate::serializer::render_datetime_in(&dt.with_timezone(&Utc), tz)
 }
 
 // ---------------------------------------------------------------------------
@@ -948,25 +943,24 @@ struct DecodedLabel {
     parent: Option<String>,
 }
 
-fn decode_label(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedLabel, Denial> {
-    Ok(DecodedLabel {
-        id: row_uuid(row, "id")?.to_string(),
-        created_at: crate::serializer::render_datetime_in(&row_datetime(row, "created_at")?, tz),
-        updated_at: crate::serializer::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
-        deleted_at: row_datetime_opt(row, "deleted_at")?
-            .map(|dt| crate::serializer::render_datetime_in(&dt, tz)),
-        name: row_string(row, "name")?,
-        description: row_string(row, "description")?,
-        color: row_string(row, "color")?,
-        sort_order: row_f64(row, "sort_order")?,
-        external_source: row_string_opt(row, "external_source")?,
-        external_id: row_string_opt(row, "external_id")?,
-        created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
-        updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
-        workspace: row_uuid(row, "workspace_id")?.to_string(),
-        project: row_uuid_opt(row, "project_id")?.map(|id| id.to_string()),
-        parent: row_uuid_opt(row, "parent_id")?.map(|id| id.to_string()),
-    })
+fn decode_label(row: &labels::Model, tz: &Tz) -> DecodedLabel {
+    DecodedLabel {
+        id: row.id.to_string(),
+        created_at: render_dt(&row.created_at, tz),
+        updated_at: render_dt(&row.updated_at, tz),
+        deleted_at: row.deleted_at.as_ref().map(|dt| render_dt(dt, tz)),
+        name: row.name.clone(),
+        description: row.description.clone(),
+        color: row.color.clone(),
+        sort_order: row.sort_order,
+        external_source: row.external_source.clone(),
+        external_id: row.external_id.clone(),
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        workspace: row.workspace_id.to_string(),
+        project: row.project_id.map(|id| id.to_string()),
+        parent: row.parent_id.map(|id| id.to_string()),
+    }
 }
 
 fn render_label_value(
@@ -1018,23 +1012,24 @@ struct DecodedPage {
     description_markdown: String,
 }
 
-fn decode_page(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedPage, Denial> {
-    let description_html = row_string_opt(row, "description_html")?;
+fn decode_page(row: &pages::Model, tz: &Tz) -> DecodedPage {
+    // `description_html` is `NOT NULL`; the shape still takes an option.
+    let description_html = Some(row.description_html.clone());
     let description_markdown = html_to_markdown(description_html.as_deref());
-    Ok(DecodedPage {
-        id: row_uuid(row, "id")?.to_string(),
-        name: row_string(row, "name")?,
-        parent: row_uuid_opt(row, "parent_id")?.map(|id| id.to_string()),
-        owned_by: row_uuid_opt(row, "owned_by_id")?.map(|id| id.to_string()),
-        access: i64::from(row_i16(row, "access")?),
-        is_locked: row_bool(row, "is_locked")?,
-        archived_at: row_date_opt(row, "archived_at")?.map(|d| d.format("%Y-%m-%d").to_string()),
-        created_at: crate::serializer::render_datetime_in(&row_datetime(row, "created_at")?, tz),
-        updated_at: crate::serializer::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
+    DecodedPage {
+        id: row.id.to_string(),
+        name: row.name.clone(),
+        parent: row.parent_id.map(|id| id.to_string()),
+        owned_by: Some(row.owned_by_id.to_string()),
+        access: i64::from(row.access),
+        is_locked: row.is_locked,
+        archived_at: row.archived_at.map(|d| d.format("%Y-%m-%d").to_string()),
+        created_at: render_dt(&row.created_at, tz),
+        updated_at: render_dt(&row.updated_at, tz),
         description_html,
-        description_stripped: row_string_opt(row, "description_stripped")?,
+        description_stripped: row.description_stripped.clone(),
         description_markdown,
-    })
+    }
 }
 
 fn render_page_lite_value(
@@ -1106,32 +1101,155 @@ fn render_page_value(
 
 /// Decoded user row for [`expand_actor`]: names, nullable `email`,
 /// `COALESCE`d avatar, optional avatar asset.
-type ExpandUserLookup = (String, String, Option<String>, String, Option<Uuid>);
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct ExpandUserLookup {
+    first_name: String,
+    last_name: String,
+    email: Option<String>,
+    avatar: String,
+    avatar_asset_id: Option<Uuid>,
+}
 
-/// Resolve an avatar/cover file-asset id to its served URL (the D-19
-/// `resolve_avatar_url` inputs).
+/// The `UserLite` columns of one `users` row (`COALESCE(avatar, '')`).
+async fn fetch_user_lite<C: ConnectionTrait>(
+    db: &C,
+    user_id: &Uuid,
+) -> Result<Option<ExpandUserLookup>, DbErr> {
+    users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Email,
+        ])
+        .expr_as(
+            Func::coalesce([
+                Expr::col((users::Entity, users::Column::Avatar)).into(),
+                Expr::value(""),
+            ]),
+            "avatar",
+        )
+        .column(users::Column::AvatarAssetId)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_model::<ExpandUserLookup>()
+        .one(db)
+        .await
+}
+
+/// `users.display_name` for one user (`None` when the row is missing).
+async fn fetch_display_name<C: ConnectionTrait>(
+    db: &C,
+    user_id: &Uuid,
+) -> Result<Option<String>, DbErr> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::DisplayName)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple::<String>()
+        .one(db)
+        .await
+}
+
+/// Decoded `file_assets` row for [`file_asset_url`].
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct AssetUrlLookup {
+    entity_type: Option<String>,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    issue_id: Option<Uuid>,
+}
+
+/// `FileAsset.asset_url` (`db/models/asset.py:80-100`) for an avatar/cover
+/// asset id (the D-19 `resolve_avatar_url` inputs): static types render
+/// `/api/assets/v2/static/<id>/`, attachments and description assets join
+/// their workspace slug. A missing row (or slug) renders null like
+/// `getattr` on a dead FK (the `handlers_social` / `v1_projects`
+/// `file_asset_url` precedent).
 async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, Denial> {
-    let url: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "file_url" FROM "file_assets" WHERE "id" = $1"#)
-            .bind(asset_id)
-            .fetch_optional(pool)
+    let row = file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .into_model::<AssetUrlLookup>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "file-asset-url"))?;
+    let Some(AssetUrlLookup {
+        entity_type,
+        workspace_id,
+        project_id,
+        issue_id,
+    }) = row
+    else {
+        return Ok(None);
+    };
+    async fn workspace_slug(
+        pool: &PgPool,
+        workspace_id: Option<Uuid>,
+    ) -> Result<Option<String>, Denial> {
+        read::workspace_slug(pool, workspace_id)
             .await
-            .map_err(|error| db_error(error, "file-asset-url"))?;
-    Ok(url.flatten())
+            .map_err(|error| match error {
+                // Unreachable: this read never 404s or fails mid-row.
+                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+                read::Error::Db(err) => {
+                    let (site, source) = err.split();
+                    db_error(source, site)
+                }
+            })
+    }
+    match entity_type.as_deref() {
+        Some("WORKSPACE_LOGO")
+        | Some("USER_AVATAR")
+        | Some("USER_COVER")
+        | Some("PROJECT_COVER") => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
+        Some("ISSUE_ATTACHMENT") => {
+            let slug = workspace_slug(pool, workspace_id).await?;
+            Ok(slug.map(|s| {
+                format!(
+                    "/api/assets/v2/workspaces/{s}/projects/{}/issues/{}/attachments/{asset_id}/",
+                    project_id.map(|v| v.to_string()).unwrap_or_default(),
+                    issue_id.map(|v| v.to_string()).unwrap_or_default(),
+                )
+            }))
+        }
+        Some("ISSUE_DESCRIPTION")
+        | Some("COMMENT_DESCRIPTION")
+        | Some("PAGE_DESCRIPTION")
+        | Some("DRAFT_ISSUE_DESCRIPTION") => {
+            let slug = workspace_slug(pool, workspace_id).await?;
+            Ok(slug.map(|s| {
+                format!(
+                    "/api/assets/v2/workspaces/{s}/projects/{}/{asset_id}/",
+                    project_id.map(|v| v.to_string()).unwrap_or_default(),
+                )
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// `expand=created_by/updated_by/owned_by/actor`: `UserLiteSerializer`
 /// (`user.py:13-38`) via the D-19 `user_lite_to_representation` kernel. A
 /// missing row renders null.
 async fn expand_actor(pool: &PgPool, user_id: &Uuid) -> Result<Value, Denial> {
-    let row: Option<ExpandUserLookup> = sqlx::query_as(
-        r#"SELECT "first_name", "last_name", "email", COALESCE("avatar", ''), "avatar_asset_id" FROM "users" WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-actor"))?;
-    let Some((first_name, last_name, email, avatar, avatar_asset)) = row else {
+    let db = sea_orm_connection(pool);
+    let row = fetch_user_lite(&db, user_id)
+        .await
+        .map_err(|error| db_error(error, "expand-actor"))?;
+    let Some(ExpandUserLookup {
+        first_name,
+        last_name,
+        email,
+        avatar,
+        avatar_asset_id: avatar_asset,
+    }) = row
+    else {
         return Ok(Value::Null);
     };
     let avatar_url = match avatar_asset {
@@ -1143,13 +1261,9 @@ async fn expand_actor(pool: &PgPool, user_id: &Uuid) -> Result<Value, Denial> {
         avatar_url.as_deref(),
         &avatar,
     );
-    let display_name: Option<String> =
-        sqlx::query_scalar(r#"SELECT "display_name" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-actor-name"))?
-            .flatten();
+    let display_name = fetch_display_name(&db, user_id)
+        .await
+        .map_err(|error| db_error(error, "expand-actor-name"))?;
     let id = user_id.to_string();
     let display_name = display_name.unwrap_or_default();
     let row = pidash_services::v1_projects::ser_collab::UserLiteRow {
@@ -1183,14 +1297,18 @@ async fn fetch_owner_strings(
     pool: &PgPool,
     user_id: &Uuid,
 ) -> Result<Option<OwnerStrings>, Denial> {
-    let row: Option<ExpandUserLookup> = sqlx::query_as(
-        r#"SELECT "first_name", "last_name", "email", COALESCE("avatar", ''), "avatar_asset_id" FROM "users" WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-owner"))?;
-    let Some((first_name, last_name, email, avatar, avatar_asset)) = row else {
+    let db = sea_orm_connection(pool);
+    let row = fetch_user_lite(&db, user_id)
+        .await
+        .map_err(|error| db_error(error, "expand-owner"))?;
+    let Some(ExpandUserLookup {
+        first_name,
+        last_name,
+        email,
+        avatar,
+        avatar_asset_id: avatar_asset,
+    }) = row
+    else {
         return Ok(None);
     };
     let avatar_url = match avatar_asset {
@@ -1203,13 +1321,9 @@ async fn fetch_owner_strings(
         &avatar,
     )
     .map(str::to_owned);
-    let display_name: Option<String> =
-        sqlx::query_scalar(r#"SELECT "display_name" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-owner-name"))?
-            .flatten();
+    let display_name = fetch_display_name(&db, user_id)
+        .await
+        .map_err(|error| db_error(error, "expand-owner-name"))?;
     Ok(Some(OwnerStrings {
         id: user_id.to_string(),
         first_name,
@@ -1224,12 +1338,14 @@ async fn fetch_owner_strings(
 /// `expand=workspace`: `WorkspaceLiteSerializer`: `name`, `slug`, `id` in
 /// field order. A missing row renders null.
 async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Value, Denial> {
-    let row: Option<(String, String)> =
-        sqlx::query_as(r#"SELECT "name", "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-workspace"))?;
+    let row: Option<(String, String)> = workspaces::Entity::find()
+        .select_only()
+        .columns([workspaces::Column::Name, workspaces::Column::Slug])
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-workspace"))?;
     Ok(match row {
         Some((name, slug)) => {
             let mut map = Map::with_capacity(3);
@@ -1242,60 +1358,68 @@ async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Value, D
     })
 }
 
+/// The `ProjectLiteSerializer` columns of one `projects` row.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct ProjectLiteLookup {
+    id: Uuid,
+    identifier: String,
+    name: String,
+    cover_image: Option<String>,
+    icon_prop: Option<Value>,
+    emoji: Option<String>,
+    description: String,
+    is_default: bool,
+    cover_image_asset_id: Option<Uuid>,
+}
+
 /// `expand=project`: `ProjectLiteSerializer` (`project.py:354-377`): `id`,
 /// `identifier`, `name`, `cover_image`, `icon_prop`, `emoji`,
 /// `description`, `is_default`, `cover_image_url` in field order. A
 /// missing row renders null.
 async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "identifier", "name", "cover_image", "icon_prop", "emoji", "description", "is_default", "cover_image_asset_id" FROM "projects" WHERE "id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-project"))?;
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::IconProp,
+            projects::Column::Emoji,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+            projects::Column::CoverImageAssetId,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_model::<ProjectLiteLookup>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-project"))?;
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    let cover_asset: Option<Uuid> = row_uuid_opt(&row, "cover_image_asset_id")?;
-    let cover_text: Option<String> = row_string_opt(&row, "cover_image")?;
     // `Project.cover_image_url` (`db/models/project.py:176-185`): the
     // asset URL wins, then the stored text, else null.
-    let cover_url = match cover_asset {
+    let cover_url = match row.cover_image_asset_id {
         Some(id) => file_asset_url(pool, &id).await?,
         None => None,
     };
-    let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
-    let icon_prop: Option<Value> = row.try_get("icon_prop").map_err(|_| Denial::ServerError)?;
+    let cover_url = cover_url.or_else(|| row.cover_image.clone().filter(|text| !text.is_empty()));
     let mut map = Map::with_capacity(9);
-    map.insert(
-        "id".to_owned(),
-        Value::String(row_uuid(&row, "id")?.to_string()),
-    );
-    map.insert(
-        "identifier".to_owned(),
-        Value::String(row_string(&row, "identifier")?),
-    );
-    map.insert("name".to_owned(), Value::String(row_string(&row, "name")?));
+    map.insert("id".to_owned(), Value::String(row.id.to_string()));
+    map.insert("identifier".to_owned(), Value::String(row.identifier));
+    map.insert("name".to_owned(), Value::String(row.name));
     map.insert(
         "cover_image".to_owned(),
-        cover_text.map(Value::String).unwrap_or(Value::Null),
+        row.cover_image.map(Value::String).unwrap_or(Value::Null),
     );
-    map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
+    map.insert("icon_prop".to_owned(), row.icon_prop.unwrap_or(Value::Null));
     map.insert(
         "emoji".to_owned(),
-        row_string_opt(&row, "emoji")?
-            .map(Value::String)
-            .unwrap_or(Value::Null),
+        row.emoji.map(Value::String).unwrap_or(Value::Null),
     );
-    map.insert(
-        "description".to_owned(),
-        Value::String(row_string(&row, "description")?),
-    );
-    map.insert(
-        "is_default".to_owned(),
-        Value::Bool(row_bool(&row, "is_default")?),
-    );
+    map.insert("description".to_owned(), Value::String(row.description));
+    map.insert("is_default".to_owned(), Value::Bool(row.is_default));
     map.insert(
         "cover_image_url".to_owned(),
         cover_url.map(Value::String).unwrap_or(Value::Null),
@@ -1309,12 +1433,14 @@ async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denia
 /// renders soft-deleted parents (verified live). A hard-missing row is
 /// unreachable (`CASCADE`) and renders `{}` via `None`.
 async fn expand_parent_label(pool: &PgPool, parent_id: &Uuid) -> Result<Option<Value>, Denial> {
-    let row: Option<(Uuid, Option<Uuid>)> =
-        sqlx::query_as(r#"SELECT "id", "project_id" FROM "labels" WHERE "id" = $1"#)
-            .bind(parent_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-parent-label"))?;
+    let row: Option<(Uuid, Option<Uuid>)> = labels::Entity::find()
+        .select_only()
+        .columns([labels::Column::Id, labels::Column::ProjectId])
+        .filter(labels::Column::Id.eq(*parent_id))
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-parent-label"))?;
     match row {
         Some((id, project_id)) => {
             let id_text = id.to_string();
@@ -1348,9 +1474,12 @@ async fn expand_parent_label(pool: &PgPool, parent_id: &Uuid) -> Result<Option<V
 /// `serializers/base.py:72-117`). No live scope (soft-deleted parents
 /// render); a hard-missing row renders `{}` via `None`.
 async fn expand_parent_page(pool: &PgPool, parent_id: &Uuid) -> Result<Option<Value>, Denial> {
-    let row: Option<Uuid> = sqlx::query_scalar(r#"SELECT "id" FROM "pages" WHERE "id" = $1"#)
-        .bind(parent_id)
-        .fetch_optional(pool)
+    let row: Option<Uuid> = pages::Entity::find()
+        .select_only()
+        .column(pages::Column::Id)
+        .filter(pages::Column::Id.eq(*parent_id))
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "expand-parent-page"))?;
     match row {
@@ -1764,7 +1893,7 @@ async fn label_list_inner(
     let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
-        let decoded = decode_label(row, &tz)?;
+        let decoded = decode_label(row, &tz);
         let expansions = label_expansions(&pre.pool, &decoded, &expand_refs, &kept).await?;
         rendered.push(render_label_value(
             &decoded,
@@ -1865,27 +1994,24 @@ async fn label_post_inner(
     // `WorkspaceBaseModel.save` reads `self.project.workspace`
     // (`workspace.py:192-195`): a bogus project UUID misses here with
     // `RelatedObjectDoesNotExist` → the 404 branch, before any INSERT.
-    let label_workspace: Option<Uuid> =
-        sqlx::query_scalar(r#"SELECT "workspace_id" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|error| db_error(error, "label-post-workspace"))?
-            .flatten();
+    let db = sea_orm_connection(&pre.pool);
+    let label_workspace: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "label-post-workspace"))?;
     let Some(label_workspace) = label_workspace else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
     // `Label.save` (`label.py:46-54`, BUG-2): `MAX(sort_order)+10000` over
     // the project's live labels when any exist (an explicit `sort_order`
     // is overwritten); otherwise the passed value or the 65535 default.
-    let max_sort: Option<f64> = sqlx::query_scalar(
-        r#"SELECT MAX("sort_order") FROM "labels" WHERE "project_id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "label-post-max"))?
-    .flatten();
+    let max_sort = max_label_sort_order(&db, &project_id)
+        .await
+        .map_err(|error| db_error(error, "label-post-max"))?;
     let sort_order = match max_sort {
         Some(max) => max + 10000.0,
         None => validated.sort_order.unwrap_or(65535.0),
@@ -1898,29 +2024,25 @@ async fn label_post_inner(
         Some(Some(ref raw)) => Some(raw.parse::<Uuid>().map_err(|_| Denial::ServerError)?),
         _ => None,
     };
-    let insert = sqlx::query(
-        r#"INSERT INTO "labels" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "workspace_id", "project_id", "parent_id", "name", "description", "color",
-            "sort_order", "external_source", "external_id")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
-    )
-    .bind(label_id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(label_workspace)
-    .bind(project_id)
-    .bind(parent_id)
-    .bind(validated.name.clone().unwrap_or_default())
-    .bind(validated.description.clone().unwrap_or_default())
-    .bind(validated.color.clone().unwrap_or_default())
-    .bind(sort_order)
-    .bind(validated.external_source.clone().unwrap_or(None))
-    .bind(validated.external_id.clone().unwrap_or(None))
-    .execute(&pre.pool)
+    let insert = labels::Entity::insert(new_label_model(NewLabel {
+        id: label_id,
+        created_at,
+        updated_at,
+        created_by_id: pre.actor.id,
+        workspace_id: label_workspace,
+        project_id,
+        parent_id,
+        name: validated.name.clone().unwrap_or_default(),
+        description: validated.description.clone().unwrap_or_default(),
+        color: validated.color.clone().unwrap_or_default(),
+        sort_order,
+        external_source: validated.external_source.clone().unwrap_or(None),
+        external_id: validated.external_id.clone().unwrap_or(None),
+    }))
+    .exec(&db)
     .await;
     if let Err(error) = insert {
-        if is_integrity_error(&error) {
+        if is_integrity_violation(&error) {
             // The `except IntegrityError` arm (`:1393-1405`, BUG-3): name
             // lookup by RAW name → 409, or the `None.id` 500.
             return label_post_integrity_arm(
@@ -1938,7 +2060,7 @@ async fn label_post_inner(
     let Some(row) = row else {
         return Err(Denial::ServerError);
     };
-    let decoded = decode_label(&row, &tz)?;
+    let decoded = decode_label(&row, &tz);
     let body = render_label_value(&decoded, None, &[], &[])?;
     Ok(json_created(
         serde_json::to_string(&body).map_err(|_| Denial::ServerError)?,
@@ -1955,20 +2077,22 @@ async fn label_post_integrity_arm(
     raw_name: Option<&Value>,
 ) -> Result<Response, Denial> {
     let name = raw_text(raw_name);
-    let hit: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT l."id" FROM "labels" l
-           WHERE l."deleted_at" IS NULL
-             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND l."project_id" = $2 AND l."name" = $3
-           ORDER BY l."created_at" DESC LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(&name)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "label-post-dup-lookup"))?
-    .flatten();
+    let hit: Option<Uuid> = labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(labels::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((labels::Entity, labels::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(labels::Column::ProjectId.eq(*project_id))
+        .filter(labels::Column::Name.eq(name))
+        .order_by_desc(labels::Column::CreatedAt)
+        .limit(1)
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "label-post-dup-lookup"))?;
     match hit {
         Some(id) => Err(label_name_conflict(&id.to_string())),
         // BUG-3: `str(label.id)` with `label is None` raises
@@ -2020,7 +2144,7 @@ async fn label_detail_inner(
         // `.get()` miss → `ObjectDoesNotExist` → the 404 branch.
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
-    let decoded = decode_label(&row, &tz)?;
+    let decoded = decode_label(&row, &tz);
     let body = render_label_value(&decoded, None, &[], &[])?;
     Ok(json_response(
         StatusCode::OK,
@@ -2131,35 +2255,25 @@ async fn label_patch_inner(
         Some(None) => Some(None),
         None => None,
     };
-    let update = sqlx::query(
-        r#"UPDATE "labels" SET "updated_at" = $1, "updated_by_id" = $2,
-               "name" = COALESCE($3, "name"),
-               "description" = COALESCE($4, "description"),
-               "color" = COALESCE($5, "color"),
-               "sort_order" = COALESCE($6, "sort_order"),
-               "external_source" = CASE WHEN $7 THEN NULL ELSE COALESCE($8, "external_source") END,
-               "external_id" = CASE WHEN $9 THEN NULL ELSE COALESCE($10, "external_id") END,
-               "parent_id" = CASE WHEN $11 THEN NULL ELSE COALESCE($12, "parent_id") END
-           WHERE "id" = $13"#,
+    let update = label_patch_update(
+        *pk,
+        updated_at,
+        pre.actor.id,
+        LabelPatch {
+            name: validated.name.clone(),
+            description: validated.description.clone(),
+            color: validated.color.clone(),
+            sort_order: validated.sort_order,
+            external_source: validated.external_source.clone(),
+            external_id: validated.external_id.clone(),
+            parent_id,
+        },
     )
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(validated.name.clone())
-    .bind(validated.description.clone())
-    .bind(validated.color.clone())
-    .bind(validated.sort_order)
-    .bind(validated.external_source == Some(None))
-    .bind(validated.external_source.clone().unwrap_or(None))
-    .bind(validated.external_id == Some(None))
-    .bind(validated.external_id.clone().unwrap_or(None))
-    .bind(parent_id == Some(None))
-    .bind(parent_id.unwrap_or(None))
-    .bind(pk)
-    .execute(&pre.pool)
+    .exec(&sea_orm_connection(&pre.pool))
     .await;
     if let Err(error) = update {
         // BUG-4: uncaught → `handle_exception` → 400.
-        if is_integrity_error(&error) {
+        if is_integrity_violation(&error) {
             return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
         }
         return Err(db_error(error, "label-patch-update"));
@@ -2168,7 +2282,7 @@ async fn label_patch_inner(
     let Some(row) = row else {
         return Err(Denial::ServerError);
     };
-    let decoded = decode_label(&row, &tz)?;
+    let decoded = decode_label(&row, &tz);
     let body = render_label_value(&decoded, None, &[], &[])?;
     Ok(json_response(
         StatusCode::OK,
@@ -2222,16 +2336,10 @@ async fn label_delete_inner(
     // calls plus the crum `updated_by` stamp (`mixins.py:72-78`).
     let deleted_at = now_utc();
     let updated_at = now_utc();
-    sqlx::query(
-        r#"UPDATE "labels" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
-    )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "label-delete"))?;
+    label_soft_delete(*pk, deleted_at, updated_at, pre.actor.id)
+        .exec(&sea_orm_connection(&pre.pool))
+        .await
+        .map_err(|error| db_error(error, "label-delete"))?;
     let (sweep_args, sweep_kwargs) = soft_delete_sweep("label", &pk.to_string());
     enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
     Ok(Response::builder()
@@ -2251,27 +2359,21 @@ async fn label_name_exists(
     name: &str,
     exclude_pk: Option<&Uuid>,
 ) -> Result<bool, Denial> {
-    let hit: bool = if let Some(pk) = exclude_pk {
-        sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "labels" WHERE "deleted_at" IS NULL AND "project_id" IS NULL AND "name" = $1 AND "id" != $2)"#,
-        )
-        .bind(name)
-        .bind(pk)
-        .fetch_optional(pool)
+    let hit: Option<Uuid> = labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(labels::Column::DeletedAt.is_null())
+        .filter(labels::Column::ProjectId.is_null())
+        .filter(labels::Column::Name.eq(name))
+        .apply_if(exclude_pk, |query, pk| {
+            query.filter(labels::Column::Id.ne(*pk))
+        })
+        .limit(1)
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
         .await
-        .map_err(|error| db_error(error, "label-name-exists"))?
-        .unwrap_or(false)
-    } else {
-        sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "labels" WHERE "deleted_at" IS NULL AND "project_id" IS NULL AND "name" = $1)"#,
-        )
-        .bind(name)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "label-name-exists"))?
-        .unwrap_or(false)
-    };
-    Ok(hit)
+        .map_err(|error| db_error(error, "label-name-exists"))?;
+    Ok(hit.is_some())
 }
 
 /// The parent-PK fact: a live label carrying the canonical pk
@@ -2280,15 +2382,17 @@ async fn label_pk_exists(pool: &PgPool, canonical_pk: &str) -> Result<bool, Deni
     let pk = canonical_pk
         .parse::<Uuid>()
         .map_err(|_| Denial::ServerError)?;
-    let hit: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "labels" WHERE "deleted_at" IS NULL AND "id" = $1)"#,
-    )
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "label-pk-exists"))?
-    .unwrap_or(false);
-    Ok(hit)
+    let hit: Option<Uuid> = labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(labels::Column::DeletedAt.is_null())
+        .filter(labels::Column::Id.eq(pk))
+        .limit(1)
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "label-pk-exists"))?;
+    Ok(hit.is_some())
 }
 
 /// The external-dup probe (`:1367-1372`, `:1505-1512`): same
@@ -2302,38 +2406,26 @@ async fn label_external_hit(
     external_id: &str,
     exclude_pk: Option<&Uuid>,
 ) -> Result<Option<Uuid>, Denial> {
-    if let Some(pk) = exclude_pk {
-        sqlx::query_scalar(
-            r#"SELECT l."id" FROM "labels" l
-               WHERE l."deleted_at" IS NULL AND l."project_id" = $1
-                 AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $2)
-                 AND l."external_source" = $3 AND l."external_id" = $4 AND l."id" != $5
-               ORDER BY l."created_at" DESC LIMIT 1"#,
+    labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(labels::Column::DeletedAt.is_null())
+        .filter(labels::Column::ProjectId.eq(*project_id))
+        .filter(
+            Expr::col((labels::Entity, labels::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
         )
-        .bind(project_id)
-        .bind(slug)
-        .bind(external_source)
-        .bind(external_id)
-        .bind(pk)
-        .fetch_optional(pool)
+        .filter(labels::Column::ExternalSource.eq(external_source))
+        .filter(labels::Column::ExternalId.eq(external_id))
+        .apply_if(exclude_pk, |query, pk| {
+            query.filter(labels::Column::Id.ne(*pk))
+        })
+        .order_by_desc(labels::Column::CreatedAt)
+        .limit(1)
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "label-external-hit"))
-    } else {
-        sqlx::query_scalar(
-            r#"SELECT l."id" FROM "labels" l
-               WHERE l."deleted_at" IS NULL AND l."project_id" = $1
-                 AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $2)
-                 AND l."external_source" = $3 AND l."external_id" = $4
-               ORDER BY l."created_at" DESC LIMIT 1"#,
-        )
-        .bind(project_id)
-        .bind(slug)
-        .bind(external_source)
-        .bind(external_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "label-external-hit"))
-    }
 }
 
 /// Python `str()` of a raw request-data scalar for the dup probes
@@ -2368,15 +2460,137 @@ fn label_name_conflict(id: &str) -> Denial {
 }
 
 /// Re-read one label by pk, unscoped (`Label.objects.get`, `:1389,:1522`).
-async fn fetch_label_row_by_pk(
-    pool: &PgPool,
-    pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(r#"SELECT * FROM "labels" WHERE "deleted_at" IS NULL AND "id" = $1"#)
-        .bind(pk)
-        .fetch_optional(pool)
+async fn fetch_label_row_by_pk(pool: &PgPool, pk: &Uuid) -> Result<Option<labels::Model>, Denial> {
+    labels::Entity::find()
+        .filter(labels::Column::DeletedAt.is_null())
+        .filter(labels::Column::Id.eq(*pk))
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "label-reread"))
+}
+
+/// `MAX("sort_order")` over the project's live labels (`Label.save`,
+/// BUG-2): `None` when the project has none.
+async fn max_label_sort_order<C: ConnectionTrait>(
+    db: &C,
+    project_id: &Uuid,
+) -> Result<Option<f64>, DbErr> {
+    let row: Option<(Option<f64>,)> = labels::Entity::find()
+        .select_only()
+        .expr_as(
+            Func::max(Expr::col((labels::Entity, labels::Column::SortOrder))),
+            "max_sort",
+        )
+        .filter(labels::Column::ProjectId.eq(*project_id))
+        .filter(labels::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(row.and_then(|(max,)| max))
+}
+
+/// The columns `LabelListCreateAPIEndpoint.post` writes (`Label.save`,
+/// `:1383-1389`): `updated_by` is NULL on create (crum stamps it on
+/// updates only), `deleted_at` is left to its default.
+struct NewLabel {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    created_by_id: Uuid,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    parent_id: Option<Uuid>,
+    name: String,
+    description: String,
+    color: String,
+    sort_order: f64,
+    external_source: Option<String>,
+    external_id: Option<String>,
+}
+
+fn new_label_model(new: NewLabel) -> labels::ActiveModel {
+    labels::ActiveModel {
+        id: Set(new.id),
+        created_at: Set(new.created_at.into()),
+        updated_at: Set(new.updated_at.into()),
+        created_by_id: Set(Some(new.created_by_id)),
+        updated_by_id: Set(None),
+        workspace_id: Set(new.workspace_id),
+        project_id: Set(Some(new.project_id)),
+        parent_id: Set(new.parent_id),
+        name: Set(new.name),
+        description: Set(new.description),
+        color: Set(new.color),
+        sort_order: Set(new.sort_order),
+        external_source: Set(new.external_source),
+        external_id: Set(new.external_id),
+        deleted_at: NotSet,
+    }
+}
+
+/// The label PATCH partial update (`serializer.save()`, a full save):
+/// `None` keeps a column, `Some(None)` clears a nullable one.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct LabelPatch {
+    name: Option<String>,
+    description: Option<String>,
+    color: Option<String>,
+    sort_order: Option<f64>,
+    external_source: Option<Option<String>>,
+    external_id: Option<Option<String>>,
+    parent_id: Option<Option<Uuid>>,
+}
+
+/// `UPDATE "labels"` for one PATCH: the `auto_now` / crum stamps always,
+/// then only the fields the body carried (Django writes every column, but
+/// the untouched ones carry their current value — same row either way).
+fn label_patch_update(
+    pk: Uuid,
+    updated_at: DateTime<Utc>,
+    actor_id: Uuid,
+    patch: LabelPatch,
+) -> sea_orm::UpdateMany<labels::Entity> {
+    let mut update = labels::Entity::update_many()
+        .col_expr(labels::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(labels::Column::UpdatedById, Expr::value(actor_id))
+        .filter(labels::Column::Id.eq(pk));
+    if let Some(name) = patch.name {
+        update = update.col_expr(labels::Column::Name, Expr::value(name));
+    }
+    if let Some(description) = patch.description {
+        update = update.col_expr(labels::Column::Description, Expr::value(description));
+    }
+    if let Some(color) = patch.color {
+        update = update.col_expr(labels::Column::Color, Expr::value(color));
+    }
+    if let Some(sort_order) = patch.sort_order {
+        update = update.col_expr(labels::Column::SortOrder, Expr::value(sort_order));
+    }
+    if let Some(external_source) = patch.external_source {
+        update = update.col_expr(labels::Column::ExternalSource, Expr::value(external_source));
+    }
+    if let Some(external_id) = patch.external_id {
+        update = update.col_expr(labels::Column::ExternalId, Expr::value(external_id));
+    }
+    if let Some(parent_id) = patch.parent_id {
+        update = update.col_expr(labels::Column::ParentId, Expr::value(parent_id));
+    }
+    update
+}
+
+/// `Label.delete()` (`mixins.py:72-78`): `deleted_at` plus the full-save
+/// `updated_at` / crum `updated_by` stamps.
+fn label_soft_delete(
+    pk: Uuid,
+    deleted_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    actor_id: Uuid,
+) -> sea_orm::UpdateMany<labels::Entity> {
+    labels::Entity::update_many()
+        .col_expr(labels::Column::DeletedAt, Expr::value(deleted_at))
+        .col_expr(labels::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(labels::Column::UpdatedById, Expr::value(actor_id))
+        .filter(labels::Column::Id.eq(pk))
 }
 
 // ---------------------------------------------------------------------------
@@ -2794,7 +3008,7 @@ async fn detail_response(
     let Some(row) = row else {
         return Err(Denial::ServerError);
     };
-    let decoded = decode_page(&row, tz)?;
+    let decoded = decode_page(&row, tz);
     let body = render_page_detail_value(&decoded, None, &[], None, &[])?;
     Ok(json_response(
         status,
@@ -2828,8 +3042,8 @@ async fn check_parent(
     let lookup = match fetch_visible_page(pool, slug, project_id, user_id, &parent_id).await? {
         None => ParentLookup::Missing,
         Some(row) => ParentLookup::Found(ParentRef {
-            id: row_uuid(&row, "id")?,
-            archived: row_date_opt(&row, "archived_at")?.is_some(),
+            id: row.id,
+            archived: row.archived_at.is_some(),
         }),
     };
     let found = match lookup {
@@ -2854,15 +3068,18 @@ async fn check_parent(
         if ancestor == target {
             return Err(parent_denial(ValidateParentError::SelfNest));
         }
-        let next: Option<Uuid> = sqlx::query_scalar(
-            r#"SELECT "parent_id" FROM "pages" WHERE "deleted_at" IS NULL AND "id" = $1 ORDER BY "created_at" DESC LIMIT 1"#,
-        )
-        .bind(ancestor)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "parent-walk"))?
-        .flatten()
-        .flatten();
+        let next: Option<(Option<Uuid>,)> = pages::Entity::find()
+            .select_only()
+            .column(pages::Column::ParentId)
+            .filter(pages::Column::DeletedAt.is_null())
+            .filter(pages::Column::Id.eq(ancestor))
+            .order_by_desc(pages::Column::CreatedAt)
+            .limit(1)
+            .into_tuple()
+            .one(&sea_orm_connection(pool))
+            .await
+            .map_err(|error| db_error(error, "parent-walk"))?;
+        let next = next.and_then(|(parent,)| parent);
         match next {
             Some(id) => ancestor = id,
             None => return Ok(Some(parent_id)),
@@ -2942,7 +3159,7 @@ async fn page_list_inner(
     let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
-        let decoded = decode_page(row, &tz)?;
+        let decoded = decode_page(row, &tz);
         rendered.push(
             render_page_lite_expanded(
                 &pre.pool,
@@ -3088,14 +3305,10 @@ async fn page_post_inner(
     // The filter is live-scoped (`Project.objects`, `SoftDeletionManager`):
     // a soft-deleted project never 409s — it falls through to the 404 in
     // `PageSerializer.create` after conversion.
-    let project_archived: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL AND "archived_at" IS NOT NULL)"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "page-post-archived"))?
-    .unwrap_or(false);
+    let db = sea_orm_connection(&pre.pool);
+    let project_archived = project_probe(&db, &project_id, true)
+        .await
+        .map_err(|error| db_error(error, "page-post-archived"))?;
     if project_archived {
         return Err(Denial::Conflict(PROJECT_ARCHIVED_BODY.to_owned()));
     }
@@ -3134,14 +3347,17 @@ async fn page_post_inner(
     // re-validates against the GLOBAL pk scope — a parent deleted in the
     // race answers the DRF `does_not_exist` 400 here, before the write.
     if let Some(parent_id) = parent_id {
-        let still_there: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "pages" WHERE "deleted_at" IS NULL AND "id" = $1)"#,
-        )
-        .bind(parent_id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "page-post-parent-race"))?
-        .unwrap_or(false);
+        let still_there: Option<Uuid> = pages::Entity::find()
+            .select_only()
+            .column(pages::Column::Id)
+            .filter(pages::Column::DeletedAt.is_null())
+            .filter(pages::Column::Id.eq(parent_id))
+            .limit(1)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|error| db_error(error, "page-post-parent-race"))?;
+        let still_there = still_there.is_some();
         if !still_there {
             return Err(Denial::FieldErrors(field_errors_body(&[(
                 "parent",
@@ -3170,66 +3386,53 @@ async fn page_post_inner(
     // soft-deleted (or race-deleted) project raises `DoesNotExist` → the
     // `handle_exception` 404, after every 400/409/503 above — and the
     // in-transaction read keeps the race window closed.
-    let project_live: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL)"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| db_error(error, "page-post-project-live"))?
-    .unwrap_or(false);
+    let project_live = project_probe(&TxConn::new(&mut tx), &project_id, false)
+        .await
+        .map_err(|error| db_error(error, "page-post-project-live"))?;
     if !project_live {
         let _ = tx.rollback().await;
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     }
-    let insert_page = sqlx::query(
-        r#"INSERT INTO "pages" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "workspace_id", "name", "description_json", "description_binary", "description_html",
-            "description_stripped", "owned_by_id", "access", "color", "parent_id", "archived_at",
-            "is_locked", "view_props", "logo_props", "is_global", "moved_to_page", "moved_to_project",
-            "sort_order", "external_id", "external_source")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, '', $13, NULL,
-            FALSE, '{"full_width": false}', '{}', FALSE, NULL, NULL, 65535, NULL, NULL)"#,
-    )
-    .bind(page_id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(workspace_id)
-    .bind(validated.name.clone().unwrap_or_default())
-    .bind(fields.description_json.clone())
-    .bind(fields.description_binary.clone())
-    .bind(fields.description_html.clone())
-    .bind(stripped.clone())
-    .bind(pre.actor.id)
-    .bind(validated.access.unwrap_or(0) as i16)
-    .bind(parent_id)
-    .execute(&mut *tx)
+    let insert_page = pages::Entity::insert(new_page_model(NewPage {
+        id: page_id,
+        created_at,
+        updated_at,
+        created_by_id: pre.actor.id,
+        workspace_id,
+        name: validated.name.clone().unwrap_or_default(),
+        description_json: fields.description_json.clone(),
+        description_binary: fields.description_binary.clone(),
+        description_html: fields.description_html.clone(),
+        description_stripped: stripped.clone(),
+        owned_by_id: pre.actor.id,
+        access: validated.access.unwrap_or(0) as i16,
+        parent_id,
+    }))
+    .exec(&TxConn::new(&mut tx))
     .await;
     if let Err(error) = insert_page {
         let _ = tx.rollback().await;
-        if is_integrity_error(&error) {
+        if is_integrity_violation(&error) {
             return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
         }
         return Err(db_error(error, "page-post-insert"));
     }
-    let insert_link = sqlx::query(
-        r#"INSERT INTO "project_pages" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "workspace_id", "project_id", "page_id")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7)"#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(link_created_at)
-    .bind(link_updated_at)
-    .bind(pre.actor.id)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(page_id)
-    .execute(&mut *tx)
+    let insert_link = project_pages::Entity::insert(project_pages::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(link_created_at.into()),
+        updated_at: Set(link_updated_at.into()),
+        created_by_id: Set(Some(pre.actor.id)),
+        updated_by_id: Set(None),
+        workspace_id: Set(workspace_id),
+        project_id: Set(project_id),
+        page_id: Set(page_id),
+        deleted_at: NotSet,
+    })
+    .exec(&TxConn::new(&mut tx))
     .await;
     if let Err(error) = insert_link {
         let _ = tx.rollback().await;
-        if is_integrity_error(&error) {
+        if is_integrity_violation(&error) {
             return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
         }
         return Err(db_error(error, "page-post-link"));
@@ -3267,6 +3470,169 @@ fn strip_description(html: &str) -> Option<String> {
     } else {
         Some(pidash_db::app_pages::strip::ml_strip_tags(html))
     }
+}
+
+/// A live `projects` row with this id; `archived` additionally requires
+/// `archived_at IS NOT NULL` (`Project.objects.filter(...).exists()`).
+async fn project_probe<C: ConnectionTrait>(
+    db: &C,
+    project_id: &Uuid,
+    archived: bool,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .apply_if(archived.then_some(()), |query, ()| {
+            query.filter(projects::Column::ArchivedAt.is_not_null())
+        })
+        .limit(1)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// The columns `PageSerializer.create` writes (`app/serializers/page.py:
+/// 61-89`); every other column takes the model default (`color` empty,
+/// `view_props` `{"full_width": false}`, `logo_props` `{}`, `sort_order`
+/// 65535, flags false, the rest NULL).
+struct NewPage {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    created_by_id: Uuid,
+    workspace_id: Uuid,
+    name: String,
+    description_json: Value,
+    description_binary: Vec<u8>,
+    description_html: String,
+    description_stripped: Option<String>,
+    owned_by_id: Uuid,
+    access: i16,
+    parent_id: Option<Uuid>,
+}
+
+fn new_page_model(new: NewPage) -> pages::ActiveModel {
+    pages::ActiveModel {
+        id: Set(new.id),
+        created_at: Set(new.created_at.into()),
+        updated_at: Set(new.updated_at.into()),
+        created_by_id: Set(Some(new.created_by_id)),
+        updated_by_id: Set(None),
+        workspace_id: Set(new.workspace_id),
+        name: Set(new.name),
+        description_json: Set(new.description_json),
+        description_binary: Set(Some(new.description_binary)),
+        description_html: Set(new.description_html),
+        description_stripped: Set(new.description_stripped),
+        owned_by_id: Set(new.owned_by_id),
+        access: Set(new.access),
+        color: Set(String::new()),
+        parent_id: Set(new.parent_id),
+        archived_at: Set(None),
+        is_locked: Set(false),
+        view_props: Set(serde_json::json!({"full_width": false})),
+        logo_props: Set(serde_json::json!({})),
+        is_global: Set(false),
+        moved_to_page: Set(None),
+        moved_to_project: Set(None),
+        sort_order: Set(65535.0),
+        external_id: Set(None),
+        external_source: Set(None),
+        deleted_at: NotSet,
+    }
+}
+
+/// The converted document a page PATCH stores (`:467-473`).
+#[derive(Debug, Clone, PartialEq)]
+struct PageBody {
+    description_html: String,
+    description_json: Value,
+    description_binary: Vec<u8>,
+    /// `None` keeps the stored `description_stripped` (an empty body
+    /// strips to nothing; the column keeps its old text — as before).
+    description_stripped: Option<String>,
+}
+
+/// The page PATCH partial update: `None` keeps a column; `clear_parent`
+/// wins over `parent_id` (explicit `"parent": null`).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct PagePatch {
+    name: Option<String>,
+    access: Option<i16>,
+    clear_parent: bool,
+    parent_id: Option<Uuid>,
+    body: Option<PageBody>,
+}
+
+/// `UPDATE "pages"` for one PATCH under the row lock: the `auto_now` /
+/// crum stamps always, then only the changed fields.
+fn page_patch_update(
+    page_id: Uuid,
+    updated_at: DateTime<Utc>,
+    actor_id: Uuid,
+    patch: PagePatch,
+) -> sea_orm::UpdateMany<pages::Entity> {
+    let mut update = pages::Entity::update_many()
+        .col_expr(pages::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(pages::Column::UpdatedById, Expr::value(actor_id))
+        .filter(pages::Column::Id.eq(page_id));
+    if let Some(name) = patch.name {
+        update = update.col_expr(pages::Column::Name, Expr::value(name));
+    }
+    if let Some(access) = patch.access {
+        update = update.col_expr(pages::Column::Access, Expr::value(access));
+    }
+    if patch.clear_parent {
+        update = update.col_expr(pages::Column::ParentId, Expr::value(None::<Uuid>));
+    } else if let Some(parent_id) = patch.parent_id {
+        update = update.col_expr(pages::Column::ParentId, Expr::value(parent_id));
+    }
+    if let Some(body) = patch.body {
+        update = update
+            .col_expr(
+                pages::Column::DescriptionHtml,
+                Expr::value(body.description_html),
+            )
+            .col_expr(
+                pages::Column::DescriptionJson,
+                Expr::value(body.description_json),
+            )
+            .col_expr(
+                pages::Column::DescriptionBinary,
+                Expr::value(body.description_binary),
+            );
+        if let Some(stripped) = body.description_stripped {
+            update = update.col_expr(pages::Column::DescriptionStripped, Expr::value(stripped));
+        }
+    }
+    update
+}
+
+/// `UserFavorite.objects.filter(entity_type="page", entity_identifier=
+/// page_id, project_id=..., workspace__slug=...).delete()` — the queryset
+/// `.delete()` is `.update(deleted_at=now())` (`db/mixins.py:48-51`): no
+/// `updated_at` stamp.
+fn page_favorites_soft_delete(
+    page_id: &Uuid,
+    project_id: &Uuid,
+    slug: &str,
+) -> sea_orm::UpdateMany<user_favorites::Entity> {
+    user_favorites::Entity::update_many()
+        .col_expr(
+            user_favorites::Column::DeletedAt,
+            Expr::current_timestamp().into(),
+        )
+        .filter(user_favorites::Column::EntityType.eq("page"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(*page_id))
+        .filter(user_favorites::Column::ProjectId.eq(*project_id))
+        .filter(
+            Expr::col((user_favorites::Entity, user_favorites::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(user_favorites::Column::DeletedAt.is_null())
 }
 
 /// `GET .../pages/<page_id>/` (`views/page.py:365-376`).
@@ -3317,7 +3683,7 @@ async fn page_detail_inner(
     };
     let (field_specs, kept, expand) = field_selection(query, PAGE_DETAIL_FIELDS)?;
     let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
-    let decoded = decode_page(&row, &tz)?;
+    let decoded = decode_page(&row, &tz);
     let body = render_page_detail_expanded(
         &pre.pool,
         &decoded,
@@ -3390,7 +3756,7 @@ async fn page_patch_inner(
     let validated = validate_page_write(&parsed.value, WriteMode::Update)
         .map_err(|errors| Denial::FieldErrors(errors.body()))?;
     // Pre-lock guards (`:418-427`): lock → archived-body → access → parent.
-    let is_locked = row_bool(&row, "is_locked")?;
+    let is_locked = row.is_locked;
     if is_locked {
         return Err(page_error(
             "Page is locked",
@@ -3398,7 +3764,7 @@ async fn page_patch_inner(
             Some(("PAGE_LOCKED", 4701)),
         ));
     }
-    let archived = row_date_opt(&row, "archived_at")?.is_some();
+    let archived = row.archived_at.is_some();
     if validated.has_body() && archived {
         return Err(page_error(
             "Page is archived",
@@ -3406,8 +3772,8 @@ async fn page_patch_inner(
             Some(("PAGE_ARCHIVED", 4702)),
         ));
     }
-    let current_access = i64::from(row_i16(&row, "access")?);
-    let owned_by_id = row_uuid_opt(&row, "owned_by_id")?;
+    let current_access = i64::from(row.access);
+    let owned_by_id = Some(row.owned_by_id);
     if let Some(access) = validated.access {
         if access != current_access && owned_by_id != Some(pre.actor.id) {
             return Err(Denial::ForbiddenError(PAGE_ACCESS_DENIAL_BODY.to_owned()));
@@ -3429,11 +3795,9 @@ async fn page_patch_inner(
         parent_present.then_some(*page_id),
     )
     .await?;
-    let current_name = row_string(&row, "name")?;
-    let current_html = row_string_opt(&row, "description_html")?.unwrap_or_default();
-    let current_binary: Option<Vec<u8>> = row
-        .try_get("description_binary")
-        .map_err(|_| Denial::ServerError)?;
+    let current_name = row.name.clone();
+    let current_html = row.description_html.clone();
+    let current_binary: Option<Vec<u8>> = row.description_binary.clone();
     let renamed = validated
         .name
         .as_deref()
@@ -3486,13 +3850,16 @@ async fn page_patch_inner(
         .begin()
         .await
         .map_err(|error| db_error(error, "page-patch-tx"))?;
-    let locked: Option<(bool, Option<chrono::NaiveDate>)> = sqlx::query_as(
-        r#"SELECT "is_locked", "archived_at" FROM "pages" WHERE "deleted_at" IS NULL AND "id" = $1 FOR UPDATE"#,
-    )
-    .bind(page_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| db_error(error, "page-patch-lock"))?;
+    let locked: Option<(bool, Option<chrono::NaiveDate>)> = pages::Entity::find()
+        .select_only()
+        .columns([pages::Column::IsLocked, pages::Column::ArchivedAt])
+        .filter(pages::Column::DeletedAt.is_null())
+        .filter(pages::Column::Id.eq(*page_id))
+        .lock_exclusive()
+        .into_tuple()
+        .one(&TxConn::new(&mut tx))
+        .await
+        .map_err(|error| db_error(error, "page-patch-lock"))?;
     let Some((locked_now, archived_now)) = locked else {
         let _ = tx.rollback().await;
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
@@ -3515,33 +3882,28 @@ async fn page_patch_inner(
     }
     let new_name = validated.name.clone();
     let new_access = validated.access.map(|a| a as i16);
-    let update = sqlx::query(
-        r#"UPDATE "pages" SET "updated_at" = $1, "updated_by_id" = $2,
-               "name" = COALESCE($3, "name"),
-               "access" = COALESCE($4, "access"),
-               "parent_id" = CASE WHEN $5 THEN NULL WHEN $6 IS NULL THEN "parent_id" ELSE $6 END,
-               "description_html" = COALESCE($7, "description_html"),
-               "description_json" = COALESCE($8, "description_json"),
-               "description_binary" = COALESCE($9, "description_binary"),
-               "description_stripped" = COALESCE($10, "description_stripped")
-           WHERE "id" = $11"#,
+    let update = page_patch_update(
+        *page_id,
+        updated_at,
+        pre.actor.id,
+        PagePatch {
+            name: new_name,
+            access: new_access,
+            clear_parent: parent_present && validated.parent == Some(None),
+            parent_id,
+            body: fields.as_ref().map(|f| PageBody {
+                description_html: f.description_html.clone(),
+                description_json: f.description_json.clone(),
+                description_binary: f.description_binary.clone(),
+                description_stripped: stripped.clone().unwrap_or(None),
+            }),
+        },
     )
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(new_name)
-    .bind(new_access)
-    .bind(parent_present && validated.parent == Some(None))
-    .bind(parent_id)
-    .bind(fields.as_ref().map(|f| f.description_html.clone()))
-    .bind(fields.as_ref().map(|f| f.description_json.clone()))
-    .bind(fields.as_ref().map(|f| f.description_binary.clone()))
-    .bind(stripped.unwrap_or(None))
-    .bind(page_id)
-    .execute(&mut *tx)
+    .exec(&TxConn::new(&mut tx))
     .await;
     if let Err(error) = update {
         let _ = tx.rollback().await;
-        if is_integrity_error(&error) {
+        if is_integrity_violation(&error) {
             return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
         }
         return Err(db_error(error, "page-patch-update"));
@@ -3652,17 +4014,20 @@ async fn page_archive_inner(
     // owner), then owner-or-project-admin (403 otherwise). The admin
     // probe is the Q3 port's `archive_admin_exists_sql` in executable
     // `$n` form (no workspace scope, unlike the delete guard).
-    let is_locked = row_bool(&row, "is_locked")?;
-    let owned_by = row_uuid(&row, "owned_by_id")?;
-    let is_admin: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE "deleted_at" IS NULL AND "project_id" = $1 AND "member_id" = $2 AND "is_active" AND "role" = 20)"#,
+    let is_locked = row.is_locked;
+    let owned_by = row.owned_by_id;
+    let db = sea_orm_connection(&pre.pool);
+    let is_admin = super::auth_reads::project_membership_exists(
+        &db,
+        pre.actor.id,
+        super::auth_reads::MembershipScope {
+            project_id: Some(project_id),
+            roles: &[20],
+            ..Default::default()
+        },
     )
-    .bind(project_id)
-    .bind(pre.actor.id)
-    .fetch_optional(&pre.pool)
     .await
-    .map_err(|error| db_error(error, "archive-admin"))?
-    .unwrap_or(false);
+    .map_err(|error| db_error(error, "archive-admin"))?;
     match check_can_archive(is_locked, owned_by, pre.actor.id, is_admin) {
         ArchiveDecision::Allow => {}
         ArchiveDecision::Locked => {
@@ -3674,31 +4039,24 @@ async fn page_archive_inner(
             ));
         }
     }
-    let archived = row_date_opt(&row, "archived_at")?.is_some();
+    let archived = row.archived_at.is_some();
     if is_archive {
         if !archived {
             // Queryset `.delete()` is `.update(deleted_at=now())`
             // (`db/mixins.py:48-51`) — no `updated_at` stamp, no sweep
             // task (the D-30 merged precedent,
             // `app_pages/archive_page`).
-            sqlx::query(
-                r#"UPDATE user_favorites SET deleted_at = now()
-                   WHERE entity_type = 'page' AND entity_identifier = $1 AND project_id = $2
-                   AND workspace_id = (SELECT id FROM workspaces WHERE slug = $3)
-                   AND deleted_at IS NULL"#,
-            )
-            .bind(page_id)
-            .bind(project_id)
-            .bind(slug)
-            .execute(&pre.pool)
-            .await
-            .map_err(|error| db_error(error, "archive-favorites"))?;
+            page_favorites_soft_delete(page_id, &project_id, slug)
+                .exec(&db)
+                .await
+                .map_err(|error| db_error(error, "archive-favorites"))?;
             // `unarchive_archive_page_and_descendants(page_id,
             // timezone.now().date())` (`:537`): a DATE, not a datetime
             // (the first-party `datetime.now()` differs — ported as the
             // v1 call site reads). The CTE text is the merged D-30
             // `STATE_CTE_SQL`.
             let today = chrono::Utc::now().date_naive();
+            // raw-sql: recursive CTE (page descendants archive stamp, shared app_pages::STATE_CTE_SQL)
             sqlx::query(crate::app_pages::STATE_CTE_SQL)
                 .bind(page_id)
                 .bind(today)
@@ -3713,13 +4071,15 @@ async fn page_archive_inner(
         // a soft-deleted parent is FOUND and only its `archived_at` decides
         // the detach; a hard-missing `parent_id` raises `DoesNotExist` →
         // the v1 `handle_exception` 404 branch (no `deleted_at` scope here).
-        if let Some(parent_id) = row_uuid_opt(&row, "parent_id")? {
-            let parent: Option<(Option<chrono::NaiveDate>,)> =
-                sqlx::query_as(r#"SELECT p.archived_at FROM pages p WHERE p.id = $1"#)
-                    .bind(parent_id)
-                    .fetch_optional(&pre.pool)
-                    .await
-                    .map_err(|error| db_error(error, "unarchive-parent"))?;
+        if let Some(parent_id) = row.parent_id {
+            let parent: Option<(Option<chrono::NaiveDate>,)> = pages::Entity::find()
+                .select_only()
+                .column(pages::Column::ArchivedAt)
+                .filter(pages::Column::Id.eq(parent_id))
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|error| db_error(error, "unarchive-parent"))?;
             let Some((parent_archived,)) = parent else {
                 return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
             };
@@ -3728,13 +4088,15 @@ async fn page_archive_inner(
                 // listed column, so Django persists ONLY `parent_id`: the
                 // in-memory `updated_at` (auto_now) and `updated_by` (
                 // `BaseModel.save`) are set on the instance but never written.
-                sqlx::query(r#"UPDATE pages SET parent_id = NULL WHERE id = $1"#)
-                    .bind(page_id)
-                    .execute(&pre.pool)
+                pages::Entity::update_many()
+                    .col_expr(pages::Column::ParentId, Expr::value(None::<Uuid>))
+                    .filter(pages::Column::Id.eq(*page_id))
+                    .exec(&db)
                     .await
                     .map_err(|error| db_error(error, "unarchive-detach"))?;
             }
         }
+        // raw-sql: recursive CTE (page descendants archive stamp, shared app_pages::STATE_CTE_SQL)
         sqlx::query(crate::app_pages::STATE_CTE_SQL)
             .bind(page_id)
             .bind(None::<chrono::NaiveDate>)
@@ -8200,5 +8562,674 @@ mod converter_tests {
     fn html_to_markdown_empty_arms() {
         assert_eq!(html_to_markdown(None), "");
         assert_eq!(html_to_markdown(Some("")), "");
+    }
+}
+
+#[cfg(test)]
+mod orm_tests {
+    use super::*;
+    use sea_orm::DbBackend;
+
+    fn sql<Q: QueryTrait>(query: &Q) -> String {
+        query.build(DbBackend::Postgres).to_string()
+    }
+
+    #[test]
+    fn label_scope_pins_the_queryset_shape() {
+        let (project, user) = (Uuid::nil(), Uuid::nil());
+        let text = sql(&label_scope("acme", &project, &user));
+        assert!(text.starts_with(r#"SELECT DISTINCT "labels"."#), "{text}");
+        assert!(text.contains(r#""labels"."deleted_at" IS NULL"#), "{text}");
+        assert!(
+            text.contains(
+                r#""labels"."workspace_id" = (SELECT "workspaces"."id" FROM "workspaces" WHERE "workspaces"."slug" = 'acme')"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                r#"EXISTS(SELECT 1 FROM "project_members" WHERE "project_members"."project_id" = "labels"."project_id" AND "project_members"."member_id" = "#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                r#"EXISTS(SELECT 1 FROM "projects" WHERE "projects"."id" = "labels"."project_id" AND "projects"."archived_at" IS NULL)"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(r#"ORDER BY "labels"."created_at" DESC"#),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn page_list_query_adds_the_archived_arm_only_when_excluded() {
+        let (project, user) = (Uuid::nil(), Uuid::nil());
+        let with = sql(&page_list_query("acme", &project, &user, true));
+        let without = sql(&page_list_query("acme", &project, &user, false));
+        assert!(!with.contains(r#""pages"."archived_at" IS NULL"#), "{with}");
+        assert!(
+            without.contains(r#""pages"."archived_at" IS NULL"#),
+            "{without}"
+        );
+        for text in [&with, &without] {
+            assert!(
+                text.contains(
+                    r#"INNER JOIN "projects" ON "project_pages"."project_id" = "projects"."id" INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#
+                ),
+                "{text}"
+            );
+            assert!(
+                text.contains(r#"("pages"."access" = 0 OR "pages"."owned_by_id" = "#),
+                "{text}"
+            );
+            assert!(
+                text.ends_with(r#"ORDER BY "pages"."created_at" DESC"#),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_patch_update_sets_only_the_carried_fields() {
+        let pk = Uuid::nil();
+        let now = Utc::now();
+        let bare = sql(&label_patch_update(pk, now, pk, LabelPatch::default()));
+        assert!(
+            bare.starts_with(r#"UPDATE "labels" SET "updated_at" = "#),
+            "{bare}"
+        );
+        assert!(!bare.contains(r#""name""#), "{bare}");
+        assert!(
+            bare.ends_with(&format!(r#"WHERE "labels"."id" = '{pk}'"#)),
+            "{bare}"
+        );
+        let patched = sql(&label_patch_update(
+            pk,
+            now,
+            pk,
+            LabelPatch {
+                name: Some("Bug".into()),
+                external_source: Some(None),
+                parent_id: Some(Some(pk)),
+                ..Default::default()
+            },
+        ));
+        assert!(patched.contains(r#""name" = 'Bug'"#), "{patched}");
+        assert!(patched.contains(r#""external_source" = NULL"#), "{patched}");
+        assert!(
+            patched.contains(&format!(r#""parent_id" = '{pk}'"#)),
+            "{patched}"
+        );
+        assert!(!patched.contains(r#""external_id""#), "{patched}");
+    }
+
+    #[test]
+    fn page_patch_update_clears_or_keeps_the_parent() {
+        let pk = Uuid::nil();
+        let now = Utc::now();
+        let cleared = sql(&page_patch_update(
+            pk,
+            now,
+            pk,
+            PagePatch {
+                clear_parent: true,
+                parent_id: Some(pk),
+                ..Default::default()
+            },
+        ));
+        assert!(cleared.contains(r#""parent_id" = NULL"#), "{cleared}");
+        let kept = sql(&page_patch_update(pk, now, pk, PagePatch::default()));
+        assert!(!kept.contains(r#""parent_id""#), "{kept}");
+        let body = sql(&page_patch_update(
+            pk,
+            now,
+            pk,
+            PagePatch {
+                body: Some(PageBody {
+                    description_html: "<p>x</p>".into(),
+                    description_json: serde_json::json!({}),
+                    description_binary: vec![1],
+                    description_stripped: None,
+                }),
+                ..Default::default()
+            },
+        ));
+        assert!(
+            body.contains(r#""description_html" = '<p>x</p>'"#),
+            "{body}"
+        );
+        assert!(!body.contains(r#""description_stripped""#), "{body}");
+    }
+
+    #[test]
+    fn favorites_soft_delete_pins_the_scope() {
+        let text = sql(&page_favorites_soft_delete(
+            &Uuid::nil(),
+            &Uuid::nil(),
+            "acme",
+        ));
+        assert!(
+            text.starts_with(
+                r#"UPDATE "user_favorites" SET "deleted_at" = CURRENT_TIMESTAMP WHERE"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""user_favorites"."entity_type" = 'page'"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                r#""user_favorites"."workspace_id" = (SELECT "workspaces"."id" FROM "workspaces" WHERE "workspaces"."slug" = 'acme')"#
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(r#""user_favorites"."deleted_at" IS NULL"#),
+            "{text}"
+        );
+    }
+
+    /// Every read and write against constraint-free temp copies on one
+    /// connection.
+    #[tokio::test]
+    async fn live_label_page_reads_and_writes() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "projects",
+            "project_members",
+            "labels",
+            "pages",
+            "project_pages",
+            "user_favorites",
+            "users",
+            "file_assets",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, project, archived_project, user, stranger) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (label_live, label_dead, label_other, label_global) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (page_public, page_owned, page_private, page_archived, page_orphan) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let avatar_asset = Uuid::new_v4();
+        let page_cols = "(id, created_at, updated_at, name, description_json, description_html, \
+                         description_stripped, access, owned_by_id, workspace_id, color, archived_at, \
+                         is_locked, parent_id, view_props, logo_props, is_global, sort_order, deleted_at)";
+        let page_row = |id: Uuid,
+                        name: &str,
+                        access: i16,
+                        owner: Uuid,
+                        archived: &str,
+                        parent: &str,
+                        deleted: &str| {
+            format!(
+                "('{id}', now(), now(), '{name}', '{{}}', '<p>{name}</p>', '{name}', {access}, '{owner}', '{ws}', '', {archived}, false, {parent}, '{{}}', '{{}}', false, 65535, {deleted})"
+            )
+        };
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug, name) VALUES ('{ws}', 'acme', 'Acme')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, name, description, is_default, archived_at, deleted_at) VALUES \
+                 ('{project}', '{ws}', 'ACME', 'Acme', 'd', false, NULL, NULL), \
+                 ('{archived_project}', '{ws}', 'OLD', 'Old', 'd', false, now(), NULL)"
+            ),
+            format!(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES \
+                 (gen_random_uuid(), '{ws}', '{project}', '{user}', 20, true, NULL), \
+                 (gen_random_uuid(), '{ws}', '{project}', '{stranger}', 15, false, NULL)"
+            ),
+            format!(
+                "INSERT INTO labels (id, created_at, updated_at, name, description, workspace_id, project_id, color, sort_order, external_source, external_id, deleted_at) VALUES \
+                 ('{label_live}', '2024-01-02T00:00:00Z', now(), 'Bug', '', '{ws}', '{project}', '#f00', 65535, 'jira', 'J-1', NULL), \
+                 ('{label_dead}', '2024-01-03T00:00:00Z', now(), 'Dead', '', '{ws}', '{project}', '#000', 1, NULL, NULL, now()), \
+                 ('{label_other}', '2024-01-04T00:00:00Z', now(), 'Other', '', '{ws}', '{archived_project}', '#000', 2, NULL, NULL, NULL), \
+                 ('{label_global}', '2024-01-05T00:00:00Z', now(), 'Global', '', '{ws}', NULL, '#000', 3, NULL, NULL, NULL)"
+            ),
+            format!(
+                "INSERT INTO pages {page_cols} VALUES {}, {}, {}, {}, {}",
+                page_row(page_public, "Public", 0, stranger, "NULL", "NULL", "NULL"),
+                page_row(page_owned, "Owned", 1, user, "NULL", &format!("'{page_public}'"), "NULL"),
+                page_row(page_private, "Private", 1, stranger, "NULL", "NULL", "NULL"),
+                page_row(page_archived, "Archived", 0, user, "'2024-02-03'", "NULL", "NULL"),
+                page_row(page_orphan, "Orphan", 0, user, "NULL", "NULL", "NULL"),
+            ),
+            format!(
+                "INSERT INTO project_pages (id, created_at, updated_at, workspace_id, project_id, page_id, deleted_at) VALUES \
+                 (gen_random_uuid(), now(), now(), '{ws}', '{project}', '{page_public}', NULL), \
+                 (gen_random_uuid(), now(), now(), '{ws}', '{project}', '{page_owned}', NULL), \
+                 (gen_random_uuid(), now(), now(), '{ws}', '{project}', '{page_private}', NULL), \
+                 (gen_random_uuid(), now(), now(), '{ws}', '{project}', '{page_archived}', NULL)"
+            ),
+            format!(
+                "INSERT INTO user_favorites (id, created_at, updated_at, entity_type, entity_identifier, is_folder, sequence, project_id, user_id, workspace_id, deleted_at) VALUES \
+                 (gen_random_uuid(), now(), now(), 'page', '{page_public}', false, 1, '{project}', '{user}', '{ws}', NULL), \
+                 (gen_random_uuid(), now(), now(), 'page', '{page_owned}', false, 1, '{project}', '{user}', '{ws}', NULL)"
+            ),
+            format!(
+                "INSERT INTO users (id, first_name, last_name, email, avatar, avatar_asset_id, display_name) VALUES \
+                 ('{user}', 'Ada', 'Lovelace', 'ada@example.com', '', '{avatar_asset}', 'ada')"
+            ),
+            format!(
+                "INSERT INTO file_assets (id, entity_type, workspace_id) VALUES ('{avatar_asset}', 'USER_AVATAR', '{ws}')"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let db = sea_orm_connection(&pool);
+        let tz: Tz = "UTC".parse().expect("tz");
+
+        // Label queryset: the live project label only, newest first.
+        let rows = fetch_label_rows(&pool, "acme", &project, &user)
+            .await
+            .expect("labels");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![label_live]
+        );
+        let decoded = decode_label(&rows[0], &tz);
+        assert_eq!(decoded.created_at, "2024-01-02T00:00:00Z");
+        assert_eq!(decoded.external_id.as_deref(), Some("J-1"));
+        assert!(fetch_label_rows(&pool, "acme", &project, &stranger)
+            .await
+            .expect("labels")
+            .is_empty());
+        assert!(fetch_label_rows(&pool, "acme", &archived_project, &user)
+            .await
+            .expect("labels")
+            .is_empty());
+        assert!(
+            fetch_label_detail(&pool, "acme", &project, &user, &label_live)
+                .await
+                .expect("detail")
+                .is_some()
+        );
+        assert!(
+            fetch_label_detail(&pool, "acme", &project, &user, &label_dead)
+                .await
+                .expect("detail")
+                .is_none()
+        );
+        assert!(
+            fetch_label_detail(&pool, "other", &project, &user, &label_live)
+                .await
+                .expect("detail")
+                .is_none()
+        );
+
+        // Probes.
+        assert!(label_name_exists(&pool, "Global", None).await.expect("n"));
+        assert!(!label_name_exists(&pool, "Global", Some(&label_global))
+            .await
+            .expect("n"));
+        assert!(!label_name_exists(&pool, "Bug", None).await.expect("n"));
+        assert!(label_pk_exists(&pool, &label_live.to_string())
+            .await
+            .expect("pk"));
+        assert!(!label_pk_exists(&pool, &label_dead.to_string())
+            .await
+            .expect("pk"));
+        assert_eq!(
+            label_external_hit(&pool, "acme", &project, "jira", "J-1", None)
+                .await
+                .expect("ext"),
+            Some(label_live)
+        );
+        assert_eq!(
+            label_external_hit(&pool, "acme", &project, "jira", "J-1", Some(&label_live))
+                .await
+                .expect("ext"),
+            None
+        );
+        assert_eq!(
+            max_label_sort_order(&db, &project).await.expect("max"),
+            Some(65535.0)
+        );
+        assert_eq!(
+            max_label_sort_order(&db, &Uuid::new_v4())
+                .await
+                .expect("max"),
+            None
+        );
+
+        // Label insert → re-read → patch → soft delete.
+        let new_id = Uuid::new_v4();
+        let now = now_utc();
+        labels::Entity::insert(new_label_model(NewLabel {
+            id: new_id,
+            created_at: now,
+            updated_at: now,
+            created_by_id: user,
+            workspace_id: ws,
+            project_id: project,
+            parent_id: Some(label_live),
+            name: "Feature".into(),
+            description: "d".into(),
+            color: "#0f0".into(),
+            sort_order: 75535.0,
+            external_source: None,
+            external_id: None,
+        }))
+        .exec(&db)
+        .await
+        .expect("insert");
+        let stored = fetch_label_row_by_pk(&pool, &new_id)
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(
+            (stored.name.as_str(), stored.parent_id, stored.updated_by_id),
+            ("Feature", Some(label_live), None)
+        );
+        assert_eq!(stored.created_at.timestamp_micros(), now.timestamp_micros());
+        label_patch_update(
+            new_id,
+            now_utc(),
+            user,
+            LabelPatch {
+                color: Some("#00f".into()),
+                parent_id: Some(None),
+                external_source: Some(Some("jira".into())),
+                ..Default::default()
+            },
+        )
+        .exec(&db)
+        .await
+        .expect("patch");
+        let patched = fetch_label_row_by_pk(&pool, &new_id)
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(
+            (
+                patched.name.as_str(),
+                patched.color.as_str(),
+                patched.parent_id,
+                patched.external_source.as_deref(),
+                patched.updated_by_id,
+            ),
+            ("Feature", "#00f", None, Some("jira"), Some(user))
+        );
+        label_soft_delete(new_id, now_utc(), now_utc(), user)
+            .exec(&db)
+            .await
+            .expect("delete");
+        assert!(fetch_label_row_by_pk(&pool, &new_id)
+            .await
+            .expect("reread")
+            .is_none());
+
+        // Page visibility: public + owned (archived only on request),
+        // never the stranger's private page or the unlinked one.
+        let ids = |rows: &[pages::Model]| rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        let visible = fetch_page_rows(&pool, "acme", &project, &user, false)
+            .await
+            .expect("pages");
+        assert_eq!(visible.len(), 2, "{:?}", ids(&visible));
+        assert!(ids(&visible).contains(&page_public) && ids(&visible).contains(&page_owned));
+        let all = fetch_page_rows(&pool, "acme", &project, &user, true)
+            .await
+            .expect("pages");
+        assert_eq!(all.len(), 3);
+        assert!(ids(&all).contains(&page_archived));
+        assert!(fetch_page_rows(&pool, "acme", &project, &stranger, true)
+            .await
+            .expect("pages")
+            .is_empty());
+        let owned = fetch_visible_page(&pool, "acme", &project, &user, &page_owned)
+            .await
+            .expect("page")
+            .expect("found");
+        let decoded = decode_page(&owned, &tz);
+        assert_eq!(
+            (
+                decoded.access,
+                decoded.parent.as_deref(),
+                decoded.archived_at
+            ),
+            (1, Some(page_public.to_string()).as_deref(), None)
+        );
+        assert_eq!(decoded.description_html.as_deref(), Some("<p>Owned</p>"));
+        let archived = fetch_visible_page(&pool, "acme", &project, &user, &page_archived)
+            .await
+            .expect("page")
+            .expect("found");
+        assert_eq!(
+            decode_page(&archived, &tz).archived_at.as_deref(),
+            Some("2024-02-03")
+        );
+        assert!(
+            fetch_visible_page(&pool, "acme", &project, &user, &page_private)
+                .await
+                .expect("page")
+                .is_none()
+        );
+
+        // Project probes.
+        assert!(project_probe(&db, &project, false).await.expect("p"));
+        assert!(!project_probe(&db, &project, true).await.expect("p"));
+        assert!(project_probe(&db, &archived_project, true)
+            .await
+            .expect("p"));
+        assert!(!project_probe(&db, &Uuid::new_v4(), false).await.expect("p"));
+
+        // Page insert + link, lock read, patch, favourites, detach.
+        let new_page = Uuid::new_v4();
+        pages::Entity::insert(new_page_model(NewPage {
+            id: new_page,
+            created_at: now,
+            updated_at: now,
+            created_by_id: user,
+            workspace_id: ws,
+            name: "New".into(),
+            description_json: serde_json::json!({"type": "doc"}),
+            description_binary: vec![1, 2],
+            description_html: "<p>New</p>".into(),
+            description_stripped: Some("New".into()),
+            owned_by_id: user,
+            access: 0,
+            parent_id: None,
+        }))
+        .exec(&db)
+        .await
+        .expect("insert page");
+        project_pages::Entity::insert(project_pages::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(Some(user)),
+            updated_by_id: Set(None),
+            workspace_id: Set(ws),
+            project_id: Set(project),
+            page_id: Set(new_page),
+            deleted_at: NotSet,
+        })
+        .exec(&db)
+        .await
+        .expect("insert link");
+        let created = fetch_visible_page(&pool, "acme", &project, &user, &new_page)
+            .await
+            .expect("page")
+            .expect("found");
+        assert_eq!(created.view_props, serde_json::json!({"full_width": false}));
+        assert_eq!(created.sort_order, 65535.0);
+        assert_eq!(created.description_binary.as_deref(), Some(&[1u8, 2][..]));
+        let locked: Option<(bool, Option<chrono::NaiveDate>)> = pages::Entity::find()
+            .select_only()
+            .columns([pages::Column::IsLocked, pages::Column::ArchivedAt])
+            .filter(pages::Column::DeletedAt.is_null())
+            .filter(pages::Column::Id.eq(new_page))
+            .lock_exclusive()
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("lock");
+        assert_eq!(locked, Some((false, None)));
+        page_patch_update(
+            new_page,
+            now_utc(),
+            user,
+            PagePatch {
+                name: Some("Renamed".into()),
+                access: Some(1),
+                clear_parent: false,
+                parent_id: Some(page_public),
+                body: Some(PageBody {
+                    description_html: "<p>Body</p>".into(),
+                    description_json: serde_json::json!({"type": "doc", "v": 2}),
+                    description_binary: vec![9],
+                    description_stripped: None,
+                }),
+            },
+        )
+        .exec(&db)
+        .await
+        .expect("patch page");
+        let patched = pages::Entity::find_by_id(new_page)
+            .one(&db)
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(
+            (
+                patched.name.as_str(),
+                patched.access,
+                patched.parent_id,
+                patched.description_html.as_str(),
+                patched.description_stripped.as_deref(),
+                patched.updated_by_id,
+            ),
+            (
+                "Renamed",
+                1,
+                Some(page_public),
+                "<p>Body</p>",
+                Some("New"),
+                Some(user)
+            )
+        );
+        page_patch_update(
+            new_page,
+            now_utc(),
+            user,
+            PagePatch {
+                clear_parent: true,
+                ..Default::default()
+            },
+        )
+        .exec(&db)
+        .await
+        .expect("clear parent");
+        let cleared = pages::Entity::find_by_id(new_page)
+            .one(&db)
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(cleared.parent_id, None);
+        let swept = page_favorites_soft_delete(&page_public, &project, "acme")
+            .exec(&db)
+            .await
+            .expect("favorites");
+        assert_eq!(swept.rows_affected, 1);
+        assert_eq!(
+            page_favorites_soft_delete(&page_public, &project, "acme")
+                .exec(&db)
+                .await
+                .expect("favorites")
+                .rows_affected,
+            0
+        );
+
+        // Expansions.
+        let lite = fetch_user_lite(&db, &user)
+            .await
+            .expect("user")
+            .expect("row");
+        assert_eq!(
+            lite,
+            ExpandUserLookup {
+                first_name: "Ada".into(),
+                last_name: "Lovelace".into(),
+                email: Some("ada@example.com".into()),
+                avatar: String::new(),
+                avatar_asset_id: Some(avatar_asset),
+            }
+        );
+        assert_eq!(
+            fetch_display_name(&db, &user)
+                .await
+                .expect("name")
+                .as_deref(),
+            Some("ada")
+        );
+        assert_eq!(
+            fetch_display_name(&db, &stranger).await.expect("name"),
+            None
+        );
+        assert_eq!(
+            file_asset_url(&pool, &avatar_asset).await.expect("url"),
+            Some(format!("/api/assets/v2/static/{avatar_asset}/"))
+        );
+        assert_eq!(
+            file_asset_url(&pool, &Uuid::new_v4()).await.expect("url"),
+            None
+        );
+        assert_eq!(
+            expand_workspace(&pool, &ws).await.expect("ws"),
+            serde_json::json!({"name": "Acme", "slug": "acme", "id": ws.to_string()})
+        );
+        let project_lite = expand_project(&pool, &project).await.expect("project");
+        assert_eq!(project_lite["identifier"], "ACME");
+        assert_eq!(project_lite["cover_image_url"], Value::Null);
+        assert_eq!(
+            expand_parent_label(&pool, &label_global)
+                .await
+                .expect("parent"),
+            Some(serde_json::json!({"id": label_global.to_string(), "project_id": null}))
+        );
+        assert_eq!(
+            expand_parent_page(&pool, &page_orphan)
+                .await
+                .expect("parent"),
+            Some(serde_json::json!({"id": page_orphan.to_string()}))
+        );
+        assert_eq!(
+            expand_parent_page(&pool, &Uuid::new_v4())
+                .await
+                .expect("parent"),
+            None
+        );
     }
 }

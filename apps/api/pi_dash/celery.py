@@ -90,6 +90,12 @@ app.conf.beat_schedule = {
         "task": "runner.release_pins_on_offline_runners",
         "schedule": crontab(minute="*/1"),
     },
+    # Built-in engine: pause engines whose engine credential expired, so
+    # pods route elsewhere (built_engine_as_runner §4.3).
+    "runner-pause-engines-with-expired-credentials": {
+        "task": "runner.pause_engines_with_expired_credentials",
+        "schedule": crontab(minute="*/5"),
+    },
     "runner-fail-runs-on-offline-runners": {
         "task": "runner.fail_runs_on_offline_runners",
         "schedule": crontab(minute="*/1"),

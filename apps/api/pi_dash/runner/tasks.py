@@ -124,10 +124,21 @@ def mark_offline_runners() -> int:
 def _pinned_runner_gone_q(cutoff) -> Q:
     """Pinned runner that will not take its pinned runs: silent past
     ``cutoff`` or operator-paused (it keeps heartbeating but takes no work)."""
+    from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning, engine_paused_q
+
     return (
         Q(pinned_runner__last_heartbeat_at__lt=cutoff)
         | Q(pinned_runner__last_heartbeat_at__isnull=True)
         | Q(pinned_runner__paused_at__isnull=False)
+        # An engine whose machine is paused, or whose pod work is off, takes
+        # no locality pins either (built_engine_as_runner §7). Pausing and
+        # turning pod work off release its pins at once; this is the
+        # backstop.
+        | engine_paused_q("pinned_runner__")
+        | Q(
+            pinned_runner__provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
+            pinned_runner__pod_dispatch=RunnerPodDispatch.PINNED_ONLY,
+        )
     )
 
 
@@ -178,6 +189,18 @@ def _releasable_pins():
         executor_kind=AgentExecutorKind.LOCAL_RUNNER,
         pinned_runner__isnull=False,
     )
+
+
+@shared_task(name="runner.pause_engines_with_expired_credentials")
+def pause_engines_with_expired_credentials() -> int:
+    """Pause engines whose 14-day engine credential ran out
+    (``engine_sign_in_required``, built_engine_as_runner §4.3)."""
+    from pi_dash.runner.services.engine_state import pause_engines_with_expired_credentials as _pause
+
+    paused = _pause()
+    if paused:
+        logger.info("pause_engines_with_expired_credentials paused %s machine(s)", paused)
+    return paused
 
 
 @shared_task(name="runner.release_pins_on_offline_runners")

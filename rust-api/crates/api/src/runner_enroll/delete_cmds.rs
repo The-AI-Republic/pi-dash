@@ -114,7 +114,6 @@ use pidash_auth::scope::TenantScope;
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
-use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
@@ -800,14 +799,12 @@ impl PubsubStore for PoolPubsub<'_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(pubsub_svc::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await?;
-        rows.iter()
-            .map(runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::from)
+        pubsub_svc::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| OutboxError::from(pidash_db::orm_tx::into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -816,7 +813,7 @@ impl PubsubStore for PoolPubsub<'_> {
         reason: &str,
     ) -> Result<(), OutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             Utc::now(),
             reason,
@@ -1465,21 +1462,24 @@ fn owned(
 }
 
 /// Register the web deletes + machine-command routes
-/// (`runner/web_urls.py`: dev-machine delete, create-runner post, the
-/// create-runner status get). Merged under `RouteGroup::RunnerWeb` at
-/// the F-10 seam; the runner-detail DELETE joins the sibling
-/// `manage::routes` registration for its path (axum merges
-/// same-path `MethodRouter`s, so a second registration would collide
-/// on the doubly-defined DELETE).
+/// (`runner/web_urls.py`: dev-machine delete + owner-controls patch,
+/// create-runner post, the create-runner status get). Merged under
+/// `RouteGroup::RunnerWeb` at the F-10 seam; the runner-detail DELETE
+/// joins the sibling `manage::routes` registration for its path (axum
+/// merges same-path `MethodRouter`s, so a second registration would
+/// collide on the doubly-defined DELETE).
 pub fn web_routes() -> Router<AppState> {
-    use axum::routing::{delete, get, post};
-    const DELETE_ONLY: &[&str] = &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"];
+    use axum::routing::{get, patch, post};
+    const PATCH_DELETE_ONLY: &[&str] = &["GET", "POST", "PUT", "HEAD", "OPTIONS"];
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     Router::new()
         .route(
             "/api/runners/dev-machines/{machine_id}/",
-            owned(delete(machine_delete), DELETE_ONLY),
+            owned(
+                patch(super::manage::dev_machine_patch).delete(machine_delete),
+                PATCH_DELETE_ONLY,
+            ),
         )
         .route(
             "/api/runners/dev-machines/{machine_id}/create-runner/",

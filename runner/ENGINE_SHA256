@@ -1,0 +1,12 @@
+# SHA-256 of the upstream OpenAI Codex release assets for the tag in
+# runner/ENGINE_VERSION, pinned in this repo so a replaced upstream asset
+# fails the release instead of shipping (runner/scripts/stage_engine.py).
+# Change it together with ENGINE_VERSION: after bumping the tag, take each
+# digest from `gh api repos/openai/codex/releases/tags/<tag>` and confirm at
+# least one with `sha256sum` on a downloaded asset.
+tag rust-v0.153.4
+8cf911ea676523bfb2121ec561848d2aba564890ad536db4d8a3353f2b9850b1  codex-aarch64-apple-darwin.tar.gz
+d69200f0bf841b1d1a07f80b80cf742a2e4fc2bab91ae8a44b1042f8e8ca9fa4  codex-x86_64-apple-darwin.tar.gz
+5cda6182bd94c3a30f2eb63a495489ebf7f691fddb14d70f48c6c1a5071b6cde  codex-aarch64-unknown-linux-musl.tar.gz
+f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30  codex-x86_64-unknown-linux-musl.tar.gz
+e5434e7df009c65c610b03088b34a9f9df338d7e6b83f6dc07520da00542e44b  codex-x86_64-pc-windows-msvc.exe.tar.gz

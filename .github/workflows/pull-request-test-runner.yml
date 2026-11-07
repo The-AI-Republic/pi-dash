@@ -67,6 +67,11 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --locked
 
+      # Offline tests of the release workflow's engine staging (asset mapping,
+      # checksum, rename, licence files, MSI version define).
+      - name: Test release engine staging
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
   install-ps1:
     # install.ps1 is documented as `irm .../install.ps1 | iex`, which runs it
     # inside the user's own session: a bare `exit` there closes their window
@@ -92,6 +97,17 @@ jobs:
           if ($actual -ne $expected) { throw "cargo-dist checksum mismatch: $actual" }
           Expand-Archive -LiteralPath $archive -DestinationPath $destination
           $destination | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # `include` in dist-workspace.toml copies runner/dist-engine/engine into
+      # every archive, stub ones included, so it has to exist. The release
+      # workflow stages the real engine (runner/scripts/stage_engine.py); this
+      # job only exercises the installers, so an empty placeholder is enough.
+      - name: Stage a placeholder built-in engine
+        shell: pwsh
+        run: |
+          $stage = 'runner/dist-engine/engine'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Set-Content -Path (Join-Path $stage 'README.txt') -Value 'placeholder for cargo dist build --artifacts=lies'
 
       - name: Generate cargo-dist installer with stub artifacts
         shell: pwsh

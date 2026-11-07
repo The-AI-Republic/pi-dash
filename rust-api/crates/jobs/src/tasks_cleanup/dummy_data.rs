@@ -198,6 +198,12 @@ fn db_error(error: sqlx::Error) -> String {
     error.to_string()
 }
 
+/// The task carries ids as `uuid::text` strings (its own statements cast
+/// them back); the domain writers take `Uuid`.
+fn parse_uuid(id: &str) -> DbResult<uuid::Uuid> {
+    uuid::Uuid::parse_str(id).map_err(|error| error.to_string())
+}
+
 /// `get_default_agent_executor` (`core/agent_execution.py:26`):
 /// `DEFAULT_AGENT_EXECUTOR` when it names a known executor,
 /// `local_runner` otherwise.
@@ -378,10 +384,12 @@ impl PgDummyData {
         use pidash_services::domain::projects::{insert_demo_project, DemoProject};
         let now = chrono::Utc::now();
         let default_executor = default_agent_executor();
-        let project_id = insert_demo_project(
-            &self.pool,
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let orm = pidash_db::pool::sea_orm_connection(&self.pool);
+        let project_uuid = insert_demo_project(
+            &orm,
             &DemoProject {
-                workspace_id,
+                workspace_id: workspace_uuid,
                 name: &full_name,
                 identifier: &identifier,
                 is_default: !has_default,
@@ -392,28 +400,24 @@ impl PgDummyData {
         )
         .await
         .map_err(db_error)?;
+        let project_id = project_uuid.to_string();
         // `create_default_pod_for_new_project` (`runner/signals.py:31-66`):
         // the `post_save` handler fires during `Project.objects.create`,
         // before the member rows below. Best-effort + idempotent — never
         // fails the task. Lead/assignee are `None` on this path (the task
         // passes neither), so `created_by` stamps `NULL`, like Django.
-        if let (Ok(project_uuid), Ok(workspace_uuid)) = (
-            uuid::Uuid::parse_str(&project_id),
-            uuid::Uuid::parse_str(workspace_id),
-        ) {
-            pidash_services::runner_runs::signals::create_default_pod_for_new_project(
-                &self.pool,
-                &pidash_services::runner_runs::signals::NewProject {
-                    id: project_uuid,
-                    workspace_id: workspace_uuid,
-                    identifier: identifier.clone(),
-                    created: true,
-                    project_lead: None,
-                    default_assignee: None,
-                },
-            )
-            .await;
-        }
+        pidash_services::runner_runs::signals::create_default_pod_for_new_project(
+            &self.pool,
+            &pidash_services::runner_runs::signals::NewProject {
+                id: project_uuid,
+                workspace_id: workspace_uuid,
+                identifier: identifier.clone(),
+                created: true,
+                project_lead: None,
+                default_assignee: None,
+            },
+        )
+        .await;
         // `ProjectMember.objects.create` runs the `save()` hook: the
         // property row persists BEFORE the member row, and `save()`
         // nulls the audit user on both.
@@ -456,11 +460,11 @@ impl PgDummyData {
         .map_err(db_error)?;
         use pidash_services::domain::projects::members::{add_demo, DemoProjectMember};
         add_demo(
-            &self.pool,
+            &orm,
             &DemoProjectMember {
-                project_id: &project_id,
-                workspace_id,
-                member_id: user_id,
+                project_id: project_uuid,
+                workspace_id: workspace_uuid,
+                member_id: parse_uuid(user_id)?,
                 role: plan::PROJECT_MEMBER_ROLE,
                 sort_order: 65535.0,
                 view_props: &member_props,
@@ -494,14 +498,17 @@ impl PgDummyData {
         let member_props = pidash_db::ops::users::project_member_props_json();
         let member_prefs = pidash_db::ops::users::project_preferences_json();
         use pidash_services::domain::projects::members::{add_demo, DemoProjectMember};
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let orm = pidash_db::pool::sea_orm_connection(&self.pool);
         for member_id in &user_ids {
             let sort_order = f64::from(randint(rng, 0, 65535));
             add_demo(
-                &self.pool,
+                &orm,
                 &DemoProjectMember {
-                    project_id,
-                    workspace_id,
-                    member_id,
+                    project_id: project_uuid,
+                    workspace_id: workspace_uuid,
+                    member_id: parse_uuid(member_id)?,
                     role: plan::PROJECT_MEMBER_ROLE,
                     sort_order,
                     view_props: &member_props,
@@ -526,13 +533,17 @@ impl PgDummyData {
     ) -> DbResult<()> {
         use pidash_services::domain::projects::states::{add_demo, DemoState};
         let now = chrono::Utc::now();
+        let project_uuid = parse_uuid(project_id)?;
+        let workspace_uuid = parse_uuid(workspace_id)?;
+        let created_by = parse_uuid(user_id)?;
+        let orm = pidash_db::pool::sea_orm_connection(&self.pool);
         for state in plan::DEFAULT_STATES {
             add_demo(
-                &self.pool,
+                &orm,
                 &DemoState {
-                    project_id,
-                    workspace_id,
-                    created_by: user_id,
+                    project_id: project_uuid,
+                    workspace_id: workspace_uuid,
+                    created_by,
                     name: state.name,
                     color: state.color,
                     sequence: state.sequence,
@@ -864,7 +875,7 @@ impl PgDummyData {
             let priority = plan::PRIORITIES[randint(rng, 0, 4) as usize];
             let creator_id = &creator_ids[randint(rng, 0, (creator_ids.len() - 1) as u32) as usize];
             let issue_id = insert_demo_issue(
-                &self.pool,
+                &pidash_db::pool::sea_orm_connection(&self.pool),
                 &DemoIssue {
                     state_id,
                     project_id,
@@ -884,7 +895,7 @@ impl PgDummyData {
             .await
             .map_err(db_error)?;
             insert_demo_issue_sequence(
-                &self.pool,
+                &pidash_db::pool::sea_orm_connection(&self.pool),
                 &DemoIssueSequence {
                     issue_id: &issue_id,
                     project_id,
@@ -1037,7 +1048,7 @@ impl PgDummyData {
             let draw = randint(rng, 0, max_draw as u32) as usize;
             for assignee_position in sample_positions(rng, assignee_ids.len(), draw)? {
                 insert_demo_issue_assignee(
-                    &self.pool,
+                    &pidash_db::pool::sea_orm_connection(&self.pool),
                     &DemoIssueAssignee {
                         issue_id: &issue_ids[position],
                         assignee_id: &assignee_ids[assignee_position],

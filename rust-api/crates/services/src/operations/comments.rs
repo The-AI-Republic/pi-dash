@@ -8,10 +8,13 @@
 //! (`views/issue.py:2034-2089`).
 
 use chrono::{DateTime, Utc};
+use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect};
 use serde_json::{Map, Value};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+use pidash_db::entity::{issue_comments, projects, workspaces};
 
 use crate::domain::comments as comment_domain;
 use crate::domain::WriteCtx;
@@ -29,6 +32,53 @@ use super::common::{
 use super::deps::Deps;
 use super::error::{Error, Outcome, PAYLOAD_NOT_VALID_BODY, VALID_DETAIL_BODY};
 
+/// `issue_comments` columns the dedupe reads keep; narrow by design.
+#[derive(Debug, Clone, FromQueryResult)]
+struct CommentDedupeRow {
+    id: Uuid,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct ProjectWorkspaceRow {
+    workspace_id: Uuid,
+}
+
+/// The shared dedupe predicate (`:1895-1900`, `:2048-2053`): live +
+/// project + slug + source + id. The raw used a scalar
+/// `workspace_id = (SELECT ... WHERE "slug" = $2)` subquery without a
+/// `deleted_at` guard (Django never applies the related manager);
+/// the join renders the same fold (`slug` is unique, so the scalar
+/// subquery can return at most one row). A `None` source filters
+/// `IS NULL` (the patch's stored-source default may be NULL — Django
+/// renders `None` as `IS NULL`, `IS NOT DISTINCT FROM` on the binding).
+fn comment_dedupe_query(
+    project_id: &Uuid,
+    slug: &str,
+    source: Option<&str>,
+    external_id: &str,
+) -> sea_orm::Select<issue_comments::Entity> {
+    use sea_orm::RelationTrait;
+    let mut query = issue_comments::Entity::find()
+        .join(
+            sea_orm::JoinType::InnerJoin,
+            issue_comments::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .columns([issue_comments::Column::Id]);
+    query = query
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .filter(issue_comments::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(issue_comments::Column::ExternalId.eq(external_id.to_owned()));
+    match source {
+        Some(source) => {
+            query = query.filter(issue_comments::Column::ExternalSource.eq(source.to_owned()))
+        }
+        None => query = query.filter(issue_comments::Column::ExternalSource.is_null()),
+    }
+    query
+}
+
 /// Comment external-dedupe `exists()` (`:1895-1900`, `:2048-2053`): live +
 /// project + slug + source + id. No pk exclusion — the patch caller
 /// compares `external_id` in Python first (`:2047`, ported asymmetry 8).
@@ -41,19 +91,14 @@ async fn comment_external_exists(
     source: Option<&str>,
     external_id: &str,
 ) -> Result<bool, Error> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL AND c."project_id" = $1
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $2)
-             AND c."external_source" IS NOT DISTINCT FROM $3 AND c."external_id" = $4)"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-dedupe"))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = comment_dedupe_query(project_id, slug, source, external_id)
+        .limit(1)
+        .into_model::<CommentDedupeRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "comment-dedupe"))?;
+    Ok(hit.is_some())
 }
 
 /// The create-409 `"id"`: the duplicate row's id
@@ -65,20 +110,15 @@ async fn comment_external_first_id(
     source: &str,
     external_id: &str,
 ) -> Result<Option<Uuid>, Error> {
-    sqlx::query_scalar(
-        r#"SELECT c."id" FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL AND c."project_id" = $1
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $2)
-             AND c."external_source" = $3 AND c."external_id" = $4
-           ORDER BY c."created_at" DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-dup-first"))
+    use sea_orm::QueryOrder;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = comment_dedupe_query(project_id, slug, Some(source), external_id)
+        .order_by_desc(issue_comments::Column::CreatedAt)
+        .into_model::<CommentDedupeRow>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "comment-dup-first"))?;
+    Ok(row.map(|row| row.id))
 }
 
 /// The comment-create activity `requested_data`
@@ -277,13 +317,14 @@ pub async fn create(
     })
     .map_err(|error| Error::FieldErrors(error.body().to_owned()))?;
     // `ProjectBaseModel.save` sets the workspace from the project.
-    let comment_workspace: Option<Uuid> =
-        sqlx::query_scalar(r#"SELECT "workspace_id" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "comment-post-workspace"))?
-            .flatten();
+    let comment_workspace: Option<Uuid> = projects::Entity::find_by_id(project_id)
+        .select_only()
+        .columns([projects::Column::WorkspaceId])
+        .into_model::<ProjectWorkspaceRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "comment-post-workspace"))?
+        .map(|row| row.workspace_id);
     let Some(comment_workspace) = comment_workspace else {
         return Err(Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
     };
@@ -356,7 +397,7 @@ pub async fn create(
         labels: &labels,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&mut *tx, &rows)
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(|error| {
             // No issue lookup precedes the create: a bogus `issue_id`
@@ -369,12 +410,16 @@ pub async fn create(
                 db_error(error, "comment-post-insert")
             }
         })?;
-    comment_domain::insert_description_row(&mut *tx, &rows)
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(|error| db_error(error, "comment-post-desc"))?;
-    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
-        .await
-        .map_err(|error| db_error(error, "comment-post-desc-link"))?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        rows.id,
+        rows.description_id,
+    )
+    .await
+    .map_err(|error| db_error(error, "comment-post-desc-link"))?;
     let description_id = rows.description_id;
     tx.commit().await.map_err(|error| {
         // Every FK here is `DEFERRABLE INITIALLY DEFERRED`, so the bogus
@@ -393,8 +438,13 @@ pub async fn create(
     // `update_fields=["created_at","created_by"]`.
     let (db_created_at, response_created_at) = resolve_created_at(map.get("created_at"))?;
     let created_by = override_user_id(map.get("created_by"), &actor_id)?;
-    if let Err(error) =
-        comment_domain::restamp_comment_created(pool, comment_id, db_created_at, created_by).await
+    if let Err(error) = comment_domain::restamp_comment_created(
+        &pidash_db::pool::sea_orm_connection(pool),
+        comment_id,
+        db_created_at,
+        created_by,
+    )
+    .await
     {
         if is_fk_violation(&error) {
             return Err(Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
@@ -641,7 +691,7 @@ pub async fn update(
         .await
         .map_err(|error| db_error(error, "comment-patch-tx"))?;
     comment_domain::save_v1_comment_update(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &comment_domain::V1CommentUpdate {
             id: *pk,
             json: &new_json,
@@ -682,7 +732,7 @@ pub async fn update(
     if let Some(description_id) = stored_description_id {
         if html_changed || json_changed || stripped_changed {
             comment_domain::sync_v1_description_subset(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &comment_domain::V1DescriptionSync {
                     id: description_id,
                     html: html_changed.then_some(new_html.as_str()),
@@ -715,12 +765,16 @@ pub async fn update(
             html: &new_html,
             stripped: desc_stripped.as_deref(),
         };
-        comment_domain::insert_description_values(&mut *tx, &desc)
+        comment_domain::insert_description_values(&pidash_db::orm_tx::TxConn::new(&mut tx), &desc)
             .await
             .map_err(|error| db_error(error, "comment-patch-desc-mint"))?;
-        comment_domain::link_comment_description(&mut *tx, *pk, desc.id)
-            .await
-            .map_err(|error| db_error(error, "comment-patch-desc-link"))?;
+        comment_domain::link_comment_description(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            *pk,
+            desc.id,
+        )
+        .await
+        .map_err(|error| db_error(error, "comment-patch-desc-link"))?;
     }
     tx.commit()
         .await
@@ -930,6 +984,39 @@ fn webhook_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    #[test]
+    fn dedupe_query_scopes_live_project_slug_and_source() {
+        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = comment_dedupe_query(&project, "acme", Some("src"), "ext-1")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"FROM "issue_comments""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
+        assert!(
+            sql.contains(r#""projects"."id" = '11111111-1111-1111-1111-111111111111'"#)
+                || sql.contains(r#""project_id" = '11111111-1111-1111-1111-111111111111'"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""external_source" = 'src'"#), "{sql}");
+        assert!(sql.contains(r#""external_id" = 'ext-1'"#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            !sql.contains(r#""workspaces"."deleted_at""#),
+            "Django never applies the related manager: {sql}"
+        );
+    }
+
+    #[test]
+    fn dedupe_query_with_null_source_filters_is_null() {
+        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = comment_dedupe_query(&project, "acme", None, "ext-1")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""external_source" IS NULL"#), "{sql}");
+    }
 
     fn patch_map(pairs: &[(&str, Value)]) -> Map<String, Value> {
         pairs

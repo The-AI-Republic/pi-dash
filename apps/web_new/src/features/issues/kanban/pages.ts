@@ -70,6 +70,13 @@ export interface BoardReadInput {
    */
   groupDomain?: readonly string[] | undefined;
   subDomain?: readonly string[] | undefined;
+  /**
+   * Explicit column and lane order for the group axes (states in
+   * workflow order, NEWPIDASH-46). Shape only like the domains: it
+   * never rides in the query key.
+   */
+  groupOrder?: readonly string[] | undefined;
+  subOrder?: readonly string[] | undefined;
 }
 
 /** The three envelope shapes a board read can answer. */
@@ -281,6 +288,8 @@ function emptyResultsBoard(response: BoardResponse, input: BoardReadInput): Boar
       showEmpty: input.showEmpty,
       groupDomain: input.groupDomain,
       subDomain: input.subDomain,
+      groupOrder: input.groupOrder,
+      subOrder: input.subOrder,
     });
   }
   return groupedBoard(response as GroupedIssueListResponse, {
@@ -288,6 +297,7 @@ function emptyResultsBoard(response: BoardResponse, input: BoardReadInput): Boar
     labels: input.groupLabels,
     showEmpty: input.showEmpty,
     domain: input.groupDomain,
+    order: input.groupOrder,
   });
 }
 
@@ -302,6 +312,8 @@ export function toBoard(response: BoardResponse, input: BoardReadInput): BoardDa
       showEmpty: input.showEmpty,
       groupDomain: input.groupDomain,
       subDomain: input.subDomain,
+      groupOrder: input.groupOrder,
+      subOrder: input.subOrder,
     });
   }
   if (isGrouped(response)) {
@@ -310,6 +322,7 @@ export function toBoard(response: BoardResponse, input: BoardReadInput): BoardDa
       labels: input.groupLabels,
       showEmpty: input.showEmpty,
       domain: input.groupDomain,
+      order: input.groupOrder,
     });
   }
   if (!Array.isArray(response.results)) {

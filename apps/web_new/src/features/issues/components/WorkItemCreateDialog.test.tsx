@@ -1538,39 +1538,24 @@ describe("WorkItemCreateDialog default pod (NEWPIDASH-23)", () => {
     expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: TYPE_TWO });
   });
 
-  it("keeps an agent pick over the default pod", async () => {
+  it("offers no agent row and defaults to the pod even when the project's legacy default is an agent", async () => {
     const user = userEvent.setup();
     const h = setup({
       projects: {
         [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
-          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "" }],
+          default_agent_executor: "cloud_agent",
+          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "", deprecated: true }],
         }),
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
     await user.click(await screen.findByRole("button", { name: "Runs on: Local pod" }));
-    await user.click(await screen.findByRole("option", { name: /Pi Dash Cloud Agent/ }));
-    fireEvent.change(titleField(), { target: { value: "In the cloud" } });
+    expect(screen.queryByRole("option", { name: /Pi Dash Cloud Agent/ })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    fireEvent.change(titleField(), { target: { value: "Runner project" } });
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: null, agent_executor: "cloud_agent" });
-  });
-
-  it("leaves the target on the project default when that default is an agent", async () => {
-    const h = setup({
-      projects: {
-        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
-          default_agent_executor: "cloud_agent",
-          agent_executor_options: [{ kind: "cloud_agent", available: true, reason_code: "" }],
-        }),
-        [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
-      },
-    });
-    await waitFor(() => expect(h.calls.some((call) => call.url.includes("/runners/pods/"))).toBe(true));
-    fireEvent.change(titleField(), { target: { value: "Cloud project" } });
-    save();
-    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
-    expect(posts(h.sent)[0]).toEqual({ name: "Cloud project" });
+    expect(posts(h.sent)[0]).toMatchObject({ assigned_pod_id: PARENT_ID, agent_executor: "local_runner" });
   });
 
   it("does not count the preselected pod as work for the discard guard", async () => {

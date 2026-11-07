@@ -103,7 +103,7 @@ async-trait = "0.1"
 # PIDASHCONV-1631 v1-asset user-save template: the relocated sea-query
 # builder. Identical spec to pidash-db (locked sea-query 0.32.7 — no
 # lock churn).
-sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }
+sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "postgres-array", "with-uuid", "with-chrono", "with-json"] }
 # OVL-14 (PIDASHCONV-1649): `space::sanitize` moved here from pidash-api.
 # Identical spec to pidash-api (locked ammonia 4.2.0 — no lock churn).
 ammonia = "4"

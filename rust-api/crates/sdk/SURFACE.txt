@@ -285,6 +285,7 @@ pidash_sdk::db::Settings
 pidash_sdk::db::SettingsOverlay
 pidash_sdk::db::TABLE
 pidash_sdk::db::Transaction
+pidash_sdk::db::TxConn
 pidash_sdk::db::active_run_for
 pidash_sdk::db::admin_get_by_instance_user_sql
 pidash_sdk::db::client_from_settings
@@ -426,6 +427,7 @@ pidash_sdk::operations::pull_requests
 pidash_sdk::operations::relations
 pidash_sdk::operations::requested_data_text
 pidash_sdk::operations::requested_data_value
+pidash_sdk::operations::schedulers
 pidash_sdk::operations::workpad
 pidash_sdk::ops::AgentRunStatus
 pidash_sdk::ops::AgentRunTrigger

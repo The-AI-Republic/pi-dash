@@ -6,37 +6,39 @@
 //! functions instead of executing SQL text. Reads stay where they are
 //! (design D5).
 //!
-//! Two execution shapes, by writer kind:
+//! Every writer takes a SeaORM [`ConnectionTrait`]: the caller's pool
+//! (`pidash_db::pool::sea_orm_connection(&pool)`) or the caller's open
+//! sqlx transaction (`pidash_db::orm_tx::TxConn::new(&mut tx)`), so no
+//! flow restructures its transaction. Two shapes, by writer kind:
 //!
-//! * [`create_user`] runs on any SeaORM connection (the `&DatabaseConnection`
-//!   the binary carries, or a future `WriteTxn` handle): it inserts through
-//!   the `users` entity, so the `after_save` hook
+//! * [`create_user`] inserts through the `users` entity's
+//!   `ActiveModelTrait::insert`, so the `after_save` hook
 //!   (`db::entity::users_hooks`, the `create_user_notification` post_save
 //!   receiver, `user.py:307-320`) fires and the preferences row lands in
 //!   the same transaction. The profile row is service-level, not hook
 //!   code: Django creates it explicitly in the adapter
 //!   (`adapter/base.py:342`, defaults) and the license admin view
 //!   (`admin.py:218`, with `company_name`), never in a receiver (D4).
-//! * Everything else is generic over `sqlx::Executor`, like
-//!   [`super::tokens`]: the login stamps, the IDP sync, the avatar
-//!   singles and the account upsert all run on the caller's pool or on
-//!   the caller's existing `sqlx` transaction with no restructuring.
-//!   The bot insert ([`create_bot_user`]) is executor-generic too: the
-//!   workpad `get_or_create` flow races under `SAVEPOINT`s on a
-//!   `&mut PgConnection` Django's `transaction.atomic()` nests to, and
-//!   an entity insert cannot join that transaction (D5). Bots get
-//!   neither hook effect anyway (Django skips bots in the receiver and
-//!   creates no profile for them), so nothing is lost.
-//! * The provisioned insert ([`insert_provisioned_user`]) is
-//!   executor-generic for the same D5 reason: the overlay's platform
-//!   upsert and OIDC sync create users on a caller-owned sqlx
-//!   transaction. Neither path writes a profile row here, and the
-//!   prefs row is the separate explicit
-//!   [`insert_user_notification_preference`] call (both paths create
-//!   non-bots, so the receiver gate is statically satisfied; the sync
-//!   path stamps it with a fresh `now`). The platform dirty update
-//!   ([`update_user_fields`]) rides the same executor shape (D6 gap
+//! * Everything else is a bare entity statement (`Entity::insert`,
+//!   `update_many`, a sea-query `UPDATE`): no hooks fire. The bot insert
+//!   ([`create_bot_user`]) and the provisioned insert
+//!   ([`insert_provisioned_user`]) deliberately take this shape — bots
+//!   get neither hook effect anyway (Django skips bots in the receiver
+//!   and creates no profile for them), and the provisioning paths write
+//!   the prefs row as the separate explicit
+//!   [`insert_user_notification_preference`] call (both create non-bots,
+//!   so the receiver gate is statically satisfied; the sync path stamps
+//!   it with a fresh `now`). The platform dirty update
+//!   ([`update_user_fields`]) rides the same shape (D6 gap
 //!   PIDASHCONV-1616).
+//! * [`get_agent_system_user`] alone takes `&mut PgConnection`: its
+//!   `get_or_create` race seam needs a savepoint on the caller's
+//!   transaction (sqlx's nested `begin`), which a [`ConnectionTrait`]
+//!   handle cannot open.
+//!
+//! Errors stay [`sqlx::Error`] (through [`pidash_db::orm_tx::into_sqlx`]),
+//! so the callers' SQLSTATE classification (23505 races, 23502 stamps)
+//! is unchanged.
 //!
 //! Per-caller deltas (design D6) ride on the input structs, each citing
 //! the Python file:line that has the same difference. Three Rust-side
@@ -55,12 +57,105 @@
 
 use chrono::{DateTime, Utc};
 use pidash_compat::db::is_unique_violation;
+use pidash_db::entity::{accounts, profiles, user_notification_preferences, users};
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, Query, SimpleExpr, UpdateStatement};
 use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, EntityTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
+    QueryFilter, QuerySelect, UpdateMany,
+};
 use std::fmt::Write as _;
 use uuid::Uuid;
 
 use super::error::DomainError;
+
+/// A bound clock as the entity's `timestamptz` value.
+fn at(now: DateTime<Utc>) -> sea_orm::prelude::DateTimeWithTimeZone {
+    now.fixed_offset()
+}
+
+/// Run one bulk update.
+async fn exec_update<E: EntityTrait>(
+    db: &impl ConnectionTrait,
+    stmt: UpdateMany<E>,
+) -> Result<(), sqlx::Error> {
+    stmt.exec(db).await.map(|_| ()).map_err(into_sqlx)
+}
+
+/// Run one built statement.
+async fn exec_stmt(db: &impl ConnectionTrait, stmt: &UpdateStatement) -> Result<(), sqlx::Error> {
+    db.execute(DbBackend::Postgres.build(stmt))
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
+/// `users` column, unqualified (the single-table `UPDATE`s).
+fn col(column: users::Column) -> Expr {
+    Expr::col(column)
+}
+
+/// `User.save()`'s empty-name backfill as the stamps spell it
+/// (`display_name = ''`): `CASE WHEN "display_name" = '' THEN
+/// split_part("email", '@', 1) ELSE "display_name" END`.
+fn display_name_backfill_case() -> SimpleExpr {
+    Expr::case(
+        col(users::Column::DisplayName).eq(""),
+        split_part_email_prefix(),
+    )
+    .finally(col(users::Column::DisplayName))
+    .into()
+}
+
+/// The password/logout twins' NULL-tolerant spelling of the same
+/// backfill: `COALESCE("display_name", '') = ''`.
+fn display_name_backfill_coalesce_case() -> SimpleExpr {
+    Expr::case(
+        Expr::expr(Func::coalesce([
+            col(users::Column::DisplayName).into(),
+            Expr::val("").into(),
+        ]))
+        .eq(""),
+        split_part_email_prefix(),
+    )
+    .finally(col(users::Column::DisplayName))
+    .into()
+}
+
+/// `split_part("email", '@', 1)`.
+fn split_part_email_prefix() -> SimpleExpr {
+    Func::cust(Alias::new("split_part"))
+        .args([
+            col(users::Column::Email).into(),
+            Expr::val("@").into(),
+            Expr::val(1).into(),
+        ])
+        .into()
+}
+
+/// `"is_staff" = CASE WHEN "is_superuser" THEN true ELSE "is_staff" END`.
+fn staff_for_superuser_case() -> SimpleExpr {
+    Expr::case(col(users::Column::IsSuperuser).eq(true), true)
+        .finally(col(users::Column::IsStaff))
+        .into()
+}
+
+/// `User.save()`'s token rotation when a token is in use: `token = CASE
+/// WHEN token_updated_at IS NOT NULL THEN <fresh> ELSE token END` and
+/// `token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN <at>
+/// ELSE token_updated_at END`.
+fn token_rotation_cases(fresh_token: &str, rotated_at: SimpleExpr) -> (SimpleExpr, SimpleExpr) {
+    let in_use = || col(users::Column::TokenUpdatedAt).is_not_null();
+    (
+        Expr::case(in_use(), fresh_token)
+            .finally(col(users::Column::Token))
+            .into(),
+        Expr::case(in_use(), rotated_at)
+            .finally(col(users::Column::TokenUpdatedAt))
+            .into(),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // create_user (entity; the after_save hook fires)
@@ -108,6 +203,67 @@ pub struct NewUser<'a> {
     pub profile: Option<NewProfile<'a>>,
 }
 
+/// The default `profiles` row (`db/models/user.py:200-273`, every model
+/// default) for one user: `company_name` is the one caller-set column
+/// (`''` everywhere but the license admin create), `background_color`
+/// the caller's draw.
+fn default_profile_row(
+    id: Uuid,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+    company_name: &str,
+    background_color: &str,
+) -> profiles::ActiveModel {
+    let now = at(now);
+    profiles::ActiveModel {
+        id: Set(id),
+        created_at: Set(now),
+        updated_at: Set(now),
+        user_id: Set(user_id),
+        theme: Set(serde_json::json!({})),
+        is_app_rail_docked: Set(true),
+        is_tour_completed: Set(false),
+        onboarding_step: Set(serde_json::json!({
+            "profile_complete": false,
+            "workspace_create": false,
+            "workspace_invite": false,
+            "workspace_join": false,
+        })),
+        use_case: Set(None),
+        role: Set(None),
+        is_onboarded: Set(false),
+        last_workspace_id: Set(None),
+        billing_address_country: Set("INDIA".to_owned()),
+        billing_address: Set(None),
+        has_billing_address: Set(false),
+        company_name: Set(company_name.to_owned()),
+        notification_view_mode: Set("full".to_owned()),
+        is_smooth_cursor_enabled: Set(false),
+        is_mobile_onboarded: Set(false),
+        mobile_onboarding_step: Set(serde_json::json!({
+            "profile_complete": false,
+            "workspace_create": false,
+            "workspace_join": false,
+        })),
+        mobile_timezone_auto_set: Set(false),
+        language: Set("en".to_owned()),
+        start_of_the_week: Set(0),
+        goals: Set(serde_json::json!({})),
+        background_color: Set(background_color.to_owned()),
+        is_navigation_tour_completed: Set(false),
+        has_marketing_email_consent: Set(false),
+        is_subscribed_to_changelog: Set(false),
+        product_tour: Set(serde_json::json!({
+            "work_items": false,
+            "cycles": false,
+            "modules": false,
+            "intake": false,
+            "pages": false,
+        })),
+        settings: Set(serde_json::json!({})),
+    }
+}
+
 /// `User(...)` + first `save()` for a sign-up
 /// (`adapter/base.py:296-328` + `User.save()`, `user.py:169-187`):
 /// identity + names + password hash; every other column takes its
@@ -121,9 +277,8 @@ pub struct NewUser<'a> {
 /// frozen-`now` shape survives byte for byte.
 pub async fn create_user<C>(db: &C, user: &NewUser<'_>) -> Result<Uuid, DomainError>
 where
-    C: sea_orm::ConnectionTrait,
+    C: ConnectionTrait,
 {
-    use pidash_db::entity::{profiles, users};
     // `None` ip/user-agent renders NULL into the NOT NULL columns, so the
     // request 500s — the 500 Python answers uncaught (`META.get` is None,
     // `user.py` has no null=True). Every caller maps any error here to its
@@ -132,7 +287,7 @@ where
         return Err(DomainError::Work("login ip/user-agent is None".to_owned()));
     };
     let id = user.id.unwrap_or_else(Uuid::new_v4);
-    let now = user.now.fixed_offset();
+    let now = at(user.now);
     let row = users::ActiveModel {
         id: Set(id),
         password: Set(user.password_hash.clone()),
@@ -161,7 +316,7 @@ where
         is_password_autoset: Set(user.is_password_autoset),
         token: Set(String::new()),
         user_timezone: Set("UTC".to_owned()),
-        last_active: Set(user.last_active.map(|dt| dt.fixed_offset())),
+        last_active: Set(user.last_active.map(at)),
         last_login_time: Set(None),
         last_logout_time: Set(None),
         last_login_ip: Set(login_ip.to_owned()),
@@ -179,87 +334,92 @@ where
     };
     row.insert(db).await.map_err(DomainError::Db)?;
     if let Some(profile) = &user.profile {
-        let prow = profiles::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            created_at: Set(now),
-            updated_at: Set(now),
-            user_id: Set(id),
-            theme: Set(serde_json::json!({})),
-            is_app_rail_docked: Set(true),
-            is_tour_completed: Set(false),
-            onboarding_step: Set(serde_json::json!({
-                "profile_complete": false,
-                "workspace_create": false,
-                "workspace_invite": false,
-                "workspace_join": false,
-            })),
-            use_case: Set(None),
-            role: Set(None),
-            is_onboarded: Set(false),
-            last_workspace_id: Set(None),
-            billing_address_country: Set("INDIA".to_owned()),
-            billing_address: Set(None),
-            has_billing_address: Set(false),
-            company_name: Set(profile.company_name.to_owned()),
-            notification_view_mode: Set("full".to_owned()),
-            is_smooth_cursor_enabled: Set(false),
-            is_mobile_onboarded: Set(false),
-            mobile_onboarding_step: Set(serde_json::json!({
-                "profile_complete": false,
-                "workspace_create": false,
-                "workspace_join": false,
-            })),
-            mobile_timezone_auto_set: Set(false),
-            language: Set("en".to_owned()),
-            start_of_the_week: Set(0),
-            goals: Set(serde_json::json!({})),
-            background_color: Set(profile.background_color.clone()),
-            is_navigation_tour_completed: Set(false),
-            has_marketing_email_consent: Set(false),
-            is_subscribed_to_changelog: Set(false),
-            product_tour: Set(serde_json::json!({
-                "work_items": false,
-                "cycles": false,
-                "modules": false,
-                "intake": false,
-                "pages": false,
-            })),
-            settings: Set(serde_json::json!({})),
-        };
-        profiles::Entity::insert(prow)
-            .exec(db)
-            .await
-            .map_err(DomainError::Db)?;
+        profiles::Entity::insert(default_profile_row(
+            Uuid::new_v4(),
+            id,
+            user.now,
+            profile.company_name,
+            &profile.background_color,
+        ))
+        .exec(db)
+        .await
+        .map_err(DomainError::Db)?;
     }
     Ok(id)
 }
 
 // ---------------------------------------------------------------------------
-// bots (executor-generic; no hook effects by design)
+// bots + provisioned users (bare inserts; no hook effects by design)
 // ---------------------------------------------------------------------------
 
-/// The bot `users` insert, moved verbatim from
-/// `db::orchestration::workpad::AGENT_USER_INSERT_SQL` (D8: that const is
-/// now `pub(crate)`): all 40 physical columns in `_meta` order, so the
-/// statement holds every `NOT NULL` constraint with no database
-/// default. `$1..$40` follow the column order.
-const BOT_USER_INSERT_SQL: &str = "INSERT INTO users (password, last_login, id, username,
-    mobile_number, email, display_name, first_name, last_name, avatar, avatar_asset_id,
-    cover_image, cover_image_asset_id, date_joined, created_at, updated_at, last_location,
-    created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff,
-    is_email_verified, is_password_autoset, is_password_reset_required, token, last_active,
-    last_login_time, last_logout_time, last_login_ip, last_logout_ip, last_login_medium,
-    last_login_uagent, token_updated_at, is_bot, bot_type, user_timezone, is_email_valid,
-    masked_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-    $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-    $36, $37, $38, $39, $40)";
+/// The one full-row `users` insert shape the bot and provisioned paths
+/// share: all 40 physical columns (the moved
+/// `db::orchestration::workpad::AGENT_USER_INSERT_SQL` column list), the
+/// caller-varying ones here, every other at its Django model default.
+struct FullUserRow<'a> {
+    id: Uuid,
+    username: &'a str,
+    email: &'a str,
+    password_hash: &'a str,
+    display_name: &'a str,
+    first_name: &'a str,
+    last_name: &'a str,
+    avatar: &'a str,
+    is_managed: bool,
+    is_email_verified: bool,
+    is_password_autoset: bool,
+    last_login_medium: &'a str,
+    user_timezone: &'a str,
+    is_bot: bool,
+    bot_type: Option<&'a str>,
+    now: DateTime<Utc>,
+}
 
-/// `set_unusable_password` + `save(update_fields=["password"])`
-/// (`workpad.py:62-65`), moved verbatim from
-/// `db::orchestration::workpad::AGENT_USER_PASSWORD_SQL` (D8). `$1` is
-/// the unusable hash, `$2` the user id.
-const BOT_USER_PASSWORD_SQL: &str = "UPDATE users SET password = $1 WHERE id = $2";
+fn full_user_row(row: &FullUserRow<'_>) -> users::ActiveModel {
+    let now = at(row.now);
+    users::ActiveModel {
+        password: Set(row.password_hash.to_owned()),
+        last_login: Set(None),
+        id: Set(row.id),
+        username: Set(row.username.to_owned()),
+        mobile_number: Set(None),
+        email: Set(Some(row.email.to_owned())),
+        display_name: Set(row.display_name.to_owned()),
+        first_name: Set(row.first_name.to_owned()),
+        last_name: Set(row.last_name.to_owned()),
+        avatar: Set(row.avatar.to_owned()),
+        avatar_asset_id: Set(None),
+        cover_image: Set(None),
+        cover_image_asset_id: Set(None),
+        date_joined: Set(now),
+        created_at: Set(now),
+        updated_at: Set(now),
+        last_location: Set(String::new()),
+        created_location: Set(String::new()),
+        is_superuser: Set(false),
+        is_managed: Set(row.is_managed),
+        is_password_expired: Set(false),
+        is_active: Set(true),
+        is_staff: Set(false),
+        is_email_verified: Set(row.is_email_verified),
+        is_password_autoset: Set(row.is_password_autoset),
+        is_password_reset_required: Set(false),
+        token: Set(String::new()),
+        last_active: Set(Some(now)),
+        last_login_time: Set(None),
+        last_logout_time: Set(None),
+        last_login_ip: Set(String::new()),
+        last_logout_ip: Set(String::new()),
+        last_login_medium: Set(row.last_login_medium.to_owned()),
+        last_login_uagent: Set(String::new()),
+        token_updated_at: Set(None),
+        is_bot: Set(row.is_bot),
+        bot_type: Set(row.bot_type.map(str::to_owned)),
+        user_timezone: Set(row.user_timezone.to_owned()),
+        is_email_valid: Set(false),
+        masked_at: Set(None),
+    }
+}
 
 /// Resolved inputs for [`create_bot_user`]: the workpad agent user
 /// (`workpad.py:53-61`: `defaults={email, first_name, last_name,
@@ -280,112 +440,61 @@ pub struct NewBotUser<'a> {
     pub now: DateTime<Utc>,
 }
 
-/// Bot `users` insert for the provisioning flows that cannot run an
-/// entity insert: the workpad `get_or_create` races under savepoints on
-/// a `&mut PgConnection`, and the seed bot follows the same function
-/// for one bot path. Column order and values are the moved
-/// `AGENT_USER_INSERT_SQL` verbatim; like the hook, bots get no
-/// preferences row (the receiver skips `is_bot`) and no profile row
-/// (neither Django flow creates one). Returns the row id.
-pub async fn create_bot_user<'e, E>(ex: E, bot: &NewBotUser<'_>) -> Result<Uuid, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+/// The bot `users` row ([`full_user_row`] with the bot fields).
+fn bot_user_row(id: Uuid, bot: &NewBotUser<'_>) -> users::ActiveModel {
+    full_user_row(&FullUserRow {
+        id,
+        username: bot.username,
+        email: bot.email,
+        password_hash: bot.password_hash,
+        display_name: bot.display_name,
+        first_name: bot.first_name,
+        last_name: bot.last_name,
+        avatar: "",
+        is_managed: false,
+        is_email_verified: false,
+        is_password_autoset: bot.is_password_autoset,
+        last_login_medium: "email",
+        user_timezone: "UTC",
+        is_bot: true,
+        bot_type: bot.bot_type,
+        now: bot.now,
+    })
+}
+
+/// Bot `users` insert for the provisioning flows: the workpad
+/// `get_or_create` (under the savepoint [`get_agent_system_user`]
+/// opens) and the seed bot. A bare entity insert: like the hook, bots
+/// get no preferences row (the receiver skips `is_bot`) and no profile
+/// row (neither Django flow creates one). Returns the row id.
+pub async fn create_bot_user(
+    db: &impl ConnectionTrait,
+    bot: &NewBotUser<'_>,
+) -> Result<Uuid, sqlx::Error> {
     let id = bot.id.unwrap_or_else(Uuid::new_v4);
-    sqlx::query(BOT_USER_INSERT_SQL)
-        .bind(bot.password_hash)
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(id)
-        .bind(bot.username)
-        .bind(Option::<String>::None)
-        .bind(bot.email)
-        .bind(bot.display_name)
-        .bind(bot.first_name)
-        .bind(bot.last_name)
-        .bind("")
-        .bind(Option::<Uuid>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<Uuid>::None)
-        .bind(bot.now)
-        .bind(bot.now)
-        .bind(bot.now)
-        .bind("")
-        .bind("")
-        .bind(false)
-        .bind(false)
-        .bind(false)
-        .bind(true)
-        .bind(false)
-        .bind(false)
-        .bind(bot.is_password_autoset)
-        .bind(false)
-        .bind("")
-        .bind(bot.now)
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind("")
-        .bind("")
-        .bind("email")
-        .bind("")
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(true)
-        .bind(bot.bot_type)
-        .bind("UTC")
-        .bind(false)
-        .bind(Option::<DateTime<Utc>>::None)
-        .execute(ex)
-        .await?;
+    users::Entity::insert(bot_user_row(id, bot))
+        .exec(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(id)
 }
 
 /// `set_unusable_password` + `save(update_fields=["password"])`
 /// (`workpad.py:62-65`): the bot insert stores a placeholder password
 /// and this stamps the unusable hash right after.
-pub async fn stamp_bot_unusable_password<'e, E>(
-    ex: E,
+pub async fn stamp_bot_unusable_password(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     unusable_hash: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(BOT_USER_PASSWORD_SQL)
-        .bind(unusable_hash)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::Password, Expr::value(unusable_hash))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
-
-// ---------------------------------------------------------------------------
-// provisioned users (executor-generic; D6 gap PIDASHCONV-1616)
-// ---------------------------------------------------------------------------
-
-/// The provisioned `users` insert: all 40 physical columns in `_meta`
-/// order, the same list [`BOT_USER_INSERT_SQL`] carries — one
-/// full-row shape for the table. The platform path spells the columns
-/// id-first; the stored rows are identical either way. `$1..$40`
-/// follow the column order.
-const PROVISIONED_USER_INSERT_SQL: &str = "INSERT INTO users (password, last_login, id, username,
-    mobile_number, email, display_name, first_name, last_name, avatar, avatar_asset_id,
-    cover_image, cover_image_asset_id, date_joined, created_at, updated_at, last_location,
-    created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff,
-    is_email_verified, is_password_autoset, is_password_reset_required, token, last_active,
-    last_login_time, last_logout_time, last_login_ip, last_logout_ip, last_login_medium,
-    last_login_uagent, token_updated_at, is_bot, bot_type, user_timezone, is_email_valid,
-    masked_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-    $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-    $36, $37, $38, $39, $40)";
-
-/// The `User` `post_save` effect as explicit SQL
-/// (`db/models/user.py:307-320`): one `user_notification_preferences`
-/// row — all five flags true, NULL audit and scope columns — in
-/// `_meta` column order. `$1..$14` follow the column order.
-const USER_NOTIFICATION_PREFERENCE_INSERT_SQL: &str = "INSERT INTO user_notification_preferences
-    (created_at, updated_at, created_by_id, updated_by_id, deleted_at, id, user_id,
-    workspace_id, project_id, property_change, state_change, comment, mention, issue_completed)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)";
 
 /// Resolved inputs for [`insert_provisioned_user`]: the two tx-bound
 /// provisioning paths' first-save values. The platform upsert
@@ -416,103 +525,83 @@ pub struct ProvisionedUser<'a> {
     pub now: DateTime<Utc>,
 }
 
+/// The provisioned `users` row ([`full_user_row`] with the caller's
+/// fields, never a bot).
+fn provisioned_user_row(id: Uuid, user: &ProvisionedUser<'_>) -> users::ActiveModel {
+    full_user_row(&FullUserRow {
+        id,
+        username: user.username,
+        email: user.email,
+        password_hash: user.password_hash,
+        display_name: user.display_name,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        avatar: user.avatar,
+        is_managed: user.is_managed,
+        is_email_verified: user.is_email_verified,
+        is_password_autoset: user.is_password_autoset,
+        last_login_medium: user.last_login_medium,
+        user_timezone: user.user_timezone,
+        is_bot: false,
+        bot_type: None,
+        now: user.now,
+    })
+}
+
 /// `User(...)` + first `save()` for the tx-bound provisioning paths:
 /// the platform upsert (`service.py:255-265`) and the OIDC sync
-/// `get_or_create` create side (`sync.py:91-103`). Executor-generic —
-/// both callers hold a sqlx transaction an entity insert cannot join
-/// (D5) — and profile-free. The `post_save` prefs effect is the
-/// caller's separate [`insert_user_notification_preference`] call.
-/// Returns the row id (generated when `ProvisionedUser::id` is
-/// `None`).
-pub async fn insert_provisioned_user<'e, E>(
-    ex: E,
+/// `get_or_create` create side (`sync.py:91-103`). A bare entity
+/// insert (no `after_save`) and profile-free: the `post_save` prefs
+/// effect is the caller's separate
+/// [`insert_user_notification_preference`] call. Returns the row id
+/// (generated when `ProvisionedUser::id` is `None`).
+pub async fn insert_provisioned_user(
+    db: &impl ConnectionTrait,
     user: &ProvisionedUser<'_>,
-) -> Result<Uuid, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<Uuid, sqlx::Error> {
     let id = user.id.unwrap_or_else(Uuid::new_v4);
-    sqlx::query(PROVISIONED_USER_INSERT_SQL)
-        .bind(user.password_hash)
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(id)
-        .bind(user.username)
-        .bind(Option::<String>::None)
-        .bind(user.email)
-        .bind(user.display_name)
-        .bind(user.first_name)
-        .bind(user.last_name)
-        .bind(user.avatar)
-        .bind(Option::<Uuid>::None)
-        .bind(Option::<String>::None)
-        .bind(Option::<Uuid>::None)
-        .bind(user.now)
-        .bind(user.now)
-        .bind(user.now)
-        .bind("")
-        .bind("")
-        .bind(false)
-        .bind(user.is_managed)
-        .bind(false)
-        .bind(true)
-        .bind(false)
-        .bind(user.is_email_verified)
-        .bind(user.is_password_autoset)
-        .bind(false)
-        .bind("")
-        .bind(user.now)
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind("")
-        .bind("")
-        .bind(user.last_login_medium)
-        .bind("")
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(false)
-        .bind(Option::<String>::None)
-        .bind(user.user_timezone)
-        .bind(false)
-        .bind(Option::<DateTime<Utc>>::None)
-        .execute(ex)
-        .await?;
+    users::Entity::insert(provisioned_user_row(id, user))
+        .exec(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(id)
 }
 
 /// The `User` `post_save` effect as an explicit call
 /// (`db/models/user.py:307-320`, reached from `service.py:265` and
 /// `sync.py:91`): one preferences row — all five flags true, NULL
-/// audit and scope columns. Executor-generic: the tx-bound callers
-/// cannot reach the entity `after_save` hook (D5). `row_id` is
+/// audit and scope columns. The tx-bound callers run the bare user
+/// insert, so the hook never fires for them. `row_id` is
 /// caller-generated (`uuid4`, both callers); `now` stamps both
 /// columns (the platform path reuses the user row's `now`, the sync
 /// path a fresh stamp).
-pub async fn insert_user_notification_preference<'e, E>(
-    ex: E,
+pub async fn insert_user_notification_preference(
+    db: &impl ConnectionTrait,
     row_id: Uuid,
     user_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(USER_NOTIFICATION_PREFERENCE_INSERT_SQL)
-        .bind(now)
-        .bind(now)
-        .bind(Option::<Uuid>::None)
-        .bind(Option::<Uuid>::None)
-        .bind(Option::<DateTime<Utc>>::None)
-        .bind(row_id)
-        .bind(user_id)
-        .bind(Option::<Uuid>::None)
-        .bind(Option::<Uuid>::None)
-        .bind(true)
-        .bind(true)
-        .bind(true)
-        .bind(true)
-        .bind(true)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    let now = at(now);
+    user_notification_preferences::Entity::insert(user_notification_preferences::ActiveModel {
+        created_at: Set(now),
+        updated_at: Set(now),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        id: Set(row_id),
+        user_id: Set(user_id),
+        workspace_id: Set(None),
+        project_id: Set(None),
+        property_change: Set(true),
+        state_change: Set(true),
+        comment: Set(true),
+        mention: Set(true),
+        issue_completed: Set(true),
+    })
+    .exec(db)
+    .await
+    .map(|_| ())
+    .map_err(into_sqlx)
 }
 
 /// Dirty `users` subset for [`update_user_fields`]: `Some` writes the
@@ -531,66 +620,49 @@ impl UserFieldUpdates<'_> {
     }
 }
 
-/// Render the dirty-fields `UPDATE` for one input combination (fixed
-/// `_meta` order: username, email, display_name, updated_at — Django
-/// 4.2 re-sorts `update_fields`, `base.py:952-957`). `None` when no
-/// column is dirty: the save never runs. Pure, so the unit tests pin
-/// the exact text per combination.
-fn user_fields_sql(updates: &UserFieldUpdates<'_>) -> Option<String> {
+/// The dirty-fields `UPDATE` for one input combination (fixed `_meta`
+/// order: username, email, display_name, updated_at — Django 4.2
+/// re-sorts `update_fields`, `base.py:952-957`). `None` when no column
+/// is dirty: the save never runs. Pure, so the unit tests pin the
+/// shape per combination.
+fn user_fields_update(
+    user_id: Uuid,
+    updates: &UserFieldUpdates<'_>,
+    now: DateTime<Utc>,
+) -> Option<UpdateMany<users::Entity>> {
     if updates.is_empty() {
         return None;
     }
-    let mut set = Vec::new();
-    let mut next = 0;
-    let mut arg = || {
-        next += 1;
-        format!("${next}")
-    };
-    if updates.username.is_some() {
-        set.push(format!("\"username\" = {}", arg()));
+    let mut stmt = users::Entity::update_many();
+    if let Some(username) = updates.username {
+        stmt = stmt.col_expr(users::Column::Username, Expr::value(username));
     }
-    if updates.email.is_some() {
-        set.push(format!("\"email\" = {}", arg()));
+    if let Some(email) = updates.email {
+        stmt = stmt.col_expr(users::Column::Email, Expr::value(email));
     }
-    if updates.display_name.is_some() {
-        set.push(format!("\"display_name\" = {}", arg()));
+    if let Some(display_name) = updates.display_name {
+        stmt = stmt.col_expr(users::Column::DisplayName, Expr::value(display_name));
     }
-    let updated_at = arg();
-    set.push(format!("\"updated_at\" = {updated_at}"));
-    let id = arg();
-    Some(format!(
-        "UPDATE \"users\" SET {} WHERE \"id\" = {id}",
-        set.join(", ")
-    ))
+    Some(
+        stmt.col_expr(users::Column::UpdatedAt, Expr::value(now))
+            .filter(users::Column::Id.eq(user_id)),
+    )
 }
 
 /// `user.save(update_fields=...)` (`service.py:267-280`): only dirty
 /// columns plus `updated_at`, in `_meta` order. A no-op when nothing
 /// is dirty (the `if user_updates:` guard). Runs on the caller's
-/// executor.
-pub async fn update_user_fields<'e, E>(
-    ex: E,
+/// connection.
+pub async fn update_user_fields(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     updates: &UserFieldUpdates<'_>,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let Some(sql) = user_fields_sql(updates) else {
-        return Ok(());
-    };
-    let mut query = sqlx::query(&sql);
-    if let Some(username) = updates.username {
-        query = query.bind(username);
+) -> Result<(), sqlx::Error> {
+    match user_fields_update(user_id, updates, now) {
+        Some(stmt) => exec_update(db, stmt).await,
+        None => Ok(()),
     }
-    if let Some(email) = updates.email {
-        query = query.bind(email);
-    }
-    if let Some(display_name) = updates.display_name {
-        query = query.bind(display_name);
-    }
-    query.bind(now).bind(user_id).execute(ex).await.map(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -628,7 +700,7 @@ pub enum GetAgentUserError {
 /// The agent-user columns this unit touches: identity plus the
 /// `is_bot` gate. The email column is nullable in the schema, though
 /// the created row always carries [`AGENT_USER_EMAIL`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
 pub struct AgentSystemUser {
     pub id: Uuid,
     pub username: String,
@@ -638,38 +710,29 @@ pub struct AgentSystemUser {
     pub is_bot: bool,
 }
 
-/// Lookup by the unique username (`workpad.py:53-61`). Django's
-/// `get()` pages with `LIMIT 21` to detect multiplicity; the unique
-/// index precludes that, so this reads one row. `$1` is the username.
-const AGENT_USER_SELECT_SQL: &str =
-    "SELECT id, username, email, first_name, last_name, is_bot FROM users WHERE username = $1 LIMIT 1";
-
-/// Map one agent-user row.
-pub fn map_agent_system_user(row: &sqlx::postgres::PgRow) -> Result<AgentSystemUser, sqlx::Error> {
-    use sqlx::Row;
-    Ok(AgentSystemUser {
-        id: row.try_get("id")?,
-        username: row.try_get("username")?,
-        email: row.try_get("email")?,
-        first_name: row.try_get("first_name")?,
-        last_name: row.try_get("last_name")?,
-        is_bot: row.try_get("is_bot")?,
-    })
-}
-
-/// Single agent-user row by username, or `None`.
-pub async fn find_agent_user<'e, E>(
-    ex: E,
+/// Single agent-user row by the unique username (`workpad.py:53-61`),
+/// or `None`. Django's `get()` pages with `LIMIT 21` to detect
+/// multiplicity; the unique index precludes that, so this reads one
+/// row.
+pub async fn find_agent_user(
+    db: &impl ConnectionTrait,
     username: &str,
-) -> Result<Option<AgentSystemUser>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(AGENT_USER_SELECT_SQL)
-        .bind(username)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|row| map_agent_system_user(&row)).transpose()
+) -> Result<Option<AgentSystemUser>, sqlx::Error> {
+    users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::Username,
+            users::Column::Email,
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::IsBot,
+        ])
+        .filter(users::Column::Username.eq(username))
+        .into_model::<AgentSystemUser>()
+        .one(db)
+        .await
+        .map_err(into_sqlx)
 }
 
 /// `make_password(None)`: `!` plus 40 `SystemRandom` alphanumerics
@@ -692,25 +755,23 @@ pub fn is_password_usable(encoded: &str) -> bool {
 ///
 /// The `get_or_create` race seam mirrors Django: `SELECT`, then
 /// `INSERT` under a savepoint (what `transaction.atomic()` nests to
-/// inside a transaction — call inside one), and on a unique
-/// violation roll back to the savepoint and re-read the winner's
-/// row. A human-held name raises [`AgentUserCollisionError`] instead
-/// of reusing the row.
+/// inside a transaction — call inside one; sqlx's nested `begin` is
+/// the savepoint), and on a unique violation roll back to the
+/// savepoint and re-read the winner's row. A human-held name raises
+/// [`AgentUserCollisionError`] instead of reusing the row.
 pub async fn get_agent_system_user(
     conn: &mut sqlx::PgConnection,
     now: DateTime<Utc>,
 ) -> Result<(AgentSystemUser, bool), GetAgentUserError> {
-    if let Some(user) = find_agent_user(&mut *conn, AGENT_USERNAME).await? {
+    if let Some(user) = find_agent_user(&TxConn::new(&mut *conn), AGENT_USERNAME).await? {
         if !user.is_bot {
             return Err(AgentUserCollisionError.into());
         }
         return Ok((user, false));
     }
-    sqlx::query("SAVEPOINT pidash_agent_user")
-        .execute(&mut *conn)
-        .await?;
+    let mut savepoint = sqlx::Connection::begin(&mut *conn).await?;
     let created = create_bot_user(
-        &mut *conn,
+        &TxConn::new(&mut savepoint),
         &NewBotUser {
             id: None,
             username: AGENT_USERNAME,
@@ -729,24 +790,18 @@ pub async fn get_agent_system_user(
     .await;
     let id = match created {
         Ok(id) => {
-            sqlx::query("RELEASE SAVEPOINT pidash_agent_user")
-                .execute(&mut *conn)
-                .await?;
+            savepoint.commit().await?;
             id
         }
         Err(e) if is_unique_violation(&e) => {
-            sqlx::query("ROLLBACK TO SAVEPOINT pidash_agent_user")
-                .execute(&mut *conn)
-                .await?;
-            sqlx::query("RELEASE SAVEPOINT pidash_agent_user")
-                .execute(&mut *conn)
-                .await?;
+            savepoint.rollback().await?;
             // Django re-runs `get()` here; when the conflict was
             // email-only the re-get misses and Django re-raises the
             // original `IntegrityError` — so return it, not
             // `RowNotFound` (which would mislead retry-on-missing
             // callers into a loop).
-            let Some(user) = find_agent_user(&mut *conn, AGENT_USERNAME).await? else {
+            let Some(user) = find_agent_user(&TxConn::new(&mut *conn), AGENT_USERNAME).await?
+            else {
                 return Err(e.into());
             };
             if !user.is_bot {
@@ -756,7 +811,7 @@ pub async fn get_agent_system_user(
         }
         Err(e) => return Err(e.into()),
     };
-    stamp_bot_unusable_password(&mut *conn, id, &make_unusable_password()).await?;
+    stamp_bot_unusable_password(&TxConn::new(&mut *conn), id, &make_unusable_password()).await?;
     Ok((
         AgentSystemUser {
             id,
@@ -773,7 +828,7 @@ pub async fn get_agent_system_user(
 /// [`get_agent_system_user`] (`orchestration/workpad.py:44-71`) on its
 /// own transaction: the id other writers stamp as the ambient crum
 /// user for pause/failure comments. Own transaction, since the flow
-/// issues `SAVEPOINT`s on the insert path. Moved from the api ports
+/// opens a savepoint on the insert path. Moved from the api ports
 /// (`runner_runs::LivePorts::agent_system_user_id`, OVL-06
 /// PIDASHCONV-1544); the ports method is now a thin caller.
 /// Re-exported through `pidash-sdk::ops`.
@@ -790,7 +845,7 @@ pub async fn agent_system_user_id(pool: &sqlx::PgPool) -> Result<Uuid, GetAgentU
 
 /// How the stamps write `display_name`: bound (gitlab/github resolve
 /// the backfill in Rust) or the atomic backfill `CASE` (gitea/google).
-/// `None` on the whole field omits the column (magic/admin).
+/// `None` on the whole field omits the column (admin).
 pub enum DisplayNameUpdate<'a> {
     Bound(&'a str),
     BackfillCase,
@@ -798,7 +853,7 @@ pub enum DisplayNameUpdate<'a> {
 
 /// How the stamps write `is_staff`: a bound `is_staff || is_superuser`
 /// (gitlab/github) or the atomic `OR` expression (gitea/google).
-/// `None` omits the column (magic/admin).
+/// `None` omits the column (admin).
 pub enum StaffSync {
     Value(bool),
     OrSuperuser,
@@ -842,112 +897,64 @@ pub struct LoginStamps<'a> {
     pub now: DateTime<Utc>,
 }
 
-/// Render the stamps `UPDATE` for one input combination. Column order is
+/// The stamps `UPDATE` for one input combination. Column order is
 /// fixed (medium, stamps, token, active, avatar pair, display, staff,
-/// updated_at); binds follow in the same order. Pure, so the unit
-/// tests pin the exact text per caller.
-fn login_stamps_sql(stamps: &LoginStamps<'_>) -> String {
-    let mut set = Vec::new();
-    let mut next = 0;
-    let mut arg = || {
-        next += 1;
-        format!("${next}")
-    };
-    if stamps.medium.is_some() {
-        set.push(format!("\"last_login_medium\" = {}", arg()));
+/// updated_at). Pure, so the unit tests pin the shape per caller.
+fn login_stamps_update(user_id: Uuid, stamps: &LoginStamps<'_>) -> UpdateMany<users::Entity> {
+    use users::Column as C;
+    let mut stmt = users::Entity::update_many();
+    if let Some(medium) = stamps.medium {
+        stmt = stmt.col_expr(C::LastLoginMedium, Expr::value(medium));
     }
-    let active = arg();
-    let login_time = arg();
-    let ip = arg();
-    let uagent = arg();
-    let token_at = arg();
-    let token = arg();
-    set.push(format!("\"last_active\" = {active}"));
-    set.push(format!("\"last_login_time\" = {login_time}"));
-    set.push(format!("\"last_login_ip\" = {ip}"));
-    set.push(format!("\"last_login_uagent\" = {uagent}"));
-    set.push(format!("\"token_updated_at\" = {token_at}"));
-    set.push(format!("\"token\" = {token}"));
-    set.push("\"is_active\" = TRUE".to_owned());
-    if stamps.avatar.is_some() {
-        set.push(format!("\"avatar\" = {}", arg()));
+    stmt = stmt
+        .col_expr(C::LastActive, Expr::value(stamps.now))
+        .col_expr(C::LastLoginTime, Expr::value(stamps.now))
+        .col_expr(C::LastLoginIp, Expr::value(stamps.login_ip))
+        .col_expr(C::LastLoginUagent, Expr::value(stamps.login_uagent))
+        .col_expr(C::TokenUpdatedAt, Expr::value(stamps.now))
+        .col_expr(C::Token, Expr::value(stamps.rotated_token))
+        .col_expr(C::IsActive, Expr::value(true));
+    if let Some(avatar) = stamps.avatar {
+        stmt = stmt.col_expr(C::Avatar, Expr::value(avatar));
     }
-    if stamps.avatar_asset_id.is_some() {
-        set.push(format!("\"avatar_asset_id\" = {}", arg()));
+    if let Some(asset) = stamps.avatar_asset_id {
+        stmt = stmt.col_expr(C::AvatarAssetId, Expr::value(asset));
     }
     match &stamps.display_name {
         None => {}
-        Some(DisplayNameUpdate::Bound(_)) => {
-            set.push(format!("\"display_name\" = {}", arg()));
+        Some(DisplayNameUpdate::Bound(name)) => {
+            stmt = stmt.col_expr(C::DisplayName, Expr::value(*name));
         }
         Some(DisplayNameUpdate::BackfillCase) => {
-            set.push(
-                "\"display_name\" = CASE WHEN \"display_name\" = '' \
-                 THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END"
-                    .to_owned(),
-            );
+            stmt = stmt.col_expr(C::DisplayName, display_name_backfill_case());
         }
     }
     match &stamps.is_staff {
         None => {}
-        Some(StaffSync::Value(_)) => {
-            set.push(format!("\"is_staff\" = {}", arg()));
+        Some(StaffSync::Value(staff)) => {
+            stmt = stmt.col_expr(C::IsStaff, Expr::value(*staff));
         }
         Some(StaffSync::OrSuperuser) => {
-            set.push("\"is_staff\" = \"is_staff\" OR \"is_superuser\"".to_owned());
+            stmt = stmt.col_expr(C::IsStaff, col(C::IsStaff).or(col(C::IsSuperuser)));
         }
     }
     if stamps.touch_updated_at {
-        set.push(format!("\"updated_at\" = {}", arg()));
+        stmt = stmt.col_expr(C::UpdatedAt, Expr::value(stamps.now));
     }
-    let id = arg();
-    format!(
-        "UPDATE \"users\" SET {} WHERE \"id\" = {id}",
-        set.join(", ")
-    )
+    stmt.filter(C::Id.eq(user_id))
 }
 
 /// `save_user_data` (`adapter/base.py:220-234`): the login stamps plus
 /// the `is_active` flip in one `UPDATE`, with the `User.save()` column
 /// effects (`user.py:169-187`) each caller dirtied. Runs on the
-/// caller's executor — the signup/login flows never hold a transaction
-/// here.
-pub async fn save_user_data<'e, E>(
-    ex: E,
+/// caller's connection — the signup/login flows never hold a
+/// transaction here.
+pub async fn save_user_data(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     stamps: &LoginStamps<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = login_stamps_sql(stamps);
-    let mut query = sqlx::query(&sql);
-    if let Some(medium) = stamps.medium {
-        query = query.bind(medium);
-    }
-    query = query
-        .bind(stamps.now)
-        .bind(stamps.now)
-        .bind(stamps.login_ip)
-        .bind(stamps.login_uagent)
-        .bind(stamps.now)
-        .bind(stamps.rotated_token);
-    if let Some(avatar) = stamps.avatar {
-        query = query.bind(avatar);
-    }
-    if let Some(asset) = stamps.avatar_asset_id {
-        query = query.bind(asset);
-    }
-    if let Some(DisplayNameUpdate::Bound(name)) = &stamps.display_name {
-        query = query.bind(name);
-    }
-    if let Some(StaffSync::Value(staff)) = &stamps.is_staff {
-        query = query.bind(staff);
-    }
-    if stamps.touch_updated_at {
-        query = query.bind(stamps.now);
-    }
-    query.bind(user_id).execute(ex).await.map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(db, login_stamps_update(user_id, stamps)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -974,107 +981,73 @@ pub struct SyncUpdate<'a> {
     pub now: DateTime<Utc>,
 }
 
-/// Render the sync `UPDATE` for one input combination (fixed column
-/// order: names, avatar pair, staff, updated_at). Pure; unit-tested
-/// per caller like [`login_stamps_sql`].
-fn sync_update_sql(sync: &SyncUpdate<'_>) -> String {
-    let mut set = Vec::new();
-    let mut next = 0;
-    let mut arg = || {
-        next += 1;
-        format!("${next}")
-    };
-    let first = arg();
-    let last = arg();
-    let display = arg();
-    set.push(format!("\"first_name\" = {first}"));
-    set.push(format!("\"last_name\" = {last}"));
-    set.push(format!("\"display_name\" = {display}"));
-    if sync.avatar.is_some() {
-        set.push(format!("\"avatar\" = {}", arg()));
+/// The sync `UPDATE` for one input combination (fixed column order:
+/// names, avatar pair, staff, updated_at). Pure; unit-tested per
+/// caller like [`login_stamps_update`].
+fn sync_update(user_id: Uuid, sync: &SyncUpdate<'_>) -> UpdateMany<users::Entity> {
+    use users::Column as C;
+    let mut stmt = users::Entity::update_many()
+        .col_expr(C::FirstName, Expr::value(sync.first_name))
+        .col_expr(C::LastName, Expr::value(sync.last_name))
+        .col_expr(C::DisplayName, Expr::value(sync.display_name));
+    if let Some(avatar) = sync.avatar {
+        stmt = stmt.col_expr(C::Avatar, Expr::value(avatar));
     }
-    if sync.avatar_asset_id.is_some() {
-        set.push(format!("\"avatar_asset_id\" = {}", arg()));
+    if let Some(asset) = sync.avatar_asset_id {
+        stmt = stmt.col_expr(C::AvatarAssetId, Expr::value(asset));
     }
-    if sync.is_staff.is_some() {
-        set.push(format!("\"is_staff\" = {}", arg()));
+    if let Some(staff) = sync.is_staff {
+        stmt = stmt.col_expr(C::IsStaff, Expr::value(staff));
     }
     if sync.touch_updated_at {
-        set.push(format!("\"updated_at\" = {}", arg()));
+        stmt = stmt.col_expr(C::UpdatedAt, Expr::value(sync.now));
     }
-    let id = arg();
-    format!(
-        "UPDATE \"users\" SET {} WHERE \"id\" = {id}",
-        set.join(", ")
-    )
+    stmt.filter(C::Id.eq(user_id))
 }
 
 /// `sync_user_data` (`adapter/base.py:256-287`): the IDP sync save.
-/// Runs on the caller's executor.
-pub async fn sync_user_data<'e, E>(
-    ex: E,
+/// Runs on the caller's connection.
+pub async fn sync_user_data(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     sync: &SyncUpdate<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = sync_update_sql(sync);
-    let mut query = sqlx::query(&sql)
-        .bind(sync.first_name)
-        .bind(sync.last_name)
-        .bind(sync.display_name);
-    if let Some(avatar) = sync.avatar {
-        query = query.bind(avatar);
-    }
-    if let Some(asset) = sync.avatar_asset_id {
-        query = query.bind(asset);
-    }
-    if let Some(staff) = sync.is_staff {
-        query = query.bind(staff);
-    }
-    if sync.touch_updated_at {
-        query = query.bind(sync.now);
-    }
-    query.bind(user_id).execute(ex).await.map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(db, sync_update(user_id, sync)).await
 }
 
-/// `UPDATE users SET avatar_asset_id = $1 WHERE id = $2`: the signup /
-/// sync asset stamp, one statement on every path that emits it
-/// (gitlab, google twice, github). Runs on the caller's executor.
-pub async fn stamp_avatar_asset<'e, E>(
-    ex: E,
+/// `UPDATE users SET avatar_asset_id = <asset> WHERE id = <user>`: the
+/// signup / sync asset stamp, one statement on every path that emits
+/// it (gitlab, google twice, github). Runs on the caller's connection.
+pub async fn stamp_avatar_asset(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     asset_id: Uuid,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query("UPDATE \"users\" SET \"avatar_asset_id\" = $1 WHERE \"id\" = $2")
-        .bind(asset_id)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::AvatarAssetId, Expr::value(asset_id))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
 
-/// `UPDATE users SET avatar = $1 WHERE id = $2`: the sync URL stamp
-/// when the avatar upload fails (google twice) and the github signup
-/// URL stamp after its `''` insert. Runs on the caller's executor.
-pub async fn stamp_avatar_url<'e, E>(
-    ex: E,
+/// `UPDATE users SET avatar = <url> WHERE id = <user>`: the sync URL
+/// stamp when the avatar upload fails (google twice) and the github
+/// signup URL stamp after its `''` insert. Runs on the caller's
+/// connection.
+pub async fn stamp_avatar_url(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     avatar_url: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query("UPDATE \"users\" SET \"avatar\" = $1 WHERE \"id\" = $2")
-        .bind(avatar_url)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::Avatar, Expr::value(avatar_url))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,182 +1063,201 @@ where
 /// the driver; when dirty, all three current values are written. A fixed
 /// shape, unlike [`sync_user_data`] (always names) and [`save_user_data`]
 /// (the full login-stamps statement).
-const USER_RELOGIN_UPDATE_SQL: &str = "UPDATE \"users\" SET \"avatar\" = $1, \"is_email_verified\" = $2, \"last_login_medium\" = $3 WHERE \"id\" = $4";
-
-/// See [`USER_RELOGIN_UPDATE_SQL`]: the fixed 3-column re-login write.
-/// Runs on the caller's executor (the sync driver holds the upsert
-/// transaction).
-pub async fn update_user_relogin<'e, E>(
-    ex: E,
+fn relogin_update(
     user_id: Uuid,
     avatar: &str,
     is_email_verified: bool,
     last_login_medium: &str,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(USER_RELOGIN_UPDATE_SQL)
-        .bind(avatar)
-        .bind(is_email_verified)
-        .bind(last_login_medium)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> UpdateMany<users::Entity> {
+    users::Entity::update_many()
+        .col_expr(users::Column::Avatar, Expr::value(avatar))
+        .col_expr(
+            users::Column::IsEmailVerified,
+            Expr::value(is_email_verified),
+        )
+        .col_expr(
+            users::Column::LastLoginMedium,
+            Expr::value(last_login_medium),
+        )
+        .filter(users::Column::Id.eq(user_id))
+}
+
+/// See [`relogin_update`]: the fixed 3-column re-login write. Runs on
+/// the caller's connection (the sync driver holds the upsert
+/// transaction).
+pub async fn update_user_relogin(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    avatar: &str,
+    is_email_verified: bool,
+    last_login_medium: &str,
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        relogin_update(user_id, avatar, is_email_verified, last_login_medium),
+    )
+    .await
 }
 
 /// The OIDC sync every-login bump (`pi_dash_cloud/airepublic/sync.py:126-127`):
-/// `update_fields = ["last_login_time"]`, a single column.
-const USER_LAST_LOGIN_TIME_UPDATE_SQL: &str =
-    "UPDATE \"users\" SET \"last_login_time\" = $1 WHERE \"id\" = $2";
-
-/// See [`USER_LAST_LOGIN_TIME_UPDATE_SQL`]: the single-column timestamp
-/// bump. Runs on the caller's executor (the sync driver holds the upsert
-/// transaction).
-pub async fn update_user_last_login_time<'e, E>(
-    ex: E,
+/// `update_fields = ["last_login_time"]`, a single column. Runs on the
+/// caller's connection (the sync driver holds the upsert transaction).
+pub async fn update_user_last_login_time(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     at: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(USER_LAST_LOGIN_TIME_UPDATE_SQL)
-        .bind(at)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::LastLoginTime, Expr::value(at))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
-// v2 asset link (executor-generic; the file-asset user writes)
+// v2 asset link (the file-asset user writes)
 // ---------------------------------------------------------------------------
 
-/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the
-/// avatar link plus the full `user.save()` column effects
-/// (`db/models/user.py:169-187`) — normalized email, filled display
-/// name, staff sync, token rotation, `auto_now` `updated_at`. The
-/// caller owns the user-row read, the previous-asset delete and the
+/// The full `user.save()` column effects (`db/models/user.py:169-187`)
+/// the asset link/unlink twins append after their own columns —
+/// normalized email, filled display name, staff sync, token rotation,
+/// `auto_now` `updated_at` — from the caller's
 /// [`pidash_db::ops::users::UserSaveWrite`] computation.
-const USER_AVATAR_LINK_SQL: &str = "UPDATE \"users\" SET \"avatar\" = $1, \"avatar_asset_id\" = $2, \"email\" = $3, \"display_name\" = $4, \"is_staff\" = $5, \"token\" = $6, \"token_updated_at\" = $7, \"updated_at\" = $8 WHERE \"id\" = $9";
+fn with_user_save_effects(
+    stmt: UpdateMany<users::Entity>,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> UpdateMany<users::Entity> {
+    use users::Column as C;
+    stmt.col_expr(C::Email, Expr::value(write.email.as_str()))
+        .col_expr(C::DisplayName, Expr::value(write.display_name.as_str()))
+        .col_expr(C::IsStaff, Expr::value(write.is_staff))
+        .col_expr(C::Token, Expr::value(write.token.as_str()))
+        .col_expr(C::TokenUpdatedAt, Expr::value(write.token_updated_at))
+        .col_expr(C::UpdatedAt, Expr::value(now))
+}
 
-/// Link an avatar asset onto one user row
-/// (`avatar = ""`, the ported empty-string write).
-pub async fn link_avatar_asset<'e, E>(
-    ex: E,
+/// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the
+/// avatar link (`avatar = ""`, the ported empty-string write) plus the
+/// full `user.save()` column effects. The caller owns the user-row
+/// read, the previous-asset delete and the `UserSaveWrite`
+/// computation.
+fn avatar_link_update(
     user_id: Uuid,
     asset_id: Uuid,
     write: &pidash_db::ops::users::UserSaveWrite,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(USER_AVATAR_LINK_SQL)
-        .bind("")
-        .bind(asset_id)
-        .bind(&write.email)
-        .bind(&write.display_name)
-        .bind(write.is_staff)
-        .bind(&write.token)
-        .bind(write.token_updated_at)
-        .bind(now)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> UpdateMany<users::Entity> {
+    with_user_save_effects(
+        users::Entity::update_many()
+            .col_expr(users::Column::Avatar, Expr::value(""))
+            .col_expr(users::Column::AvatarAssetId, Expr::value(asset_id)),
+        write,
+        now,
+    )
+    .filter(users::Column::Id.eq(user_id))
+}
+
+/// Link an avatar asset onto one user row
+/// (`avatar = ""`, the ported empty-string write).
+pub async fn link_avatar_asset(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    asset_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    exec_update(db, avatar_link_update(user_id, asset_id, write, now)).await
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the
 /// cover link plus the full `user.save()` column effects.
 /// `cover_image = NULL` here (asymmetry with avatar — ported).
-const USER_COVER_LINK_SQL: &str = "UPDATE \"users\" SET \"cover_image\" = NULL, \"cover_image_asset_id\" = $1, \"email\" = $2, \"display_name\" = $3, \"is_staff\" = $4, \"token\" = $5, \"token_updated_at\" = $6, \"updated_at\" = $7 WHERE \"id\" = $8";
-
-/// Link a cover asset onto one user row.
-pub async fn link_cover_asset<'e, E>(
-    ex: E,
+fn cover_link_update(
     user_id: Uuid,
     asset_id: Uuid,
     write: &pidash_db::ops::users::UserSaveWrite,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(USER_COVER_LINK_SQL)
-        .bind(asset_id)
-        .bind(&write.email)
-        .bind(&write.display_name)
-        .bind(write.is_staff)
-        .bind(&write.token)
-        .bind(write.token_updated_at)
-        .bind(now)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> UpdateMany<users::Entity> {
+    with_user_save_effects(
+        users::Entity::update_many()
+            .col_expr(users::Column::CoverImage, Expr::value(None::<String>))
+            .col_expr(users::Column::CoverImageAssetId, Expr::value(asset_id)),
+        write,
+        now,
+    )
+    .filter(users::Column::Id.eq(user_id))
+}
+
+/// Link a cover asset onto one user row.
+pub async fn link_cover_asset(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    asset_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    exec_update(db, cover_link_update(user_id, asset_id, write, now)).await
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`):
 /// clears the avatar link FK only (the `avatar` string is untouched
 /// here), plus the full `user.save()` column effects.
-const USER_AVATAR_UNLINK_SQL: &str = "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7";
-
-/// Clear one user row's avatar link FK.
-pub async fn unlink_avatar_asset<'e, E>(
-    ex: E,
+fn avatar_unlink_update(
     user_id: Uuid,
     write: &pidash_db::ops::users::UserSaveWrite,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(USER_AVATAR_UNLINK_SQL)
-        .bind(&write.email)
-        .bind(&write.display_name)
-        .bind(write.is_staff)
-        .bind(&write.token)
-        .bind(write.token_updated_at)
-        .bind(now)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> UpdateMany<users::Entity> {
+    with_user_save_effects(
+        users::Entity::update_many()
+            .col_expr(users::Column::AvatarAssetId, Expr::value(None::<Uuid>)),
+        write,
+        now,
+    )
+    .filter(users::Column::Id.eq(user_id))
+}
+
+/// Clear one user row's avatar link FK.
+pub async fn unlink_avatar_asset(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    exec_update(db, avatar_unlink_update(user_id, write, now)).await
 }
 
 /// `UserAssetsV2Endpoint.entity_asset_delete` (`v2.py:80-107`):
 /// clears the cover link FK only, plus the full `user.save()`
 /// column effects.
-const USER_COVER_UNLINK_SQL: &str = "UPDATE \"users\" SET \"cover_image_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7";
-
-/// Clear one user row's cover link FK.
-pub async fn unlink_cover_asset<'e, E>(
-    ex: E,
+fn cover_unlink_update(
     user_id: Uuid,
     write: &pidash_db::ops::users::UserSaveWrite,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(USER_COVER_UNLINK_SQL)
-        .bind(&write.email)
-        .bind(&write.display_name)
-        .bind(write.is_staff)
-        .bind(&write.token)
-        .bind(write.token_updated_at)
-        .bind(now)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> UpdateMany<users::Entity> {
+    with_user_save_effects(
+        users::Entity::update_many()
+            .col_expr(users::Column::CoverImageAssetId, Expr::value(None::<Uuid>)),
+        write,
+        now,
+    )
+    .filter(users::Column::Id.eq(user_id))
+}
+
+/// Clear one user row's cover link FK.
+pub async fn unlink_cover_asset(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    exec_update(db, cover_unlink_update(user_id, write, now)).await
 }
 
 // ---------------------------------------------------------------------------
-// notification-preference PATCH (executor-generic; dynamic SET list)
+// notification-preference PATCH (dynamic SET list)
 // ---------------------------------------------------------------------------
 
 /// One validated PATCH column write for
@@ -1276,37 +1268,43 @@ pub enum PreferenceColumn {
     Flag(bool),
 }
 
-/// `serializer.save()` (`base.py:306`): the validated columns plus
-/// `updated_at`/`updated_by` (`BaseModel.save` stamps the updater
-/// through crum on every update — `db/models/base.py:23-44`). The
-/// SET list is caller-ordered (fixed push order at the call site);
-/// `$1` is the row id, `$2`/`$3` the stamps, `$4+` the columns.
-pub async fn save_preference_columns<'e, E>(
-    ex: E,
+/// `serializer.save()` (`base.py:306`): the stamps first
+/// (`updated_at`, `updated_by` — `BaseModel.save` stamps the updater
+/// through crum on every update, `db/models/base.py:23-44`), then the
+/// validated columns in the caller's push order (the handler's fixed
+/// order), by name. Pure.
+fn preference_columns_update(
     id: Uuid,
     now: DateTime<Utc>,
     user_id: Uuid,
     columns: &[(&str, PreferenceColumn)],
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let mut sql = String::from(
-        "UPDATE \"user_notification_preferences\" SET \"updated_at\" = $2, \"updated_by_id\" = $3",
-    );
-    for (index, (column, _)) in columns.iter().enumerate() {
-        sql.push_str(&format!(", \"{column}\" = ${}", index + 4));
-    }
-    sql.push_str(" WHERE \"id\" = $1");
-    let mut query = sqlx::query(&sql).bind(id).bind(now).bind(user_id);
-    for (_, value) in columns {
-        query = match value {
-            PreferenceColumn::Stamp(stamp) => query.bind(*stamp),
-            PreferenceColumn::Id(owner) => query.bind(*owner),
-            PreferenceColumn::Flag(flag) => query.bind(*flag),
+) -> UpdateStatement {
+    use user_notification_preferences::Column as P;
+    let mut stmt = Query::update();
+    stmt.table(user_notification_preferences::Entity)
+        .value(P::UpdatedAt, Expr::value(now))
+        .value(P::UpdatedById, Expr::value(user_id));
+    for (column, value) in columns {
+        let value: SimpleExpr = match value {
+            PreferenceColumn::Stamp(stamp) => Expr::value(*stamp),
+            PreferenceColumn::Id(owner) => Expr::value(*owner),
+            PreferenceColumn::Flag(flag) => Expr::value(*flag),
         };
+        stmt.value(Alias::new(*column), value);
     }
-    query.execute(ex).await.map(|_| ())
+    stmt.and_where(Expr::col(P::Id).eq(id)).to_owned()
+}
+
+/// Apply the validated preference PATCH columns plus the
+/// `updated_at`/`updated_by` stamps. Runs on the caller's connection.
+pub async fn save_preference_columns(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    now: DateTime<Utc>,
+    user_id: Uuid,
+    columns: &[(&str, PreferenceColumn)],
+) -> Result<(), sqlx::Error> {
+    exec_stmt(db, &preference_columns_update(id, now, user_id, columns)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1330,39 +1328,22 @@ pub struct ProfilePath {
     pub last_workspace_id: Option<Uuid>,
 }
 
-const PROFILE_PATH_SELECT_SQL: &str =
-    "SELECT \"id\", \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" \
-     WHERE \"user_id\" = $1 LIMIT 1";
-
-const PROFILE_DEFAULT_INSERT_SQL: &str = "INSERT INTO \"profiles\"
-    (\"id\", \"created_at\", \"updated_at\", \"user_id\", \"theme\", \"is_app_rail_docked\",
-     \"is_tour_completed\", \"onboarding_step\", \"use_case\", \"role\", \"is_onboarded\",
-     \"last_workspace_id\", \"billing_address_country\", \"billing_address\",
-     \"has_billing_address\", \"company_name\", \"notification_view_mode\",
-     \"is_smooth_cursor_enabled\", \"is_mobile_onboarded\", \"mobile_onboarding_step\",
-     \"mobile_timezone_auto_set\", \"language\", \"start_of_the_week\", \"goals\",
-     \"background_color\", \"is_navigation_tour_completed\", \"has_marketing_email_consent\",
-     \"is_subscribed_to_changelog\", \"product_tour\", \"settings\")
-    VALUES ($1, $2, $2, $3, '{}', TRUE, FALSE,
-     '{\"profile_complete\": false, \"workspace_create\": false, \
-       \"workspace_invite\": false, \"workspace_join\": false}',
-     NULL, NULL, FALSE, NULL, 'INDIA', NULL, FALSE, '', 'full', FALSE, FALSE,
-     '{\"profile_complete\": false, \"workspace_create\": false, \"workspace_join\": false}',
-     FALSE, 'en', 0, '{}', $4, FALSE, FALSE, FALSE,
-     '{\"work_items\": false, \"cycles\": false, \"modules\": false, \"intake\": false, \
-       \"pages\": false}', '{}')";
-
-const SET_PROFILE_LAST_WORKSPACE_SQL: &str =
-    "UPDATE \"profiles\" SET \"updated_at\" = $1, \"last_workspace_id\" = $2 WHERE \"id\" = $3";
-
-async fn fetch_profile_path<'e, E>(ex: E, user_id: Uuid) -> Result<Option<ProfilePath>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<(Uuid, bool, Option<Uuid>)> = sqlx::query_as(PROFILE_PATH_SELECT_SQL)
-        .bind(user_id)
-        .fetch_optional(ex)
-        .await?;
+async fn fetch_profile_path(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+) -> Result<Option<ProfilePath>, sqlx::Error> {
+    let row: Option<(Uuid, bool, Option<Uuid>)> = profiles::Entity::find()
+        .select_only()
+        .columns([
+            profiles::Column::Id,
+            profiles::Column::IsOnboarded,
+            profiles::Column::LastWorkspaceId,
+        ])
+        .filter(profiles::Column::UserId.eq(user_id))
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(
         row.map(|(id, is_onboarded, last_workspace_id)| ProfilePath {
             id,
@@ -1373,8 +1354,9 @@ where
 }
 
 /// The `get_or_create` create leg on its own: the default profile row
-/// for `user_id` ([`PROFILE_DEFAULT_INSERT_SQL`], same values
-/// [`get_or_create_profile`] inserts). Returns the new row id.
+/// for `user_id` ([`default_profile_row`] with `company_name ''`, the
+/// same values [`get_or_create_profile`] inserts). Returns the new row
+/// id.
 ///
 /// Race contract: a lost create race surfaces SQLSTATE 23505 from the
 /// `user_id` unique index. Callers outside an explicit transaction
@@ -1383,23 +1365,17 @@ where
 /// `atomic()` nests to a savepoint there
 /// (`db/models/query.py:get_or_create`) — roll back to it on 23505,
 /// and re-probe. Any other error propagates untouched.
-pub async fn insert_default_profile<'e, E>(
-    ex: E,
+pub async fn insert_default_profile(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     now: DateTime<Utc>,
     background_color: &str,
-) -> Result<Uuid, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+) -> Result<Uuid, sqlx::Error> {
     let id = Uuid::new_v4();
-    sqlx::query(PROFILE_DEFAULT_INSERT_SQL)
-        .bind(id)
-        .bind(now)
-        .bind(user_id)
-        .bind(background_color)
-        .execute(ex)
-        .await?;
+    profiles::Entity::insert(default_profile_row(id, user_id, now, "", background_color))
+        .exec(db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(id)
 }
 
@@ -1412,32 +1388,29 @@ where
 /// (Django re-raises there); any non-23505 insert error propagates
 /// without a re-probe.
 ///
-/// Race-tolerant on executors outside an explicit transaction (the
+/// Race-tolerant on connections outside an explicit transaction (the
 /// pool, which is what every caller passes): a failed `INSERT` there
 /// aborts no transaction, so the re-probe still runs. Callers inside
 /// an explicit transaction must hold a savepoint across the whole
 /// call, or compose the probe with [`insert_default_profile`] under
 /// their own savepoint (its race contract) — otherwise the failed
 /// insert aborts their transaction and the re-probe fails with it.
-pub async fn get_or_create_profile<'e, E>(
-    ex: E,
+pub async fn get_or_create_profile(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     now: DateTime<Utc>,
     background_color: &str,
-) -> Result<ProfilePath, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres> + Copy,
-{
-    if let Some(path) = fetch_profile_path(ex, user_id).await? {
+) -> Result<ProfilePath, sqlx::Error> {
+    if let Some(path) = fetch_profile_path(db, user_id).await? {
         return Ok(path);
     }
-    match insert_default_profile(ex, user_id, now, background_color).await {
+    match insert_default_profile(db, user_id, now, background_color).await {
         Ok(id) => Ok(ProfilePath {
             id,
             is_onboarded: false,
             last_workspace_id: None,
         }),
-        Err(insert) if is_unique_violation(&insert) => match fetch_profile_path(ex, user_id).await?
+        Err(insert) if is_unique_violation(&insert) => match fetch_profile_path(db, user_id).await?
         {
             Some(path) => Ok(path),
             None => Err(insert),
@@ -1451,23 +1424,21 @@ where
 /// `updated_at` to `now`. The `SET` lists `updated_at` first —
 /// `_meta` field order, where the `TimeAuditModel` `auto_now` stamp
 /// (`db/mixins.py:20`) precedes every concrete `Profile` field
-/// (`db/models/user.py:200-273`). Runs on the caller's executor.
-pub async fn set_profile_last_workspace<'e, E>(
-    ex: E,
+/// (`db/models/user.py:200-273`). Runs on the caller's connection.
+pub async fn set_profile_last_workspace(
+    db: &impl ConnectionTrait,
     profile_id: Uuid,
     workspace_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SET_PROFILE_LAST_WORKSPACE_SQL)
-        .bind(now)
-        .bind(workspace_id)
-        .bind(profile_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        profiles::Entity::update_many()
+            .col_expr(profiles::Column::UpdatedAt, Expr::value(now))
+            .col_expr(profiles::Column::LastWorkspaceId, Expr::value(workspace_id))
+            .filter(profiles::Column::Id.eq(profile_id)),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1479,18 +1450,17 @@ where
 /// `unique_together = ["provider", "provider_account_id"]`,
 /// `ordering = ("-created_at",)`).
 ///
-/// Moved verbatim from `pidash_db::auth_oauth::queries::account`
-/// (PIDASHCONV-1525, ORM-07); the SQL constants are `pub(crate)` (D8)
-/// and the update leg is renamed to the issue's `rotate_account_tokens`.
+/// Moved from `pidash_db::auth_oauth::queries::account`
+/// (PIDASHCONV-1525, ORM-07) as `accounts` entity statements; the
+/// update leg is named after the issue's `rotate_account_tokens`.
 pub mod account {
-    use sqlx::postgres::{PgConnection, PgRow};
-    use sqlx::Row;
+    use super::*;
 
     /// Django table name (`Meta.db_table`, `user.py:298`).
     pub const TABLE: &str = "accounts";
 
     /// Columns in Django declaration order (audit prefix first), the order
-    /// the `SELECT` projects and the `INSERT`/`UPDATE` bind.
+    /// the lookup projects and the `INSERT`/`UPDATE` bind.
     pub const COLUMNS: &[&str] = &[
         "id",
         "created_at",
@@ -1523,52 +1493,6 @@ pub mod account {
     /// Lookup filter columns in bind order
     /// (`filter(user=, provider=, provider_account_id=)`, `oauth.py:108-112`).
     pub const LOOKUP_COLUMNS: &[&str] = &["user_id", "provider", "provider_account_id"];
-
-    /// `Account.objects.filter(user_id=$1 AND provider=$2 AND
-    /// provider_account_id=$3).first()` — fixture F6 `emitted_sql.lookup`
-    /// (Django `%s` → `$N`).
-    pub(crate) const LOOKUP_SQL: &str = "SELECT \"accounts\".\"id\", \"accounts\".\"created_at\", \"accounts\".\"updated_at\", \"accounts\".\"user_id\", \"accounts\".\"provider_account_id\", \"accounts\".\"provider\", \"accounts\".\"access_token\", \"accounts\".\"access_token_expired_at\", \"accounts\".\"refresh_token\", \"accounts\".\"refresh_token_expired_at\", \"accounts\".\"last_connected_at\", \"accounts\".\"id_token\", \"accounts\".\"metadata\" FROM \"accounts\" WHERE \"accounts\".\"user_id\" = $1 AND \"accounts\".\"provider\" = $2 AND \"accounts\".\"provider_account_id\" = $3 LIMIT 1";
-
-    /// `account.save()` on the update path: Django writes every local field,
-    /// so the `SET` lists all non-pk columns in field order
-    /// (`oauth.py:114-120`; fixture F6 `emitted_sql.update` names the six
-    /// assigned columns plus `updated_at`).
-    pub(crate) const UPDATE_SQL: &str = "UPDATE \"accounts\" SET \"created_at\" = $1, \"updated_at\" = $2, \"user_id\" = $3, \"provider_account_id\" = $4, \"provider\" = $5, \"access_token\" = $6, \"access_token_expired_at\" = $7, \"refresh_token\" = $8, \"refresh_token_expired_at\" = $9, \"last_connected_at\" = $10, \"id_token\" = $11, \"metadata\" = $12 WHERE \"accounts\".\"id\" = $13";
-
-    /// `Account.objects.create(...)` (`oauth.py:123-133`): `id` is a
-    /// client-side `uuid4` (the caller supplies it — this crate's `uuid`
-    /// has no `v4` feature, per the `license/queries` precedent),
-    /// `metadata` falls back to `{}`, timestamps to `now`.
-    pub(crate) const INSERT_SQL: &str = "INSERT INTO \"accounts\" (\"id\", \"created_at\", \"updated_at\", \"user_id\", \"provider_account_id\", \"provider\", \"access_token\", \"access_token_expired_at\", \"refresh_token\", \"refresh_token_expired_at\", \"last_connected_at\", \"id_token\", \"metadata\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
-
-    /// The cloud sync update side (`Account.objects.update_or_create`,
-    /// `pi_dash_cloud/airepublic/sync.py:146-159`): the eight `defaults`
-    /// columns plus `created_at` (re-set to its stored value) and
-    /// `updated_at` (re-stamped), in Django `_meta` order. The lookup
-    /// columns (`provider`, `provider_account_id`) are excluded —
-    /// probe-verified Django behavior, and why the overlay cannot use
-    /// [`rotate_account_tokens`]: that OSS `oauth.py` full save rewrites
-    /// all 13 columns including the Tier-1 provider pair. The `SET`
-    /// list matches the overlay `update_account_upsert` builder column
-    /// for column; only the sea-query `CAST(...)` wrappers are gone
-    /// (Django emits none, and they are identity for typed binds).
-    pub(crate) const UPDATE_ACCOUNT_UPSERT_SQL: &str = "UPDATE \"accounts\" SET \"created_at\" = $1, \"updated_at\" = $2, \"user_id\" = $3, \"access_token\" = $4, \"access_token_expired_at\" = $5, \"refresh_token\" = $6, \"refresh_token_expired_at\" = $7, \"last_connected_at\" = $8, \"id_token\" = $9, \"metadata\" = $10 WHERE \"accounts\".\"id\" = $11";
-
-    /// `persist_rotated_tokens`
-    /// (`pi_dash_cloud/airepublic/token_store.py:139-150`, twin at
-    /// `refresh.py:154-164`): `save(update_fields=["access_token",
-    /// "refresh_token", "access_token_expired_at"])`, emitted in `_meta`
-    /// order with no `updated_at` stamp (probe-verified). The `SET`
-    /// list matches the overlay `update_account_rotated_tokens`
-    /// builder column for column.
-    pub(crate) const UPDATE_ACCOUNT_ROTATED_SQL: &str = "UPDATE \"accounts\" SET \"access_token\" = $1, \"access_token_expired_at\" = $2, \"refresh_token\" = $3 WHERE \"accounts\".\"id\" = $4";
-
-    /// `_persist_plan_snapshot`
-    /// (`pi_dash_cloud/airepublic/refresh.py:167-197`):
-    /// `save(update_fields=["metadata"])`. Matches the overlay
-    /// `update_account_metadata` builder.
-    pub(crate) const UPDATE_ACCOUNT_METADATA_SQL: &str =
-        "UPDATE \"accounts\" SET \"metadata\" = $1 WHERE \"accounts\".\"id\" = $2";
 
     /// The five token fields every provider's `set_token_data` stores
     /// (fixture F4 `token_fields_consumed_downstream`).
@@ -1607,24 +1531,26 @@ pub mod account {
         ErrorSwallowed,
     }
 
-    /// `Account.objects.filter(...).first()` projected to the update path's
-    /// only need: the row id.
-    pub async fn find_account_id<'e, E>(
-        ex: E,
+    /// `Account.objects.filter(user_id, provider,
+    /// provider_account_id).first()` — fixture F6 `emitted_sql.lookup`
+    /// — projected to the update path's only need: the row id. No
+    /// `ORDER BY` (the statement the port executed carried none).
+    pub async fn find_account_id(
+        db: &impl ConnectionTrait,
         user_id: uuid::Uuid,
         provider: &str,
         provider_account_id: &str,
-    ) -> Result<Option<uuid::Uuid>, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let row: Option<PgRow> = sqlx::query(LOOKUP_SQL)
-            .bind(user_id)
-            .bind(provider)
-            .bind(provider_account_id)
-            .fetch_optional(ex)
-            .await?;
-        row.map(|r| r.try_get("id")).transpose()
+    ) -> Result<Option<uuid::Uuid>, sqlx::Error> {
+        accounts::Entity::find()
+            .select_only()
+            .column(accounts::Column::Id)
+            .filter(accounts::Column::UserId.eq(user_id))
+            .filter(accounts::Column::Provider.eq(provider))
+            .filter(accounts::Column::ProviderAccountId.eq(provider_account_id))
+            .into_tuple()
+            .one(db)
+            .await
+            .map_err(into_sqlx)
     }
 
     /// Parameters for the insert side (`oauth.py:123-133`). `id` is
@@ -1640,11 +1566,12 @@ pub mod account {
         pub metadata: Option<serde_json::Value>,
     }
 
-    /// The update side (`oauth.py:113-120`): assign the six token fields
-    /// plus `last_connected_at = now`, then `.save()`.
+    /// `account.save()` on the update path (`oauth.py:114-120`): Django
+    /// writes every local field, so the `SET` lists all non-pk columns
+    /// in field order (fixture F6 `emitted_sql.update` names the six
+    /// assigned columns plus `updated_at`).
     #[allow(clippy::too_many_arguments)]
-    pub async fn rotate_account_tokens<'e, E>(
-        ex: E,
+    pub(super) fn rotate_tokens_update(
         account_id: uuid::Uuid,
         created_at: chrono::DateTime<chrono::Utc>,
         user_id: uuid::Uuid,
@@ -1653,55 +1580,117 @@ pub mod account {
         tokens: &TokenFields,
         now: chrono::DateTime<chrono::Utc>,
         metadata: serde_json::Value,
-    ) -> Result<(), sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        sqlx::query(UPDATE_SQL)
-            .bind(created_at)
-            .bind(now)
-            .bind(user_id)
-            .bind(provider_account_id)
-            .bind(provider)
-            .bind(tokens.access_token.clone())
-            .bind(tokens.access_token_expired_at)
-            .bind(tokens.refresh_token.clone())
-            .bind(tokens.refresh_token_expired_at)
-            .bind(now)
-            .bind(tokens.id_token_or_default())
-            .bind(metadata)
-            .bind(account_id)
-            .execute(ex)
-            .await?;
-        Ok(())
+    ) -> UpdateMany<accounts::Entity> {
+        use accounts::Column as A;
+        accounts::Entity::update_many()
+            .col_expr(A::CreatedAt, Expr::value(created_at))
+            .col_expr(A::UpdatedAt, Expr::value(now))
+            .col_expr(A::UserId, Expr::value(user_id))
+            .col_expr(A::ProviderAccountId, Expr::value(provider_account_id))
+            .col_expr(A::Provider, Expr::value(provider))
+            .col_expr(A::AccessToken, Expr::value(tokens.access_token.clone()))
+            .col_expr(
+                A::AccessTokenExpiredAt,
+                Expr::value(tokens.access_token_expired_at),
+            )
+            .col_expr(A::RefreshToken, Expr::value(tokens.refresh_token.clone()))
+            .col_expr(
+                A::RefreshTokenExpiredAt,
+                Expr::value(tokens.refresh_token_expired_at),
+            )
+            .col_expr(A::LastConnectedAt, Expr::value(now))
+            .col_expr(A::IdToken, Expr::value(tokens.id_token_or_default()))
+            .col_expr(A::Metadata, Expr::value(metadata))
+            .filter(A::Id.eq(account_id))
+    }
+
+    /// The update side (`oauth.py:113-120`): assign the six token fields
+    /// plus `last_connected_at = now`, then `.save()`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rotate_account_tokens(
+        db: &impl ConnectionTrait,
+        account_id: uuid::Uuid,
+        created_at: chrono::DateTime<chrono::Utc>,
+        user_id: uuid::Uuid,
+        provider_account_id: &str,
+        provider: &str,
+        tokens: &TokenFields,
+        now: chrono::DateTime<chrono::Utc>,
+        metadata: serde_json::Value,
+    ) -> Result<(), sqlx::Error> {
+        exec_update(
+            db,
+            rotate_tokens_update(
+                account_id,
+                created_at,
+                user_id,
+                provider_account_id,
+                provider,
+                tokens,
+                now,
+                metadata,
+            ),
+        )
+        .await
+    }
+
+    /// `Account.objects.create(...)` (`oauth.py:123-133`): a client-side
+    /// `uuid4` id (the caller supplies it), `metadata` falling back to
+    /// `{}`, timestamps `now`. The nullable-input `Option`s bind straight
+    /// through (a missing access token is NULL into NOT NULL and raises,
+    /// as before).
+    pub(super) fn new_account_insert(
+        params: &NewAccount<'_>,
+    ) -> sea_orm::sea_query::InsertStatement {
+        Query::insert()
+            .into_table(accounts::Entity)
+            .columns([
+                accounts::Column::Id,
+                accounts::Column::CreatedAt,
+                accounts::Column::UpdatedAt,
+                accounts::Column::UserId,
+                accounts::Column::ProviderAccountId,
+                accounts::Column::Provider,
+                accounts::Column::AccessToken,
+                accounts::Column::AccessTokenExpiredAt,
+                accounts::Column::RefreshToken,
+                accounts::Column::RefreshTokenExpiredAt,
+                accounts::Column::LastConnectedAt,
+                accounts::Column::IdToken,
+                accounts::Column::Metadata,
+            ])
+            .values_panic([
+                Expr::value(params.id),
+                Expr::value(params.now),
+                Expr::value(params.now),
+                Expr::value(params.user_id),
+                Expr::value(params.provider_account_id),
+                Expr::value(params.provider),
+                Expr::value(params.tokens.access_token.clone()),
+                Expr::value(params.tokens.access_token_expired_at),
+                Expr::value(params.tokens.refresh_token.clone()),
+                Expr::value(params.tokens.refresh_token_expired_at),
+                Expr::value(params.now),
+                Expr::value(params.tokens.id_token_or_default()),
+                Expr::value(
+                    params
+                        .metadata
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                ),
+            ])
+            .to_owned()
     }
 
     /// The create side (`oauth.py:123-133`).
-    pub async fn create_account<'e, E>(ex: E, params: &NewAccount<'_>) -> Result<(), sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let metadata = params
-            .metadata
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
-        sqlx::query(INSERT_SQL)
-            .bind(params.id)
-            .bind(params.now)
-            .bind(params.now)
-            .bind(params.user_id)
-            .bind(params.provider_account_id)
-            .bind(params.provider)
-            .bind(params.tokens.access_token.clone())
-            .bind(params.tokens.access_token_expired_at)
-            .bind(params.tokens.refresh_token.clone())
-            .bind(params.tokens.refresh_token_expired_at)
-            .bind(params.now)
-            .bind(params.tokens.id_token_or_default())
-            .bind(metadata)
-            .execute(ex)
-            .await?;
-        Ok(())
+    pub async fn create_account(
+        db: &impl ConnectionTrait,
+        params: &NewAccount<'_>,
+    ) -> Result<(), sqlx::Error> {
+        db.execute(DbBackend::Postgres.build(&new_account_insert(params)))
+            .await
+            .map(|_| ())
+            .map_err(into_sqlx)
     }
 
     /// `create_update_account` (`oauth.py:105-136`): filter-first, then
@@ -1709,10 +1698,9 @@ pub mod account {
     /// `log_exception` (BUG-6) — a database failure returns
     /// `Ok(UpsertOutcome::ErrorSwallowed)`, never `Err`.
     ///
-    /// Takes `&mut PgConnection` (an acquired connection, or `&mut *tx`
-    /// inside a larger transaction — Python runs each statement in
-    /// autocommit, so both are faithful). Single-statement steps stay
-    /// generic over `sqlx::Executor` for reuse.
+    /// Runs on the caller's connection (an acquired connection through
+    /// `TxConn`, or `TxConn::new(&mut tx)` inside a larger transaction —
+    /// Python runs each statement in autocommit, so both are faithful).
     ///
     /// `created_at`/`metadata` for the update side come from the looked-up
     /// row; pass them back in (Django's `.save()` rewrites them unchanged).
@@ -1723,7 +1711,7 @@ pub mod account {
     /// {}).get("provider_id")` → `None`).
     #[allow(clippy::too_many_arguments)]
     pub async fn create_update_account(
-        conn: &mut PgConnection,
+        db: &impl ConnectionTrait,
         user_id: uuid::Uuid,
         provider: &str,
         user_data: &serde_json::Value,
@@ -1734,7 +1722,7 @@ pub mod account {
     ) -> Result<UpsertOutcome, sqlx::Error> {
         let provider_account_id = lookup_provider_id(user_data);
         let found = match provider_account_id {
-            Some(pid) => find_account_id(&mut *conn, user_id, provider, pid).await,
+            Some(pid) => find_account_id(db, user_id, provider, pid).await,
             None => Ok(None),
         };
         let found = match found {
@@ -1750,7 +1738,7 @@ pub mod account {
                 metadata: serde_json::json!({}),
             });
             let res = rotate_account_tokens(
-                &mut *conn,
+                db,
                 account_id,
                 prior.created_at,
                 user_id,
@@ -1778,7 +1766,7 @@ pub mod account {
             now,
             metadata: None,
         };
-        match create_account(&mut *conn, &params).await {
+        match create_account(db, &params).await {
             Ok(()) => Ok(UpsertOutcome::Created),
             Err(e) => {
                 tracing::warn!("Error in create_update_account create: {e}");
@@ -1819,75 +1807,112 @@ pub mod account {
         pub metadata: Option<&'a serde_json::Value>,
     }
 
+    /// The cloud sync update side (`Account.objects.update_or_create`,
+    /// `pi_dash_cloud/airepublic/sync.py:146-159`): the eight `defaults`
+    /// columns plus `created_at` (re-set to its stored value) and
+    /// `updated_at` (re-stamped), in Django `_meta` order. The lookup
+    /// columns (`provider`, `provider_account_id`) are excluded —
+    /// probe-verified Django behavior, and why the overlay cannot use
+    /// [`rotate_account_tokens`]: that OSS `oauth.py` full save rewrites
+    /// all 13 columns including the Tier-1 provider pair.
+    pub(super) fn upsert_update(
+        row: &AccountUpsert<'_>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> UpdateMany<accounts::Entity> {
+        use accounts::Column as A;
+        accounts::Entity::update_many()
+            .col_expr(A::CreatedAt, Expr::value(row.created_at))
+            .col_expr(A::UpdatedAt, Expr::value(now))
+            .col_expr(A::UserId, Expr::value(row.user_id))
+            .col_expr(A::AccessToken, Expr::value(row.access_token))
+            .col_expr(
+                A::AccessTokenExpiredAt,
+                Expr::value(row.access_token_expired_at),
+            )
+            .col_expr(A::RefreshToken, Expr::value(row.refresh_token))
+            .col_expr(
+                A::RefreshTokenExpiredAt,
+                Expr::value(row.refresh_token_expired_at),
+            )
+            .col_expr(A::LastConnectedAt, Expr::value(row.last_connected_at))
+            .col_expr(A::IdToken, Expr::value(row.id_token))
+            .col_expr(A::Metadata, Expr::value(row.metadata.cloned()))
+            .filter(A::Id.eq(row.id))
+    }
+
     /// The cloud sync update side (`sync.py:146-159`): ten columns, the
     /// lookup pair excluded. Runs on the caller's pool or transaction
     /// (the overlay sync holds one for the whole
     /// `update_or_create`).
-    pub async fn update_account_upsert<'e, E>(
-        ex: E,
+    pub async fn update_account_upsert(
+        db: &impl ConnectionTrait,
         row: &AccountUpsert<'_>,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        sqlx::query(UPDATE_ACCOUNT_UPSERT_SQL)
-            .bind(row.created_at)
-            .bind(now)
-            .bind(row.user_id)
-            .bind(row.access_token)
-            .bind(row.access_token_expired_at)
-            .bind(row.refresh_token)
-            .bind(row.refresh_token_expired_at)
-            .bind(row.last_connected_at)
-            .bind(row.id_token)
-            .bind(row.metadata)
-            .bind(row.id)
-            .execute(ex)
-            .await?;
-        Ok(())
+    ) -> Result<(), sqlx::Error> {
+        exec_update(db, upsert_update(row, now)).await
+    }
+
+    /// `persist_rotated_tokens`
+    /// (`pi_dash_cloud/airepublic/token_store.py:139-150`, twin at
+    /// `refresh.py:154-164`): `save(update_fields=["access_token",
+    /// "refresh_token", "access_token_expired_at"])`, emitted in `_meta`
+    /// order with no `updated_at` stamp (probe-verified).
+    pub(super) fn rotated_tokens_update(
+        account_id: uuid::Uuid,
+        access_token: &str,
+        access_token_expired_at: Option<chrono::DateTime<chrono::Utc>>,
+        refresh_token: Option<&str>,
+    ) -> UpdateMany<accounts::Entity> {
+        use accounts::Column as A;
+        accounts::Entity::update_many()
+            .col_expr(A::AccessToken, Expr::value(access_token))
+            .col_expr(
+                A::AccessTokenExpiredAt,
+                Expr::value(access_token_expired_at),
+            )
+            .col_expr(A::RefreshToken, Expr::value(refresh_token))
+            .filter(A::Id.eq(account_id))
     }
 
     /// The token-rotation write (`token_store.py:139-150`): always all
     /// three columns, never `updated_at`. The keep-vs-replace value
     /// rules (empty grant token, zero `expires_in`) live with the
     /// caller, which passes the resolved values in.
-    pub async fn update_account_rotated_tokens<'e, E>(
-        ex: E,
+    pub async fn update_account_rotated_tokens(
+        db: &impl ConnectionTrait,
         account_id: uuid::Uuid,
         access_token: &str,
         access_token_expired_at: Option<chrono::DateTime<chrono::Utc>>,
         refresh_token: Option<&str>,
-    ) -> Result<(), sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        sqlx::query(UPDATE_ACCOUNT_ROTATED_SQL)
-            .bind(access_token)
-            .bind(access_token_expired_at)
-            .bind(refresh_token)
-            .bind(account_id)
-            .execute(ex)
-            .await?;
-        Ok(())
+    ) -> Result<(), sqlx::Error> {
+        exec_update(
+            db,
+            rotated_tokens_update(
+                account_id,
+                access_token,
+                access_token_expired_at,
+                refresh_token,
+            ),
+        )
+        .await
     }
 
-    /// The plan-snapshot write (`refresh.py:167-197`): `metadata` only.
-    /// The unchanged-skip check lives with the caller.
-    pub async fn update_account_metadata<'e, E>(
-        ex: E,
+    /// `_persist_plan_snapshot`
+    /// (`pi_dash_cloud/airepublic/refresh.py:167-197`):
+    /// `save(update_fields=["metadata"])`. The unchanged-skip check lives
+    /// with the caller.
+    pub async fn update_account_metadata(
+        db: &impl ConnectionTrait,
         account_id: uuid::Uuid,
         metadata: &serde_json::Value,
-    ) -> Result<(), sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        sqlx::query(UPDATE_ACCOUNT_METADATA_SQL)
-            .bind(metadata)
-            .bind(account_id)
-            .execute(ex)
-            .await?;
-        Ok(())
+    ) -> Result<(), sqlx::Error> {
+        exec_update(
+            db,
+            accounts::Entity::update_many()
+                .col_expr(accounts::Column::Metadata, Expr::value(metadata.clone()))
+                .filter(accounts::Column::Id.eq(account_id)),
+        )
+        .await
     }
 
     /// Pure row transform mirroring the update side for fixture
@@ -2054,90 +2079,83 @@ pub fn profile_full_save_sql() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// ops user saves (PIDASHCONV-1631; relocated verbatim from
-// `pidash_db::ops::users`, which cannot own covered-table writes).
-// Management commands run each statement in autocommit, so the twins
-// stay executor-generic with `Utc::now()` sampled inside, as before.
+// ops user saves (PIDASHCONV-1631; relocated from `pidash_db::ops::users`,
+// which cannot own covered-table writes). Management commands run each
+// statement in autocommit, so the twins run on the caller's connection
+// with `Utc::now()` sampled inside, as before.
 // ---------------------------------------------------------------------------
-
-const SAVE_USER_ACTIVATION_SQL: &str = r#"UPDATE "users" SET "is_active" = TRUE, "email" = $2, "display_name" = $3,
-                  "is_staff" = $4, "token" = $5, "token_updated_at" = $6, "updated_at" = $7
-           WHERE "id" = $1"#;
 
 /// `user.is_active = True; user.save()` (`activate_user.py:35-36`):
 /// `save()` rewrites the row with the normalized email, filled
 /// display name, staff escalation, possible token rotation, and the
 /// `auto_now` `updated_at`.
-pub async fn save_user_activation<'e, E>(
-    ex: E,
+fn user_activation_update(
     id: Uuid,
     write: &pidash_db::ops::users::UserSaveWrite,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let now = Utc::now();
-    sqlx::query(SAVE_USER_ACTIVATION_SQL)
-        .bind(id)
-        .bind(&write.email)
-        .bind(&write.display_name)
-        .bind(write.is_staff)
-        .bind(&write.token)
-        .bind(write.token_updated_at)
-        .bind(now)
-        .execute(ex)
-        .await?;
-    Ok(())
+    now: DateTime<Utc>,
+) -> UpdateMany<users::Entity> {
+    with_user_save_effects(
+        users::Entity::update_many().col_expr(users::Column::IsActive, Expr::value(true)),
+        write,
+        now,
+    )
+    .filter(users::Column::Id.eq(id))
 }
 
-const SAVE_USER_PASSWORD_SQL: &str = r#"UPDATE "users" SET "password" = $2, "is_password_autoset" = FALSE,
-                  "email" = $3, "display_name" = $4, "is_staff" = $5,
-                  "token" = $6, "token_updated_at" = $7, "updated_at" = $8
-           WHERE "id" = $1"#;
+/// See [`user_activation_update`]. Runs on the caller's connection.
+pub async fn save_user_activation(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    write: &pidash_db::ops::users::UserSaveWrite,
+) -> Result<(), sqlx::Error> {
+    exec_update(db, user_activation_update(id, write, Utc::now())).await
+}
 
 /// `user.set_password(password); user.is_password_autoset = False;
 /// user.save()` (`reset_password.py:62-64`).
-pub async fn save_user_password<'e, E>(
-    ex: E,
+fn user_password_update(
     id: Uuid,
     encoded_password: &str,
     write: &pidash_db::ops::users::UserSaveWrite,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let now = Utc::now();
-    sqlx::query(SAVE_USER_PASSWORD_SQL)
-        .bind(id)
-        .bind(encoded_password)
-        .bind(&write.email)
-        .bind(&write.display_name)
-        .bind(write.is_staff)
-        .bind(&write.token)
-        .bind(write.token_updated_at)
-        .bind(now)
-        .execute(ex)
-        .await?;
-    Ok(())
+    now: DateTime<Utc>,
+) -> UpdateMany<users::Entity> {
+    with_user_save_effects(
+        users::Entity::update_many()
+            .col_expr(users::Column::Password, Expr::value(encoded_password))
+            .col_expr(users::Column::IsPasswordAutoset, Expr::value(false)),
+        write,
+        now,
+    )
+    .filter(users::Column::Id.eq(id))
+}
+
+/// See [`user_password_update`]. Runs on the caller's connection.
+pub async fn save_user_password(
+    db: &impl ConnectionTrait,
+    id: Uuid,
+    encoded_password: &str,
+    write: &pidash_db::ops::users::UserSaveWrite,
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        user_password_update(id, encoded_password, write, Utc::now()),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
 // v1 asset full-row user save (PIDASHCONV-1631; relocated verbatim from
-// `pidash_db::v1_assets::asset_queries`). The sea-query builder follows
-// the db-owned [`pidash_db::v1_assets::asset_queries::USER_COLUMNS`]
-// list, so a Django user-model sync cannot silently desync the SET.
+// `pidash_db::v1_assets::asset_queries`). The template follows the
+// db-owned [`pidash_db::v1_assets::asset_queries::USER_COLUMNS`] list, so
+// a Django user-model sync cannot silently desync the SET.
 // ---------------------------------------------------------------------------
-
-/// `users` table for [`entity_user_save_sql`] (the db-layer literal is
-/// private to `asset_queries`).
-const ENTITY_USER_TABLE: &str = "users";
 
 /// `entity_asset_delete` user write (`asset.py:63-64,69-70`, server
 /// twins `:261-262,:267-268`): `user.save()` with no `update_fields`
 /// is a **full-row** save — every non-pk column in `_meta` order, pk
-/// in `WHERE`. The builder emits exactly that: `SET` over
+/// in `WHERE`. The template renders exactly that: `SET` over
 /// [`pidash_db::v1_assets::asset_queries::USER_COLUMNS`] minus `id`
-/// (`$1`–`$39`), `WHERE "users"."id" = $40`. Handlers bind the fetched
+/// (`$1`–`$39`), `WHERE "users"."id" = ($40)`. Handlers bind the fetched
 /// row with `AvatarAssetId` / `CoverImageAssetId` nulled (see
 /// [`pidash_db::v1_assets::asset_queries::EntityClearTarget`]); the
 /// `NoOp` arm binds the row unchanged (and the handler skips the
@@ -2146,61 +2164,50 @@ const ENTITY_USER_TABLE: &str = "users";
 /// `User.save()` also lowercases/strips the email and rotates the
 /// token when `token_updated_at` is set (`db/models/user.py:162-170`);
 /// that value-shaping is handler-owned, like every other Python-side
-/// assignment on this path.
+/// assignment on this path. A `$n` text template like the
+/// `:placeholder` ones above (the executing handler is an api caller):
+/// the text is the former sea-query render, byte for byte.
 pub fn entity_user_save_sql() -> String {
     use pidash_db::v1_assets::asset_queries::USER_COLUMNS;
-    use sea_query::PostgresQueryBuilder;
-    use sea_query::{Alias, Expr, Query};
-    let mut stmt = Query::update();
-    stmt.table(Alias::new(ENTITY_USER_TABLE.to_owned()));
+    let mut set_clause = String::new();
     let mut bind = 1u32;
     for col in USER_COLUMNS {
         if *col == "id" {
             continue;
         }
-        stmt.value(
-            Alias::new((*col).to_owned()),
-            Expr::cust(format!("${bind}")),
-        );
+        if bind > 1 {
+            set_clause.push_str(", ");
+        }
+        let _ = write!(set_clause, "\"{col}\" = ${bind}");
         bind += 1;
     }
-    stmt.and_where(
-        Expr::col((Alias::new(ENTITY_USER_TABLE), Alias::new("id")))
-            .eq(Expr::cust(format!("${bind}"))),
-    );
-    stmt.to_string(PostgresQueryBuilder)
+    format!("UPDATE \"users\" SET {set_clause} WHERE \"users\".\"id\" = (${bind})")
 }
 
 // login/logout signal stamps + password writes + profile pointers
-// (PIDASHCONV-1628: moved from the api handlers; executor-generic)
+// (PIDASHCONV-1628: moved from the api handlers)
 // ---------------------------------------------------------------------------
 
 /// `update_last_login` (`auth/models.py`): `login()` sets
 /// `last_login = now` on every login. One canonical statement serves
 /// the four login paths (email, magic, OAuth, license admin): the
-/// email path's id-first bind order (`SET "last_login" = $2 WHERE
-/// "id" = $1`) and the magic path's qualified `WHERE "users"."id"`
-/// are spelling-only — same column, same row, same value — and are
-/// normalized here (the `login_stamps_sql` precedent: no fixture pins
-/// the spelling).
-const STAMP_LAST_LOGIN_SQL: &str = "UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2";
-
-/// Stamp `users.last_login` for one user. Runs on the caller's
-/// executor — the login flows never hold a transaction here.
-pub async fn stamp_last_login<'e, E>(
-    ex: E,
+/// email path's id-first bind order and the magic path's qualified
+/// `WHERE "users"."id"` were spelling-only — same column, same row,
+/// same value — and are normalized here (the `login_stamps` precedent:
+/// no fixture pins the spelling). Runs on the caller's connection —
+/// the login flows never hold a transaction here.
+pub async fn stamp_last_login(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(STAMP_LAST_LOGIN_SQL)
-        .bind(now)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::LastLogin, Expr::value(now))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
 
 /// Django's `check_password` setter (`base_user.py:111-123`): a
@@ -2208,54 +2215,20 @@ where
 /// hasher at once. `save(update_fields=["password"])` writes only
 /// that column (no `updated_at` bump). One statement on all three
 /// paths (email sign-in, change-password, license admin sign-in).
-const REHASH_PASSWORD_SQL: &str = "UPDATE \"users\" SET \"password\" = $1 WHERE \"id\" = $2";
-
-/// Persist a re-encoded password hash, nothing else. Runs on the
-/// caller's executor.
-pub async fn rehash_password<'e, E>(ex: E, user_id: Uuid, new_hash: &str) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(REHASH_PASSWORD_SQL)
-        .bind(new_hash)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+/// Runs on the caller's connection.
+pub async fn rehash_password(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    new_hash: &str,
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::Password, Expr::value(new_hash))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
-
-/// Change/set-password `UPDATE`: the password write with the
-/// `User.save()` column effects folded in
-/// (`db/models/user.py:169-187`) — `updated_at` (`auto_now`), the
-/// `token`/`token_updated_at` rotation when a token is already in use
-/// (PB-1079), the empty-`display_name` fill from the email prefix, and
-/// `is_staff` for superusers — plus the `user_logged_in` signal's
-/// `last_login` bump.
-///
-/// Moved byte-for-byte from `api::auth_session::email`
-/// (PIDASHCONV-1628); `$1` is the encoded password, `$2` the user id,
-/// `$3` a fresh token, `$4` the rotation timestamp. The `email`
-/// re-normalization in `save()` is a no-op on these paths (the address
-/// never changes), so it stays out.
-const PASSWORD_WRITE_WITH_LOGIN_SQL: &str = r#"UPDATE users SET password = $1,
-    is_password_autoset = false, last_login = now(), updated_at = now(),
-    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
-    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
-    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
-    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
-    WHERE id = $2"#;
-
-/// Reset-password `UPDATE`: same `User.save()` effects as
-/// [`PASSWORD_WRITE_WITH_LOGIN_SQL`] but no `login()` call follows,
-/// so no `last_login` bump. Same binds. Moved byte-for-byte from
-/// `api::auth_session::email` (PIDASHCONV-1628).
-const PASSWORD_WRITE_SQL: &str = r#"UPDATE users SET password = $1,
-    is_password_autoset = false, updated_at = now(),
-    token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END,
-    token_updated_at = CASE WHEN token_updated_at IS NOT NULL THEN $4 ELSE token_updated_at END,
-    display_name = CASE WHEN COALESCE(display_name, '') = '' THEN split_part(email, '@', 1) ELSE display_name END,
-    is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END
-    WHERE id = $2"#;
 
 /// Resolved inputs for [`write_password_with_save_effects`]:
 /// `fresh_token` is caller-generated (`uuid4hex + uuid4hex`,
@@ -2270,30 +2243,44 @@ pub struct PasswordSave<'a> {
     pub stamp_last_login: bool,
 }
 
+/// Change/set/reset-password `UPDATE`: the password write with the
+/// `User.save()` column effects folded in
+/// (`db/models/user.py:169-187`) — `updated_at` (`auto_now`, the
+/// database clock), the `token`/`token_updated_at` rotation when a
+/// token is already in use (PB-1079), the empty-`display_name` fill
+/// from the email prefix, and `is_staff` for superusers — plus, on the
+/// change/set twin only, the `user_logged_in` signal's `last_login`
+/// bump (the database clock too). Moved from
+/// `api::auth_session::email` (PIDASHCONV-1628). The `email`
+/// re-normalization in `save()` is a no-op on these paths (the
+/// address never changes), so it stays out.
+fn password_save_update(user_id: Uuid, save: &PasswordSave<'_>) -> UpdateMany<users::Entity> {
+    use users::Column as C;
+    let (token, token_updated_at) =
+        token_rotation_cases(save.fresh_token, Expr::value(save.rotated_at));
+    let mut stmt = users::Entity::update_many()
+        .col_expr(C::Password, Expr::value(save.encoded))
+        .col_expr(C::IsPasswordAutoset, Expr::value(false));
+    if save.stamp_last_login {
+        stmt = stmt.col_expr(C::LastLogin, Expr::current_timestamp().into());
+    }
+    stmt.col_expr(C::UpdatedAt, Expr::current_timestamp().into())
+        .col_expr(C::Token, token)
+        .col_expr(C::TokenUpdatedAt, token_updated_at)
+        .col_expr(C::DisplayName, display_name_backfill_coalesce_case())
+        .col_expr(C::IsStaff, staff_for_superuser_case())
+        .filter(C::Id.eq(user_id))
+}
+
 /// Password write shared by change/set/reset-password: the encoded
 /// password plus the `User.save()` column effects above. Runs on the
-/// caller's executor.
-pub async fn write_password_with_save_effects<'e, E>(
-    ex: E,
+/// caller's connection.
+pub async fn write_password_with_save_effects(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     save: &PasswordSave<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let sql = if save.stamp_last_login {
-        PASSWORD_WRITE_WITH_LOGIN_SQL
-    } else {
-        PASSWORD_WRITE_SQL
-    };
-    sqlx::query(sql)
-        .bind(save.encoded)
-        .bind(user_id)
-        .bind(save.fresh_token)
-        .bind(save.rotated_at)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(db, password_save_update(user_id, save)).await
 }
 
 /// The sign-out stamps: `last_logout_ip`/`last_logout_time` and the
@@ -2306,39 +2293,38 @@ where
 /// effects as the password writes above. The `email` re-normalization is
 /// a no-op (the address never changes here), so it stays out. One
 /// canonical statement serves the app, space and license admin sign-outs.
-/// The bind values stay per caller: the app path binds `None` when no IP
-/// is present, the admin path `""`. `$4` is a fresh token.
-const STAMP_LOGOUT_SQL: &str = "UPDATE \"users\" SET \"last_logout_ip\" = $1, \
-    \"last_logout_time\" = $2, \"updated_at\" = $2, \
-    \"token\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $4 ELSE \"token\" END, \
-    \"token_updated_at\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $2 \
-    ELSE \"token_updated_at\" END, \
-    \"display_name\" = CASE WHEN COALESCE(\"display_name\", '') = '' \
-    THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
-    \"is_staff\" = CASE WHEN \"is_superuser\" THEN true ELSE \"is_staff\" END \
-    WHERE \"id\" = $3";
-
-/// Stamp the sign-out columns plus the `User.save()` effects for one
-/// user. The rotated token is drawn here (`uuid4().hex + uuid4().hex`,
-/// `user.py:174`). Runs on the caller's executor.
-pub async fn stamp_logout<'e, E>(
-    ex: E,
+/// Both callers bind `None` when no IP is present (NEWPIDASH-42 brought
+/// the admin path in line; it used to bind `""`).
+fn logout_update(
     user_id: Uuid,
     ip: Option<&str>,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
+    fresh_token: &str,
+) -> UpdateMany<users::Entity> {
+    use users::Column as C;
+    let (token, token_updated_at) = token_rotation_cases(fresh_token, Expr::value(now));
+    users::Entity::update_many()
+        .col_expr(C::LastLogoutIp, Expr::value(ip))
+        .col_expr(C::LastLogoutTime, Expr::value(now))
+        .col_expr(C::UpdatedAt, Expr::value(now))
+        .col_expr(C::Token, token)
+        .col_expr(C::TokenUpdatedAt, token_updated_at)
+        .col_expr(C::DisplayName, display_name_backfill_coalesce_case())
+        .col_expr(C::IsStaff, staff_for_superuser_case())
+        .filter(C::Id.eq(user_id))
+}
+
+/// Stamp the sign-out columns plus the `User.save()` effects for one
+/// user. The rotated token is drawn here (`uuid4().hex + uuid4().hex`,
+/// `user.py:174`). Runs on the caller's connection.
+pub async fn stamp_logout(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    ip: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    sqlx::query(STAMP_LOGOUT_SQL)
-        .bind(ip)
-        .bind(now)
-        .bind(user_id)
-        .bind(token)
-        .execute(ex)
-        .await
-        .map(|_| ())
+    exec_update(db, logout_update(user_id, ip, now, &token)).await
 }
 
 /// The invite-accept user touch (`invite.py:204-205`): `User` has no
@@ -2346,24 +2332,19 @@ where
 /// `db/models/user.py:236`), so Django drops the transient attribute
 /// and the save only stamps `updated_at` (ported bug 11,
 /// [`crate::app_workspace::queries_membership::user_touch_sql`]).
-const TOUCH_USER_UPDATED_AT_SQL: &str = "UPDATE users SET updated_at = $1 WHERE id = $2";
-
-/// Touch `users.updated_at` for one user. Runs on the caller's
-/// executor.
-pub async fn touch_user_updated_at<'e, E>(
-    ex: E,
+/// Runs on the caller's connection.
+pub async fn touch_user_updated_at(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(TOUCH_USER_UPDATED_AT_SQL)
-        .bind(now)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::UpdatedAt, Expr::value(now))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
 
 /// The `PATCH users/me/` `User.save()`: the merged row (validated
@@ -2371,11 +2352,11 @@ where
 /// (`save_email`, `save_display_name`, token regeneration,
 /// `save_is_staff`, `user.py:169-187`).
 ///
-/// Moved byte-for-byte from `api::app_workspace::handlers_user`
-/// (PIDASHCONV-1628): `$1`-`$14` are the merged columns, `$15`-`$18`
-/// the derived ones, `$19` the `auto_now` stamp, `$20` the id. The
-/// merge and the derivation stay at the call site (pure computation,
-/// not SQL); every resolved value rides this struct.
+/// Moved from `api::app_workspace::handlers_user` (PIDASHCONV-1628):
+/// the fourteen merged columns, then the four derived ones, then the
+/// `auto_now` stamp, in that order. The merge and the derivation stay
+/// at the call site (pure computation, not SQL); every resolved value
+/// rides this struct.
 pub struct MeProfileSave<'a> {
     pub last_login: Option<DateTime<Utc>>,
     pub display_name: &'a str,
@@ -2398,116 +2379,103 @@ pub struct MeProfileSave<'a> {
     pub updated_at: DateTime<Utc>,
 }
 
-const ME_PROFILE_SAVE_SQL: &str =
-    "UPDATE users SET last_login = $1, display_name = $2, first_name = $3, last_name = $4, \
-    avatar = $5, avatar_asset_id = $6, cover_image = $7, cover_image_asset_id = $8, \
-    is_password_expired = $9, is_password_reset_required = $10, bot_type = $11, \
-    user_timezone = $12, is_email_valid = $13, masked_at = $14, email = $15, token = $16, \
-    token_updated_at = $17, is_staff = $18, updated_at = $19 WHERE id = $20";
+/// See [`MeProfileSave`]: the merged columns, the derived ones, the
+/// stamp.
+fn me_profile_update(user_id: Uuid, save: &MeProfileSave<'_>) -> UpdateMany<users::Entity> {
+    use users::Column as C;
+    users::Entity::update_many()
+        .col_expr(C::LastLogin, Expr::value(save.last_login))
+        .col_expr(C::DisplayName, Expr::value(save.display_name))
+        .col_expr(C::FirstName, Expr::value(save.first_name))
+        .col_expr(C::LastName, Expr::value(save.last_name))
+        .col_expr(C::Avatar, Expr::value(save.avatar))
+        .col_expr(C::AvatarAssetId, Expr::value(save.avatar_asset_id))
+        .col_expr(C::CoverImage, Expr::value(save.cover_image))
+        .col_expr(C::CoverImageAssetId, Expr::value(save.cover_image_asset_id))
+        .col_expr(C::IsPasswordExpired, Expr::value(save.is_password_expired))
+        .col_expr(
+            C::IsPasswordResetRequired,
+            Expr::value(save.is_password_reset_required),
+        )
+        .col_expr(C::BotType, Expr::value(save.bot_type))
+        .col_expr(C::UserTimezone, Expr::value(save.user_timezone))
+        .col_expr(C::IsEmailValid, Expr::value(save.is_email_valid))
+        .col_expr(C::MaskedAt, Expr::value(save.masked_at))
+        .col_expr(C::Email, Expr::value(save.email))
+        .col_expr(C::Token, Expr::value(save.token))
+        .col_expr(C::TokenUpdatedAt, Expr::value(save.token_updated_at))
+        .col_expr(C::IsStaff, Expr::value(save.is_staff))
+        .col_expr(C::UpdatedAt, Expr::value(save.updated_at))
+        .filter(C::Id.eq(user_id))
+}
 
 /// Persist the merged `PATCH users/me/` row. Runs on the caller's
-/// executor.
-pub async fn save_me_profile<'e, E>(
-    ex: E,
+/// connection.
+pub async fn save_me_profile(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     save: &MeProfileSave<'_>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(ME_PROFILE_SAVE_SQL)
-        .bind(save.last_login)
-        .bind(save.display_name)
-        .bind(save.first_name)
-        .bind(save.last_name)
-        .bind(save.avatar)
-        .bind(save.avatar_asset_id)
-        .bind(save.cover_image)
-        .bind(save.cover_image_asset_id)
-        .bind(save.is_password_expired)
-        .bind(save.is_password_reset_required)
-        .bind(save.bot_type)
-        .bind(save.user_timezone)
-        .bind(save.is_email_valid)
-        .bind(save.masked_at)
-        .bind(save.email)
-        .bind(save.token)
-        .bind(save.token_updated_at)
-        .bind(save.is_staff)
-        .bind(save.updated_at)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(db, me_profile_update(user_id, save)).await
 }
 
 /// Shared `delete_old_avatar` user leg (`adapter/base.py:244-248`):
 /// clear the FK plus the avatar string after the asset soft-delete
-/// lands. Runs on the caller's executor.
-const CLEAR_AVATAR_SQL: &str =
-    "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"avatar\" = '' WHERE \"id\" = $1";
-
-/// Clear one user's avatar FK + string. Runs on the caller's
-/// executor.
-pub async fn clear_avatar<'e, E>(ex: E, user_id: Uuid) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(CLEAR_AVATAR_SQL)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+/// lands. Runs on the caller's connection.
+pub async fn clear_avatar(db: &impl ConnectionTrait, user_id: Uuid) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        users::Entity::update_many()
+            .col_expr(users::Column::AvatarAssetId, Expr::value(None::<Uuid>))
+            .col_expr(users::Column::Avatar, Expr::value(""))
+            .filter(users::Column::Id.eq(user_id)),
+    )
+    .await
 }
 
 /// `remove_last_workspace_ids_from_user_settings`: null every profile
-/// pointer at a deleted workspace. Runs on the caller's executor.
-const CLEAR_LAST_WORKSPACE_SQL: &str =
-    "UPDATE profiles SET last_workspace_id = NULL WHERE last_workspace_id = $1";
-
-/// Null the `last_workspace_id` pointers at one workspace. Runs on
-/// the caller's executor.
-pub async fn clear_last_workspace<'e, E>(ex: E, workspace_id: Uuid) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(CLEAR_LAST_WORKSPACE_SQL)
-        .bind(workspace_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+/// pointer at a deleted workspace. Runs on the caller's connection.
+pub async fn clear_last_workspace(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        profiles::Entity::update_many()
+            .col_expr(profiles::Column::LastWorkspaceId, Expr::value(None::<Uuid>))
+            .filter(profiles::Column::LastWorkspaceId.eq(workspace_id)),
+    )
+    .await
 }
 
 /// The join-request approve pointer write (`join_request.py:204`):
 /// `Profile.last_workspace_id` follows the approved workspace. Runs
-/// on the caller's executor — the approve path holds its own `sqlx`
+/// on the caller's connection — the approve path holds its own `sqlx`
 /// transaction around the member write, this write and the status
 /// write.
-const SET_LAST_WORKSPACE_SQL: &str =
-    "UPDATE profiles SET last_workspace_id = $1 WHERE user_id = $2";
-
-/// Point one user's profile at a workspace. Runs on the caller's
-/// executor.
-pub async fn set_last_workspace<'e, E>(
-    ex: E,
+pub async fn set_last_workspace(
+    db: &impl ConnectionTrait,
     user_id: Uuid,
     workspace_id: Uuid,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(SET_LAST_WORKSPACE_SQL)
-        .bind(workspace_id)
-        .bind(user_id)
-        .execute(ex)
-        .await
-        .map(|_| ())
+) -> Result<(), sqlx::Error> {
+    exec_update(
+        db,
+        profiles::Entity::update_many()
+            .col_expr(profiles::Column::LastWorkspaceId, Expr::value(workspace_id))
+            .filter(profiles::Column::UserId.eq(user_id)),
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_db::orm_tx::TxConn;
     use sqlx::Row;
+
+    fn orm(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+        pidash_db::pool::sea_orm_connection(pool)
+    }
 
     fn fixture(name: &str) -> serde_json::Value {
         let body = std::fs::read_to_string(
@@ -2530,59 +2498,6 @@ mod tests {
     }
 
     // -- moved F6 pins (code side; fixture-shape assertions stay in db) ---
-
-    #[test]
-    fn f6_lookup_sql_pins() {
-        assert_eq!(account::TABLE, "accounts");
-        assert_eq!(
-            account::LOOKUP_COLUMNS,
-            &["user_id", "provider", "provider_account_id"]
-        );
-        let sql = account::LOOKUP_SQL;
-        assert!(sql.contains("FROM \"accounts\""), "lookup table");
-        let (user_pos, prov_pos, pid_pos) = (
-            sql.find("user_id\" = $1").expect("user_id $1"),
-            sql.find("provider\" = $2").expect("provider $2"),
-            sql.find("provider_account_id\" = $3")
-                .expect("provider_account_id $3"),
-        );
-        assert!(
-            user_pos < prov_pos && prov_pos < pid_pos,
-            "predicate order user, provider, provider_account_id"
-        );
-        assert!(sql.ends_with("LIMIT 1"), ".first() limit");
-    }
-
-    #[test]
-    fn f6_update_sql_pins() {
-        for col in [
-            "access_token",
-            "refresh_token",
-            "access_token_expired_at",
-            "refresh_token_expired_at",
-            "last_connected_at",
-            "id_token",
-        ] {
-            assert!(
-                account::UPDATE_COLUMNS.contains(&col),
-                "update writes {col}"
-            );
-        }
-        for col in ["user_id", "provider", "provider_account_id"] {
-            assert!(
-                !account::UPDATE_COLUMNS.contains(&col),
-                "update leaves {col} alone"
-            );
-        }
-        assert!(
-            account::UPDATE_SQL.contains("\"updated_at\" = $"),
-            "save() stamps updated_at"
-        );
-        assert!(
-            account::UPDATE_SQL.contains("WHERE \"accounts\".\"id\" = $13"),
-            "update targets the row id"
-        );
-    }
 
     #[test]
     fn f6_update_row_transform_matches_before_after() {
@@ -2621,31 +2536,6 @@ mod tests {
     }
 
     #[test]
-    fn f6_insert_sql_pins() {
-        for key in [
-            "access_token",
-            "refresh_token",
-            "access_token_expired_at",
-            "refresh_token_expired_at",
-            "last_connected_at",
-            "id_token",
-            "provider",
-            "provider_account_id",
-            "user_id",
-        ] {
-            assert!(account::COLUMNS.contains(&key), "insert binds {key}");
-        }
-        assert!(
-            account::INSERT_SQL.contains("(\"id\","),
-            "client-side uuid pk"
-        );
-        assert!(
-            account::INSERT_SQL.contains("\"metadata\""),
-            "metadata default {{}}"
-        );
-    }
-
-    #[test]
     fn f6_error_outcome_variant() {
         assert_eq!(
             format!("{:?}", account::UpsertOutcome::ErrorSwallowed),
@@ -2654,52 +2544,6 @@ mod tests {
     }
 
     // -- cloud account update legs (D6; SET lists mirror the overlay builders)
-
-    #[test]
-    fn cloud_upsert_sql_pins_provider_excluding_shape() {
-        // Column for column, the overlay `update_account_upsert`
-        // render minus the sea-query `CAST(...)` wrappers: ten `SET`
-        // entries in `_meta` order, the lookup pair excluded, the row
-        // id last.
-        assert_eq!(
-            account::UPDATE_ACCOUNT_UPSERT_SQL,
-            "UPDATE \"accounts\" SET \"created_at\" = $1, \"updated_at\" = $2, \
-             \"user_id\" = $3, \"access_token\" = $4, \"access_token_expired_at\" = $5, \
-             \"refresh_token\" = $6, \"refresh_token_expired_at\" = $7, \
-             \"last_connected_at\" = $8, \"id_token\" = $9, \"metadata\" = $10 \
-             WHERE \"accounts\".\"id\" = $11"
-        );
-        assert!(
-            !account::UPDATE_ACCOUNT_UPSERT_SQL.contains("provider"),
-            "lookup columns excluded"
-        );
-    }
-
-    #[test]
-    fn cloud_rotated_sql_pins_triple_without_stamp() {
-        // The overlay `update_account_rotated_tokens` render minus the
-        // `CAST(...)` wrapper: three `SET` entries, no `updated_at`.
-        assert_eq!(
-            account::UPDATE_ACCOUNT_ROTATED_SQL,
-            "UPDATE \"accounts\" SET \"access_token\" = $1, \
-             \"access_token_expired_at\" = $2, \"refresh_token\" = $3 \
-             WHERE \"accounts\".\"id\" = $4"
-        );
-        assert!(
-            !account::UPDATE_ACCOUNT_ROTATED_SQL.contains("updated_at"),
-            "rotation stamps nothing"
-        );
-    }
-
-    #[test]
-    fn cloud_metadata_sql_pins_single_column() {
-        // The overlay `update_account_metadata` render minus the
-        // `CAST(... AS jsonb)` wrapper.
-        assert_eq!(
-            account::UPDATE_ACCOUNT_METADATA_SQL,
-            "UPDATE \"accounts\" SET \"metadata\" = $1 WHERE \"accounts\".\"id\" = $2"
-        );
-    }
 
     // -- stamps builder vectors (one exact text per caller) ------------------
 
@@ -2718,149 +2562,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stamps_sql_email_shape() {
-        let stamps = LoginStamps {
-            medium: Some("email"),
-            login_ip: Some(""),
-            login_uagent: Some(""),
-            display_name: Some(DisplayNameUpdate::BackfillCase),
-            is_staff: Some(StaffSync::OrSuperuser),
-            touch_updated_at: true,
-            ..stamps_fixture()
-        };
-        // NEWPIDASH-17: the full `user.save()` effects (backfill, staff
-        // sync, `auto_now`) ride along, like gitea/google.
-        assert_eq!(
-            login_stamps_sql(&stamps),
-            "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-             \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
-             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
-             \"display_name\" = CASE WHEN \"display_name\" = '' \
-             THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
-             \"is_staff\" = \"is_staff\" OR \"is_superuser\", \
-             \"updated_at\" = $8 WHERE \"id\" = $9"
-        );
-    }
-
-    #[test]
-    fn stamps_sql_magic_shape() {
-        let stamps = LoginStamps {
-            medium: Some("magic-code"),
-            touch_updated_at: true,
-            ..stamps_fixture()
-        };
-        assert_eq!(
-            login_stamps_sql(&stamps),
-            "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-             \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
-             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
-             \"updated_at\" = $8 WHERE \"id\" = $9"
-        );
-    }
-
-    #[test]
-    fn stamps_sql_gitlab_shape() {
-        let stamps = LoginStamps {
-            medium: Some("gitlab"),
-            avatar: Some("https://avatar.test/a"),
-            display_name: Some(DisplayNameUpdate::Bound("ada")),
-            is_staff: Some(StaffSync::Value(false)),
-            touch_updated_at: true,
-            ..stamps_fixture()
-        };
-        assert_eq!(
-            login_stamps_sql(&stamps),
-            "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-             \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
-             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
-             \"avatar\" = $8, \"display_name\" = $9, \"is_staff\" = $10, \
-             \"updated_at\" = $11 WHERE \"id\" = $12"
-        );
-    }
-
-    #[test]
-    fn stamps_sql_gitea_shape() {
-        let stamps = LoginStamps {
-            medium: Some("gitea"),
-            login_ip: Some(""),
-            login_uagent: Some(""),
-            avatar: Some(""),
-            avatar_asset_id: Some(None),
-            display_name: Some(DisplayNameUpdate::BackfillCase),
-            is_staff: Some(StaffSync::OrSuperuser),
-            touch_updated_at: true,
-            ..stamps_fixture()
-        };
-        assert_eq!(
-            login_stamps_sql(&stamps),
-            "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-             \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
-             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
-             \"avatar\" = $8, \"avatar_asset_id\" = $9, \
-             \"display_name\" = CASE WHEN \"display_name\" = '' \
-             THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
-             \"is_staff\" = \"is_staff\" OR \"is_superuser\", \
-             \"updated_at\" = $10 WHERE \"id\" = $11"
-        );
-    }
-
-    #[test]
-    fn stamps_sql_google_shape() {
-        let stamps = LoginStamps {
-            medium: Some("google"),
-            display_name: Some(DisplayNameUpdate::BackfillCase),
-            is_staff: Some(StaffSync::OrSuperuser),
-            touch_updated_at: true,
-            ..stamps_fixture()
-        };
-        assert_eq!(
-            login_stamps_sql(&stamps),
-            "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-             \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
-             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
-             \"display_name\" = CASE WHEN \"display_name\" = '' \
-             THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
-             \"is_staff\" = \"is_staff\" OR \"is_superuser\", \
-             \"updated_at\" = $8 WHERE \"id\" = $9"
-        );
-    }
-
-    #[test]
-    fn stamps_sql_github_shape() {
-        let stamps = LoginStamps {
-            medium: Some("github"),
-            display_name: Some(DisplayNameUpdate::Bound("ada")),
-            is_staff: Some(StaffSync::Value(true)),
-            touch_updated_at: true,
-            ..stamps_fixture()
-        };
-        assert_eq!(
-            login_stamps_sql(&stamps),
-            "UPDATE \"users\" SET \"last_login_medium\" = $1, \"last_active\" = $2, \
-             \"last_login_time\" = $3, \"last_login_ip\" = $4, \"last_login_uagent\" = $5, \
-             \"token_updated_at\" = $6, \"token\" = $7, \"is_active\" = TRUE, \
-             \"display_name\" = $8, \"is_staff\" = $9, \
-             \"updated_at\" = $10 WHERE \"id\" = $11"
-        );
-    }
-
-    #[test]
-    fn stamps_sql_admin_shape() {
-        // No medium column: the license stamps never assign it.
-        let stamps = LoginStamps {
-            touch_updated_at: true,
-            ..stamps_fixture()
-        };
-        assert_eq!(
-            login_stamps_sql(&stamps),
-            "UPDATE \"users\" SET \"last_active\" = $1, \
-             \"last_login_time\" = $2, \"last_login_ip\" = $3, \"last_login_uagent\" = $4, \
-             \"token_updated_at\" = $5, \"token\" = $6, \"is_active\" = TRUE, \
-             \"updated_at\" = $7 WHERE \"id\" = $8"
-        );
-    }
-
     // -- sync builder vectors -------------------------------------------------
 
     fn sync_fixture() -> SyncUpdate<'static> {
@@ -2876,107 +2577,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sync_sql_gitlab_shape() {
-        let sync = SyncUpdate {
-            avatar: Some("u"),
-            avatar_asset_id: Some(None),
-            is_staff: Some(true),
-            touch_updated_at: true,
-            ..sync_fixture()
-        };
-        assert_eq!(
-            sync_update_sql(&sync),
-            "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-             \"display_name\" = $3, \"avatar\" = $4, \"avatar_asset_id\" = $5, \
-             \"is_staff\" = $6, \"updated_at\" = $7 WHERE \"id\" = $8"
-        );
-    }
-
-    #[test]
-    fn sync_sql_gitea_shape() {
-        let sync = SyncUpdate {
-            avatar: Some("u"),
-            avatar_asset_id: Some(None),
-            ..sync_fixture()
-        };
-        assert_eq!(
-            sync_update_sql(&sync),
-            "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-             \"display_name\" = $3, \"avatar\" = $4, \"avatar_asset_id\" = $5 \
-             WHERE \"id\" = $6"
-        );
-    }
-
-    #[test]
-    fn sync_sql_google_names_shape() {
-        assert_eq!(
-            sync_update_sql(&sync_fixture()),
-            "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-             \"display_name\" = $3 WHERE \"id\" = $4"
-        );
-    }
-
-    #[test]
-    fn sync_sql_github_asset_arm_shape() {
-        let sync = SyncUpdate {
-            avatar_asset_id: Some(Some(Uuid::nil())),
-            touch_updated_at: true,
-            ..sync_fixture()
-        };
-        assert_eq!(
-            sync_update_sql(&sync),
-            "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-             \"display_name\" = $3, \"avatar_asset_id\" = $4, \"updated_at\" = $5 \
-             WHERE \"id\" = $6"
-        );
-    }
-
-    #[test]
-    fn sync_sql_github_url_arm_shape() {
-        let sync = SyncUpdate {
-            avatar: Some("u"),
-            touch_updated_at: true,
-            ..sync_fixture()
-        };
-        assert_eq!(
-            sync_update_sql(&sync),
-            "UPDATE \"users\" SET \"first_name\" = $1, \"last_name\" = $2, \
-             \"display_name\" = $3, \"avatar\" = $4, \"updated_at\" = $5 \
-             WHERE \"id\" = $6"
-        );
-    }
-
     // -- OIDC sync login stamps (PIDASHCONV-1621) -------------------------------
-
-    #[test]
-    fn relogin_update_sql_is_byte_identical() {
-        // The overlay re-login builder, verbatim
-        // (`cloud-db/src/auth/queries.rs`, `update_user_relogin`): the SET
-        // list is identical — columns, order, quoting and `$n` positions.
-        // Only the `WHERE` differs: the sea-query builder qualifies it
-        // (`WHERE "users"."id" = $4`) while OSS spells it unqualified.
-        assert_eq!(
-            USER_RELOGIN_UPDATE_SQL,
-            "UPDATE \"users\" SET \"avatar\" = $1, \"is_email_verified\" = $2, \
-             \"last_login_medium\" = $3 WHERE \"id\" = $4"
-        );
-    }
-
-    #[test]
-    fn last_login_time_update_sql_is_byte_identical() {
-        // The overlay timestamp builder, verbatim
-        // (`cloud-db/src/auth/queries.rs`, `update_user_last_login_time`):
-        // same single SET column. The builder renders the bind as
-        // `CAST($1 AS timestamptz)` (sea-query renders every datetime bind
-        // that way) while OSS binds the `DateTime<Utc>` as a plain `$1`
-        // like every other stamps fn — the same stored value either way —
-        // and the `WHERE` is unqualified here (`WHERE "id" = $2`).
-        assert_eq!(
-            USER_LAST_LOGIN_TIME_UPDATE_SQL,
-            "UPDATE \"users\" SET \"last_login_time\" = $1 WHERE \"id\" = $2"
-        );
-    }
 
     /// PIDASHCONV-1621: the two OIDC sync stamps write only their own
     /// columns — the re-login triple flips avatar/verified/medium while
@@ -3013,10 +2614,16 @@ mod tests {
         .execute(&mut *tx)
         .await
         .expect("seed user");
-        update_user_relogin(&mut *tx, user_id, "http://pic/new", true, "airepublic")
-            .await
-            .expect("relogin triple runs");
-        update_user_last_login_time(&mut *tx, user_id, login)
+        update_user_relogin(
+            &TxConn::new(&mut tx),
+            user_id,
+            "http://pic/new",
+            true,
+            "airepublic",
+        )
+        .await
+        .expect("relogin triple runs");
+        update_user_last_login_time(&TxConn::new(&mut tx), user_id, login)
             .await
             .expect("login-time single runs");
         let row: sqlx::postgres::PgRow = sqlx::query(
@@ -3050,23 +2657,663 @@ mod tests {
         assert_eq!(ip, "", "login ip untouched");
     }
 
+    // -- statement-shape pins (the SQL-text pins of the sqlx era, over the
+    //    rendered SeaORM statements) ---------------------------------------
+
+    fn render<E: EntityTrait>(stmt: UpdateMany<E>) -> String {
+        use sea_orm::QueryTrait;
+        stmt.build(DbBackend::Postgres).to_string()
+    }
+
+    fn set_clause(sql: &str) -> &str {
+        &sql[sql.find("SET ").expect("SET") + 4..sql.find(" WHERE").expect("WHERE")]
+    }
+
+    const ID1: &str = "'00000000-0000-0000-0000-000000000001'";
+    const T0: &str = "'1970-01-01 00:00:00.000000 +00:00'";
+
+    /// Every `users` column the bot and provisioned rows set, in `_meta`
+    /// order: all 40 physical columns, none left to a database default.
     #[test]
-    fn asset_link_sql_matches_handler_text() {
+    fn bot_and_provisioned_rows_set_all_40_columns() {
+        use sea_orm::{ActiveModelTrait, Iden, Iterable};
+        let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
+        let bot = bot_user_row(
+            Uuid::nil(),
+            &NewBotUser {
+                id: None,
+                username: AGENT_USERNAME,
+                email: AGENT_USER_EMAIL,
+                password_hash: "",
+                display_name: AGENT_DISPLAY_NAME,
+                first_name: AGENT_USER_FIRST_NAME,
+                last_name: AGENT_USER_LAST_NAME,
+                is_password_autoset: false,
+                bot_type: Some("WORKSPACE_SEED"),
+                now,
+            },
+        );
+        let provisioned = provisioned_user_row(
+            Uuid::nil(),
+            &ProvisionedUser {
+                id: None,
+                email: "p@example.test",
+                username: "p",
+                password_hash: "!x",
+                display_name: "P",
+                first_name: "",
+                last_name: "",
+                avatar: "",
+                is_managed: true,
+                is_email_verified: true,
+                is_password_autoset: false,
+                last_login_medium: "email",
+                user_timezone: "UTC",
+                now,
+            },
+        );
+        let columns: Vec<String> = users::Column::iter().map(|c| c.to_string()).collect();
+        assert_eq!(columns.len(), 40);
+        for name in USER_META_COLUMNS {
+            assert!(
+                columns.iter().any(|c| c == name),
+                "{name} is an entity column"
+            );
+        }
+        for column in users::Column::iter() {
+            assert!(bot.get(column).is_set(), "bot row sets {column:?}");
+            assert!(
+                provisioned.get(column).is_set(),
+                "provisioned row sets {column:?}"
+            );
+        }
+        // The bot fields: is_bot, the type, the fixed defaults.
+        assert_eq!(bot.is_bot.as_ref(), &true);
+        assert_eq!(bot.bot_type.as_ref(), &Some("WORKSPACE_SEED".to_owned()));
+        assert_eq!(bot.is_managed.as_ref(), &false);
+        assert_eq!(bot.last_login_medium.as_ref(), "email");
+        assert_eq!(bot.last_active.as_ref(), &Some(at(now)));
+        assert_eq!(bot.avatar.as_ref(), "");
+        // The provisioned fields ride the caller's values, never a bot.
+        assert_eq!(provisioned.is_bot.as_ref(), &false);
+        assert_eq!(provisioned.is_managed.as_ref(), &true);
+        assert_eq!(provisioned.is_email_verified.as_ref(), &true);
+        assert_eq!(provisioned.bot_type.as_ref(), &None);
+    }
+
+    /// The default profile row carries every Django model default
+    /// (`db/models/user.py:200-273`) and the two caller inputs.
+    #[test]
+    fn default_profile_row_pins_model_defaults() {
+        let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
+        let row = default_profile_row(Uuid::nil(), Uuid::max(), now, "Acme", "#abcdef");
+        assert_eq!(row.company_name.as_ref(), "Acme");
+        assert_eq!(row.background_color.as_ref(), "#abcdef");
+        assert_eq!(row.billing_address_country.as_ref(), "INDIA");
+        assert_eq!(row.notification_view_mode.as_ref(), "full");
+        assert_eq!(row.language.as_ref(), "en");
+        assert_eq!(row.start_of_the_week.as_ref(), &0);
+        assert_eq!(row.is_app_rail_docked.as_ref(), &true);
+        assert_eq!(row.is_onboarded.as_ref(), &false);
         assert_eq!(
-            USER_AVATAR_LINK_SQL,
-            "UPDATE \"users\" SET \"avatar\" = $1, \"avatar_asset_id\" = $2, \"email\" = $3, \"display_name\" = $4, \"is_staff\" = $5, \"token\" = $6, \"token_updated_at\" = $7, \"updated_at\" = $8 WHERE \"id\" = $9"
+            row.onboarding_step.as_ref(),
+            &serde_json::json!({
+                "profile_complete": false, "workspace_create": false,
+                "workspace_invite": false, "workspace_join": false,
+            })
         );
         assert_eq!(
-            USER_COVER_LINK_SQL,
-            "UPDATE \"users\" SET \"cover_image\" = NULL, \"cover_image_asset_id\" = $1, \"email\" = $2, \"display_name\" = $3, \"is_staff\" = $4, \"token\" = $5, \"token_updated_at\" = $6, \"updated_at\" = $7 WHERE \"id\" = $8"
+            row.product_tour.as_ref(),
+            &serde_json::json!({
+                "work_items": false, "cycles": false, "modules": false,
+                "intake": false, "pages": false,
+            })
+        );
+        assert_eq!(row.settings.as_ref(), &serde_json::json!({}));
+    }
+
+    /// `user_fields_update`: dirty columns only, `_meta` order, then
+    /// `updated_at`; nothing dirty renders no statement.
+    #[test]
+    fn user_fields_update_shapes() {
+        let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
+        assert!(user_fields_update(Uuid::nil(), &field_updates_fixture(), now).is_none());
+        let all = render(
+            user_fields_update(
+                Uuid::nil(),
+                &UserFieldUpdates {
+                    username: Some("u"),
+                    email: Some("e"),
+                    display_name: Some("d"),
+                },
+                now,
+            )
+            .expect("dirty"),
         );
         assert_eq!(
-            USER_AVATAR_UNLINK_SQL,
-            "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7"
+            set_clause(&all),
+            format!("\"username\" = 'u', \"email\" = 'e', \"display_name\" = 'd', \"updated_at\" = {T0}")
+        );
+        let email_only = render(
+            user_fields_update(
+                Uuid::nil(),
+                &UserFieldUpdates {
+                    email: Some("e"),
+                    ..field_updates_fixture()
+                },
+                now,
+            )
+            .expect("dirty"),
         );
         assert_eq!(
-            USER_COVER_UNLINK_SQL,
-            "UPDATE \"users\" SET \"cover_image_asset_id\" = NULL, \"email\" = $1, \"display_name\" = $2, \"is_staff\" = $3, \"token\" = $4, \"token_updated_at\" = $5, \"updated_at\" = $6 WHERE \"id\" = $7"
+            set_clause(&email_only),
+            format!("\"email\" = 'e', \"updated_at\" = {T0}")
+        );
+        let username_display = render(
+            user_fields_update(
+                Uuid::nil(),
+                &UserFieldUpdates {
+                    username: Some("u"),
+                    display_name: Some("d"),
+                    ..field_updates_fixture()
+                },
+                now,
+            )
+            .expect("dirty"),
+        );
+        assert_eq!(
+            set_clause(&username_display),
+            format!("\"username\" = 'u', \"display_name\" = 'd', \"updated_at\" = {T0}")
+        );
+        assert!(
+            all.ends_with("WHERE \"users\".\"id\" = '00000000-0000-0000-0000-000000000000'"),
+            "{all}"
+        );
+    }
+
+    /// The stamps builder, one shape per caller: fixed stamp columns,
+    /// the optional avatar pair, display/staff in bound or `CASE`/`OR`
+    /// form, `updated_at` last.
+    #[test]
+    fn login_stamps_update_shapes() {
+        let id = Uuid::from_u128(1);
+        let fixed = format!(
+            "\"last_active\" = {T0}, \"last_login_time\" = {T0}, \"last_login_ip\" = NULL, \
+             \"last_login_uagent\" = NULL, \"token_updated_at\" = {T0}, \"token\" = 'tok', \
+             \"is_active\" = TRUE"
+        );
+        let backfill = "\"display_name\" = (CASE WHEN (\"display_name\" = '') THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END)";
+        let or_super = "\"is_staff\" = \"is_staff\" OR \"is_superuser\"";
+
+        // email: NEWPIDASH-17, the full `user.save()` effects ride along.
+        let email = render(login_stamps_update(
+            id,
+            &LoginStamps {
+                medium: Some("email"),
+                login_ip: Some(""),
+                login_uagent: Some(""),
+                display_name: Some(DisplayNameUpdate::BackfillCase),
+                is_staff: Some(StaffSync::OrSuperuser),
+                touch_updated_at: true,
+                ..stamps_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&email),
+            format!(
+                "\"last_login_medium\" = 'email', {}, {backfill}, {or_super}, \"updated_at\" = {T0}",
+                fixed.replace("= NULL", "= ''")
+            )
+        );
+        assert!(
+            email.ends_with(&format!("WHERE \"users\".\"id\" = {ID1}")),
+            "{email}"
+        );
+
+        // magic: NEWPIDASH-41, the full `user.save()` effects ride along
+        // like email/gitea/google.
+        let magic = render(login_stamps_update(
+            id,
+            &LoginStamps {
+                medium: Some("magic-code"),
+                display_name: Some(DisplayNameUpdate::BackfillCase),
+                is_staff: Some(StaffSync::OrSuperuser),
+                touch_updated_at: true,
+                ..stamps_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&magic),
+            format!(
+                "\"last_login_medium\" = 'magic-code', {fixed}, {backfill}, {or_super}, \"updated_at\" = {T0}"
+            )
+        );
+
+        // gitlab: bound avatar, bound display name, bound staff.
+        let gitlab = render(login_stamps_update(
+            id,
+            &LoginStamps {
+                medium: Some("gitlab"),
+                avatar: Some("https://avatar.test/a"),
+                display_name: Some(DisplayNameUpdate::Bound("ada")),
+                is_staff: Some(StaffSync::Value(false)),
+                touch_updated_at: true,
+                ..stamps_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&gitlab),
+            format!(
+                "\"last_login_medium\" = 'gitlab', {fixed}, \"avatar\" = 'https://avatar.test/a', \
+                 \"display_name\" = 'ada', \"is_staff\" = FALSE, \"updated_at\" = {T0}"
+            )
+        );
+
+        // gitea: avatar pair (NULL asset), backfill CASE, OR staff.
+        let gitea = render(login_stamps_update(
+            id,
+            &LoginStamps {
+                medium: Some("gitea"),
+                avatar: Some(""),
+                avatar_asset_id: Some(None),
+                display_name: Some(DisplayNameUpdate::BackfillCase),
+                is_staff: Some(StaffSync::OrSuperuser),
+                touch_updated_at: true,
+                ..stamps_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&gitea),
+            format!(
+                "\"last_login_medium\" = 'gitea', {fixed}, \"avatar\" = '', \"avatar_asset_id\" = NULL, \
+                 {backfill}, {or_super}, \"updated_at\" = {T0}"
+            )
+        );
+
+        // github: bound display name + bound staff, no avatar here.
+        let github = render(login_stamps_update(
+            id,
+            &LoginStamps {
+                medium: Some("github"),
+                display_name: Some(DisplayNameUpdate::Bound("ada")),
+                is_staff: Some(StaffSync::Value(true)),
+                touch_updated_at: true,
+                ..stamps_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&github),
+            format!(
+                "\"last_login_medium\" = 'github', {fixed}, \"display_name\" = 'ada', \
+                 \"is_staff\" = TRUE, \"updated_at\" = {T0}"
+            )
+        );
+
+        // admin: no medium column (the license stamps never assign it).
+        let admin = render(login_stamps_update(
+            id,
+            &LoginStamps {
+                touch_updated_at: true,
+                ..stamps_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&admin),
+            format!("{fixed}, \"updated_at\" = {T0}")
+        );
+    }
+
+    /// The sync builder, one shape per caller.
+    #[test]
+    fn sync_update_shapes() {
+        let id = Uuid::from_u128(1);
+        let names = "\"first_name\" = 'a', \"last_name\" = 'b', \"display_name\" = 'c'";
+        let gitlab = render(sync_update(
+            id,
+            &SyncUpdate {
+                avatar: Some("u"),
+                avatar_asset_id: Some(None),
+                is_staff: Some(true),
+                touch_updated_at: true,
+                ..sync_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&gitlab),
+            format!("{names}, \"avatar\" = 'u', \"avatar_asset_id\" = NULL, \"is_staff\" = TRUE, \"updated_at\" = {T0}")
+        );
+        assert!(
+            gitlab.ends_with(&format!("WHERE \"users\".\"id\" = {ID1}")),
+            "{gitlab}"
+        );
+        let gitea = render(sync_update(
+            id,
+            &SyncUpdate {
+                avatar: Some("u"),
+                avatar_asset_id: Some(None),
+                ..sync_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&gitea),
+            format!("{names}, \"avatar\" = 'u', \"avatar_asset_id\" = NULL")
+        );
+        let google = render(sync_update(id, &sync_fixture()));
+        assert_eq!(set_clause(&google), names);
+        let github_asset = render(sync_update(
+            id,
+            &SyncUpdate {
+                avatar_asset_id: Some(Some(Uuid::nil())),
+                touch_updated_at: true,
+                ..sync_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&github_asset),
+            format!("{names}, \"avatar_asset_id\" = '00000000-0000-0000-0000-000000000000', \"updated_at\" = {T0}")
+        );
+        let github_url = render(sync_update(
+            id,
+            &SyncUpdate {
+                avatar: Some("u"),
+                touch_updated_at: true,
+                ..sync_fixture()
+            },
+        ));
+        assert_eq!(
+            set_clause(&github_url),
+            format!("{names}, \"avatar\" = 'u', \"updated_at\" = {T0}")
+        );
+    }
+
+    /// The fixed-shape singles: the OIDC re-login triple (no
+    /// `updated_at`), the asset link/unlink twins with the `User.save()`
+    /// effects appended, the ops saves, and the `PATCH users/me/` row.
+    #[test]
+    fn fixed_statement_shapes() {
+        let id = Uuid::from_u128(1);
+        let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
+        let relogin = render(relogin_update(id, "pic", true, "airepublic"));
+        assert_eq!(
+            set_clause(&relogin),
+            "\"avatar\" = 'pic', \"is_email_verified\" = TRUE, \"last_login_medium\" = 'airepublic'"
+        );
+        assert!(
+            !relogin.contains("updated_at"),
+            "relogin stamps nothing: {relogin}"
+        );
+
+        let write = pidash_db::ops::users::UserSaveWrite {
+            email: "u@x".to_owned(),
+            display_name: "U".to_owned(),
+            is_staff: false,
+            token: "tok".to_owned(),
+            token_updated_at: None,
+        };
+        let effects = format!(
+            "\"email\" = 'u@x', \"display_name\" = 'U', \"is_staff\" = FALSE, \"token\" = 'tok', \
+             \"token_updated_at\" = NULL, \"updated_at\" = {T0}"
+        );
+        let avatar_link = render(avatar_link_update(id, Uuid::nil(), &write, now));
+        assert_eq!(
+            set_clause(&avatar_link),
+            format!("\"avatar\" = '', \"avatar_asset_id\" = '00000000-0000-0000-0000-000000000000', {effects}")
+        );
+        let cover_link = render(cover_link_update(id, Uuid::nil(), &write, now));
+        assert_eq!(
+            set_clause(&cover_link),
+            format!("\"cover_image\" = NULL, \"cover_image_asset_id\" = '00000000-0000-0000-0000-000000000000', {effects}")
+        );
+        let avatar_unlink = render(avatar_unlink_update(id, &write, now));
+        assert_eq!(
+            set_clause(&avatar_unlink),
+            format!("\"avatar_asset_id\" = NULL, {effects}")
+        );
+        let cover_unlink = render(cover_unlink_update(id, &write, now));
+        assert_eq!(
+            set_clause(&cover_unlink),
+            format!("\"cover_image_asset_id\" = NULL, {effects}")
+        );
+        for sql in [&avatar_link, &cover_link, &avatar_unlink, &cover_unlink] {
+            assert!(
+                sql.ends_with(&format!("WHERE \"users\".\"id\" = {ID1}")),
+                "{sql}"
+            );
+        }
+
+        // Ops saves: the flag / the hash + autoset, then the same effects.
+        let activation = render(user_activation_update(id, &write, now));
+        assert_eq!(
+            set_clause(&activation),
+            format!("\"is_active\" = TRUE, {effects}")
+        );
+        let password = render(user_password_update(id, "pbkdf2$new", &write, now));
+        assert_eq!(
+            set_clause(&password),
+            format!("\"password\" = 'pbkdf2$new', \"is_password_autoset\" = FALSE, {effects}")
+        );
+
+        // `PATCH users/me/`: fourteen merged columns, four derived, the stamp.
+        let me = render(me_profile_update(
+            id,
+            &MeProfileSave {
+                last_login: None,
+                display_name: "Ada",
+                first_name: "Ada",
+                last_name: "L",
+                avatar: "img",
+                avatar_asset_id: None,
+                cover_image: None,
+                cover_image_asset_id: None,
+                is_password_expired: false,
+                is_password_reset_required: false,
+                bot_type: None,
+                user_timezone: "UTC",
+                is_email_valid: true,
+                masked_at: None,
+                email: "ada@x",
+                token: "tok",
+                token_updated_at: None,
+                is_staff: false,
+                updated_at: now,
+            },
+        ));
+        assert!(me.starts_with("UPDATE \"users\" SET \"last_login\" = NULL, \"display_name\" = 'Ada', \"first_name\" = 'Ada'"), "{me}");
+        assert!(
+            me.contains("\"masked_at\" = NULL, \"email\" = 'ada@x', \"token\" = 'tok', \"token_updated_at\" = NULL, \"is_staff\" = FALSE, \"updated_at\" = "),
+            "{me}"
+        );
+        assert_eq!(
+            set_clause(&me).matches(" = ").count(),
+            19,
+            "nineteen SET entries"
+        );
+    }
+
+    /// The password and logout twins: the `User.save()` effects as
+    /// expressions — the rotation `CASE`s, the NULL-tolerant backfill,
+    /// the superuser staff `CASE`, and the database clock where Django
+    /// used `auto_now`; only the change/set twin bumps `last_login`.
+    #[test]
+    fn password_and_logout_update_shapes() {
+        let id = Uuid::from_u128(1);
+        let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
+        let rotation = format!(
+            "\"token\" = (CASE WHEN (\"token_updated_at\" IS NOT NULL) THEN 'fresh' ELSE \"token\" END), \
+             \"token_updated_at\" = (CASE WHEN (\"token_updated_at\" IS NOT NULL) THEN {T0} ELSE \"token_updated_at\" END)"
+        );
+        let backfill = "\"display_name\" = (CASE WHEN (COALESCE(\"display_name\", '') = '') THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END)";
+        let staff =
+            "\"is_staff\" = (CASE WHEN (\"is_superuser\" = TRUE) THEN TRUE ELSE \"is_staff\" END)";
+        let login_twin = render(password_save_update(
+            id,
+            &PasswordSave {
+                encoded: "hash",
+                fresh_token: "fresh",
+                rotated_at: now,
+                stamp_last_login: true,
+            },
+        ));
+        assert_eq!(
+            set_clause(&login_twin),
+            format!(
+                "\"password\" = 'hash', \"is_password_autoset\" = FALSE, \"last_login\" = CURRENT_TIMESTAMP, \
+                 \"updated_at\" = CURRENT_TIMESTAMP, {rotation}, {backfill}, {staff}"
+            )
+        );
+        let reset_twin = render(password_save_update(
+            id,
+            &PasswordSave {
+                encoded: "hash",
+                fresh_token: "fresh",
+                rotated_at: now,
+                stamp_last_login: false,
+            },
+        ));
+        assert!(!reset_twin.contains("last_login"), "{reset_twin}");
+        assert!(
+            reset_twin.contains("\"updated_at\" = CURRENT_TIMESTAMP"),
+            "{reset_twin}"
+        );
+        let logout = render(logout_update(id, Some("9.9.9.9"), now, "fresh"));
+        assert_eq!(
+            set_clause(&logout),
+            format!(
+                "\"last_logout_ip\" = '9.9.9.9', \"last_logout_time\" = {T0}, \"updated_at\" = {T0}, \
+                 {rotation}, {backfill}, {staff}"
+            )
+        );
+        let logout_none = render(logout_update(id, None, now, "fresh"));
+        assert!(
+            logout_none.contains("\"last_logout_ip\" = NULL"),
+            "{logout_none}"
+        );
+    }
+
+    /// The preference PATCH: stamps first, then the caller's columns
+    /// by name in push order.
+    #[test]
+    fn preference_columns_update_shape() {
+        let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
+        let columns = [
+            ("comment", PreferenceColumn::Flag(false)),
+            ("project_id", PreferenceColumn::Id(None)),
+            ("deleted_at", PreferenceColumn::Stamp(Some(now))),
+        ];
+        let sql = preference_columns_update(Uuid::from_u128(1), now, Uuid::nil(), &columns)
+            .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert_eq!(
+            sql,
+            format!(
+                "UPDATE \"user_notification_preferences\" SET \"updated_at\" = {T0}, \
+                 \"updated_by_id\" = '00000000-0000-0000-0000-000000000000', \"comment\" = FALSE, \
+                 \"project_id\" = NULL, \"deleted_at\" = {T0} WHERE \"id\" = {ID1}"
+            )
+        );
+    }
+
+    /// The account statements: the F6 full-save update (every non-pk
+    /// column, field order), the insert (client-side id, `{}` metadata
+    /// default, NULL tokens bound as given), and the three cloud legs.
+    #[test]
+    fn account_statement_shapes() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let id = Uuid::from_u128(1);
+        let now: DateTime<Utc> = DateTime::from_timestamp(0, 0).expect("epoch");
+        let tokens = token_fields();
+        let full = render(account::rotate_tokens_update(
+            id,
+            now,
+            Uuid::nil(),
+            "pid",
+            "google",
+            &tokens,
+            now,
+            serde_json::json!({}),
+        ));
+        assert_eq!(
+            set_clause(&full),
+            format!(
+                "\"created_at\" = {T0}, \"updated_at\" = {T0}, \"user_id\" = '00000000-0000-0000-0000-000000000000', \
+                 \"provider_account_id\" = 'pid', \"provider\" = 'google', \"access_token\" = 'TOK', \
+                 \"access_token_expired_at\" = NULL, \"refresh_token\" = NULL, \"refresh_token_expired_at\" = NULL, \
+                 \"last_connected_at\" = {T0}, \"id_token\" = '', \"metadata\" = '{{}}'"
+            )
+        );
+        assert!(
+            full.ends_with(&format!("WHERE \"accounts\".\"id\" = {ID1}")),
+            "{full}"
+        );
+        for col in account::UPDATE_COLUMNS {
+            assert!(
+                full.contains(&format!("\"{col}\" = ")),
+                "update writes {col}"
+            );
+        }
+
+        let insert = account::new_account_insert(&account::NewAccount {
+            id,
+            user_id: Uuid::nil(),
+            provider: "google",
+            provider_account_id: "pid",
+            tokens: &tokens,
+            now,
+            metadata: None,
+        })
+        .to_string(PostgresQueryBuilder);
+        assert!(
+            insert.starts_with(
+                "INSERT INTO \"accounts\" (\"id\", \"created_at\", \"updated_at\", \"user_id\", \
+                 \"provider_account_id\", \"provider\", \"access_token\", \"access_token_expired_at\", \
+                 \"refresh_token\", \"refresh_token_expired_at\", \"last_connected_at\", \"id_token\", \"metadata\") VALUES ("
+            ),
+            "{insert}"
+        );
+        assert!(
+            insert.contains(&format!(
+                "'pid', 'google', 'TOK', NULL, NULL, NULL, {T0}, '', "
+            )) && insert.ends_with("'{}')"),
+            "{insert}"
+        );
+        for key in account::COLUMNS {
+            assert!(insert.contains(&format!("\"{key}\"")), "insert binds {key}");
+        }
+
+        let upsert = render(account::upsert_update(
+            &account::AccountUpsert {
+                id,
+                created_at: now,
+                user_id: Uuid::nil(),
+                access_token: "at",
+                access_token_expired_at: None,
+                refresh_token: None,
+                refresh_token_expired_at: None,
+                last_connected_at: now,
+                id_token: "idt",
+                metadata: None,
+            },
+            now,
+        ));
+        assert_eq!(
+            set_clause(&upsert),
+            format!(
+                "\"created_at\" = {T0}, \"updated_at\" = {T0}, \"user_id\" = '00000000-0000-0000-0000-000000000000', \
+                 \"access_token\" = 'at', \"access_token_expired_at\" = NULL, \"refresh_token\" = NULL, \
+                 \"refresh_token_expired_at\" = NULL, \"last_connected_at\" = {T0}, \"id_token\" = 'idt', \"metadata\" = NULL"
+            )
+        );
+        assert!(
+            !upsert.contains("provider"),
+            "lookup columns excluded: {upsert}"
+        );
+        let rotated = render(account::rotated_tokens_update(id, "at", None, Some("rt")));
+        assert_eq!(
+            set_clause(&rotated),
+            "\"access_token\" = 'at', \"access_token_expired_at\" = NULL, \"refresh_token\" = 'rt'"
+        );
+        assert!(
+            !rotated.contains("updated_at"),
+            "rotation stamps nothing: {rotated}"
         );
     }
 
@@ -3119,70 +3366,6 @@ mod tests {
         assert_ne!(make_unusable_password(), make_unusable_password());
         assert!(is_password_usable(""));
         assert!(is_password_usable("pbkdf2_sha256$1500000$salt$hash"));
-    }
-
-    #[test]
-    fn agent_insert_lists_all_40_physical_columns() {
-        // `_meta` order per FX-AUTH-03.models.json (the two trailing
-        // ManyToMany entries are relations, not columns).
-        let columns = [
-            "password",
-            "last_login",
-            "id",
-            "username",
-            "mobile_number",
-            "email",
-            "display_name",
-            "first_name",
-            "last_name",
-            "avatar",
-            "avatar_asset_id",
-            "cover_image",
-            "cover_image_asset_id",
-            "date_joined",
-            "created_at",
-            "updated_at",
-            "last_location",
-            "created_location",
-            "is_superuser",
-            "is_managed",
-            "is_password_expired",
-            "is_active",
-            "is_staff",
-            "is_email_verified",
-            "is_password_autoset",
-            "is_password_reset_required",
-            "token",
-            "last_active",
-            "last_login_time",
-            "last_logout_time",
-            "last_login_ip",
-            "last_logout_ip",
-            "last_login_medium",
-            "last_login_uagent",
-            "token_updated_at",
-            "is_bot",
-            "bot_type",
-            "user_timezone",
-            "is_email_valid",
-            "masked_at",
-        ];
-        assert_eq!(columns.len(), 40);
-        let head = BOT_USER_INSERT_SQL;
-        let mut cursor = 0;
-        for column in columns {
-            let found = head[cursor..]
-                .find(column)
-                .unwrap_or_else(|| panic!("{column} listed"));
-            cursor += found + column.len();
-        }
-        for bind in 1..=40 {
-            assert!(head.contains(&format!("${bind}")), "bind ${bind} present");
-        }
-        assert_eq!(
-            BOT_USER_PASSWORD_SQL,
-            "UPDATE users SET password = $1 WHERE id = $2"
-        );
     }
 
     async fn scratch_pool() -> Option<sqlx::PgPool> {
@@ -3279,7 +3462,7 @@ mod tests {
             .await
             .expect("probe savepoint");
         let raced = create_bot_user(
-            &mut *tx,
+            &TxConn::new(&mut tx),
             &NewBotUser {
                 id: Some(live_uuid("000000005002")),
                 username: AGENT_USERNAME,
@@ -3572,7 +3755,7 @@ mod tests {
             token_updated_at: None,
         };
         let avatar_asset = Uuid::new_v4();
-        link_avatar_asset(&pool, user, avatar_asset, &write, now)
+        link_avatar_asset(&orm(&pool), user, avatar_asset, &write, now)
             .await
             .expect("avatar link");
         let linked: (String, Option<Uuid>, String) =
@@ -3584,11 +3767,11 @@ mod tests {
         assert_eq!(linked.0, "");
         assert_eq!(linked.1, Some(avatar_asset));
         assert_eq!(linked.2, "u@example.test");
-        unlink_avatar_asset(&pool, user, &write, now)
+        unlink_avatar_asset(&orm(&pool), user, &write, now)
             .await
             .expect("avatar unlink");
         let cover_asset = Uuid::new_v4();
-        link_cover_asset(&pool, user, cover_asset, &write, now)
+        link_cover_asset(&orm(&pool), user, cover_asset, &write, now)
             .await
             .expect("cover link");
         let cover: (Option<String>, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
@@ -3599,7 +3782,7 @@ mod tests {
         .await
         .expect("read back");
         assert_eq!(cover, (None, Some(cover_asset), None));
-        unlink_cover_asset(&pool, user, &write, now)
+        unlink_cover_asset(&orm(&pool), user, &write, now)
             .await
             .expect("cover unlink");
         let pref = Uuid::new_v4();
@@ -3616,7 +3799,7 @@ mod tests {
             ("comment", PreferenceColumn::Flag(false)),
             ("project_id", PreferenceColumn::Id(None)),
         ];
-        save_preference_columns(&pool, pref, now, user, &columns)
+        save_preference_columns(&orm(&pool), pref, now, user, &columns)
             .await
             .expect("preference save");
         let saved: (bool, Option<Uuid>, Option<Uuid>) = sqlx::query_as(
@@ -3689,7 +3872,7 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("savepoint");
-        let err = save_user_data(&mut *tx, user_id, &gitea)
+        let err = save_user_data(&TxConn::new(&mut tx), user_id, &gitea)
             .await
             .expect_err("missing ip/uagent fails");
         assert_not_null_violation(&err);
@@ -3710,53 +3893,13 @@ mod tests {
             rotated_token: "tok",
             now,
         };
-        let err = save_user_data(&mut *tx, user_id, &email)
+        let err = save_user_data(&TxConn::new(&mut tx), user_id, &email)
             .await
             .expect_err("email shape fails identically");
         assert_not_null_violation(&err);
     }
 
     // -- PIDASHCONV-1615: race-tolerant profile get_or_create + setter ----
-
-    #[test]
-    fn profile_path_select_sql_pins() {
-        assert_eq!(
-            PROFILE_PATH_SELECT_SQL,
-            "SELECT \"id\", \"is_onboarded\", \"last_workspace_id\" FROM \"profiles\" \
-             WHERE \"user_id\" = $1 LIMIT 1"
-        );
-    }
-
-    #[test]
-    fn profile_default_insert_sql_pins() {
-        let sql = PROFILE_DEFAULT_INSERT_SQL;
-        assert!(
-            sql.starts_with("INSERT INTO \"profiles\""),
-            "profiles insert"
-        );
-        assert!(
-            sql.contains("VALUES ($1, $2, $2, $3,"),
-            "id, now, now, user binds"
-        );
-        for literal in ["'INDIA'", "'full'", "'en'", "'{}'", "$4"] {
-            assert!(sql.contains(literal), "insert carries {literal}");
-        }
-        assert!(sql.contains(", '', '"), "company_name ''");
-        assert!(
-            sql.contains("\"workspace_invite\": false"),
-            "full onboarding json"
-        );
-        assert!(sql.contains("\"work_items\": false"), "product tour json");
-        assert!(sql.ends_with("'{}')"), "settings {{}} tail");
-    }
-
-    #[test]
-    fn set_profile_last_workspace_sql_pins() {
-        assert_eq!(
-            SET_PROFILE_LAST_WORKSPACE_SQL,
-            "UPDATE \"profiles\" SET \"updated_at\" = $1, \"last_workspace_id\" = $2 WHERE \"id\" = $3"
-        );
-    }
 
     /// The 30 `profiles` columns both race-table DDLs share: the
     /// `PROFILES_DDL` column set plus the production `user_id` unique
@@ -3812,7 +3955,7 @@ mod tests {
         let now: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
         let user_id = live_uuid("000000006151");
         let background = "#a1b2c3";
-        let fresh = get_or_create_profile(&pool, user_id, now, background)
+        let fresh = get_or_create_profile(&orm(&pool), user_id, now, background)
             .await
             .expect("create leg");
         assert!(!fresh.is_onboarded);
@@ -3939,7 +4082,7 @@ mod tests {
         .expect("canonical bytes");
         assert!(canonical.0 && canonical.1 && canonical.2);
         // Found leg: same row, no second insert.
-        let found = get_or_create_profile(&pool, user_id, now, "#ffffff")
+        let found = get_or_create_profile(&orm(&pool), user_id, now, "#ffffff")
             .await
             .expect("found leg");
         assert_eq!(found, fresh);
@@ -3966,14 +4109,14 @@ mod tests {
             .expect("temp profiles");
         let now: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T0");
         let user_id = live_uuid("000000006152");
-        insert_default_profile(&mut *tx, user_id, now, "#a1b2c3")
+        insert_default_profile(&TxConn::new(&mut tx), user_id, now, "#a1b2c3")
             .await
             .expect("first insert");
         sqlx::query("SAVEPOINT sp_profile_race")
             .execute(&mut *tx)
             .await
             .expect("savepoint");
-        let raced = insert_default_profile(&mut *tx, user_id, now, "#d4e5f6").await;
+        let raced = insert_default_profile(&TxConn::new(&mut tx), user_id, now, "#d4e5f6").await;
         sqlx::query("ROLLBACK TO SAVEPOINT sp_profile_race")
             .execute(&mut *tx)
             .await
@@ -4028,7 +4171,7 @@ mod tests {
                 while gate.load(Ordering::SeqCst) < RACERS {
                     tokio::task::yield_now().await;
                 }
-                get_or_create_profile(&pool, user_id, now, "#1615a1").await
+                get_or_create_profile(&orm(&pool), user_id, now, "#1615a1").await
             }));
         }
         let mut winner: Option<Uuid> = None;
@@ -4072,15 +4215,15 @@ mod tests {
         let user_a = live_uuid("000000006153");
         let user_b = live_uuid("000000006154");
         let background = "#a1b2c3";
-        let a = get_or_create_profile(&pool, user_a, t0, background)
+        let a = get_or_create_profile(&orm(&pool), user_a, t0, background)
             .await
             .expect("row a");
-        let b = get_or_create_profile(&pool, user_b, t0, background)
+        let b = get_or_create_profile(&orm(&pool), user_b, t0, background)
             .await
             .expect("row b");
         let ws1 = live_uuid("000000006155");
         let ws2 = live_uuid("000000006156");
-        set_profile_last_workspace(&pool, a.id, ws1, t1)
+        set_profile_last_workspace(&orm(&pool), a.id, ws1, t1)
             .await
             .expect("first stamp");
         let row: sqlx::postgres::PgRow = sqlx::query(
@@ -4110,7 +4253,7 @@ mod tests {
                 .await
                 .expect("read back b");
         assert_eq!(other, (t0, None));
-        set_profile_last_workspace(&pool, a.id, ws2, t2)
+        set_profile_last_workspace(&orm(&pool), a.id, ws2, t2)
             .await
             .expect("second stamp");
         let moved: (DateTime<Utc>, Option<Uuid>) =
@@ -4169,110 +4312,12 @@ mod tests {
         "masked_at",
     ];
 
-    #[test]
-    fn provisioned_insert_lists_all_40_columns_in_meta_order() {
-        let head = PROVISIONED_USER_INSERT_SQL;
-        let mut cursor = 0;
-        for column in USER_META_COLUMNS {
-            let found = head[cursor..]
-                .find(column)
-                .unwrap_or_else(|| panic!("{column} listed"));
-            cursor += found + column.len();
-        }
-        for bind in 1..=40 {
-            assert!(head.contains(&format!("${bind}")), "bind ${bind} present");
-        }
-    }
-
-    #[test]
-    fn prefs_insert_lists_all_14_columns_in_meta_order() {
-        let columns = [
-            "created_at",
-            "updated_at",
-            "created_by_id",
-            "updated_by_id",
-            "deleted_at",
-            "id",
-            "user_id",
-            "workspace_id",
-            "project_id",
-            "property_change",
-            "state_change",
-            "comment",
-            "mention",
-            "issue_completed",
-        ];
-        let head = USER_NOTIFICATION_PREFERENCE_INSERT_SQL;
-        let mut cursor = 0;
-        for column in columns {
-            let found = head[cursor..]
-                .find(column)
-                .unwrap_or_else(|| panic!("{column} listed"));
-            cursor += found + column.len();
-        }
-        for bind in 1..=14 {
-            assert!(head.contains(&format!("${bind}")), "bind ${bind} present");
-        }
-    }
-
     fn field_updates_fixture() -> UserFieldUpdates<'static> {
         UserFieldUpdates {
             username: None,
             email: None,
             display_name: None,
         }
-    }
-
-    #[test]
-    fn user_fields_sql_empty_is_no_save() {
-        let updates = field_updates_fixture();
-        assert!(updates.is_empty());
-        assert_eq!(user_fields_sql(&updates), None);
-    }
-
-    #[test]
-    fn user_fields_sql_all_dirty_shape() {
-        let updates = UserFieldUpdates {
-            username: Some("u"),
-            email: Some("e"),
-            display_name: Some("d"),
-        };
-        assert!(!updates.is_empty());
-        assert_eq!(
-            user_fields_sql(&updates).as_deref(),
-            Some(
-                "UPDATE \"users\" SET \"username\" = $1, \"email\" = $2, \
-                 \"display_name\" = $3, \"updated_at\" = $4 WHERE \"id\" = $5"
-            )
-        );
-    }
-
-    #[test]
-    fn user_fields_sql_email_only_shape() {
-        let updates = UserFieldUpdates {
-            email: Some("e"),
-            ..field_updates_fixture()
-        };
-        assert_eq!(
-            user_fields_sql(&updates).as_deref(),
-            Some("UPDATE \"users\" SET \"email\" = $1, \"updated_at\" = $2 WHERE \"id\" = $3")
-        );
-    }
-
-    #[test]
-    fn user_fields_sql_username_display_shape() {
-        let updates = UserFieldUpdates {
-            username: Some("u"),
-            display_name: Some("d"),
-            ..field_updates_fixture()
-        };
-        assert_eq!(
-            user_fields_sql(&updates).as_deref(),
-            Some(
-                "UPDATE \"users\" SET \"username\" = $1, \"display_name\" = $2, \
-                 \"updated_at\" = $3 WHERE \"id\" = $4"
-            )
-        );
     }
 
     /// Whole-row read-back as JSON: one assertion pins all 40 stored
@@ -4328,7 +4373,7 @@ mod tests {
             user_timezone: "UTC",
             now,
         };
-        let got = insert_provisioned_user(&mut *tx, &platform)
+        let got = insert_provisioned_user(&TxConn::new(&mut tx), &platform)
             .await
             .expect("platform insert");
         assert_eq!(got, platform_id);
@@ -4397,7 +4442,7 @@ mod tests {
             user_timezone: "UTC",
             now,
         };
-        let got = insert_provisioned_user(&mut *tx, &sync)
+        let got = insert_provisioned_user(&TxConn::new(&mut tx), &sync)
             .await
             .expect("sync insert");
         assert_eq!(got, sync_id);
@@ -4449,7 +4494,7 @@ mod tests {
 
         // The prefs call stores the receiver row (`user.py:307-320`).
         let prefs_id = live_uuid("000000006103");
-        insert_user_notification_preference(&mut *tx, prefs_id, platform_id, now)
+        insert_user_notification_preference(&TxConn::new(&mut tx), prefs_id, platform_id, now)
             .await
             .expect("prefs insert");
         let prefs: serde_json::Value = sqlx::query_scalar(
@@ -4482,7 +4527,7 @@ mod tests {
 
         // The dirty update writes only dirty columns plus updated_at.
         update_user_fields(
-            &mut *tx,
+            &TxConn::new(&mut tx),
             sync_id,
             &UserFieldUpdates {
                 username: None,
@@ -4501,9 +4546,14 @@ mod tests {
         assert_eq!(row["created_at"], serde_json::json!(stamp));
 
         // Empty updates save nothing — not even updated_at.
-        update_user_fields(&mut *tx, sync_id, &field_updates_fixture(), later)
-            .await
-            .expect("empty update no-ops");
+        update_user_fields(
+            &TxConn::new(&mut tx),
+            sync_id,
+            &field_updates_fixture(),
+            later,
+        )
+        .await
+        .expect("empty update no-ops");
         let row = user_json(&mut tx, sync_id).await;
         assert_eq!(row["updated_at"], serde_json::json!(stamp_later));
     }
@@ -4532,7 +4582,7 @@ mod tests {
             id_token: Some("idt-1".to_owned()),
         };
         account::create_account(
-            pool,
+            &orm(pool),
             &account::NewAccount {
                 id,
                 user_id: live_uuid("aaaaaaaaaaaa"),
@@ -4573,7 +4623,7 @@ mod tests {
         seed_account(&pool, id, t0).await;
         let meta = serde_json::json!({"x": 1});
         account::update_account_upsert(
-            &pool,
+            &orm(&pool),
             &account::AccountUpsert {
                 id,
                 created_at: t0,
@@ -4647,7 +4697,7 @@ mod tests {
         let mut tx = pool.begin().await.expect("tx");
         let meta2 = serde_json::json!({"x": 2});
         account::update_account_upsert(
-            &mut *tx,
+            &TxConn::new(&mut tx),
             &account::AccountUpsert {
                 id,
                 created_at: t0,
@@ -4701,9 +4751,15 @@ mod tests {
         let id = live_uuid("dddddddddddd");
         seed_account(&pool, id, t0).await;
         let mut tx = pool.begin().await.expect("tx");
-        account::update_account_rotated_tokens(&mut *tx, id, "at-9", Some(t1), Some("rt-9"))
-            .await
-            .expect("rotate");
+        account::update_account_rotated_tokens(
+            &TxConn::new(&mut tx),
+            id,
+            "at-9",
+            Some(t1),
+            Some("rt-9"),
+        )
+        .await
+        .expect("rotate");
         tx.commit().await.expect("commit");
         let row = read_account(&pool, id).await;
         assert_eq!(
@@ -4751,7 +4807,7 @@ mod tests {
         let id = live_uuid("eeeeeeeeeeee");
         seed_account(&pool, id, t0).await;
         let snapshot = serde_json::json!({"user_type": 2});
-        account::update_account_metadata(&pool, id, &snapshot)
+        account::update_account_metadata(&orm(&pool), id, &snapshot)
             .await
             .expect("snapshot");
         let row = read_account(&pool, id).await;
@@ -4784,49 +4840,6 @@ mod tests {
         assert!(sql.contains("\"masked_at\" = $39"), "{sql}");
         assert!(sql.contains("WHERE \"users\".\"id\" = ($40)"), "{sql}");
         assert!(!sql.contains("\"id\" = $"), "{sql}");
-    }
-
-    #[test]
-    fn ops_save_sql_pins() {
-        // `save_user_activation` (`activate_user.py:35-36`): the active
-        // flag, the `User.save()` outputs, the stamp — pk in WHERE.
-        let act = SAVE_USER_ACTIVATION_SQL;
-        let mut cursor = 0;
-        for frag in [
-            "\"is_active\" = TRUE",
-            "\"email\" = $2",
-            "\"display_name\" = $3",
-            "\"is_staff\" = $4",
-            "\"token\" = $5",
-            "\"token_updated_at\" = $6",
-            "\"updated_at\" = $7",
-            "WHERE \"id\" = $1",
-        ] {
-            let found = act[cursor..]
-                .find(frag)
-                .unwrap_or_else(|| panic!("{frag} present"));
-            cursor += found + frag.len();
-        }
-        // `save_user_password` (`reset_password.py:62-64`): the hash plus
-        // the same save outputs, autoset cleared — pk in WHERE.
-        let pwd = SAVE_USER_PASSWORD_SQL;
-        let mut cursor = 0;
-        for frag in [
-            "\"password\" = $2",
-            "\"is_password_autoset\" = FALSE",
-            "\"email\" = $3",
-            "\"display_name\" = $4",
-            "\"is_staff\" = $5",
-            "\"token\" = $6",
-            "\"token_updated_at\" = $7",
-            "\"updated_at\" = $8",
-            "WHERE \"id\" = $1",
-        ] {
-            let found = pwd[cursor..]
-                .find(frag)
-                .unwrap_or_else(|| panic!("{frag} present"));
-            cursor += found + frag.len();
-        }
     }
 
     /// Ops-command saves round-trip: activation flips the flag plus the
@@ -4866,7 +4879,7 @@ mod tests {
             token: "tok2".to_owned(),
             token_updated_at: None,
         };
-        save_user_activation(&mut *tx, id, &write)
+        save_user_activation(&TxConn::new(&mut tx), id, &write)
             .await
             .expect("activate");
         let row: (bool, String, String, bool, String) = sqlx::query_as(
@@ -4882,7 +4895,7 @@ mod tests {
         assert_eq!(row.2, "New");
         assert!(row.3);
         assert_eq!(row.4, "tok2");
-        save_user_password(&mut *tx, id, "pbkdf2$new", &write)
+        save_user_password(&TxConn::new(&mut tx), id, "pbkdf2$new", &write)
             .await
             .expect("password");
         let row: (String, bool) =
@@ -4893,75 +4906,6 @@ mod tests {
                 .expect("read back");
         assert_eq!(row.0, "pbkdf2$new");
         assert!(!row.1);
-    }
-
-    /// PIDASHCONV-1628: the moved stamp singles pin their exact
-    /// statements; the password twins differ only in the `last_login`
-    /// bump.
-    #[test]
-    fn moved_stamp_statements_pin() {
-        assert_eq!(
-            STAMP_LAST_LOGIN_SQL,
-            "UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2"
-        );
-        assert_eq!(
-            REHASH_PASSWORD_SQL,
-            "UPDATE \"users\" SET \"password\" = $1 WHERE \"id\" = $2"
-        );
-        assert_eq!(
-            STAMP_LOGOUT_SQL,
-            "UPDATE \"users\" SET \"last_logout_ip\" = $1, \"last_logout_time\" = $2, \
-             \"updated_at\" = $2, \
-             \"token\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $4 ELSE \"token\" END, \
-             \"token_updated_at\" = CASE WHEN \"token_updated_at\" IS NOT NULL THEN $2 \
-             ELSE \"token_updated_at\" END, \
-             \"display_name\" = CASE WHEN COALESCE(\"display_name\", '') = '' \
-             THEN split_part(\"email\", '@', 1) ELSE \"display_name\" END, \
-             \"is_staff\" = CASE WHEN \"is_superuser\" THEN true ELSE \"is_staff\" END \
-             WHERE \"id\" = $3"
-        );
-        assert_eq!(
-            TOUCH_USER_UPDATED_AT_SQL,
-            "UPDATE users SET updated_at = $1 WHERE id = $2"
-        );
-        assert_eq!(
-            CLEAR_AVATAR_SQL,
-            "UPDATE \"users\" SET \"avatar_asset_id\" = NULL, \"avatar\" = '' WHERE \"id\" = $1"
-        );
-        assert_eq!(
-            CLEAR_LAST_WORKSPACE_SQL,
-            "UPDATE profiles SET last_workspace_id = NULL WHERE last_workspace_id = $1"
-        );
-        assert_eq!(
-            SET_LAST_WORKSPACE_SQL,
-            "UPDATE profiles SET last_workspace_id = $1 WHERE user_id = $2"
-        );
-        assert!(PASSWORD_WRITE_WITH_LOGIN_SQL.contains("last_login = now()"));
-        assert!(!PASSWORD_WRITE_SQL.contains("last_login"));
-        for sql in [PASSWORD_WRITE_WITH_LOGIN_SQL, PASSWORD_WRITE_SQL] {
-            for clause in [
-                "password = $1",
-                "is_password_autoset = false",
-                "updated_at = now()",
-                "token = CASE WHEN token_updated_at IS NOT NULL THEN $3 ELSE token END",
-                "display_name = CASE WHEN COALESCE(display_name, '') = ''",
-                "is_staff = CASE WHEN is_superuser THEN true ELSE is_staff END",
-                "WHERE id = $2",
-            ] {
-                assert!(sql.contains(clause), "{clause} present");
-            }
-        }
-        assert!(
-            ME_PROFILE_SAVE_SQL.starts_with("UPDATE users SET last_login = $1, display_name = $2")
-        );
-        assert!(ME_PROFILE_SAVE_SQL
-            .ends_with("token_updated_at = $17, is_staff = $18, updated_at = $19 WHERE id = $20"));
-        for bind in 1..=20 {
-            assert!(
-                ME_PROFILE_SAVE_SQL.contains(&format!("${bind}")),
-                "bind ${bind} present"
-            );
-        }
     }
 
     /// Seed one temp `users` row carrying the columns the stamp tests
@@ -5006,7 +4950,7 @@ mod tests {
         let later: DateTime<Utc> = "2026-10-28T12:00:00+00:00".parse().expect("T1");
         let user_id = live_uuid("000000001628");
         seed_stamp_user(&mut tx, user_id, now).await;
-        stamp_last_login(&mut *tx, user_id, later)
+        stamp_last_login(&TxConn::new(&mut tx), user_id, later)
             .await
             .expect("stamp last_login");
         let stamped: Option<DateTime<Utc>> =
@@ -5016,7 +4960,7 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(stamped, Some(later));
-        rehash_password(&mut *tx, user_id, "new-hash")
+        rehash_password(&TxConn::new(&mut tx), user_id, "new-hash")
             .await
             .expect("rehash");
         let row: (String, DateTime<Utc>) =
@@ -5026,7 +4970,7 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(row, ("new-hash".to_owned(), now));
-        touch_user_updated_at(&mut *tx, user_id, later)
+        touch_user_updated_at(&TxConn::new(&mut tx), user_id, later)
             .await
             .expect("touch");
         let touched: DateTime<Utc> =
@@ -5036,14 +4980,16 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(touched, later);
-        clear_avatar(&mut *tx, user_id).await.expect("clear avatar");
+        clear_avatar(&TxConn::new(&mut tx), user_id)
+            .await
+            .expect("clear avatar");
         let avatar: String = sqlx::query_scalar("SELECT avatar FROM users WHERE id = $1")
             .bind(user_id)
             .fetch_one(&mut *tx)
             .await
             .expect("read back");
         assert_eq!(avatar, "");
-        stamp_logout(&mut *tx, user_id, Some("9.9.9.9"), later)
+        stamp_logout(&TxConn::new(&mut tx), user_id, Some("9.9.9.9"), later)
             .await
             .expect("stamp logout");
         let logged: (String, Option<DateTime<Utc>>) =
@@ -5079,7 +5025,7 @@ mod tests {
         .await
         .expect("arm rotation");
         let latest = later + chrono::Duration::hours(1);
-        stamp_logout(&mut *tx, user_id, Some("9.9.9.9"), latest)
+        stamp_logout(&TxConn::new(&mut tx), user_id, Some("9.9.9.9"), latest)
             .await
             .expect("stamp logout");
         let rotated: (String, Option<DateTime<Utc>>, String, bool, DateTime<Utc>) = sqlx::query_as(
@@ -5102,7 +5048,7 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("savepoint");
-        let err = stamp_logout(&mut *tx, user_id, None, later)
+        let err = stamp_logout(&TxConn::new(&mut tx), user_id, None, later)
             .await
             .expect_err("None ip raises");
         assert_not_null_violation(&err);
@@ -5131,7 +5077,7 @@ mod tests {
         // No token in use: the token columns stay put, `last_login`
         // bumps on the login twin.
         write_password_with_save_effects(
-            &mut *tx,
+            &TxConn::new(&mut tx),
             user_id,
             &PasswordSave {
                 encoded: "hash-1",
@@ -5167,7 +5113,7 @@ mod tests {
             .await
             .expect("clear last_login");
         write_password_with_save_effects(
-            &mut *tx,
+            &TxConn::new(&mut tx),
             user_id,
             &PasswordSave {
                 encoded: "hash-2",
@@ -5222,7 +5168,7 @@ mod tests {
         .execute(&mut *tx)
         .await
         .expect("seed profile");
-        set_last_workspace(&mut *tx, user_id, ws_id)
+        set_last_workspace(&TxConn::new(&mut tx), user_id, ws_id)
             .await
             .expect("set pointer");
         let pointed: Option<Uuid> =
@@ -5232,7 +5178,7 @@ mod tests {
                 .await
                 .expect("read back");
         assert_eq!(pointed, Some(ws_id));
-        clear_last_workspace(&mut *tx, ws_id)
+        clear_last_workspace(&TxConn::new(&mut tx), ws_id)
             .await
             .expect("clear pointers");
         let pointed: Option<Uuid> =
@@ -5261,7 +5207,7 @@ mod tests {
         let user_id = live_uuid("00000000162c");
         seed_stamp_user(&mut tx, user_id, now).await;
         save_me_profile(
-            &mut *tx,
+            &TxConn::new(&mut tx),
             user_id,
             &MeProfileSave {
                 last_login: Some(later),

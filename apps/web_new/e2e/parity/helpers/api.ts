@@ -5404,6 +5404,23 @@ export async function serverDeleteState(
   );
   if (!res.ok && res.status !== 204) throw new Error(`[parity] state delete failed with HTTP ${res.status}.`);
 }
+/** Patch a project state (name, group, color, description) through the API. */
+export async function serverPatchState(
+  workspaceSlug: string,
+  projectId: string,
+  stateId: string,
+  patch: Record<string, unknown>,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<void> {
+  const res = await mutateJSON(
+    "PATCH",
+    `${apiBase}/api/workspaces/${workspaceSlug}/projects/${projectId}/states/${stateId}/`,
+    sessionCookie,
+    patch
+  );
+  if (!res.ok && res.status !== 204) throw new Error(`[parity] state patch failed with HTTP ${res.status}.`);
+}
 /** Single-issue read through the public REST API. */
 export async function serverIssue(
   workspaceSlug: string,

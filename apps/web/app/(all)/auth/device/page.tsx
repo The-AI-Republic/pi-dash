@@ -17,7 +17,9 @@ class DeviceAuthService extends APIService {
   }
 
   approve(userCode: string) {
-    return this.post(`/api/v1/auth/device/approve/`, { user_code: userCode }).then((r) => r.data);
+    // A person approves here: interactive, so it may sign a signed-out
+    // built-in engine back in (the desktop app's silent approval may not).
+    return this.post(`/api/v1/auth/device/approve/`, { user_code: userCode, interactive: true }).then((r) => r.data);
   }
 }
 

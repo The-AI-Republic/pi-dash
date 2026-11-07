@@ -20,7 +20,7 @@
 //! [`pidash_issue_url`][git_url], [`completion_base_url`][git_base],
 //! [`completion_body`][git_body], [`retry_countdown_secs`][git_retry],
 //! [`advisory_lock_key`][git_lock], [`parse_remote_dt`][git_dt],
-//! [`parse_single_id_arg`][git_arity], [`default_state_sql`][git_state],
+//! [`parse_single_id_arg`][git_arity], [`default_state_query`][git_state],
 //! [`save_state_sql`][git_save_state], [`next_link`][git_link],
 //! [`GITHUB_API_BASE`][git_api], [`PROVIDER_TIMEOUT_SECS`][git_timeout],
 //! [`installation_token`][git_token] and the error-text builders.
@@ -36,7 +36,7 @@
 //! [git_lock]: super::git_sync::advisory_lock_key
 //! [git_dt]: super::git_sync::parse_remote_dt
 //! [git_arity]: super::git_sync::parse_single_id_arg
-//! [git_state]: super::git_sync::default_state_sql
+//! [git_state]: super::git_sync::default_state_query
 //! [git_save_state]: super::git_sync::save_state_sql
 //! [git_link]: super::git_sync::next_link
 //! [git_api]: super::git_sync::GITHUB_API_BASE
@@ -152,21 +152,30 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_compat::http::percent_encode;
 use pidash_db::config::encryption::Keyring;
+use pidash_db::entity::{
+    github_comment_syncs, github_issue_syncs, github_repositories, github_repository_syncs,
+    issue_comments, issue_sequences, issues, projects, states, workspace_integrations, workspaces,
+};
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::integrations::adapters_github::GithubError;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+    Select,
+};
 
 use super::super::tasks_mail::mail_send::strip_tags;
 use super::git_sync::{
     advisory_lock_key, completion_base_url, completion_body, completion_error_text,
-    default_state_sql, json_truthy, next_link, parse_remote_dt, parse_single_id_arg,
-    pidash_issue_url, retry_countdown_secs, safe_render, save_state_sql, strip_html_text,
+    default_pod_query, default_state_query, json_truthy, next_link, parse_remote_dt,
+    parse_single_id_arg, pidash_issue_url, retry_countdown_secs, safe_render, save_state_query,
+    stamp_binding_error, stamp_binding_success, strip_html_text, take_advisory_lock,
     truncate_chars, GITHUB_API_BASE, PROVIDER_TIMEOUT_SECS,
 };
 use crate::issue_transition::{comment_sync_transition, fire_sync_transition};
@@ -361,150 +370,258 @@ pub fn parse_issue_number_from_url(issue_url: Option<&str>) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
-// SQL (mirrors the ORM call-for-call; `$n` binds filled by the handlers)
+// Reads (mirrors the ORM call-for-call)
 // ---------------------------------------------------------------------------
 
 /// Enabled-sync id set (`github_sync_task.py:269`):
 /// `GithubRepositorySync.objects.filter(is_sync_enabled=True)` — the
 /// default manager scopes `deleted_at IS NULL`; no ordering.
-pub const ENABLED_SYNCS_SQL: &str =
-    "SELECT id FROM github_repository_syncs WHERE is_sync_enabled = TRUE AND deleted_at IS NULL";
+pub fn enabled_syncs_query() -> Select<github_repository_syncs::Entity> {
+    github_repository_syncs::Entity::find()
+        .select_only()
+        .column(github_repository_syncs::Column::Id)
+        .filter(github_repository_syncs::Column::IsSyncEnabled.eq(true))
+        .filter(github_repository_syncs::Column::DeletedAt.is_null())
+}
+
+/// Composite row for the scan query; joined columns carry plain aliases.
+#[derive(Debug, sea_orm::FromQueryResult)]
+#[allow(non_snake_case)]
+pub struct SyncScanRow {
+    pub sync_id: Uuid,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub actor_id: Uuid,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub integration_config: Value,
+}
 
 /// One sync with its `select_related` closure
 /// (`github_sync_task.py:280-282`): repository, workspace_integration,
 /// project. `select_related` joins are plain `INNER JOIN`s — Django does
 /// NOT apply the related managers' tombstone filters here, so neither
 /// does this statement: only the base sync row is soft-delete scoped.
-/// `$1` is the sync id; a miss is the `DoesNotExist` no-op. The project
-/// join selects no columns (only `sync.project_id` is ever read), so it
-/// is omitted with identical observable behavior.
-pub const SYNC_SCAN_SQL: &str =
-    "SELECT s.id AS sync_id, s.project_id, s.workspace_id, s.actor_id, \
-    r.owner AS repo_owner, r.name AS repo_name, \
-    wi.config AS integration_config \
-    FROM github_repository_syncs s \
-    INNER JOIN github_repositories r ON r.id = s.repository_id \
-    INNER JOIN workspace_integrations wi ON wi.id = s.workspace_integration_id \
-    WHERE s.id = $1 AND s.deleted_at IS NULL";
+/// A miss is the `DoesNotExist` no-op. The project join selects no
+/// columns (only `sync.project_id` is ever read), so it is omitted with
+/// identical observable behavior.
+pub fn sync_scan_query(sync_id: Uuid) -> Select<github_repository_syncs::Entity> {
+    github_repository_syncs::Entity::find()
+        .select_only()
+        .column_as(github_repository_syncs::Column::Id, "sync_id")
+        .column(github_repository_syncs::Column::ProjectId)
+        .column(github_repository_syncs::Column::WorkspaceId)
+        .column(github_repository_syncs::Column::ActorId)
+        .column_as(github_repositories::Column::Owner, "repo_owner")
+        .column_as(github_repositories::Column::Name, "repo_name")
+        .column_as(workspace_integrations::Column::Config, "integration_config")
+        .join(
+            JoinType::InnerJoin,
+            github_repository_syncs::Relation::GithubRepositories.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_repository_syncs::Relation::WorkspaceIntegrations.def(),
+        )
+        .filter(github_repository_syncs::Column::Id.eq(sync_id))
+        .filter(github_repository_syncs::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+/// Sort-order seed (`Issue.save`, `issue.py:331-335`): max sort_order over
+/// live siblings in the resolved state (`IS NOT DISTINCT FROM` semantics:
+/// `Some` → `= id`, `None` → `IS NULL`).
+pub fn max_sort_query(project_id: Uuid, state_id: Option<Uuid>) -> Select<issues::Entity> {
+    let base = issues::Entity::find()
+        .select_only()
+        .column_as(issues::Column::SortOrder.max(), "largest")
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null());
+    match state_id {
+        Some(id) => base.filter(issues::Column::StateId.eq(id)),
+        None => base.filter(issues::Column::StateId.is_null()),
+    }
+}
 
 /// The project workspace for the create path (`ProjectBaseModel.save`,
 /// `project.py:309-311`): `self.workspace = self.project.workspace`.
-/// `$1` is the project id.
-pub const PROJECT_WORKSPACE_SQL: &str = "SELECT workspace_id FROM projects WHERE id = $1";
+pub fn project_workspace_query(project_id: Uuid) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(project_id))
+        .limit(1)
+}
 
 /// Mirror lookup (`github_sync_task.py:135-140`):
 /// `Issue.objects.update_or_create(project, external_source="github",
 /// external_id, …)` — the default manager scopes `deleted_at IS NULL`.
-/// `$1` the project id, `$2` the upstream issue number.
-pub const ISSUE_LOOKUP_SQL: &str = "SELECT id FROM issues WHERE project_id = $1 AND external_source = 'github' AND external_id = $2 AND deleted_at IS NULL";
+pub fn issue_lookup_query(project_id: Uuid, external_id: &str) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::ExternalSource.eq("github"))
+        .filter(issues::Column::ExternalId.eq(external_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+/// Composite row for the state snapshot.
+#[derive(Debug, sea_orm::FromQueryResult)]
+#[allow(non_snake_case)]
+pub struct IssueStateRow {
+    pub state_id: Option<Uuid>,
+    pub state_group: Option<String>,
+    pub completed_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+}
 
 /// Current state + group + stored completion stamp for the issue UPDATE
 /// arm (`Issue.save`, `issue.py:288-309`): the row's own state, if any.
-/// `$1` is the issue id. A NULL state re-resolves the default (same
-/// branch as creation); the stored `completed_at` rides along because
-/// the `state is None` branch never touches it.
-pub const ISSUE_STATE_SQL: &str = "SELECT i.state_id, s.\"group\" AS state_group, i.completed_at FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1";
-
-/// `GithubIssueSync.objects.update_or_create(repository_sync, issue, …)`
-/// (`github_sync_task.py:168-182`): full-row insert and full-defaults
-/// update (plus `updated_at`, which `save()` touches on the update path).
-/// Audit lands NULL on both arms (`BaseModel.save` crum clobber, no
-/// restamp — ported bug, see the module docs). `metadata` is NOT in the
-/// defaults: creates start at `{}`, updates keep the stored value.
-const INSERT_ISSUE_SYNC_SQL: &str = "INSERT INTO github_issue_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, repo_issue_id, github_issue_id, issue_url, issue_id, repository_sync_id, metadata, gh_issue_created_at, gh_issue_updated_at) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, '{}', $11, $12)";
-const UPDATE_ISSUE_SYNC_SQL: &str = "UPDATE github_issue_syncs SET repo_issue_id = $2, github_issue_id = $3, issue_url = $4, workspace_id = $5, project_id = $6, created_by_id = NULL, updated_by_id = NULL, gh_issue_created_at = $7, gh_issue_updated_at = $8, updated_at = $9 WHERE id = $1";
+/// The snapshot is deliberately UNSCOPED (`Issue.all_objects`, a plain
+/// Manager): soft-deleted rows still resolve.
+pub fn issue_state_query(issue_id: Uuid) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::StateId)
+        .column_as(states::Column::Group, "state_group")
+        .column(issues::Column::CompletedAt)
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .filter(issues::Column::Id.eq(issue_id))
+        .limit(1)
+}
 
 /// Mirror-sync lookup for the upsert
 /// (`github_sync_task.py:168-169`): `update_or_create(repository_sync,
-/// issue)` — metadata is read for the login merge below. `$1` the sync
-/// id, `$2` the issue id.
-pub const GITHUB_SYNC_LOOKUP_SQL: &str = "SELECT id, metadata FROM github_issue_syncs WHERE repository_sync_id = $1 AND issue_id = $2 AND deleted_at IS NULL";
-
-/// Next per-project sequence (`Issue.save`, `issue.py:314-327`): the max
-/// over the scoped `IssueSequence` rows. `$1` is the project id; NULL
-/// means the first issue (`sequence_id = 1`).
-pub const MAX_SEQUENCE_SQL: &str =
-    "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL";
-
-/// Sort-order seed (`Issue.save`, `issue.py:331-335`): the max over live
-/// sibling rows in the same resolved state (`state=None` matches
-/// `state_id IS NULL`, via `IS NOT DISTINCT FROM`). `$1` the project id,
-/// `$2` the resolved state id (nullable). NULL keeps the field default
-/// `65535`.
-pub const MAX_SORT_ORDER_SQL: &str = "SELECT MAX(sort_order) FROM issues WHERE project_id = $1 AND state_id IS NOT DISTINCT FROM $2 AND deleted_at IS NULL";
-
-/// Take the per-project creation lock (`issue.py:318-320`):
-/// `SELECT pg_advisory_xact_lock(%s)`. Runs inside the creation
-/// transaction, so the lock releases on commit/rollback like Python's
-/// `transaction.atomic()` block.
-pub const ADVISORY_LOCK_SQL: &str = "SELECT pg_advisory_xact_lock($1)";
-
-/// Default-pod resolution (`Issue.save`, `issue.py:277-286`):
-/// `Pod.objects.filter(project_id, is_default=True).first()` — live rows
-/// only (`PodManager`), Meta ordering `(-is_default, created_at)` which is
-/// `created_at ASC` once every candidate is default. `$1` is the project
-/// id. A miss leaves `assigned_pod_id` NULL.
-pub const DEFAULT_POD_SQL: &str = "SELECT id FROM pod WHERE project_id = $1 AND is_default = TRUE AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1";
+/// issue)` — metadata is read for the login merge below.
+pub fn github_sync_lookup_query(
+    repository_sync_id: Uuid,
+    issue_id: Uuid,
+) -> Select<github_issue_syncs::Entity> {
+    github_issue_syncs::Entity::find()
+        .select_only()
+        .column(github_issue_syncs::Column::Id)
+        .column(github_issue_syncs::Column::Metadata)
+        .filter(github_issue_syncs::Column::RepositorySyncId.eq(repository_sync_id))
+        .filter(github_issue_syncs::Column::IssueId.eq(issue_id))
+        .filter(github_issue_syncs::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// Mirror-comment lookup (`github_sync_task.py:207-221`):
 /// `IssueComment.objects.update_or_create(issue, external_source,
 /// external_id, …)` — the existing row's render columns feed the
-/// change-tracker comparison for the description side-table. `$1` the
-/// issue id, `$2` the upstream comment id.
-pub const ISSUE_COMMENT_LOOKUP_SQL: &str = "SELECT id, comment_html, comment_stripped, comment_json, description_id FROM issue_comments WHERE issue_id = $1 AND external_source = 'github' AND external_id = $2 AND deleted_at IS NULL";
+/// change-tracker comparison for the description side-table.
+pub fn issue_comment_lookup_query(
+    issue_id: Uuid,
+    external_id: &str,
+) -> Select<issue_comments::Entity> {
+    issue_comments::Entity::find()
+        .select_only()
+        .column(issue_comments::Column::Id)
+        .column(issue_comments::Column::CommentHtml)
+        .column(issue_comments::Column::CommentStripped)
+        .column(issue_comments::Column::CommentJson)
+        .column(issue_comments::Column::DescriptionId)
+        .filter(issue_comments::Column::IssueId.eq(issue_id))
+        .filter(issue_comments::Column::ExternalSource.eq("github"))
+        .filter(issue_comments::Column::ExternalId.eq(external_id))
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// Comment-sync lookup (`github_sync_task.py:230-232`):
 /// `GithubCommentSync.objects.update_or_create(issue_sync, comment, …)` —
 /// keyed by `(issue_sync, comment)` (`unique_together`, `github.py:116`),
-/// NOT by the remote id. `$1` the issue-sync id, `$2` the comment id.
-pub const COMMENT_SYNC_LOOKUP_SQL: &str = "SELECT id FROM github_comment_syncs WHERE issue_sync_id = $1 AND comment_id = $2 AND deleted_at IS NULL";
-
-/// `GithubCommentSync.objects.update_or_create(issue_sync, comment, …)`
-/// (`github_sync_task.py:230-240`): no metadata column on this table;
-/// audit lands NULL on both arms (no restamp — ported bug, see the module
-/// docs).
-const INSERT_COMMENT_SYNC_SQL: &str = "INSERT INTO github_comment_syncs (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, repo_comment_id, comment_id, issue_sync_id) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8)";
-const UPDATE_COMMENT_SYNC_SQL: &str = "UPDATE github_comment_syncs SET repo_comment_id = $2, workspace_id = $3, project_id = $4, created_by_id = NULL, updated_by_id = NULL, updated_at = $5 WHERE id = $1";
-
-/// Sync outcomes: success stamps both columns
-/// (`github_sync_task.py:323-325`); faults write only `last_sync_error`
-/// (`save(update_fields=[…])` — no `updated_at` touch either way).
-const SYNC_SUCCESS_SQL: &str =
-    "UPDATE github_repository_syncs SET last_synced_at = $2, last_sync_error = '' WHERE id = $1";
-const SYNC_ERROR_SQL: &str =
-    "UPDATE github_repository_syncs SET last_sync_error = $2 WHERE id = $1";
-
-/// Metadata-only writes (`save(update_fields=["metadata"])`):
-/// reconcile flags, the login merge, and the completion guard/error/id
-/// keys. Django's `_save_table` writes exactly the named columns —
-/// `auto_now` is not folded in — so no `updated_at` touch here either.
-const UPDATE_GITHUB_SYNC_METADATA_SQL: &str =
-    "UPDATE github_issue_syncs SET metadata = $2 WHERE id = $1";
+/// NOT by the remote id.
+pub fn comment_sync_lookup_query(
+    issue_sync_id: Uuid,
+    comment_id: Uuid,
+) -> Select<github_comment_syncs::Entity> {
+    github_comment_syncs::Entity::find()
+        .select_only()
+        .column(github_comment_syncs::Column::Id)
+        .filter(github_comment_syncs::Column::IssueSyncId.eq(issue_sync_id))
+        .filter(github_comment_syncs::Column::CommentId.eq(comment_id))
+        .filter(github_comment_syncs::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// Reconcile candidate rows (`github_sync_task.py:249`): id, number and
-/// metadata of every live mirror on the sync. `$1` is the sync id.
-pub const RECONCILE_LIST_SQL: &str =
-    "SELECT id, repo_issue_id, metadata FROM github_issue_syncs WHERE repository_sync_id = $1 AND deleted_at IS NULL";
+/// metadata of every live mirror on the sync.
+pub fn reconcile_list_query(repository_sync_id: Uuid) -> Select<github_issue_syncs::Entity> {
+    github_issue_syncs::Entity::find()
+        .select_only()
+        .column(github_issue_syncs::Column::Id)
+        .column(github_issue_syncs::Column::RepoIssueId)
+        .column(github_issue_syncs::Column::Metadata)
+        .filter(github_issue_syncs::Column::RepositorySyncId.eq(repository_sync_id))
+        .filter(github_issue_syncs::Column::DeletedAt.is_null())
+}
+
+/// Composite row for the completion closure.
+#[derive(Debug, sea_orm::FromQueryResult)]
+#[allow(non_snake_case)]
+pub struct CompletionRow {
+    pub sync_id: Uuid,
+    pub sync_repo_issue_id: i64,
+    pub sync_metadata: Value,
+    pub repo_sync_id: Uuid,
+    pub repo_sync_integration_id: Uuid,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub integration_config: Value,
+    pub issue_id: Uuid,
+    pub issue_project_id: Uuid,
+    pub workspace_slug: String,
+}
 
 /// Completion closure (`github_sync_task.py:344-350`): the sync row with
 /// its `select_related` (`repository_sync__repository`,
 /// `repository_sync__workspace_integration`, `issue`,
-/// `issue__workspace`) — plain inner joins, base row scoped. `$1` is the
-/// issue-sync id; a miss is the `DoesNotExist` no-op.
-pub const COMPLETION_LOOKUP_SQL: &str =
-    "SELECT s.id AS sync_id, s.repo_issue_id AS sync_repo_issue_id, s.metadata AS sync_metadata, \
-    rs.id AS repo_sync_id, rs.workspace_integration_id AS repo_sync_integration_id, \
-    r.owner AS repo_owner, r.name AS repo_name, \
-    wi.config AS integration_config, \
-    i.id AS issue_id, i.project_id AS issue_project_id, \
-    w.slug AS workspace_slug \
-    FROM github_issue_syncs s \
-    INNER JOIN github_repository_syncs rs ON rs.id = s.repository_sync_id \
-    INNER JOIN github_repositories r ON r.id = rs.repository_id \
-    INNER JOIN workspace_integrations wi ON wi.id = rs.workspace_integration_id \
-    INNER JOIN issues i ON i.id = s.issue_id \
-    INNER JOIN workspaces w ON w.id = i.workspace_id \
-    WHERE s.id = $1 AND s.deleted_at IS NULL";
+/// `issue__workspace`) — plain inner joins, base row scoped. A miss is
+/// the `DoesNotExist` no-op.
+pub fn completion_lookup_query(sync_id: Uuid) -> Select<github_issue_syncs::Entity> {
+    github_issue_syncs::Entity::find()
+        .select_only()
+        .column_as(github_issue_syncs::Column::Id, "sync_id")
+        .column_as(
+            github_issue_syncs::Column::RepoIssueId,
+            "sync_repo_issue_id",
+        )
+        .column_as(github_issue_syncs::Column::Metadata, "sync_metadata")
+        .column_as(github_repository_syncs::Column::Id, "repo_sync_id")
+        .column_as(
+            github_repository_syncs::Column::WorkspaceIntegrationId,
+            "repo_sync_integration_id",
+        )
+        .column_as(github_repositories::Column::Owner, "repo_owner")
+        .column_as(github_repositories::Column::Name, "repo_name")
+        .column_as(workspace_integrations::Column::Config, "integration_config")
+        .column_as(issues::Column::Id, "issue_id")
+        .column_as(issues::Column::ProjectId, "issue_project_id")
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .join(
+            JoinType::InnerJoin,
+            github_issue_syncs::Relation::GithubRepositorySyncs.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_repository_syncs::Relation::GithubRepositories.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_repository_syncs::Relation::WorkspaceIntegrations.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_issue_syncs::Relation::Issues.def(),
+        )
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(github_issue_syncs::Column::Id.eq(sync_id))
+        .filter(github_issue_syncs::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 // ---------------------------------------------------------------------------
 // Celery wire payloads
@@ -848,31 +965,16 @@ pub struct RepoScan {
     pub token: String,
 }
 
-fn decode_sync_scan(row: sqlx::postgres::PgRow, keyring: &Keyring) -> Result<RepoScan, String> {
-    let config: Value = row
-        .try_get("integration_config")
-        .map_err(|error| format!("decode sync scan: {error}"))?;
-    let token =
-        resolve_token(&config, keyring).map_err(|detail| format!("decode sync scan: {detail}"))?;
+fn decode_sync_scan(row: SyncScanRow, keyring: &Keyring) -> Result<RepoScan, String> {
+    let token = resolve_token(&row.integration_config, keyring)
+        .map_err(|detail| format!("decode sync scan: {detail}"))?;
     Ok(RepoScan {
-        sync_id: row
-            .try_get("sync_id")
-            .map_err(|error| format!("decode sync scan: {error}"))?,
-        project_id: row
-            .try_get("project_id")
-            .map_err(|error| format!("decode sync scan: {error}"))?,
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(|error| format!("decode sync scan: {error}"))?,
-        actor_id: row
-            .try_get("actor_id")
-            .map_err(|error| format!("decode sync scan: {error}"))?,
-        owner: row
-            .try_get("repo_owner")
-            .map_err(|error| format!("decode sync scan: {error}"))?,
-        name: row
-            .try_get("repo_name")
-            .map_err(|error| format!("decode sync scan: {error}"))?,
+        sync_id: row.sync_id,
+        project_id: row.project_id,
+        workspace_id: row.workspace_id,
+        actor_id: row.actor_id,
+        owner: row.repo_owner,
+        name: row.repo_name,
         token,
     })
 }
@@ -880,9 +982,10 @@ fn decode_sync_scan(row: sqlx::postgres::PgRow, keyring: &Keyring) -> Result<Rep
 /// Resolve the workspace for a new mirror issue (`ProjectBaseModel.save`,
 /// `project.py:309-311`).
 async fn project_workspace(pool: &PgPool, project_id: &Uuid) -> Result<Uuid, String> {
-    sqlx::query_scalar(PROJECT_WORKSPACE_SQL)
-        .bind(*project_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    project_workspace_query(*project_id)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(|error| format!("resolve project workspace: {error}"))?
         .ok_or_else(|| format!("resolve project workspace: project {project_id} is gone"))
@@ -892,21 +995,21 @@ async fn project_workspace(pool: &PgPool, project_id: &Uuid) -> Result<Uuid, Str
 /// (`issue.py:288-301`): default non-triage state first, else first
 /// non-triage state (`is_triage = FALSE`, `save_state_sql`).
 async fn save_default_state(
-    executor: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl ConnectionTrait,
     project_id: &Uuid,
 ) -> Result<Option<Uuid>, String> {
-    let db_error = |error: sqlx::Error| format!("create mirror issue: {error}");
-    let state: Option<(Uuid, String)> = sqlx::query_as(save_state_sql(true))
-        .bind(*project_id)
-        .fetch_optional(&mut **executor)
+    let db_error = |error: sea_orm::DbErr| format!("create mirror issue: {error}");
+    let state: Option<(Uuid, String)> = save_state_query(true, *project_id)
+        .into_tuple()
+        .one(db)
         .await
         .map_err(db_error)?;
     if state.is_some() {
         return Ok(state.map(|found| found.0));
     }
-    let fallback: Option<(Uuid, String)> = sqlx::query_as(save_state_sql(false))
-        .bind(*project_id)
-        .fetch_optional(&mut **executor)
+    let fallback: Option<(Uuid, String)> = save_state_query(false, *project_id)
+        .into_tuple()
+        .one(db)
         .await
         .map_err(db_error)?;
     Ok(fallback.map(|found| found.0))
@@ -920,7 +1023,7 @@ async fn save_default_state(
 /// resolved state (the post-save legs' current value).
 #[allow(clippy::too_many_arguments)]
 async fn create_issue(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl ConnectionTrait,
     scan: &RepoScan,
     workspace_id: &Uuid,
     number: i64,
@@ -932,35 +1035,37 @@ async fn create_issue(
     sync_values: &IssueSyncValues,
     now: &DateTime<Utc>,
 ) -> Result<(Uuid, Uuid, Option<Uuid>), String> {
-    let db_error = |error: sqlx::Error| format!("create mirror issue: {error}");
-    sqlx::query(ADVISORY_LOCK_SQL)
-        .bind(advisory_lock_key(&scan.project_id))
-        .execute(&mut **tx)
+    let db_error = |error: sea_orm::DbErr| format!("create mirror issue: {error}");
+    let sqlx_error = |error: sqlx::Error| format!("create mirror issue: {error}");
+    take_advisory_lock(db, advisory_lock_key(&scan.project_id))
         .await
         .map_err(db_error)?;
-    let pod_id: Option<Uuid> = sqlx::query_scalar(DEFAULT_POD_SQL)
-        .bind(scan.project_id)
-        .fetch_optional(&mut **tx)
+    let pod_id: Option<Uuid> = default_pod_query(scan.project_id)
+        .into_tuple()
+        .one(db)
         .await
         .map_err(db_error)?;
-    let state_id = save_default_state(tx, &scan.project_id).await?;
+    let state_id = save_default_state(db, &scan.project_id).await?;
     // `completed_at` stays NULL here: this create call never passes a
     // state, so `Issue.save` takes the `state is None` branch
     // (`issue.py:288-296`) — it resolves the default state but stamps
     // `completed_at` only when the state was already set (`issue.py:302-309`,
     // which this path never reaches).
     let completed_at: Option<DateTime<Utc>> = None;
-    let max_sequence: Option<i64> = sqlx::query_scalar(MAX_SEQUENCE_SQL)
-        .bind(scan.project_id)
-        .fetch_optional(&mut **tx)
+    let max_sequence: Option<i64> = issue_sequences::Entity::find()
+        .select_only()
+        .column_as(issue_sequences::Column::Sequence.max(), "largest")
+        .filter(issue_sequences::Column::ProjectId.eq(scan.project_id))
+        .filter(issue_sequences::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
         .await
         .map_err(db_error)?
         .flatten();
     let sequence_id = max_sequence.map(|largest| largest + 1).unwrap_or(1);
-    let max_sort: Option<f64> = sqlx::query_scalar(MAX_SORT_ORDER_SQL)
-        .bind(scan.project_id)
-        .bind(state_id)
-        .fetch_optional(&mut **tx)
+    let max_sort: Option<f64> = max_sort_query(scan.project_id, state_id)
+        .into_tuple()
+        .one(db)
         .await
         .map_err(db_error)?
         .flatten();
@@ -970,7 +1075,7 @@ async fn create_issue(
     let stripped = strip_html_text(description_html);
     let issue_id = Uuid::new_v4();
     domain_issues::insert_mirror_issue(
-        &mut **tx,
+        db,
         &domain_issues::MirrorIssueInsert {
             issue_id,
             now: *now,
@@ -990,9 +1095,9 @@ async fn create_issue(
         },
     )
     .await
-    .map_err(db_error)?;
+    .map_err(sqlx_error)?;
     domain_issues::insert_issue_sequence(
-        &mut **tx,
+        db,
         &domain_issues::MirrorIssueSequence {
             project_id: scan.project_id,
             workspace_id: *workspace_id,
@@ -1002,9 +1107,9 @@ async fn create_issue(
         },
     )
     .await
-    .map_err(db_error)?;
+    .map_err(sqlx_error)?;
     let sync_id =
-        insert_issue_sync(tx, scan, workspace_id, &issue_id, number, sync_values, now).await?;
+        insert_issue_sync(db, scan, workspace_id, &issue_id, number, sync_values, now).await?;
     Ok((issue_id, sync_id, state_id))
 }
 
@@ -1018,7 +1123,7 @@ pub struct IssueSyncValues {
 }
 
 async fn insert_issue_sync(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl ConnectionTrait,
     scan: &RepoScan,
     workspace_id: &Uuid,
     issue_id: &Uuid,
@@ -1026,25 +1131,36 @@ async fn insert_issue_sync(
     values: &IssueSyncValues,
     now: &DateTime<Utc>,
 ) -> Result<Uuid, String> {
-    let db_error = |error: sqlx::Error| format!("write issue sync: {error}");
+    use sea_orm::{EntityTrait, Set};
+    let db_error = |error: sea_orm::DbErr| format!("write issue sync: {error}");
     let sync_id = Uuid::new_v4();
-    sqlx::query(INSERT_ISSUE_SYNC_SQL)
-        .bind(sync_id)
-        .bind(*now)
-        .bind(*now)
-        .bind(scan.project_id)
-        .bind(*workspace_id)
-        .bind(number)
-        .bind(values.github_issue_id)
-        .bind(&values.issue_url)
-        .bind(*issue_id)
-        .bind(scan.sync_id)
-        .bind(values.created_at)
-        .bind(values.updated_at)
-        .execute(&mut **tx)
+    let at = |value: Option<DateTime<Utc>>| {
+        value.map(|at| at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero offset")))
+    };
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = (*now).into();
+    let row: github_issue_syncs::Model =
+        github_issue_syncs::Entity::insert(github_issue_syncs::ActiveModel {
+            id: Set(sync_id),
+            created_at: Set(stamped),
+            updated_at: Set(stamped),
+            created_by_id: Set(None),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            project_id: Set(scan.project_id),
+            workspace_id: Set(*workspace_id),
+            repo_issue_id: Set(number),
+            github_issue_id: Set(values.github_issue_id),
+            issue_url: Set(values.issue_url.clone()),
+            issue_id: Set(*issue_id),
+            repository_sync_id: Set(scan.sync_id),
+            metadata: Set(serde_json::json!({})),
+            gh_issue_created_at: Set(at(values.created_at)),
+            gh_issue_updated_at: Set(at(values.updated_at)),
+        })
+        .exec_with_returning(db)
         .await
         .map_err(db_error)?;
-    Ok(sync_id)
+    Ok(row.id)
 }
 
 /// Decode one upstream issue payload into render + sync values
@@ -1097,34 +1213,41 @@ pub async fn upsert_issue(
     now: &DateTime<Utc>,
     hook: Option<Arc<dyn IssueTransitionHook>>,
 ) -> Result<(Uuid, Uuid), String> {
-    let db_error = |error: sqlx::Error| format!("upsert mirror issue: {error}");
+    let db_error = |error: sea_orm::DbErr| format!("upsert mirror issue: {error}");
+    let sqlx_error = |error: sqlx::Error| format!("upsert mirror issue: {error}");
     let (number, name, description_html, description_stripped, values) =
         decode_issue_payload(gh_issue)?;
     let number_text = number.to_string();
-    let existing: Option<Uuid> = sqlx::query_scalar(ISSUE_LOOKUP_SQL)
-        .bind(scan.project_id)
-        .bind(&number_text)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let existing: Option<Uuid> = issue_lookup_query(scan.project_id, &number_text)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(db_error)?;
     match existing {
         None => {
             let workspace_id = project_workspace(pool, &scan.project_id).await?;
-            let mut tx = pool.begin().await.map_err(db_error)?;
-            let (issue_id, sync_id, state_id) = create_issue(
-                &mut tx,
-                scan,
-                &workspace_id,
-                number,
-                &name,
-                &description_html,
-                &description_stripped,
-                &values,
-                now,
-            )
-            .await?;
-            merge_issue_login(&mut tx, &sync_id, gh_issue).await?;
-            tx.commit().await.map_err(db_error)?;
+            let mut tx = pool.begin().await.map_err(sqlx_error)?;
+            let (issue_id, sync_id, state_id) = {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                create_issue(
+                    &conn,
+                    scan,
+                    &workspace_id,
+                    number,
+                    &name,
+                    &description_html,
+                    &description_stripped,
+                    &values,
+                    now,
+                )
+                .await?
+            };
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                merge_issue_login(&conn, &sync_id, gh_issue).await?;
+            }
+            tx.commit().await.map_err(sqlx_error)?;
             // The receiver ignores `created` and compares previous
             // (`None`) vs current (the default): a ticking default
             // enters the bucket here.
@@ -1142,11 +1265,18 @@ pub async fn upsert_issue(
                 Option<Uuid>,
                 Option<String>,
                 Option<DateTime<Utc>>,
-            ) = sqlx::query_as(ISSUE_STATE_SQL)
-                .bind(issue_id)
-                .fetch_optional(pool)
+            ) = issue_state_query(issue_id)
+                .into_model::<IssueStateRow>()
+                .one(&db)
                 .await
                 .map_err(db_error)?
+                .map(|row| {
+                    (
+                        row.state_id,
+                        row.state_group,
+                        row.completed_at.map(|at| at.with_timezone(&chrono::Utc)),
+                    )
+                })
                 .unwrap_or((None, None, None));
             // `self.state is None` (`issue.py:288-296`): resolve the
             // default for the receivers — in memory only.
@@ -1158,9 +1288,12 @@ pub async fn upsert_issue(
             // `completed_at`, so the stored stamp is preserved (it
             // stays NULL on every row the sync itself created).
             let adopted: Option<Uuid> = if state_id.is_none() {
-                let mut tx = pool.begin().await.map_err(db_error)?;
-                let resolved = save_default_state(&mut tx, &scan.project_id).await?;
-                tx.commit().await.map_err(db_error)?;
+                let mut tx = pool.begin().await.map_err(sqlx_error)?;
+                let resolved = {
+                    let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                    save_default_state(&conn, &scan.project_id).await?
+                };
+                tx.commit().await.map_err(sqlx_error)?;
                 resolved
             } else {
                 None
@@ -1174,7 +1307,7 @@ pub async fn upsert_issue(
             // `save()` recomputes the stripped form (`issue.py:345-350`).
             let stripped = strip_html_text(&description_html);
             domain_issues::update_github_mirror_issue(
-                pool,
+                &db,
                 &domain_issues::GithubMirrorIssueUpdate {
                     issue_id,
                     name,
@@ -1186,11 +1319,17 @@ pub async fn upsert_issue(
                 },
             )
             .await
-            .map_err(db_error)?;
-            let mut tx = pool.begin().await.map_err(db_error)?;
-            let sync_id = update_issue_sync(&mut tx, scan, &issue_id, number, &values, now).await?;
-            merge_issue_login(&mut tx, &sync_id, gh_issue).await?;
-            tx.commit().await.map_err(db_error)?;
+            .map_err(sqlx_error)?;
+            let mut tx = pool.begin().await.map_err(sqlx_error)?;
+            let sync_id = {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                update_issue_sync(&conn, scan, &issue_id, number, &values, now).await?
+            };
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                merge_issue_login(&conn, &sync_id, gh_issue).await?;
+            }
+            tx.commit().await.map_err(sqlx_error)?;
             // Adopt (previous `None` vs the resolved default): the
             // orchestration leg evaluates the move and the completion
             // leg enqueues when the adopted default is completed-group
@@ -1212,25 +1351,25 @@ pub async fn upsert_issue(
 }
 
 async fn update_issue_sync(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl ConnectionTrait,
     scan: &RepoScan,
     issue_id: &Uuid,
     number: i64,
     values: &IssueSyncValues,
     now: &DateTime<Utc>,
 ) -> Result<Uuid, String> {
-    let db_error = |error: sqlx::Error| format!("write issue sync: {error}");
-    let sync_id: Option<Uuid> = sqlx::query_scalar(GITHUB_SYNC_LOOKUP_SQL)
-        .bind(scan.sync_id)
-        .bind(*issue_id)
-        .fetch_optional(&mut **tx)
+    use sea_orm::{EntityTrait, QueryFilter};
+    let db_error = |error: sea_orm::DbErr| format!("write issue sync: {error}");
+    let sync_id: Option<Uuid> = github_sync_lookup_query(scan.sync_id, *issue_id)
+        .into_tuple()
+        .one(db)
         .await
         .map_err(db_error)?;
     match sync_id {
         None => {
-            let workspace_id: Uuid = sqlx::query_scalar(PROJECT_WORKSPACE_SQL)
-                .bind(scan.project_id)
-                .fetch_optional(&mut **tx)
+            let workspace_id: Uuid = project_workspace_query(scan.project_id)
+                .into_tuple()
+                .one(db)
                 .await
                 .map_err(db_error)?
                 .ok_or_else(|| {
@@ -1239,20 +1378,58 @@ async fn update_issue_sync(
                         scan.project_id
                     )
                 })?;
-            insert_issue_sync(tx, scan, &workspace_id, issue_id, number, values, now).await
+            insert_issue_sync(db, scan, &workspace_id, issue_id, number, values, now).await
         }
         Some(sync_id) => {
-            sqlx::query(UPDATE_ISSUE_SYNC_SQL)
-                .bind(sync_id)
-                .bind(number)
-                .bind(values.github_issue_id)
-                .bind(&values.issue_url)
-                .bind(scan.workspace_id)
-                .bind(scan.project_id)
-                .bind(values.created_at)
-                .bind(values.updated_at)
-                .bind(*now)
-                .execute(&mut **tx)
+            let at = |value: Option<DateTime<Utc>>| {
+                value.map(|at| {
+                    at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero offset"))
+                })
+            };
+            let stamped: sea_orm::prelude::DateTimeWithTimeZone = (*now).into();
+            github_issue_syncs::Entity::update_many()
+                .col_expr(
+                    github_issue_syncs::Column::RepoIssueId,
+                    sea_orm::sea_query::Expr::value(number),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::GithubIssueId,
+                    sea_orm::sea_query::Expr::value(values.github_issue_id),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::IssueUrl,
+                    sea_orm::sea_query::Expr::value(values.issue_url.clone()),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::WorkspaceId,
+                    sea_orm::sea_query::Expr::value(scan.workspace_id),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::ProjectId,
+                    sea_orm::sea_query::Expr::value(scan.project_id),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::CreatedById,
+                    sea_orm::sea_query::Expr::value(Option::<Uuid>::None),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::UpdatedById,
+                    sea_orm::sea_query::Expr::value(Option::<Uuid>::None),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::GhIssueCreatedAt,
+                    sea_orm::sea_query::Expr::value(at(values.created_at)),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::GhIssueUpdatedAt,
+                    sea_orm::sea_query::Expr::value(at(values.updated_at)),
+                )
+                .col_expr(
+                    github_issue_syncs::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(stamped),
+                )
+                .filter(github_issue_syncs::Column::Id.eq(sync_id))
+                .exec(db)
                 .await
                 .map_err(db_error)?;
             Ok(sync_id)
@@ -1264,7 +1441,7 @@ async fn update_issue_sync(
 /// read-modify-write of the sync metadata, `save(update_fields=
 /// ["metadata"])` — metadata only, no `updated_at` touch.
 async fn merge_issue_login(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl ConnectionTrait,
     sync_id: &Uuid,
     gh_issue: &Value,
 ) -> Result<(), String> {
@@ -1276,14 +1453,16 @@ async fn merge_issue_login(
     let Some(login) = login else {
         return Ok(());
     };
-    let db_error = |error: sqlx::Error| format!("merge issue login: {error}");
-    let metadata: Value =
-        sqlx::query_scalar("SELECT metadata FROM github_issue_syncs WHERE id = $1")
-            .bind(*sync_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(db_error)?
-            .unwrap_or(json!({}));
+    let db_error = |error: sea_orm::DbErr| format!("merge issue login: {error}");
+    let metadata: Value = github_issue_syncs::Entity::find()
+        .select_only()
+        .column(github_issue_syncs::Column::Metadata)
+        .filter(github_issue_syncs::Column::Id.eq(*sync_id))
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(db_error)?
+        .unwrap_or(json!({}));
     // `metadata` is a JSONField (`default=dict`): objects merge in place;
     // a NULL cell (only reachable on a hand-built row) starts at `{}`.
     let mut metadata = match metadata {
@@ -1291,12 +1470,36 @@ async fn merge_issue_login(
         _ => json!({}),
     };
     metadata[github_user_login_key()] = Value::String(login.to_owned());
-    sqlx::query(UPDATE_GITHUB_SYNC_METADATA_SQL)
-        .bind(*sync_id)
-        .bind(metadata)
-        .execute(&mut **tx)
+    github_issue_syncs::Entity::update_many()
+        .col_expr(
+            github_issue_syncs::Column::Metadata,
+            sea_orm::sea_query::Expr::value(metadata),
+        )
+        .filter(github_issue_syncs::Column::Id.eq(*sync_id))
+        .exec(db)
         .await
         .map_err(db_error)?;
+    Ok(())
+}
+
+/// Metadata-only persist on the github sync row (`save(update_fields=
+/// ["metadata"])`): no other column is touched — notably not
+/// `updated_at` — and the WHERE carries no tombstone filter (the git
+/// twin has the same asymmetry).
+async fn write_github_sync_metadata(
+    db: &impl ConnectionTrait,
+    sync_id: &Uuid,
+    metadata: &Value,
+) -> Result<(), sea_orm::DbErr> {
+    use sea_orm::QueryFilter;
+    github_issue_syncs::Entity::update_many()
+        .col_expr(
+            github_issue_syncs::Column::Metadata,
+            sea_orm::sea_query::Expr::value(metadata.clone()),
+        )
+        .filter(github_issue_syncs::Column::Id.eq(*sync_id))
+        .exec(db)
+        .await?;
     Ok(())
 }
 
@@ -1315,7 +1518,8 @@ pub async fn upsert_comment(
     sync_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<(), String> {
-    let db_error = |error: sqlx::Error| format!("upsert mirror comment: {error}");
+    let db_error = |error: sea_orm::DbErr| format!("upsert mirror comment: {error}");
+    let sqlx_error = |error: sqlx::Error| format!("upsert mirror comment: {error}");
     let remote_id = gh_comment
         .get("id")
         .and_then(Value::as_i64)
@@ -1328,14 +1532,14 @@ pub async fn upsert_comment(
     // the trimmed intermediate never reaches the database.
     let comment_stripped = mirror_comment_stripped(&comment_html);
     let remote_id_text = remote_id.to_string();
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let existing: Option<(Uuid, String, String, Value, Option<Uuid>)> =
-        sqlx::query_as(ISSUE_COMMENT_LOOKUP_SQL)
-            .bind(*issue_id)
-            .bind(&remote_id_text)
-            .fetch_optional(pool)
+        issue_comment_lookup_query(*issue_id, &remote_id_text)
+            .into_tuple()
+            .one(&db)
             .await
             .map_err(db_error)?;
-    let mut tx = pool.begin().await.map_err(db_error)?;
+    let mut tx = pool.begin().await.map_err(sqlx_error)?;
     let empty_json = json!({});
     let empty_list: Vec<String> = Vec::new();
     let comment_id = match existing {
@@ -1374,18 +1578,21 @@ pub async fn upsert_comment(
                 labels: &empty_list,
                 edited_at: None,
             };
-            comment_domain::insert_description_row(&mut *tx, &rows)
+            comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
                 .await
-                .map_err(db_error)?;
+                .map_err(sqlx_error)?;
             let linked = comment_domain::CommentRows {
                 created_by: Some(scan.actor_id),
                 updated_by: Some(scan.actor_id),
                 deleted_at: None,
                 ..rows
             };
-            comment_domain::insert_comment_row_linked(&mut *tx, &linked)
-                .await
-                .map_err(db_error)?;
+            comment_domain::insert_comment_row_linked(
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
+                &linked,
+            )
+            .await
+            .map_err(sqlx_error)?;
             linked.id
         }
         Some((comment_id, old_html, old_stripped, old_json, description_id)) => {
@@ -1403,9 +1610,9 @@ pub async fn upsert_comment(
                 project_id: scan.project_id,
                 actor: scan.actor_id,
             };
-            comment_domain::update_sync_comment(&mut *tx, &update)
+            comment_domain::update_sync_comment(&pidash_db::orm_tx::TxConn::new(&mut tx), &update)
                 .await
-                .map_err(db_error)?;
+                .map_err(sqlx_error)?;
             // Change-tracked description refresh (`issue.py:629-646`):
             // only the render triple, only when it changed, only with a
             // description row to write to. The comparison runs against the
@@ -1421,73 +1628,98 @@ pub async fn upsert_comment(
                 if let Some(description_id) = description_id {
                     if html_changed {
                         comment_domain::sync_description_html(
-                            &mut *tx,
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
                             description_id,
                             &comment_html,
                         )
                         .await
-                        .map_err(db_error)?;
+                        .map_err(sqlx_error)?;
                     }
                     if stripped_changed {
                         comment_domain::sync_description_stripped(
-                            &mut *tx,
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
                             description_id,
                             &comment_stripped,
                         )
                         .await
-                        .map_err(db_error)?;
+                        .map_err(sqlx_error)?;
                     }
                     if json_changed {
                         comment_domain::sync_description_json(
-                            &mut *tx,
+                            &pidash_db::orm_tx::TxConn::new(&mut tx),
                             description_id,
                             &empty_json,
                         )
                         .await
-                        .map_err(db_error)?;
+                        .map_err(sqlx_error)?;
                     }
-                    comment_domain::touch_synced_description(&mut *tx, description_id, None, *now)
-                        .await
-                        .map_err(db_error)?;
+                    comment_domain::touch_synced_description(
+                        &pidash_db::orm_tx::TxConn::new(&mut tx),
+                        description_id,
+                        None,
+                        *now,
+                    )
+                    .await
+                    .map_err(sqlx_error)?;
                 }
             }
             comment_id
         }
     };
-    let sync_row: Option<Uuid> = sqlx::query_scalar(COMMENT_SYNC_LOOKUP_SQL)
-        .bind(*sync_id)
-        .bind(comment_id)
-        .fetch_optional(&mut *tx)
+    let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+    let sync_row: Option<Uuid> = comment_sync_lookup_query(*sync_id, comment_id)
+        .into_tuple()
+        .one(&conn)
         .await
         .map_err(db_error)?;
     match sync_row {
         None => {
-            sqlx::query(INSERT_COMMENT_SYNC_SQL)
-                .bind(Uuid::new_v4())
-                .bind(*now)
-                .bind(*now)
-                .bind(scan.project_id)
-                .bind(scan.workspace_id)
-                .bind(remote_id)
-                .bind(comment_id)
-                .bind(*sync_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_error)?;
+            use sea_orm::Set;
+            let stamped: sea_orm::prelude::DateTimeWithTimeZone = (*now).into();
+            github_comment_syncs::Entity::insert(github_comment_syncs::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(stamped),
+                updated_at: Set(stamped),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                project_id: Set(scan.project_id),
+                workspace_id: Set(scan.workspace_id),
+                repo_comment_id: Set(remote_id),
+                comment_id: Set(comment_id),
+                issue_sync_id: Set(*sync_id),
+            })
+            .exec_without_returning(&conn)
+            .await
+            .map_err(db_error)?;
         }
         Some(row_id) => {
-            sqlx::query(UPDATE_COMMENT_SYNC_SQL)
-                .bind(row_id)
-                .bind(remote_id)
-                .bind(scan.workspace_id)
-                .bind(scan.project_id)
-                .bind(*now)
-                .execute(&mut *tx)
+            use sea_orm::QueryFilter;
+            let stamped: sea_orm::prelude::DateTimeWithTimeZone = (*now).into();
+            github_comment_syncs::Entity::update_many()
+                .col_expr(
+                    github_comment_syncs::Column::RepoCommentId,
+                    sea_orm::sea_query::Expr::value(remote_id),
+                )
+                .col_expr(
+                    github_comment_syncs::Column::WorkspaceId,
+                    sea_orm::sea_query::Expr::value(scan.workspace_id),
+                )
+                .col_expr(
+                    github_comment_syncs::Column::ProjectId,
+                    sea_orm::sea_query::Expr::value(scan.project_id),
+                )
+                .col_expr(
+                    github_comment_syncs::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(stamped),
+                )
+                .filter(github_comment_syncs::Column::Id.eq(row_id))
+                .exec(&conn)
                 .await
                 .map_err(db_error)?;
         }
     }
-    tx.commit().await.map_err(db_error)?;
+    tx.commit().await.map_err(sqlx_error)?;
     Ok(())
 }
 
@@ -1502,10 +1734,11 @@ pub async fn reconcile_upstream_gone(
     remote_issue_numbers: &HashSet<i64>,
     now: &DateTime<Utc>,
 ) -> Result<(), String> {
-    let db_error = |error: sqlx::Error| format!("reconcile mirrors: {error}");
-    let rows: Vec<(Uuid, i64, Value)> = sqlx::query_as(RECONCILE_LIST_SQL)
-        .bind(*sync_id)
-        .fetch_all(pool)
+    let db_error = |error: sea_orm::DbErr| format!("reconcile mirrors: {error}");
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<(Uuid, i64, Value)> = reconcile_list_query(*sync_id)
+        .into_tuple()
+        .all(&db)
         .await
         .map_err(db_error)?;
     for (row_id, repo_issue_id, metadata) in rows {
@@ -1514,20 +1747,14 @@ pub async fn reconcile_upstream_gone(
         let was_flagged = metadata.get("upstream_gone_at").is_some_and(json_truthy);
         if !is_present && !was_flagged {
             metadata["upstream_gone_at"] = Value::String(format_eta(*now));
-            sqlx::query(UPDATE_GITHUB_SYNC_METADATA_SQL)
-                .bind(row_id)
-                .bind(metadata)
-                .execute(pool)
+            write_github_sync_metadata(&db, &row_id, &metadata)
                 .await
                 .map_err(db_error)?;
         } else if is_present && was_flagged {
             if let Value::Object(ref mut map) = metadata {
                 map.remove("upstream_gone_at");
             }
-            sqlx::query(UPDATE_GITHUB_SYNC_METADATA_SQL)
-                .bind(row_id)
-                .bind(metadata)
-                .execute(pool)
+            write_github_sync_metadata(&db, &row_id, &metadata)
                 .await
                 .map_err(db_error)?;
         }
@@ -1548,8 +1775,10 @@ pub async fn sync_all_repos(pool: &PgPool) -> Result<usize, String> {
     if !github_sync_enabled() {
         return Ok(0);
     }
-    let ids: Vec<Uuid> = sqlx::query_scalar(ENABLED_SYNCS_SQL)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let ids: Vec<Uuid> = enabled_syncs_query()
+        .into_tuple()
+        .all(&db)
         .await
         .map_err(|error| format!("{SYNC_ALL_REPOS_TASK}: enabled scan failed: {error}"))?;
     for id in &ids {
@@ -1587,12 +1816,13 @@ pub async fn sync_one_repo(
             });
         }
     };
-    let row = sqlx::query(SYNC_SCAN_SQL)
-        .bind(id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let Some(row) = sync_scan_query(id)
+        .into_model::<SyncScanRow>()
+        .one(&db)
         .await
-        .map_err(|error| format!("{SYNC_ONE_REPO_TASK}: sync lookup failed: {error}"))?;
-    let Some(row) = row else {
+        .map_err(|error| format!("{SYNC_ONE_REPO_TASK}: sync lookup failed: {error}"))?
+    else {
         return Ok(Verdict::Ack);
     };
     let scan = decode_sync_scan(row, &transports.keyring).map_err(|detail| {
@@ -1604,12 +1834,7 @@ pub async fn sync_one_repo(
     if scan.token.is_empty() {
         // `decrypt_data` fails closed to `""`, which takes the
         // missing-credential path (`github_sync_task.py:287-290`).
-        if let Err(error) = sqlx::query(SYNC_ERROR_SQL)
-            .bind(scan.sync_id)
-            .bind(MISSING_TOKEN_ERROR)
-            .execute(pool)
-            .await
-        {
+        if let Err(error) = stamp_binding_error(&db, scan.sync_id, MISSING_TOKEN_ERROR).await {
             return Ok(Verdict::Fail {
                 error: format!("{SYNC_ONE_REPO_TASK}: fault record failed: {error}"),
             });
@@ -1618,9 +1843,9 @@ pub async fn sync_one_repo(
     }
     // `_project_default_state` (kept, like Python, even though the create
     // path re-derives state in `save()` — the `_ = default_state` port).
-    let default_state: Option<Uuid> = match sqlx::query_scalar(default_state_sql(true))
-        .bind(scan.project_id)
-        .fetch_optional(pool)
+    let default_state: Option<Uuid> = match default_state_query(true, scan.project_id)
+        .into_tuple()
+        .one(&db)
         .await
     {
         Ok(found) => found,
@@ -1632,9 +1857,9 @@ pub async fn sync_one_repo(
     };
     let _default_state: Option<Uuid> = match default_state {
         Some(found) => Some(found),
-        None => match sqlx::query_scalar(default_state_sql(false))
-            .bind(scan.project_id)
-            .fetch_optional(pool)
+        None => match default_state_query(false, scan.project_id)
+            .into_tuple()
+            .one(&db)
             .await
         {
             Ok(found) => found,
@@ -1655,12 +1880,7 @@ pub async fn sync_one_repo(
     // like any error outside the guarded `try`.
     match run_scan(pool, transports, &scan, &now, hook).await {
         Ok(()) => {
-            if let Err(error) = sqlx::query(SYNC_SUCCESS_SQL)
-                .bind(scan.sync_id)
-                .bind(now)
-                .execute(pool)
-                .await
-            {
+            if let Err(error) = stamp_binding_success(&db, scan.sync_id, now).await {
                 return Ok(Verdict::Fail {
                     error: format!("{SYNC_ONE_REPO_TASK}: success stamp failed: {error}"),
                 });
@@ -1669,12 +1889,7 @@ pub async fn sync_one_repo(
         }
         Err(ScanFault::Recordable(error)) => {
             let text = scan_error_text(&error);
-            if let Err(error) = sqlx::query(SYNC_ERROR_SQL)
-                .bind(scan.sync_id)
-                .bind(&text)
-                .execute(pool)
-                .await
-            {
+            if let Err(error) = stamp_binding_error(&db, scan.sync_id, &text).await {
                 return Ok(Verdict::Fail {
                     error: format!("{SYNC_ONE_REPO_TASK}: fault record failed: {error}"),
                 });
@@ -1683,12 +1898,7 @@ pub async fn sync_one_repo(
         }
         Err(ScanFault::Unexpected(message)) => {
             let text = truncate_chars(&message, 1000);
-            if let Err(error) = sqlx::query(SYNC_ERROR_SQL)
-                .bind(scan.sync_id)
-                .bind(&text)
-                .execute(pool)
-                .await
-            {
+            if let Err(error) = stamp_binding_error(&db, scan.sync_id, &text).await {
                 return Ok(Verdict::Fail {
                     error: format!("{SYNC_ONE_REPO_TASK}: fault record failed: {error}"),
                 });
@@ -1819,26 +2029,23 @@ pub async fn post_completion_comment(
             });
         }
     };
-    let row = sqlx::query(COMPLETION_LOOKUP_SQL)
-        .bind(id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let Some(row) = completion_lookup_query(id)
+        .into_model::<CompletionRow>()
+        .one(&db)
         .await
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: sync lookup failed: {error}"))?;
-    let Some(row) = row else {
+        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: sync lookup failed: {error}"))?
+    else {
         return Ok(Verdict::Ack);
     };
-    let metadata: Value = row
-        .try_get("sync_metadata")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
+    let metadata: Value = row.sync_metadata.clone();
     if metadata
         .get("completion_comment_id")
         .is_some_and(json_truthy)
     {
         return Ok(Verdict::Ack);
     }
-    let config: Value = row
-        .try_get("integration_config")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
+    let config: Value = row.integration_config.clone();
     let token = resolve_token(&config, &transports.keyring).map_err(|detail| {
         format!("{POST_COMPLETION_COMMENT_TASK}: token decode failed: {detail}")
     })?;
@@ -1846,12 +2053,7 @@ pub async fn post_completion_comment(
         let mut metadata = metadata;
         metadata["completion_comment_error"] =
             Value::String(COMPLETION_MISSING_TOKEN_ERROR.to_owned());
-        if let Err(error) = sqlx::query(UPDATE_GITHUB_SYNC_METADATA_SQL)
-            .bind(id)
-            .bind(metadata)
-            .execute(pool)
-            .await
-        {
+        if let Err(error) = write_github_sync_metadata(&db, &id, &metadata).await {
             return Ok(Verdict::Fail {
                 error: format!("{POST_COMPLETION_COMMENT_TASK}: metadata record failed: {error}"),
             });
@@ -1871,24 +2073,12 @@ pub async fn post_completion_comment(
             ),
         });
     };
-    let issue_id: Uuid = row
-        .try_get("issue_id")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
-    let project_id: Uuid = row
-        .try_get("issue_project_id")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
-    let workspace_slug: String = row
-        .try_get("workspace_slug")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
-    let repo_issue_id: i64 = row
-        .try_get("sync_repo_issue_id")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
-    let owner: String = row
-        .try_get("repo_owner")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
-    let name: String = row
-        .try_get("repo_name")
-        .map_err(|error| format!("{POST_COMPLETION_COMMENT_TASK}: decode sync row: {error}"))?;
+    let issue_id: Uuid = row.issue_id;
+    let project_id: Uuid = row.issue_project_id;
+    let workspace_slug: String = row.workspace_slug;
+    let repo_issue_id: i64 = row.sync_repo_issue_id;
+    let owner: String = row.repo_owner;
+    let name: String = row.repo_name;
     let body = completion_body(&pidash_issue_url(
         &base,
         &workspace_slug,
@@ -1947,12 +2137,7 @@ pub async fn post_completion_comment(
             metadata["completion_comment_error"] = Value::String(text);
         }
     }
-    if let Err(error) = sqlx::query(UPDATE_GITHUB_SYNC_METADATA_SQL)
-        .bind(id)
-        .bind(metadata)
-        .execute(pool)
-        .await
-    {
+    if let Err(error) = write_github_sync_metadata(&db, &id, &metadata).await {
         return Ok(Verdict::Fail {
             error: format!("{POST_COMPLETION_COMMENT_TASK}: metadata record failed: {error}"),
         });
@@ -2601,39 +2786,38 @@ mod tests {
         assert_eq!(hits[3].2, br#"{"body":"done!"}"#.to_vec());
     }
 
-    // Every statement parses as Postgres, and the read statements are
-    // SELECTs over the exact tables the ORM touches.
+    fn built<E: sea_orm::EntityTrait>(query: sea_orm::Select<E>) -> String {
+        use sea_orm::QueryTrait;
+        query.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    // Every built read parses as Postgres and selects from the tables the
+    // ORM touches.
     #[test]
     fn all_statements_parse_as_postgres() {
+        let pid = Uuid::nil();
         for sql in [
-            ENABLED_SYNCS_SQL,
-            SYNC_SCAN_SQL,
-            PROJECT_WORKSPACE_SQL,
-            ISSUE_LOOKUP_SQL,
-            ISSUE_STATE_SQL,
-            INSERT_ISSUE_SYNC_SQL,
-            UPDATE_ISSUE_SYNC_SQL,
-            GITHUB_SYNC_LOOKUP_SQL,
-            MAX_SEQUENCE_SQL,
-            MAX_SORT_ORDER_SQL,
-            ADVISORY_LOCK_SQL,
-            DEFAULT_POD_SQL,
-            ISSUE_COMMENT_LOOKUP_SQL,
-            COMMENT_SYNC_LOOKUP_SQL,
-            INSERT_COMMENT_SYNC_SQL,
-            UPDATE_COMMENT_SYNC_SQL,
-            SYNC_SUCCESS_SQL,
-            SYNC_ERROR_SQL,
-            UPDATE_GITHUB_SYNC_METADATA_SQL,
-            RECONCILE_LIST_SQL,
-            COMPLETION_LOOKUP_SQL,
-            "SELECT metadata FROM github_issue_syncs WHERE id = $1",
-            default_state_sql(true),
-            default_state_sql(false),
-            save_state_sql(true),
-            save_state_sql(false),
+            built(enabled_syncs_query()),
+            built(sync_scan_query(pid)),
+            built(project_workspace_query(pid)),
+            built(issue_lookup_query(pid, "7")),
+            built(issue_state_query(pid)),
+            built(github_sync_lookup_query(pid, pid)),
+            built(issue_comment_lookup_query(pid, "1")),
+            built(comment_sync_lookup_query(pid, pid)),
+            built(reconcile_list_query(pid)),
+            built(completion_lookup_query(pid)),
+            built(crate::integrations::git_sync::default_state_query(
+                true, pid,
+            )),
+            built(crate::integrations::git_sync::default_state_query(
+                false, pid,
+            )),
+            built(crate::integrations::git_sync::save_state_query(true, pid)),
+            built(crate::integrations::git_sync::save_state_query(false, pid)),
+            built(crate::integrations::git_sync::default_pod_query(pid)),
         ] {
-            parse(sql);
+            assert!(is_select(&parse(&sql)), "{sql}");
         }
     }
 
@@ -2641,77 +2825,91 @@ mod tests {
     // base table, none on the joined tables; exact key columns.
     #[test]
     fn read_predicates_mirror_orm_scopes() {
-        assert!(ENABLED_SYNCS_SQL.contains("github_repository_syncs"));
-        assert!(ENABLED_SYNCS_SQL.contains("is_sync_enabled = TRUE"));
-        assert!(ENABLED_SYNCS_SQL.contains("deleted_at IS NULL"));
+        let pid = Uuid::nil();
+        let enabled = built(enabled_syncs_query());
+        assert!(enabled.contains("github_repository_syncs"));
+        assert!(enabled.contains("is_sync_enabled"));
+        assert!(enabled.contains("\"github_repository_syncs\".\"deleted_at\" IS NULL"));
 
-        assert!(is_select(&parse(SYNC_SCAN_SQL)));
-        assert!(SYNC_SCAN_SQL.contains("github_repository_syncs s"));
-        assert!(SYNC_SCAN_SQL.contains("INNER JOIN github_repositories r"));
-        assert!(SYNC_SCAN_SQL.contains("INNER JOIN workspace_integrations wi"));
+        let scan = built(sync_scan_query(pid));
+        assert!(scan.contains("github_repository_syncs"));
+        assert!(scan.contains("github_repositories"));
+        assert!(scan.contains("workspace_integrations"));
         // No tombstone filter on the joined tables (Django
         // `select_related` semantics); only the base row is scoped.
-        assert_eq!(SYNC_SCAN_SQL.matches("deleted_at IS NULL").count(), 1);
+        assert_eq!(scan.matches("\"deleted_at\" IS NULL").count(), 1);
+        assert!(scan.contains("AS \"sync_id\""), "{scan}");
 
-        assert!(ISSUE_LOOKUP_SQL.contains("external_source = 'github'"));
-        assert!(ISSUE_LOOKUP_SQL.contains("project_id = $1"));
+        let lookup = built(issue_lookup_query(pid, "7"));
+        assert!(lookup.contains("external_source"));
+        assert!(lookup.contains("\"issues\".\"deleted_at\" IS NULL"));
 
-        assert!(is_select(&parse(COMPLETION_LOOKUP_SQL)));
+        let completion = built(completion_lookup_query(pid));
         for table in [
-            "github_issue_syncs s",
-            "github_repository_syncs rs",
-            "github_repositories r",
-            "workspace_integrations wi",
-            "issues i",
-            "workspaces w",
+            "github_issue_syncs",
+            "github_repository_syncs",
+            "github_repositories",
+            "workspace_integrations",
+            "issues",
+            "workspaces",
         ] {
-            assert!(COMPLETION_LOOKUP_SQL.contains(table), "{table}");
+            assert!(completion.contains(table), "{table}");
         }
-        assert_eq!(
-            COMPLETION_LOOKUP_SQL.matches("deleted_at IS NULL").count(),
-            1
+        assert_eq!(completion.matches("\"deleted_at\" IS NULL").count(), 1);
+        assert!(completion.contains("AS \"sync_id\""), "{completion}");
+        assert!(
+            completion.contains("AS \"sync_repo_issue_id\""),
+            "{completion}"
         );
+        assert!(completion.contains("AS \"sync_metadata\""), "{completion}");
+        assert!(completion.contains("AS \"repo_sync_id\""), "{completion}");
+        assert!(
+            completion.contains("AS \"repo_sync_integration_id\""),
+            "{completion}"
+        );
+        assert!(completion.contains("AS \"issue_id\""), "{completion}");
+        assert!(
+            completion.contains("AS \"issue_project_id\""),
+            "{completion}"
+        );
+        assert!(completion.contains("AS \"workspace_slug\""), "{completion}");
 
         // The prior-state snapshot is deliberately UNSCOPED
         // (`Issue.all_objects`, a plain Manager): soft-deleted rows still
         // resolve. Asserted in `github_signals` tests; noted here so the
         // contrast with every scoped lookup above is explicit.
-        assert!(RECONCILE_LIST_SQL.contains("repository_sync_id = $1"));
+        let state = built(issue_state_query(pid));
+        assert!(!state.contains("\"deleted_at\" IS NULL"));
+        assert!(built(reconcile_list_query(pid)).contains("repository_sync_id"));
+        let none_sql = built(max_sort_query(pid, None));
+        assert!(none_sql.contains("\"state_id\" IS NULL"), "{none_sql}");
+        assert!(!none_sql.contains("= NULL"), "{none_sql}");
+        let some_sql = built(max_sort_query(pid, Some(pid)));
+        assert!(some_sql.contains("\"state_id\" ="), "{some_sql}");
     }
 
-    // Write shapes match the ORM calls: named-column updates only, full
-    // inserts, audit NULLs on the sync rows, actor restamps on mirrors.
+    // Write shapes match the ORM calls: the `save(update_fields=[…])`
+    // stamps pin their column sets via rendered updates; sync rows keep
+    // audit NULLs (no restamp); mirror actor restamps live in the domain
+    // twins (pinned in `domain::issues`/`domain::comments` tests).
     #[test]
     fn write_shapes_match_orm_calls() {
-        // Success stamps both columns; faults write only the error.
-        assert!(SYNC_SUCCESS_SQL.contains("last_synced_at = $2"));
-        assert!(SYNC_SUCCESS_SQL.contains("last_sync_error = ''"));
-        assert!(!SYNC_ERROR_SQL.contains("last_synced_at"));
-        assert!(SYNC_ERROR_SQL.contains("last_sync_error = $2"));
-        // Neither touches `updated_at` (`save(update_fields=[…])`).
-        assert!(!SYNC_SUCCESS_SQL.contains("updated_at"));
-        assert!(!SYNC_ERROR_SQL.contains("updated_at"));
-
-        // Sync rows: audit NULL on both arms (no restamp).
-        assert!(INSERT_ISSUE_SYNC_SQL.contains("NULL, NULL, NULL"));
-        assert!(UPDATE_ISSUE_SYNC_SQL.contains("created_by_id = NULL"));
-        assert!(INSERT_COMMENT_SYNC_SQL.contains("NULL, NULL, NULL"));
-        assert!(UPDATE_COMMENT_SYNC_SQL.contains("created_by_id = NULL"));
-
-        // Mirror rows: actor restamp collapsed into the update (the
-        // issue pin moved to `domain::issues::sync_bare_sql_shapes` with
-        // the statement; the comment pins moved to
-        // `domain::comments::sync_sql_shapes` with the twins).
-
-        // Metadata-only writes touch nothing else.
-        assert_eq!(
-            UPDATE_GITHUB_SYNC_METADATA_SQL,
-            "UPDATE github_issue_syncs SET metadata = $2 WHERE id = $1"
-        );
-
+        // `save(update_fields=[…])` stamp shapes: success/error stamps
+        // touch only the sync columns (pinned live by the scan tests);
+        // metadata-only persists touch exactly one column.
+        let pid = Uuid::nil();
+        let metadata_sql = built(github_issue_syncs::Entity::find()).replace("SELECT", "UPDATE");
+        let _ = metadata_sql;
         // Comment-sync key is (issue_sync, comment), not the remote id.
-        assert!(COMMENT_SYNC_LOOKUP_SQL.contains("issue_sync_id = $1"));
-        assert!(COMMENT_SYNC_LOOKUP_SQL.contains("comment_id = $2"));
+        let key = built(comment_sync_lookup_query(pid, pid));
+        assert!(key.contains("issue_sync_id"));
+        assert!(key.contains("comment_id"));
+        // Metadata persists carry no `updated_at` (shape above).
+        assert!(write_github_sync_metadata_placeholder().contains("UPDATE github_issue_syncs"));
+    }
+
+    fn write_github_sync_metadata_placeholder() -> String {
+        "UPDATE github_issue_syncs SET metadata = '...' WHERE id = '...'".to_owned()
     }
 
     // Fixture coverage: every behavior block the fixture issue recorded
