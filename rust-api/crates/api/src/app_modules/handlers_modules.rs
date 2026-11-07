@@ -77,7 +77,6 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use chrono_tz::Tz;
-use sea_orm::sea_query::extension::postgres::PgFunc;
 use sea_orm::sea_query::{Alias, CaseStatement, Condition, Expr, Func, Order, Query as SeaQuery};
 use sea_orm::{
     ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
@@ -951,6 +950,34 @@ fn estimate_annotation(group: Option<&str>) -> sea_orm::sea_query::SimpleExpr {
     msub(cell)
 }
 
+/// The `member_ids` annotated subquery (`queries::member_ids_sql`): a
+/// correlated `COALESCE(ARRAY_AGG(DISTINCT member_id), '{}'::uuid[])`
+/// over `module_members` alone (`list_engine::id_array` precedent).
+/// Running over one table, no NULL `member_id` inputs are possible, so
+/// the old `FILTER (WHERE member_id IS NOT NULL)` is a true no-op here.
+/// A main-query `LEFT JOIN module_members` would feed NULL rows into
+/// `ARRAY_AGG` (it includes NULLs) and yield `{NULL}` for memberless
+/// modules instead of `{}` (NEWPIDASH-63 review defect), so the member
+/// rows never join the outer query. `member_deleted_guard = true` adds
+/// the `deleted_at IS NULL` filter (archive path omits it, ported bug).
+fn member_ids_select(member_deleted_guard: bool) -> sea_orm::sea_query::SelectStatement {
+    let mut stmt = SeaQuery::select();
+    stmt.expr(crate::app_issues::list_engine::id_array(mcol(
+        "mm",
+        module_members::Column::MemberId,
+    )))
+    .from_as(module_members::Entity, Alias::new("mm"))
+    .and_where(mcol("mm", module_members::Column::ModuleId).equals(mref("m", modules::Column::Id)));
+    if member_deleted_guard {
+        stmt.and_where(mcol("mm", module_members::Column::DeletedAt).is_null());
+    }
+    stmt.to_owned()
+}
+
+fn member_ids_annotation(member_deleted_guard: bool) -> sea_orm::sea_query::SimpleExpr {
+    msub(member_ids_select(member_deleted_guard))
+}
+
 /// The annotated module-row statement shared by the list/detail fetch and
 /// the archived fetch. `member_deleted_guard` selects the `member_ids`
 /// deleted-at filter: the main queryset filters soft-deleted members
@@ -1068,15 +1095,10 @@ pub(crate) fn module_rows_statement(
             Alias::new(alias),
         );
     }
-    // ARRAY_AGG(DISTINCT member_id) never yields NULL elements in
-    // Postgres, so the legacy FILTER (WHERE member_id IS NOT NULL) is a
-    // no-op: the COALESCE+array-agg form returns the same array.
+    // member_ids rides a correlated subquery (member_ids_annotation):
+    // a main-query LEFT JOIN would feed NULL rows into ARRAY_AGG.
     stmt.expr_as(
-        Func::coalesce([
-            PgFunc::array_agg_distinct(mcol("module_members", module_members::Column::MemberId))
-                .into(),
-            Expr::val("{}").cast_as(Alias::new("uuid[]")),
-        ]),
+        member_ids_annotation(member_deleted_guard),
         Alias::new("member_ids"),
     )
     .from_as(modules::Entity, Alias::new("m"))
@@ -1085,24 +1107,6 @@ pub(crate) fn module_rows_statement(
         workspaces::Entity,
         Alias::new("w"),
         mcol("m", modules::Column::WorkspaceId).equals(mref("w", workspaces::Column::Id)),
-    )
-    .join_as(
-        JoinType::LeftJoin,
-        module_members::Entity,
-        Alias::new("module_members"),
-        {
-            let on = Condition::all().add(
-                mcol("m", modules::Column::Id)
-                    .equals(mref("module_members", module_members::Column::ModuleId)),
-            );
-            if member_deleted_guard {
-                // The ported bug lives here: the archive queryset does
-                // not filter soft-deleted members.
-                on.add(mcol("module_members", module_members::Column::DeletedAt).is_null())
-            } else {
-                on
-            }
-        },
     )
     .and_where(mcol("m", modules::Column::ProjectId).eq(*project_id))
     .and_where(mcol("w", workspaces::Column::Slug).eq(slug))
@@ -3979,8 +3983,17 @@ mod modules1_seaorm_tests {
         assert!(sql.contains(r#"AS "total_estimate_points""#), "{sql}");
         assert!(sql.contains(r#"AS "member_ids""#), "{sql}");
         assert!(sql.contains(r#""m"."archived_at" IS NULL"#), "{sql}");
+        // member_ids is a correlated subquery over module_members alone
+        // (list_engine::id_array precedent): no NULL inputs, so the old
+        // FILTER (WHERE member_id IS NOT NULL) is a true no-op there.
+        assert!(sql.contains(r#"FROM "module_members" AS "mm""#), "{sql}");
+        assert!(sql.contains(r#""mm"."module_id" = "m"."id""#), "{sql}");
+        assert!(sql.contains(r#""mm"."deleted_at" IS NULL"#), "{sql}");
+        // The main query must not LEFT JOIN module_members (that join fed
+        // NULL member_id rows into a main-query ARRAY_AGG — the NEWPIDASH-63
+        // member_ids defect: {NULL} instead of {} for memberless modules).
         assert!(
-            sql.contains(r#""module_members"."deleted_at" IS NULL"#),
+            !sql.contains(r#"LEFT JOIN "module_members" AS "module_members""#),
             "{sql}"
         );
         assert!(sql.contains(r#"ORDER BY "is_favorite" DESC"#), "{sql}");
@@ -3993,10 +4006,8 @@ mod modules1_seaorm_tests {
     fn module_rows_archived_variant_pins_flags() {
         let sql = module_rows_stmt("acme", None, false, true, false);
         assert!(sql.contains(r#""m"."archived_at" IS NOT NULL"#), "{sql}");
-        assert!(
-            !sql.contains(r#""module_members"."deleted_at" IS NULL"#),
-            "{sql}"
-        );
+        assert!(sql.contains(r#"FROM "module_members" AS "mm""#), "{sql}");
+        assert!(!sql.contains(r#""mm"."deleted_at" IS NULL"#), "{sql}");
         assert!(!sql.contains(r#""m"."archived_at" IS NULL"#), "{sql}");
     }
 
@@ -4038,6 +4049,123 @@ mod modules1_seaorm_tests {
             .one(&db)
             .await;
         let _ = err;
+    }
+
+    /// Regression test for the NEWPIDASH-63 review defect: a memberless
+    /// module must return `member_ids == []`, not `{NULL}`. The annotation
+    /// runs over `module_members` alone (correlated subquery), so no NULL
+    /// `member_id` inputs are possible. TEMP tables are session-local and
+    /// vanish on disconnect, so this never touches persistent schema.
+    #[tokio::test]
+    async fn live_member_ids_memberless_returns_empty() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+
+        // `m` stands in for the outer alias the annotation correlates on.
+        sqlx::query("CREATE TEMP TABLE m (id uuid NOT NULL)")
+            .execute(&pool)
+            .await
+            .expect("create temp m");
+        sqlx::query(
+            "CREATE TEMP TABLE module_members (module_id uuid NOT NULL, member_id uuid NOT NULL, deleted_at timestamptz)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create temp module_members");
+
+        let m_memberless =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid");
+        let m_with = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").expect("uuid");
+        let m_deleted =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000003").expect("uuid");
+        let member = uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000a").expect("uuid");
+        let deleted_member =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000b").expect("uuid");
+
+        sqlx::query("INSERT INTO m (id) VALUES ($1), ($2), ($3)")
+            .bind(m_memberless)
+            .bind(m_with)
+            .bind(m_deleted)
+            .execute(&pool)
+            .await
+            .expect("seed modules");
+        sqlx::query(
+            "INSERT INTO module_members (module_id, member_id, deleted_at) VALUES ($1, $2, NULL), ($3, $4, now())",
+        )
+        .bind(m_with)
+        .bind(member)
+        .bind(m_deleted)
+        .bind(deleted_member)
+        .execute(&pool)
+        .await
+        .expect("seed members");
+
+        #[derive(Debug, FromQueryResult)]
+        struct MemberIdsRow {
+            module_id: uuid::Uuid,
+            member_ids: Vec<uuid::Uuid>,
+        }
+
+        fn outer_stmt(guard: bool) -> sea_orm::sea_query::SelectStatement {
+            let mut stmt = SeaQuery::select();
+            stmt.expr_as(
+                Expr::col((Alias::new("m"), Alias::new("id"))),
+                Alias::new("module_id"),
+            )
+            .expr_as(member_ids_annotation(guard), Alias::new("member_ids"))
+            .from(Alias::new("m"))
+            .order_by(Alias::new("module_id"), Order::Asc);
+            stmt.to_owned()
+        }
+
+        for guard in [true, false] {
+            let rows = crate::app_issues::list_engine::query_built::<MemberIdsRow>(
+                &db,
+                &outer_stmt(guard),
+            )
+            .await
+            .expect("execute member_ids annotation");
+            assert_eq!(rows.len(), 3, "guard={guard}");
+            let by_module: std::collections::HashMap<uuid::Uuid, Vec<uuid::Uuid>> = rows
+                .into_iter()
+                .map(|r| (r.module_id, r.member_ids))
+                .collect();
+            assert_eq!(
+                by_module.get(&m_memberless),
+                Some(&Vec::new()),
+                "memberless module must be [] (guard={guard}); got {:?}",
+                by_module.get(&m_memberless)
+            );
+            assert_eq!(
+                by_module.get(&m_with),
+                Some(&vec![member]),
+                "live member must be present (guard={guard})"
+            );
+            if guard {
+                assert_eq!(
+                    by_module.get(&m_deleted),
+                    Some(&Vec::new()),
+                    "soft-deleted member must be filtered (guard=true)"
+                );
+            } else {
+                assert_eq!(
+                    by_module.get(&m_deleted),
+                    Some(&vec![deleted_member]),
+                    "archive path must keep soft-deleted members (guard=false)"
+                );
+            }
+        }
     }
 }
 
