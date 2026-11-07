@@ -48,6 +48,10 @@ use super::{
 };
 use crate::edge;
 use crate::state::AppState;
+use pidash_db::entity::{issue_relations, issues, project_members, projects, states};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 
 /// Register the three search GET routes. Nothing else: sibling paths stay
 /// unmatched and proxy to Django through the fallback.
@@ -530,44 +534,66 @@ async fn issue_search(
 /// row's `parent_id` under the manager scope (soft-delete, triage-state,
 /// archived issue/project, drafts — `db/models/issue.py:95-104`, same arms
 /// the section builders use). `None` = unknown id (`.first()` is None).
+fn parent_query(issue_id: uuid::Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::ParentId)
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+}
+
 async fn lookup_issue_parent(
     pool: &sqlx::PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<Option<Option<uuid::Uuid>>, Denial> {
-    let row: Option<(Option<uuid::Uuid>,)> = sqlx::query_as(
-        r#"SELECT issues.parent_id FROM issues
-           LEFT OUTER JOIN states ON (issues.state_id = states.id)
-           INNER JOIN projects ON (issues.project_id = projects.id)
-           WHERE issues.id = $1
-             AND issues.deleted_at IS NULL
-             AND NOT (states.group = 'triage' AND states.group IS NOT NULL)
-             AND NOT (issues.archived_at IS NOT NULL)
-             AND NOT (projects.archived_at IS NOT NULL)
-             AND NOT (issues.is_draft)"#,
-    )
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<uuid::Uuid>> = parent_query(*issue_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row)
 }
 
 /// `filter_issues_excluding_related_issues` (`issue.py:52-70`): both
 /// `IssueRelation` columns touching the issue, flattened
 /// (`values_list("issue_id", "related_issue_id")`), soft-deleted rows
 /// excluded via the manager. The caller appends `issue_id` itself.
+fn related_query(issue_id: uuid::Uuid) -> sea_orm::Select<issue_relations::Entity> {
+    issue_relations::Entity::find()
+        .select_only()
+        .columns([
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+        ])
+        .filter(
+            Condition::any()
+                .add(issue_relations::Column::IssueId.eq(issue_id))
+                .add(issue_relations::Column::RelatedIssueId.eq(issue_id)),
+        )
+        .filter(issue_relations::Column::DeletedAt.is_null())
+}
+
 async fn lookup_related_ids(
     pool: &sqlx::PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<Vec<String>, Denial> {
-    let rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-        r#"SELECT issue_id, related_issue_id FROM issue_relations
-           WHERE (issue_id = $1 OR related_issue_id = $1) AND deleted_at IS NULL"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<(uuid::Uuid, uuid::Uuid)> = related_query(*issue_id)
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let mut ids = Vec::with_capacity(rows.len() * 2);
     for (left, right) in rows {
         ids.push(left.to_string());
@@ -578,21 +604,32 @@ async fn lookup_related_ids(
 
 /// Guest scoping probe (`issue.py:146-149`): an active `role=5`
 /// (`ROLE.GUEST`) `ProjectMember` row for this user on the URL project.
+fn guest_query(
+    project_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::Role.eq(5i16))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
 async fn is_guest(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members
-           WHERE project_id = $1 AND member_id = $2 AND is_active AND role = 5
-             AND deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = guest_query(*project_id, *user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -669,5 +706,110 @@ mod tests {
             keys,
             pidash_services::app_views_search::queries_search::PROJECT_SEARCH_KEYS
         );
+    }
+
+    #[test]
+    fn seaorm_statement_shapes_pin_lookups() {
+        use sea_orm::DbBackend;
+        use sea_orm::QueryTrait;
+        let id = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let parent = super::parent_query(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            parent.contains("parent_id"),
+            "parent selects parent_id: {parent}"
+        );
+        assert!(
+            parent.contains("LEFT JOIN"),
+            "states is LEFT JOIN: {parent}"
+        );
+        assert!(
+            parent.contains("INNER JOIN"),
+            "projects is INNER JOIN: {parent}"
+        );
+        assert!(parent.contains("deleted_at"), "soft-delete scope: {parent}");
+        assert!(parent.contains("is_draft"), "draft scope: {parent}");
+        let related = super::related_query(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            related.contains("issue_id"),
+            "related selects issue_id: {related}"
+        );
+        assert!(
+            related.contains("related_issue_id"),
+            "related selects related: {related}"
+        );
+        let guest = super::guest_query(id, other)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(guest.contains("is_active"), "guest active scope: {guest}");
+        assert!(guest.contains("LIMIT"), "guest limit 1: {guest}");
+    }
+
+    #[tokio::test]
+    async fn live_search_lookups() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issues",
+            "states",
+            "projects",
+            "issue_relations",
+            "project_members",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, proj, issue, state, user) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO projects (id, workspace_id, identifier, deleted_at, archived_at) VALUES ('{proj}', '{ws}', 'ACM', NULL, NULL)"),
+            format!("INSERT INTO states (id, workspace_id, project_id, \"group\", deleted_at) VALUES ('{state}', '{ws}', '{proj}', 'started', NULL)"),
+            format!("INSERT INTO issues (id, project_id, workspace_id, parent_id, state_id, deleted_at, archived_at, is_draft) VALUES ('{issue}', '{proj}', '{ws}', NULL, '{state}', NULL, NULL, false)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user}', 5, true, NULL)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        assert_eq!(
+            super::lookup_issue_parent(&pool, &issue)
+                .await
+                .expect("parent"),
+            Some(None)
+        );
+        let missing = uuid::Uuid::new_v4();
+        assert_eq!(
+            super::lookup_issue_parent(&pool, &missing)
+                .await
+                .expect("missing"),
+            None
+        );
+        assert!(super::is_guest(&pool, &proj, &user).await.expect("guest"));
+        let stranger = uuid::Uuid::new_v4();
+        assert!(!super::is_guest(&pool, &proj, &stranger)
+            .await
+            .expect("not guest"));
+        assert!(super::lookup_related_ids(&pool, &issue)
+            .await
+            .expect("related")
+            .is_empty());
     }
 }
