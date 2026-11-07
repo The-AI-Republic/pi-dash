@@ -1176,6 +1176,67 @@ pub async fn clear_dedicated_runner(
     Ok(())
 }
 
+/// One system comment for a successful `pod_once` run (§23.3).
+///
+/// Mirrors `_post_pod_once_started_comment` (`scheduling.py:1044-1067`):
+/// names the pod, the actor, and the dedicated runner the issue stays
+/// assigned to. Attributed to `actor_id`.
+pub async fn post_pod_once_started_comment(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    pod_name: &str,
+    actor_id: Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
+        return Ok(());
+    };
+    let runner_name = match issue.assigned_runner_id {
+        Some(id) => runner::Entity::find_by_id(id)
+            .one(db)
+            .await?
+            .map(|r| r.name)
+            .unwrap_or_else(|| "the dedicated runner".to_owned()),
+        None => "the dedicated runner".to_owned(),
+    };
+    let actor_name = match users::Entity::find_by_id(actor_id).one(db).await? {
+        Some(user) if !user.display_name.is_empty() => user.display_name,
+        Some(user) if !user.username.is_empty() => user.username,
+        _ => "a member".to_owned(),
+    };
+    let body = format!(
+        "<p>Run started on any runner in pod <strong>{pod_name}</strong> by {actor_name}, for this run only. The issue stays assigned to <strong>{runner_name}</strong>.</p>"
+    );
+    let now = Utc::now();
+    let comment = issue_comments::ActiveModel {
+        id: sea_orm::Set(Uuid::new_v4()),
+        comment_stripped: sea_orm::Set(body.clone()),
+        attachments: sea_orm::Set(Vec::new()),
+        created_by_id: sea_orm::Set(Some(actor_id)),
+        issue_id: sea_orm::Set(issue.id),
+        project_id: sea_orm::Set(issue.project_id),
+        updated_by_id: sea_orm::Set(Some(actor_id)),
+        workspace_id: sea_orm::Set(issue.workspace_id),
+        actor_id: sea_orm::Set(Some(actor_id)),
+        comment_html: sea_orm::Set(body),
+        comment_json: sea_orm::Set(json!({})),
+        access: sea_orm::Set("full".to_owned()),
+        external_id: sea_orm::Set(None),
+        external_source: sea_orm::Set(None),
+        deleted_at: sea_orm::Set(None),
+        edited_at: sea_orm::Set(None),
+        description_id: sea_orm::Set(None),
+        parent_id: sea_orm::Set(None),
+        speaker_type: sea_orm::Set("system".to_owned()),
+        speaker_label: sea_orm::Set(String::new()),
+        speaker_agent_run_id: sea_orm::Set(None),
+        labels: sea_orm::Set(Vec::new()),
+        created_at: sea_orm::Set(now.into()),
+        updated_at: sea_orm::Set(now.into()),
+    };
+    comment.insert(db).await?;
+    Ok(())
+}
+
 /// Persist the chosen execution target (design §13.2).
 ///
 /// Saves `assigned_runner` (and `assigned_pod` from the runner when

@@ -33,6 +33,7 @@
 use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
+use sea_orm::EntityTrait;
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -300,13 +301,13 @@ impl RunCreationStore for PoolRunCreationStore<'_> {
 /// orchestration-creation behavior, not a direct one).
 const DIRECT_RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
-    pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
+    pod_id, runner_id, pinned_runner_id, pin_kind, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at) \
-    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, NULL, 'queued', $7, 0, NULL, '', $9, \
+    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $13, $6, NULL, NULL, 'queued', $7, 0, NULL, '', $9, \
     NULL, NULL, '', 'direct', NULL, '', $10, $11, '', '{}', NULL, NULL, $8, '', '{}', $12, \
     NULL, NULL, NULL)";
 
@@ -1155,6 +1156,133 @@ async fn direct_gate_allows(state: &AppState, actor_id: Uuid, has_key: bool) -> 
 /// probed), §6.5 validation with the raw-text comparison post-check,
 /// then the `execution_fields` + insert + prompt + cap transaction,
 /// post-commit dispatch, and the 201.
+/// The direct tail's pin decision (`runs.py:258-284`): the `pod_once`
+/// gate, the H-11 refusal, then the pin resolver. Returns the
+/// `(pinned_runner_id, pin_kind)` the insert binds, or the refusal
+/// `Response` to answer with.
+async fn resolve_direct_pin(
+    pool: &PgPool,
+    actor_id: Uuid,
+    work_item_id: Option<Uuid>,
+    pod_once: bool,
+    pod_id: Uuid,
+    pod_name: &str,
+) -> Result<(Option<Uuid>, &'static str), Response> {
+    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+    match work_item_id {
+        Some(work_item_id) => {
+            let Some(issue) = pidash_db::entity::issues::Entity::find_by_id(work_item_id)
+                .one(&orm_pool)
+                .await
+                .map_err(|_| server_error())?
+            else {
+                return Err(server_error());
+            };
+            if pod_once {
+                // The one-shot pod path (`:264-274`): decided by the
+                // view (this tail), before reconcile. Auth first, the
+                // pod gate second; `no_eligible_runner_in_pod` is a
+                // preflight outcome, not an auth code.
+                if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+                    &orm_pool,
+                    &issue,
+                    Some(actor_id),
+                )
+                .await
+                .map_err(|_| server_error())?
+                {
+                    let detail = match code {
+                        "pod_once_not_applicable" => {
+                            "pod_once requires a dedicated runner on the issue"
+                        }
+                        _ => "only the issue's creator and assignees may use pod_once",
+                    };
+                    let status = if code == "pod_once_not_applicable" {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::FORBIDDEN
+                    };
+                    return Err(json_response(
+                        status,
+                        serde_json::to_string(&serde_json::json!({"error": detail, "code": code}))
+                            .expect("serializable refusal"),
+                    ));
+                }
+                let pod_has = pidash_services::runner_sessions::pod_match::pod_has_runner_for_issue_principal(
+                    &orm_pool,
+                    pod_id,
+                    work_item_id,
+                    Some(actor_id),
+                    true,
+                )
+                .await
+                .map_err(|_| server_error())?;
+                if !pod_has {
+                    return Err(json_response(
+                        StatusCode::CONFLICT,
+                        serde_json::to_string(&serde_json::json!({"error": format!("no eligible runner in pod {}", pod_name), "code": "no_eligible_runner_in_pod"}))
+                            .expect("serializable refusal"),
+                    ));
+                }
+                Ok((
+                    None,
+                    pidash_services::domain::issue_assignment::PIN_LOCALITY,
+                ))
+            } else {
+                // H-11 (§11.2): a person's run on an offline/paused
+                // dedicated runner is refused at creation, before
+                // reconcile, with the full §11.2 body.
+                if let Some(code) =
+                    pidash_services::domain::issue_assignment::dedicated_run_refusal(
+                        &orm_pool,
+                        &issue,
+                        true,
+                        Some(actor_id),
+                        false,
+                    )
+                    .await
+                    .map_err(|_| server_error())?
+                {
+                    let refusal =
+                        pidash_services::domain::issue_assignment::dedicated_refusal_body(
+                            &orm_pool, &issue, code,
+                        )
+                        .await
+                        .map_err(|_| server_error())?;
+                    return Err(json_response(StatusCode::CONFLICT, refusal.to_string()));
+                }
+                // For a dedicated issue the pin is
+                // `issue.assigned_runner` (§9.1); otherwise the
+                // locality pin — with `fresh_session` or no parent
+                // the locality pin is `None`, matching Django
+                // (`runs.py:281-284` passes `parent=None` here).
+                let resolved = pidash_services::domain::issue_assignment::resolve_run_pin(
+                    &orm_pool,
+                    &pidash_services::domain::issue_assignment::ResolvePinArgs {
+                        issue: &issue,
+                        parent: None,
+                        pod_id,
+                        fresh_session: false,
+                        creator_id: Some(actor_id),
+                        trigger: pidash_types::runner_runs::AgentRunTrigger::Direct,
+                        pod_once: false,
+                        actor_id,
+                    },
+                )
+                .await
+                .map_err(|_| server_error())?;
+                let pin_id = resolved.runner.as_ref().map(|r| r.id);
+                let kind = resolved.pin_kind;
+                Ok((pin_id, kind))
+            }
+        }
+        None => Ok((
+            None,
+            pidash_services::domain::issue_assignment::PIN_LOCALITY,
+        )),
+    }
+}
+
 pub async fn post_direct(
     state: &AppState,
     pool: &PgPool,
@@ -1234,6 +1362,25 @@ pub async fn post_direct(
 
     let scope = match load_direct_scope(pool, &ctx).await {
         Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    // The pin (design §9.1) + the H-11 refusal (§11) + `pod_once`
+    // (§23.3), all before the insert exactly as Django's direct tail
+    // (`runs.py:258-284`): the H-11 refusal is checked before reconcile
+    // and fires without creating, the pod_once gate before that for
+    // the one-shot path, the resolver last for this tail.
+    let pod_once = body.get("pin").and_then(Value::as_str).unwrap_or("").trim() == "pod_once";
+    let (pinned_runner_id, pin_kind) = match resolve_direct_pin(
+        pool,
+        actor_id,
+        ctx.work_item_id,
+        pod_once,
+        ctx.pod.id,
+        &ctx.pod.name,
+    )
+    .await
+    {
+        Ok(pin) => pin,
         Err(response) => return response,
     };
     // `request.data.get("run_config") or {}` /
@@ -1341,7 +1488,7 @@ pub async fn post_direct(
         .bind(ctx.workspace_id)
         .bind(ctx.created_by)
         .bind(ctx.pod.id)
-        .bind(fields.pinned_runner_id)
+        .bind(pinned_runner_id)
         .bind(ctx.work_item_id)
         .bind(executor_kind.as_str())
         .bind(&error_details)
@@ -1349,6 +1496,7 @@ pub async fn post_direct(
         .bind(&run_config)
         .bind(&required_raw)
         .bind(now)
+        .bind(pin_kind)
         .execute(&mut **tx.inner())
         .await;
     if let Err(error) = insert {
@@ -1443,6 +1591,24 @@ pub async fn post_direct(
         drain_direct_dispatch(pool, state, &cloud, &cache, dispatches, deferred, now).await
     {
         return response;
+    }
+    // The one-shot pod path records its system comment on commit
+    // (`runs.py:417-420` calls `_post_pod_once_started_comment`).
+    if pod_once {
+        if let Some(work_item_id) = ctx.work_item_id {
+            let orm = pidash_db::pool::sea_orm_connection(pool);
+            if pidash_services::domain::issue_assignment::post_pod_once_started_comment(
+                &orm,
+                work_item_id,
+                &ctx.pod.name,
+                actor_id,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+        }
     }
     render_created_run(pool, run_id).await
 }
