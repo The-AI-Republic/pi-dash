@@ -120,3 +120,19 @@ def test_backfill_sessions_copies_active_session(workspace, workspace_integratio
     assert session.account_login == "acme-corp"
     assert session.status == "started"
     assert GitProviderInstallSession.objects.filter(state="test-state-1").count() == 1
+
+
+def test_backfill_installations_syncs_health_columns_on_existing_account(legacy_installation):
+    migration_module.backfill_app_installations(django_apps, None)
+
+    # Django refreshes keep writing the legacy row after the first
+    # backfill (0152-time values go stale); the rerun must pick up the
+    # authoritative health columns on the existing account.
+    legacy_installation.last_check_error = "GitHub App API unreachable"
+    legacy_installation.save(update_fields=["last_check_error", "updated_at"])
+    migration_module.backfill_app_installations(django_apps, None)
+
+    account = GitProviderAccount.objects.get(external_account_id="98765")
+    assert account.last_check_error == "GitHub App API unreachable"
+    assert account.verified_at == legacy_installation.verified_at
+    assert GitProviderAccount.objects.filter(auth_type="github_app").count() == 1

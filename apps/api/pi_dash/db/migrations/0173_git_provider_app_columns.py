@@ -73,6 +73,8 @@ def backfill_app_installations(apps, schema_editor):
         # connected/degraded, derived from suspended_at.
         account.suspended_at = app.suspended_at
         account.last_checked_at = app.last_checked_at
+        account.verified_at = app.verified_at
+        account.last_check_error = app.last_check_error
         account.status = "degraded" if app.suspended_at else "connected"
         metadata = account.metadata or {}
         metadata.update(
@@ -87,7 +89,16 @@ def backfill_app_installations(apps, schema_editor):
             }
         )
         account.metadata = metadata
-        account.save(update_fields=["suspended_at", "last_checked_at", "status", "metadata"])
+        account.save(
+            update_fields=[
+                "suspended_at",
+                "last_checked_at",
+                "verified_at",
+                "last_check_error",
+                "status",
+                "metadata",
+            ]
+        )
 
 
 def backfill_install_sessions(apps, schema_editor):
