@@ -1961,7 +1961,7 @@ mod tests {
                 .map(|column| format!("\"runner\".\"{column}\"")),
         );
         assert_eq!(entries, expected);
-        assert_eq!(agent_run::COLUMNS.len(), 39);
+        assert_eq!(agent_run::COLUMNS.len(), 40);
         // 32 since `pod_dispatch` (runner.0034, #2903) joined the list.
         assert_eq!(runner_cols::COLUMNS.len(), 32);
     }

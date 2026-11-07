@@ -138,6 +138,11 @@ pub const RUN_AI_NO_POD_MESSAGE: &str = "no pod is available to run this work it
 pub const RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE: &str =
     "no eligible runner or execution principal is available for this work item";
 pub const RUN_AI_FALLBACK_MESSAGE: &str = "could not dispatch a run";
+pub const RUN_AI_POD_ONCE_NOT_ALLOWED_MESSAGE: &str =
+    "only the issue's creator and assignees may use pod_once";
+pub const RUN_AI_POD_ONCE_NOT_APPLICABLE_MESSAGE: &str =
+    "pod_once requires a dedicated runner on the issue";
+pub const RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD_MESSAGE: &str = "no eligible runner in the pod";
 
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
@@ -960,6 +965,7 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
         issue_id: Uuid,
         creator_id: Option<Uuid>,
         human: bool,
+        pod_once: bool,
     ) -> Pin<
         Box<
             dyn Future<
@@ -969,7 +975,7 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
         >,
     > {
         self.inner
-            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human)
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human, pod_once)
     }
 }
 
@@ -1267,13 +1273,31 @@ pub fn wait_response(
 /// `_RUN_AI_REASON_MESSAGES` text, or the `.get` default. `None` (creation
 /// refused after preflight passed, so `dispatch_run_ai_run_with_reason`
 /// returns `(None, None)`) renders `"reason":null`, exactly as the view's
-/// `{"error": ..., "reason": reason}` does for `reason=None`.
+/// `{"error": ..., "reason": reason}` does for `reason=None`. The two
+/// `pod_once` codes ride 403/400 with the same shape (`:1227-1241`).
 pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
     let message = match reason {
         Some("active_run_exists") => RUN_AI_ACTIVE_RUN_MESSAGE,
         Some("no_pod") => RUN_AI_NO_POD_MESSAGE,
         Some("no_eligible_runner") => RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE,
+        Some("assigned_runner_offline") => {
+            "the dedicated runner is offline; bring it online or run on the pod"
+        }
+        Some("assigned_runner_paused") => {
+            "the dedicated runner is paused; resume it or run on the pod"
+        }
+        Some("assigned_runner_not_owner") => {
+            "the dedicated runner cannot take this run; use pod_once or change the runner"
+        }
+        Some("pod_once_not_allowed") => RUN_AI_POD_ONCE_NOT_ALLOWED_MESSAGE,
+        Some("pod_once_not_applicable") => RUN_AI_POD_ONCE_NOT_APPLICABLE_MESSAGE,
+        Some("no_eligible_runner_in_pod") => RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD_MESSAGE,
         _ => RUN_AI_FALLBACK_MESSAGE,
+    };
+    let status = match reason {
+        Some("pod_once_not_allowed") => StatusCode::FORBIDDEN,
+        Some("pod_once_not_applicable") => StatusCode::BAD_REQUEST,
+        _ => StatusCode::CONFLICT,
     };
     let mut map = serde_json::Map::with_capacity(2);
     map.insert("error".to_owned(), Value::String(message.to_owned()));
@@ -1284,7 +1308,31 @@ pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
             .unwrap_or(Value::Null),
     );
     let body = serde_json::to_string(&Value::Object(map)).expect("run-ai body");
-    (StatusCode::CONFLICT, body)
+    (status, body)
+}
+
+/// The v1 dedicated refusal (`:1244-1251`): the full §11.2 body.
+async fn dedicated_refusal_response(
+    pool: &PgPool,
+    issue_id: Uuid,
+    code: &'static str,
+) -> Result<Response, Denial> {
+    use pidash_db::entity::issues;
+    use sea_orm::EntityTrait;
+
+    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+    let Some(issue) = issues::Entity::find_by_id(issue_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|error| db_error(error, "dedicated-refusal-issue"))?
+    else {
+        return Err(Denial::ServerError);
+    };
+    let body =
+        pidash_services::domain::issue_assignment::dedicated_refusal_body(&orm_pool, &issue, code)
+            .await
+            .map_err(|error| db_error(error, "dedicated-refusal-body"))?;
+    Ok(json_response(StatusCode::CONFLICT, body.to_string()))
 }
 
 /// The run-ai success (`:1245-1252`): 201 `{"id","status","executor"}`.
@@ -1598,10 +1646,22 @@ pub async fn post_run_ai(
     }
     let pk = pk.parse::<Uuid>().expect("checked segment");
     let (_parts, body) = req.into_parts();
-    if read_body(body).await.is_err() {
-        return Denial::ServerError.into_response();
-    }
-    match run_ai_inner(&state, &headers, &slug, &project_id, &pk).await {
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    // `pod_once = (request.data.get("pin") or "").strip() == "pod_once"`
+    // (`views/issue.py:1242`).
+    let pod_once = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("pin")
+                .and_then(|value| value.as_str())
+                .map(|v| v.trim() == "pod_once")
+        })
+        .unwrap_or(false);
+    match run_ai_inner(&state, &headers, &slug, &project_id, &pk, pod_once).await {
         Ok(response) => response,
         Err(denial) => denial.into_response(),
     }
@@ -1613,6 +1673,7 @@ async fn run_ai_inner(
     slug: &str,
     project_id_raw: &str,
     pk: &Uuid,
+    pod_once: bool,
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
     let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
@@ -1672,12 +1733,37 @@ async fn run_ai_inner(
         issue.id,
         Some(pre.actor.id),
         Some(pre.actor.id),
+        pod_once,
     )
     .await
     .map_err(|error| db_error(error, "run-ai-driver"))?;
     let outcome = out.outcome;
+    let reason = outcome.reason.clone();
     let Some(run_id) = outcome.run_id else {
-        let (status, body) = run_ai_refusal(outcome.reason.as_deref());
+        // Dedicated refusals carry the full §11.2 body on v1 too
+        // (`views/issue.py:1244-1251`).
+        let reason: Option<&'static str> = match reason.as_deref() {
+            Some("assigned_runner_offline") => Some("assigned_runner_offline"),
+            Some("assigned_runner_paused") => Some("assigned_runner_paused"),
+            Some("assigned_runner_not_owner") => Some("assigned_runner_not_owner"),
+            _ => None,
+        };
+        let (status, body) = match reason {
+            Some(code)
+                if matches!(
+                    code,
+                    "assigned_runner_offline"
+                        | "assigned_runner_paused"
+                        | "assigned_runner_not_owner"
+                ) =>
+            {
+                match dedicated_refusal_response(&pre.pool, issue.id, code).await {
+                    Ok(response) => return Ok(response),
+                    Err(denial) => return Err(denial),
+                }
+            }
+            _ => run_ai_refusal(outcome.reason.as_deref()),
+        };
         return Ok(json_response(status, body));
     };
     let row: Option<(Uuid, String, String)> = sqlx::query_as(

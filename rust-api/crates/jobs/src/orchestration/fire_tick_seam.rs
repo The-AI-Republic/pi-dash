@@ -724,6 +724,8 @@ dispatch_driver!(
     issue_id: Uuid,
     triggered_by: &str,
     actor: Option<Uuid>,
+    pod_once: bool,
+    held_entry: bool,
 );
 
 dispatch_driver!(
@@ -733,6 +735,7 @@ dispatch_driver!(
     |_: &RunAiOutcome| false,
     issue_id: Uuid,
     actor: Option<Uuid>,
+    pod_once: bool,
 );
 
 dispatch_driver!(
@@ -822,6 +825,7 @@ pub async fn run_ai_for_human<C, H, P>(
     issue_id: Uuid,
     actor: Option<Uuid>,
     created_by: Option<Uuid>,
+    pod_once: bool,
 ) -> Result<DispatchOutcome<HumanRunAiOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
@@ -839,6 +843,7 @@ where
         now,
         jitter_secs,
         created_by,
+        pod_once,
     )
     .await?;
     let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
@@ -1085,6 +1090,8 @@ where
                 issue_id,
                 &triggered_by,
                 actor,
+                false,
+                false,
             )
             .await
             .map_err(|err| match err {
@@ -1357,6 +1364,7 @@ mod tests {
             _issue_id: Uuid,
             _creator_id: Option<Uuid>,
             _human: bool,
+            _pod_once: bool,
         ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
             let answer = self.answer;
             Box::pin(async move { Ok(answer) })
@@ -1716,6 +1724,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -1766,6 +1776,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -1831,6 +1843,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -1870,6 +1884,8 @@ mod tests {
             graph.issue,
             "tick",
             None,
+            false,
+            false,
         )
         .await
         .expect("dispatch");
@@ -1922,6 +1938,7 @@ mod tests {
             JITTER,
             graph.issue,
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");
@@ -1951,6 +1968,7 @@ mod tests {
             JITTER,
             graph.issue,
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");
@@ -2012,6 +2030,7 @@ mod tests {
             graph.issue,
             Some(graph.user),
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");
@@ -2077,6 +2096,7 @@ mod tests {
             graph.issue,
             Some(graph.user),
             Some(graph.user),
+            false,
         )
         .await
         .expect("dispatch");

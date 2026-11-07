@@ -1214,6 +1214,7 @@ async fn resolve_direct_pin(
                     work_item_id,
                     Some(actor_id),
                     true,
+                    true,
                 )
                 .await
                 .map_err(|_| server_error())?;
@@ -1698,6 +1699,12 @@ async fn post_issue_dispatch(
     // `Issue.all_objects.filter(pk=work_item_id).first()` (`:365/437`):
     // same `filter()` coercion as the direct path (ints coerce via
     // `UUID(int=)`, garbage → 500 — probed), no soft-delete scope.
+    // `pod_once = (request.data.get("pin") or "").strip() == "pod_once"`
+    // (`runs.py:483/577`). `pod_once` suppresses the queued 202
+    // (`_human_run_clock`), fires the dedicated-refusal bodies
+    // (`:492-532`), and bypasses the dedicated pin for this run
+    // only (§23.3).
+    let pod_once = body.get("pin").and_then(Value::as_str).unwrap_or("").trim() == "pod_once";
     let work_item_id = match coerce_filter_uuid(raw_work_item) {
         UuidCoerce::Id { id, .. } => id,
         UuidCoerce::Absent | UuidCoerce::Invalid => return server_error(),
@@ -1837,7 +1844,7 @@ async fn post_issue_dispatch(
                 }
             }
         }
-        if outcome.decision.queued {
+        if outcome.decision.queued && !pod_once {
             // The queued entry commits (`:373-374/409-417`): no dispatch.
             let (tx, _, _, _, _, _) = store.into_parts();
             if tx.commit().await.is_err() {
@@ -1853,20 +1860,22 @@ async fn post_issue_dispatch(
             return json_response(StatusCode::ACCEPTED, body);
         }
     }
-    // `dispatch_run_ai_run` / `dispatch_continuation_run` (`:375/447`).
-    let run_id = match mode {
+    // `dispatch_run_ai_run_with_reason` / `dispatch_continuation_run`
+    // (`:375/447`).
+    let (run_id, run_ai_reason) = match mode {
         IssueDispatchMode::RunAi => {
-            match pidash_services::orchestration::dispatch::dispatch_run_ai_run(
+            match pidash_services::orchestration::dispatch::dispatch_run_ai_run_with_reason(
                 &mut store,
                 work_item_id,
                 Some(actor_id),
+                pod_once,
                 &matcher,
                 now,
                 jitter,
             )
             .await
             {
-                Ok(outcome) => outcome.run_id,
+                Ok(outcome) => (outcome.run_id, outcome.reason),
                 Err(_) => rollback_500!(),
             }
         }
@@ -1876,13 +1885,15 @@ async fn post_issue_dispatch(
                 work_item_id,
                 mode.trigger(),
                 Some(actor_id),
+                pod_once,
+                false,
                 &matcher,
                 now,
                 jitter,
             )
             .await
             {
-                Ok(outcome) => outcome.run_id,
+                Ok(outcome) => (outcome.run_id, None),
                 Err(_) => rollback_500!(),
             }
         }
@@ -1890,12 +1901,25 @@ async fn post_issue_dispatch(
     let (mut tx, pool, cache, dispatches, deferred, _terminal) = store.into_parts();
     let Some(run_id) = run_id else {
         // `transaction.set_rollback(True)` (`:379/453`): the re-time and
-        // any bounce writes vanish with the failed dispatch.
-        return rollback_then(
-            tx,
-            json_response(StatusCode::CONFLICT, mode.dispatch_failed_body().to_owned()),
+        // any bounce writes vanish with the failed dispatch. The
+        // dedicated refusal / pod_once bodies are built first (`:492-520`).
+        let response = refusal_response_for_status(
+            pool,
+            work_item_id,
+            actor_id,
+            pod_once,
+            run_ai_reason.as_deref(),
+            mode,
         )
         .await;
+        let Some(response) = response else {
+            return rollback_then(
+                tx,
+                json_response(StatusCode::CONFLICT, mode.dispatch_failed_body().to_owned()),
+            )
+            .await;
+        };
+        return rollback_then(tx, response).await;
     };
     // Snapshot the created row before commit and drain: Django answers
     // these tails with the pre-dispatch in-memory instance (no
@@ -1913,6 +1937,156 @@ async fn post_issue_dispatch(
         return response;
     }
     render_created_snapshot(pool, &snapshot).await
+}
+
+/// The dedicated / pod_once 409/403/400 body for a failed issue
+/// dispatch (`runs.py:492-520` for run_ai, `:577-620` for
+/// comment_and_run): the comment&run tail re-probes the refusal
+/// (Django's `dispatch_continuation_run` returns None without a
+/// The dedicated / pod_once 409/403/400 body for a failed issue
+/// dispatch (`runs.py:492-520` for run_ai, `:577-620` for
+/// comment_and_run): the comment&run tail re-probes the refusal
+/// (Django's `dispatch_continuation_run` returns None without a
+/// reason); the run_ai tail maps the dispatch's reason code.
+async fn refusal_response_for_status(
+    pool: &PgPool,
+    work_item_id: Uuid,
+    actor_id: Uuid,
+    pod_once: bool,
+    reason: Option<&str>,
+    mode: IssueDispatchMode,
+) -> Option<Response> {
+    use pidash_db::entity::issues;
+
+    // The comment&run tail re-probes first (`:577-620`); the run_ai
+    // tail maps the dispatch's reason (`:492-520`).
+    let code = match mode {
+        IssueDispatchMode::RunAi => reason,
+        IssueDispatchMode::CommentAndRun if !pod_once => {
+            let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+            let issue = issues::Entity::find_by_id(work_item_id)
+                .one(&orm_pool)
+                .await
+                .ok()
+                .flatten()?;
+            return match pidash_services::domain::issue_assignment::dedicated_run_refusal(
+                &orm_pool,
+                &issue,
+                true,
+                Some(actor_id),
+                false,
+            )
+            .await
+            .ok()
+            .flatten()
+            {
+                Some(code) => Some(dedicated_code_response(pool, work_item_id, code).await),
+                None => None,
+            };
+        }
+        IssueDispatchMode::CommentAndRun => {
+            // pod_once: the else maps to `no_eligible_runner_in_pod`
+            // (`:603-607`).
+            let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+            let issue = issues::Entity::find_by_id(work_item_id)
+                .one(&orm_pool)
+                .await
+                .ok()
+                .flatten()?;
+            let code = pidash_services::domain::issue_assignment::pod_once_auth_code(
+                &orm_pool,
+                &issue,
+                Some(actor_id),
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or("no_eligible_runner_in_pod");
+            return Some(pod_once_code_response(code));
+        }
+    };
+    // run_ai maps its dispatch's reason (`:492-520`).
+    match mode {
+        IssueDispatchMode::RunAi => {
+            let code_owned = code.map(|code| code.to_owned())?;
+            let code = code_owned;
+            match code.as_str() {
+                "assigned_runner_offline"
+                | "assigned_runner_paused"
+                | "assigned_runner_not_owner" => {
+                    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+                    let issue = issues::Entity::find_by_id(work_item_id)
+                        .one(&orm_pool)
+                        .await
+                        .ok()
+                        .flatten()?;
+                    let code_s: &'static str = match code.as_str() {
+                        "assigned_runner_offline" => "assigned_runner_offline",
+                        "assigned_runner_paused" => "assigned_runner_paused",
+                        _ => "assigned_runner_not_owner",
+                    };
+                    let body = pidash_services::domain::issue_assignment::dedicated_refusal_body(
+                        &orm_pool, &issue, code_s,
+                    )
+                    .await
+                    .ok()?;
+                    Some(json_response(StatusCode::CONFLICT, body.to_string()))
+                }
+                "pod_once_not_allowed"
+                | "pod_once_not_applicable"
+                | "no_eligible_runner_in_pod" => Some(pod_once_code_response(code.as_str())),
+                _ => None,
+            }
+        }
+        IssueDispatchMode::CommentAndRun => None,
+    }
+}
+
+/// The §11.2 dedicated full body for `code` (409).
+async fn dedicated_code_response(pool: &PgPool, work_item_id: Uuid, code: &str) -> Response {
+    let code: &'static str = match code {
+        "assigned_runner_offline" => "assigned_runner_offline",
+        "assigned_runner_paused" => "assigned_runner_paused",
+        "assigned_runner_not_owner" => "assigned_runner_not_owner",
+        _ => "assigned_runner_offline",
+    };
+    use pidash_db::entity::issues;
+
+    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+    let Some(issue) = issues::Entity::find_by_id(work_item_id)
+        .one(&orm_pool)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return server_error();
+    };
+    match pidash_services::domain::issue_assignment::dedicated_refusal_body(&orm_pool, &issue, code)
+        .await
+    {
+        Ok(body) => json_response(StatusCode::CONFLICT, body.to_string()),
+        Err(_) => server_error(),
+    }
+}
+
+/// The pod_once ref-descriptor (`runs.py` the 403/400/409 bodies).
+fn pod_once_code_response(code: &str) -> Response {
+    let (status, error) = match code {
+        "pod_once_not_allowed" => (
+            StatusCode::FORBIDDEN,
+            "only the issue's creator and assignees may use pod_once",
+        ),
+        "pod_once_not_applicable" => (
+            StatusCode::BAD_REQUEST,
+            "pod_once requires a dedicated runner on the issue",
+        ),
+        _ => (StatusCode::CONFLICT, "no eligible runner in the pod"),
+    };
+    json_response(
+        status,
+        serde_json::to_string(&serde_json::json!({"error": error, "code": code}))
+            .expect("serializable refusal"),
+    )
 }
 
 /// `_post_run_ai` (`runs.py:347-388`).

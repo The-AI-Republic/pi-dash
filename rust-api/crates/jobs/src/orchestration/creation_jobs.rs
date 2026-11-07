@@ -67,10 +67,11 @@ use pidash_services::orchestration::creation::{
 };
 use pidash_services::orchestration::creation::{
     finalize_error_details_patch, finalize_lock_sql, finalize_update_sql, map_run_view,
-    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, ExecutionError,
-    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
-    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RunView, RunnerSelectRow,
-    RunnerView, StateView, TickerBudget,
+    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, DedicatedPinArgs,
+    ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment, PinOutcome,
+    PodView, ProjectView, RenderBundle, RunView, RunnerSelectRow, RunnerView, StateView,
+    TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
@@ -243,6 +244,7 @@ fn map_issue(row: &PgRow) -> Result<IssueView, sqlx::Error> {
         parent_id: row.try_get("parent_id")?,
         created_by_id: row.try_get("created_by_id")?,
         assigned_pod_id: row.try_get("assigned_pod_id")?,
+        assigned_runner_id: row.try_get("assigned_runner_id")?,
         agent_executor: row.try_get("agent_executor")?,
         git_work_branch: row.try_get("git_work_branch")?,
         workpad: row.try_get("workpad")?,
@@ -492,6 +494,7 @@ where
             .bind(&row.phase_kind)
             .bind(&row.run_config)
             .bind(row.now)
+            .bind(&row.pin_kind)
             .fetch_one(&mut **self.tx.inner())
             .await
             .map_err(Self::db)?;
@@ -640,6 +643,55 @@ where
 
     fn extra_toolsets_schema_tool(&self) -> String {
         self.toolsets.schema_tool_name().to_owned()
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        // The dedicated-pin decision (§9.1 + §11.2/§23.3).
+        let conn = pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner());
+        pidash_services::domain::issue_assignment::flight_pin(&conn, args, args.actor_id)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner());
+        pidash_services::domain::issue_assignment::pod_once_started_comment(
+            &conn, issue_id, pod_id, actor_id, now,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        // `// raw-sql:`-free: the two SELECT-free entity wrappers.
+        let conn = pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner());
+        pidash_services::domain::issue_assignment::system_comment_row(&conn, comment)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        // `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+        // (`service.py:494-495,896-897`, `pod_once`, §23.3).
+        // raw-sql: conditional single-column update; the ORM shape is the same.
+        sqlx::query(pidash_services::orchestration::creation::THREAD_CLEAR_SQL)
+            .bind(run_id)
+            .execute(&mut **self.dispatch_tx().inner())
+            .await
+            .map_err(Self::db)?;
+        Ok(())
     }
 }
 
@@ -2193,6 +2245,7 @@ mod tests {
             parent,
             creator_id: graph.user,
             pod_id: graph.pod,
+            pod_once: false,
             fresh_session: false,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: now(),
@@ -2482,6 +2535,7 @@ mod tests {
             parent,
             creator_id: graph.user,
             pod_id: graph.pod,
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: now(),
         }

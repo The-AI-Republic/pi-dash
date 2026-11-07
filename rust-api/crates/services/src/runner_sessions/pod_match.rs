@@ -38,6 +38,7 @@ pub async fn pod_has_runner_for_issue_principal(
     issue_id: Uuid,
     creator_id: Option<Uuid>,
     human: bool,
+    pod_once: bool,
 ) -> Result<bool, sea_orm::DbErr> {
     let issue = issues::Entity::find_by_id(issue_id).one(db).await?;
     let issue = issue.ok_or_else(|| sea_orm::DbErr::RecordNotFound("issue".to_owned()))?;
@@ -62,6 +63,35 @@ pub async fn pod_has_runner_for_issue_principal(
     }
     if eligible_owner_ids.is_empty() {
         return Ok(false);
+    }
+
+    // Dedicated issue (§9.4): served only by the assigned runner —
+    // in the run's pod, non-revoked, of an eligible owner, and the
+    // usage rule admits the run's creator/trigger. `pod_dispatch`
+    // is ignored (a pinned_only runner takes its dedicated runs,
+    // §23.1); offline/paused stay countable (transient).
+    if let Some(assigned_id) = issue.assigned_runner_id {
+        if !pod_once {
+            let assigned = runner::Entity::find_by_id(assigned_id)
+                .filter(runner::Column::PodId.eq(pod_id))
+                .filter(runner::Column::OwnerId.is_in(eligible_owner_ids.clone()))
+                .filter(runner::Column::Status.ne("revoked"))
+                .one(db)
+                .await?;
+            return match assigned {
+                Some(assigned) => {
+                    crate::domain::issue_assignment::runner_may_take_run(
+                        db,
+                        &assigned,
+                        creator_id,
+                        human,
+                        Some(&issue),
+                    )
+                    .await
+                }
+                None => Ok(false),
+            };
+        }
     }
 
     // Non-revoked pod members of every eligible owner (engines and
@@ -149,16 +179,24 @@ impl PodRunnerMatcher for SeaOrmPodMatcher {
         issue_id: Uuid,
         creator_id: Option<Uuid>,
         human: bool,
+        pod_once: bool,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
         let db = self.db.clone();
         Box::pin(async move {
-            pod_has_runner_for_issue_principal(db.as_ref(), pod_id, issue_id, creator_id, human)
-                .await
-                .map_err(|error| {
-                    DispatchError::Store(crate::orchestration::CreationError::MissingRow(
-                        error.to_string(),
-                    ))
-                })
+            pod_has_runner_for_issue_principal(
+                db.as_ref(),
+                pod_id,
+                issue_id,
+                creator_id,
+                human,
+                pod_once,
+            )
+            .await
+            .map_err(|error| {
+                DispatchError::Store(crate::orchestration::CreationError::MissingRow(
+                    error.to_string(),
+                ))
+            })
         })
     }
 }
