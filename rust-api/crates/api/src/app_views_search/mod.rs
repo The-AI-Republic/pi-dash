@@ -72,6 +72,8 @@ use sqlx::{Postgres, Row};
 
 use crate::state::AppState;
 pub use pidash_compat::response::{json_ok as json_response, SERVER_ERROR_BODY};
+use pidash_db::entity::{projects, workspaces};
+use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
 
 /// Merge the app-search route groups with the views route groups
 /// (PIDASHCONV-275); merges keep both sides.
@@ -180,6 +182,16 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// raises the resolve `Http404`, i.e. [`Denial::ProjectNotFound`].
 /// Skipped for anonymous callers (the slug-existence oracle stays closed) —
 /// so callers must check auth first, in Django's order.
+fn resolve_query(slug: &str, identifier: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::DeletedAt.is_null())
+}
+
 pub async fn resolve_project_id(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -189,16 +201,13 @@ pub async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = resolve_query(slug, &upper)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
 }
 
 /// A badly-formed UUID where Django would raise `ValidationError` in the
@@ -397,7 +406,18 @@ fn shape_row(row: &sqlx::postgres::PgRow, spec: Spec<'_>) -> Result<String, Deni
 
 #[cfg(test)]
 mod pidashconv_736_tests {
-    use super::normalize_resolve_identifier;
+    use super::{normalize_resolve_identifier, resolve_query};
+
+    #[test]
+    fn resolve_statement_shape_is_identifier_join() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = resolve_query("acme", "ACM")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("INNER JOIN"), "identifier join: {sql}");
+        assert!(sql.contains("\"identifier\""), "identifier filter: {sql}");
+        assert!(sql.contains("deleted_at"), "soft-delete scope: {sql}");
+    }
 
     #[test]
     fn resolve_identifier_strips_py_whitespace() {

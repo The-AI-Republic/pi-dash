@@ -41,6 +41,13 @@ use sqlx::Row;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
+use pidash_db::entity::{
+    issue_views, project_members, projects, user_favorites, workspace_members, workspaces,
+};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, JoinType, QueryFilter,
+    QuerySelect, RelationTrait, Set,
+};
 
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
@@ -388,6 +395,16 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// `Project.resolve(workspace_slug, value)`: UUIDs pass through (the row
 /// check happens in the view body); other identifiers match
 /// `UPPER(identifier)` in the workspace; misses raise `Http404`.
+fn views_resolve_query(slug: &str, identifier: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(identifier))
+        .filter(projects::Column::DeletedAt.is_null())
+}
+
 async fn resolve_project_id(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -397,31 +414,29 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::Raw(
-        StatusCode::NOT_FOUND,
-        PROJECT_NOT_FOUND_BODY.to_owned(),
-    ))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = views_resolve_query(slug, &upper)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or_else(|| Denial::Raw(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()))
 }
 
 /// Load the workspace row by slug. A miss raises `DoesNotExist`
 /// (`perform_create`'s `Workspace.objects.get`).
 async fn workspace_by_slug(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// Membership facts for the services gates, resolved with the same row
@@ -433,32 +448,42 @@ async fn membership(
     project_id: Option<&uuid::Uuid>,
     user_id: &uuid::Uuid,
 ) -> Result<permissions::Membership, Denial> {
-    let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // `role` is non-nullable; the outer Option is row presence.
-    let workspace_role = workspace_role.and_then(|row| row.0);
-    let project_role = if let Some(project_id) = project_id {
-        let row: Option<(Option<i16>,)> = sqlx::query_as(
-            r#"SELECT pm.role FROM project_members pm
-               JOIN workspaces w ON w.id = pm.workspace_id AND w.deleted_at IS NULL
-               WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-                 AND pm.is_active AND pm.deleted_at IS NULL"#,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let workspace_role: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
         )
-        .bind(slug)
-        .bind(project_id)
-        .bind(user_id)
-        .fetch_optional(pool)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-        row.and_then(|row| row.0)
+    let project_role = if let Some(project_id) = project_id {
+        let role: Option<i16> = project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Role)
+            .join(
+                JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .filter(project_members::Column::ProjectId.eq(*project_id))
+            .filter(project_members::Column::MemberId.eq(*user_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        role
     } else {
         None
     };
@@ -475,14 +500,17 @@ async fn is_view_creator(
     pk: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM issue_views WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(pk)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = issue_views::Entity::find()
+        .select_only()
+        .column(issue_views::Column::Id)
+        .filter(issue_views::Column::Id.eq(*pk))
+        .filter(issue_views::Column::CreatedById.eq(*user_id))
+        .filter(issue_views::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -586,27 +614,98 @@ async fn fetch_view_by_id(
     id: &uuid::Uuid,
     timezone: &Tz,
 ) -> Result<Option<String>, Denial> {
-    let cols = pidash_db::app_views_search::models::issue_view::COLUMNS
-        .iter()
-        .map(|col| format!("v.{col}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM (SELECT {cols} FROM issue_views AS v WHERE v.id = $1 AND v.deleted_at IS NULL) AS __r",
-    );
-    let row: Option<(String,)> = sqlx::query_as(&sql)
-        .bind(id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = issue_views::Entity::find_by_id(*id)
+        .filter(issue_views::Column::DeletedAt.is_null())
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let Some((text,)) = row else {
+    let Some(model) = model else {
         return Ok(None);
     };
-    let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-    match value {
-        Value::Object(map) => Ok(Some(shape_view(&map, None, timezone))),
-        _ => Err(Denial::ServerError),
-    }
+    // `row_to_json` produced this map before; build it field-by-field so
+    // the SeaORM model (no serde Serialize) yields the same keys/values
+    // `shape_view` parses. Datetimes ride as RFC3339 strings, like the
+    // `row_to_json` text `shape_datetime` re-renders.
+    let mut map = Map::new();
+    let mut put = |key: &str, value: Value| {
+        map.insert(key.to_owned(), value);
+    };
+    put("id", Value::String(model.id.to_string()));
+    put(
+        "created_at",
+        Value::String(
+            model
+                .created_at
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false),
+        ),
+    );
+    put(
+        "updated_at",
+        Value::String(
+            model
+                .updated_at
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false),
+        ),
+    );
+    put(
+        "deleted_at",
+        model
+            .deleted_at
+            .as_ref()
+            .map(|dt| Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)))
+            .unwrap_or(Value::Null),
+    );
+    put("name", Value::String(model.name.clone()));
+    put("description", Value::String(model.description.clone()));
+    put("query", model.query.clone());
+    put("filters", model.filters.clone());
+    put("display_filters", model.display_filters.clone());
+    put("display_properties", model.display_properties.clone());
+    put("rich_filters", model.rich_filters.clone());
+    put("access", json_num(i64::from(model.access)));
+    put(
+        "anchor",
+        model
+            .anchor
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    put(
+        "sort_order",
+        serde_json::Number::from_f64(model.sort_order)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+    );
+    put("logo_props", model.logo_props.clone());
+    put("is_locked", Value::Bool(model.is_locked));
+    put(
+        "archived_at",
+        model
+            .archived_at
+            .as_ref()
+            .map(|dt| Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)))
+            .unwrap_or(Value::Null),
+    );
+    let mut fk = |key: &str, value: Option<uuid::Uuid>| {
+        map.insert(
+            key.to_owned(),
+            value
+                .map(|id| Value::String(id.to_string()))
+                .unwrap_or(Value::Null),
+        );
+    };
+    fk("created_by_id", model.created_by_id);
+    fk("updated_by_id", model.updated_by_id);
+    fk("workspace_id", Some(model.workspace_id));
+    fk("project_id", model.project_id);
+    fk("owned_by_id", Some(model.owned_by_id));
+    Ok(Some(shape_view(&map, None, timezone)))
+}
+
+fn json_num(n: i64) -> Value {
+    Value::Number(n.into())
 }
 
 /// Shape one view row in live DRF key order (`IssueViewSerializer`:
@@ -1820,24 +1919,41 @@ async fn next_sort_order(
     project_id: Option<&uuid::Uuid>,
 ) -> Result<f64, Denial> {
     use pidash_db::app_views_search::models::issue_view;
-    let largest: Option<(Option<f64>,)> = if let Some(project_id) = project_id {
-        sqlx::query_as(
-            r#"SELECT MAX(sort_order) FROM issue_views WHERE project_id = $1 AND deleted_at IS NULL"#,
-        )
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
+    use sea_orm::sea_query::{Alias, Expr, Func, Query};
+    use sea_orm::{ConnectionTrait, FromQueryResult};
+    #[derive(Debug, sea_orm::FromQueryResult)]
+    struct MaxRow {
+        max_sort: Option<f64>,
+    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Func::max(Expr::col(Alias::new("sort_order"))),
+        Alias::new("max_sort"),
+    )
+    .from(Alias::new("issue_views"))
+    .cond_where(Expr::col(Alias::new("deleted_at")).is_null());
+    if let Some(project_id) = project_id {
+        stmt.cond_where(Expr::col(Alias::new("project_id")).eq(*project_id));
     } else {
-        sqlx::query_as(
-            r#"SELECT MAX(sort_order) FROM issue_views WHERE workspace_id = $1 AND project_id IS NULL AND deleted_at IS NULL"#,
-        )
-        .bind(workspace_id)
-        .fetch_optional(pool)
+        stmt.cond_where(Expr::col(Alias::new("workspace_id")).eq(*workspace_id))
+            .cond_where(Expr::col(Alias::new("project_id")).is_null());
+    }
+    let rows = db
+        .query_all(sea_orm::DbBackend::Postgres.build(&stmt))
         .await
-        .map_err(|_| Denial::ServerError)?
+        .map_err(|_| Denial::ServerError)?;
+    // An aggregate without GROUP BY always yields one row; a missing row
+    // maps to None, matching the pre-aggregate `fetch_optional` miss.
+    let largest: Option<Option<f64>> = match rows.first() {
+        Some(row) => Some(
+            MaxRow::from_query_result(row, "")
+                .map_err(|_| Denial::ServerError)?
+                .max_sort,
+        ),
+        None => None,
     };
-    let largest = largest.and_then(|row| row.0);
+    let largest = largest.flatten();
     Ok(issue_view::next_sort_order(largest).unwrap_or(issue_view::DEFAULT_SORT_ORDER))
 }
 
@@ -1853,16 +1969,21 @@ async fn anchor_taken(
     anchor: &str,
     exclude: Option<&uuid::Uuid>,
 ) -> Result<bool, Denial> {
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM issue_views
-           WHERE anchor = $1 AND deleted_at IS NULL AND ($2 IS NULL OR id != $2)
-           LIMIT 1"#,
-    )
-    .bind(anchor)
-    .bind(exclude)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut query = issue_views::Entity::find()
+        .select_only()
+        .column(issue_views::Column::Id)
+        .filter(issue_views::Column::Anchor.eq(anchor))
+        .filter(issue_views::Column::DeletedAt.is_null())
+        .limit(1);
+    if let Some(exclude) = exclude {
+        query = query.filter(issue_views::Column::Id.ne(*exclude));
+    }
+    let row: Option<uuid::Uuid> = query
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -1941,60 +2062,45 @@ async fn insert_view(
         .logo_props
         .clone()
         .unwrap_or_else(|| Value::Object(Map::new()));
-    let query_text = serde_json::to_string(query).map_err(|_| Denial::ServerError)?;
-    let filters_text = serde_json::to_string(&filters).map_err(|_| Denial::ServerError)?;
-    let display_filters_text =
-        serde_json::to_string(&display_filters).map_err(|_| Denial::ServerError)?;
-    let display_properties_text =
-        serde_json::to_string(&display_properties).map_err(|_| Denial::ServerError)?;
-    let rich_filters_text =
-        serde_json::to_string(&rich_filters).map_err(|_| Denial::ServerError)?;
-    let logo_props_text = serde_json::to_string(&logo_props).map_err(|_| Denial::ServerError)?;
     let access = write.access.unwrap_or(issue_view::DEFAULT_ACCESS);
-    let anchor: Option<&str> = write.anchor.as_ref().and_then(|opt| opt.as_deref());
-    let result = sqlx::query(
-        r#"INSERT INTO issue_views
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, project_id, name, description, query, filters,
-            display_filters, display_properties, rich_filters, access, anchor,
-            sort_order, logo_props, owned_by_id, is_locked, archived_at)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8,
-                   $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb,
-                   $14, $15, $16, $17::jsonb, $18, FALSE, $19)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(&name)
-    .bind(&description)
-    .bind(&query_text)
-    .bind(&filters_text)
-    .bind(&display_filters_text)
-    .bind(&display_properties_text)
-    .bind(&rich_filters_text)
-    .bind(access)
-    .bind(anchor)
-    .bind(sort_order)
-    .bind(&logo_props_text)
-    .bind(user_id)
-    .bind(archived_at)
-    .execute(pool)
+    let anchor: Option<String> = write.anchor.as_ref().and_then(|opt| opt.clone());
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let result = issue_views::Entity::insert(issue_views::ActiveModel {
+        id: Set(id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(*user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(*workspace_id),
+        project_id: Set(project_id.copied()),
+        name: Set(name),
+        description: Set(description),
+        query: Set(query.clone()),
+        filters: Set(filters),
+        display_filters: Set(display_filters),
+        display_properties: Set(display_properties),
+        rich_filters: Set(rich_filters),
+        access: Set(access),
+        anchor: Set(anchor),
+        sort_order: Set(sort_order),
+        logo_props: Set(logo_props),
+        owned_by_id: Set(*user_id),
+        is_locked: Set(false),
+        archived_at: Set(archived_at.map(Into::into)),
+    })
+    .exec_without_returning(&db)
     .await;
     match result {
         Ok(_) => Ok(id),
         Err(error) => {
-            if let sqlx::Error::Database(db_error) = &error {
-                // FK miss (unknown project) or unique violation: DRF's
-                // `IntegrityError` branch.
-                if db_error.code().is_some() {
-                    return Err(Denial::Raw(
-                        StatusCode::BAD_REQUEST,
-                        INVALID_PAYLOAD_BODY.to_owned(),
-                    ));
-                }
+            // FK miss (unknown project) or unique violation: DRF's
+            // `IntegrityError` branch.
+            if pidash_db::orm_tx::is_integrity_violation(&error) {
+                return Err(Denial::Raw(
+                    StatusCode::BAD_REQUEST,
+                    INVALID_PAYLOAD_BODY.to_owned(),
+                ));
             }
             Err(Denial::ServerError)
         }
@@ -2023,116 +2129,108 @@ async fn apply_view_update(
             r#"{"name":["This field is required."]}"#.to_owned(),
         ));
     }
-    let query_text = serde_json::to_string(query).map_err(|_| Denial::ServerError)?;
     let now = chrono::Utc::now();
-    let mut sets = vec![
-        "query = $2::jsonb".to_owned(),
-        "updated_by_id = $3".to_owned(),
-        "updated_at = $4".to_owned(),
-    ];
-    let mut binds: Vec<String> = Vec::new();
-    // The parsed `archived_at`, bound typed after the string binds: the
-    // arm below runs last, so `$N` with `N = binds.len() + 5` still owns
-    // the next placeholder when the typed bind is appended.
-    let mut archived_at: Option<DateTime<Utc>> = None;
-    // Placeholders `$1..$4` are taken by id/query/updated_by/updated_at;
-    // each appended bind owns `$N` with `N = binds.len() + 5`.
-    macro_rules! maybe_set {
-        ($field:expr, $column:expr) => {
-            if let Some(value) = &$field {
-                let text = serde_json::to_string(value).map_err(|_| Denial::ServerError)?;
-                binds.push(text);
-                sets.push(format!("{} = ${}::jsonb", $column, binds.len() + 4));
-            }
-        };
-    }
-    if !partial || write.name.is_some() {
-        if let Some(name) = &write.name {
-            binds.push(name.clone());
-            sets.push(format!("name = ${}", binds.len() + 4));
+    // Validate in Django's error-precedence order (name, description,
+    // anchor duplicate, archived_at) before any write, then apply via
+    // SeaORM ActiveModel so the SQL shape is builder-generated.
+    let name_write: Option<String> = if !partial || write.name.is_some() {
+        write.name.clone()
+    } else {
+        None
+    };
+    let description_write: Option<String> = match &write.description {
+        Some(value) => Some(coerce_description(value)?),
+        None => None,
+    };
+    if let Some(Some(text)) = &write.anchor {
+        if anchor_taken(pool, text, Some(id)).await? {
+            return Err(Denial::Raw(
+                StatusCode::BAD_REQUEST,
+                DUPLICATE_ANCHOR_BODY.to_owned(),
+            ));
         }
     }
-    if let Some(description) = &write.description {
-        let text = coerce_description(description)?;
-        binds.push(text);
-        sets.push(format!("description = ${}", binds.len() + 4));
+    // Parsed archived_at: None = absent (no write), Some(None) = clear to NULL,
+    // Some(Some) = set.
+    enum ArchivedWrite {
+        Absent,
+        Clear,
+        Set(DateTime<Utc>),
+    }
+    let archived_write = match &write.archived_at {
+        None => ArchivedWrite::Absent,
+        Some(Value::Null) => ArchivedWrite::Clear,
+        Some(Value::String(text)) => match parse_django_datetime(text, timezone) {
+            Ok(parsed) => ArchivedWrite::Set(parsed),
+            Err(error) => return Err(archived_at_denial(&error, timezone)),
+        },
+        Some(_) => {
+            return Err(archived_at_denial(&ParseDatetimeError::Invalid, timezone));
+        }
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let existing = issue_views::Entity::find_by_id(*id)
+        .filter(issue_views::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(existing) = existing else {
+        return Err(Denial::NotFound);
+    };
+    let mut am: issue_views::ActiveModel = existing.into_active_model();
+    am.query = Set(query.clone());
+    am.updated_by_id = Set(Some(*user_id));
+    am.updated_at = Set(now.into());
+    if let Some(name) = name_write {
+        am.name = Set(name);
+    }
+    if let Some(description) = description_write {
+        am.description = Set(description);
     }
     if let Some(access) = write.access {
-        // String bind like the rest, cast in SQL (Postgres assigns no
-        // `text` value to a `smallint` column uncast); the validated
-        // choice always casts.
-        binds.push(access.to_string());
-        sets.push(format!("access = ${}::smallint", binds.len() + 4));
+        am.access = Set(access);
     }
-    // `anchor` uniqueness (`UniqueValidator`) runs after the field's own
-    // validation and before the write; the row's own token is excluded.
     if let Some(anchor) = &write.anchor {
         match anchor {
-            None => sets.push("anchor = NULL".to_owned()),
-            Some(text) => {
-                if anchor_taken(pool, text, Some(id)).await? {
-                    return Err(Denial::Raw(
-                        StatusCode::BAD_REQUEST,
-                        DUPLICATE_ANCHOR_BODY.to_owned(),
-                    ));
-                }
-                binds.push(text.clone());
-                sets.push(format!("anchor = ${}", binds.len() + 4));
-            }
+            None => am.anchor = Set(None),
+            Some(text) => am.anchor = Set(Some(text.clone())),
         }
     }
-    maybe_set!(write.filters, "filters");
-    maybe_set!(write.display_filters, "display_filters");
-    maybe_set!(write.display_properties, "display_properties");
-    maybe_set!(write.rich_filters, "rich_filters");
-    maybe_set!(write.logo_props, "logo_props");
-    if let Some(archived) = &write.archived_at {
-        match archived {
-            Value::Null => sets.push("archived_at = NULL".to_owned()),
-            Value::String(text) => match parse_django_datetime(text, timezone) {
-                Ok(parsed) => {
-                    archived_at = Some(parsed);
-                    sets.push(format!("archived_at = ${}", binds.len() + 5));
-                }
-                Err(error) => return Err(archived_at_denial(&error, timezone)),
-            },
-            _ => {
-                return Err(archived_at_denial(&ParseDatetimeError::Invalid, timezone));
-            }
-        }
+    if let Some(value) = &write.filters {
+        am.filters = Set(value.clone());
     }
-    let sql = format!("UPDATE issue_views SET {} WHERE id = $1", sets.join(", "));
-    let mut query_builder = sqlx::query(&sql)
-        .bind(id)
-        .bind(&query_text)
-        .bind(user_id)
-        .bind(now);
-    for bind in &binds {
-        query_builder = query_builder.bind(bind);
+    if let Some(value) = &write.display_filters {
+        am.display_filters = Set(value.clone());
     }
-    if let Some(parsed) = archived_at {
-        query_builder = query_builder.bind(parsed);
+    if let Some(value) = &write.display_properties {
+        am.display_properties = Set(value.clone());
+    }
+    if let Some(value) = &write.rich_filters {
+        am.rich_filters = Set(value.clone());
+    }
+    if let Some(value) = &write.logo_props {
+        am.logo_props = Set(value.clone());
+    }
+    match archived_write {
+        ArchivedWrite::Absent => {}
+        ArchivedWrite::Clear => am.archived_at = Set(None),
+        ArchivedWrite::Set(parsed) => am.archived_at = Set(Some(parsed.into())),
     }
     // `select_for_update().get()` misses raise `DoesNotExist` before any
-    // write; the row is locked by this statement's own write lock. A
-    // unique violation here is an anchor held only by a soft-deleted row
-    // (live clashes fail at the pre-check): the `IntegrityError` 400.
-    let outcome = match query_builder.execute(pool).await {
-        Ok(done) => done,
+    // write (the `find_by_id` above); a unique violation here is an anchor
+    // held only by a soft-deleted row (live clashes fail at the pre-check):
+    // the `IntegrityError` 400.
+    match am.update(&db).await {
+        Ok(_) => {}
         Err(error) => {
-            if let sqlx::Error::Database(db_error) = &error {
-                if db_error.code().as_deref() == Some("23505") {
-                    return Err(Denial::Raw(
-                        StatusCode::BAD_REQUEST,
-                        INVALID_PAYLOAD_BODY.to_owned(),
-                    ));
-                }
+            if pidash_db::orm_tx::is_integrity_violation(&error) {
+                return Err(Denial::Raw(
+                    StatusCode::BAD_REQUEST,
+                    INVALID_PAYLOAD_BODY.to_owned(),
+                ));
             }
             return Err(Denial::ServerError);
         }
-    };
-    if outcome.rows_affected() == 0 {
-        return Err(Denial::NotFound);
     }
     let body = fetch_view_by_id(pool, id, timezone)
         .await?
@@ -2390,6 +2488,7 @@ async fn lock_workspace_view(
     slug: &str,
     pk: &uuid::Uuid,
 ) -> Result<(bool, uuid::Uuid, Value), Denial> {
+    // raw-sql: FOR UPDATE OF v locks only the view row (not the joined workspace row); SeaORM lock_exclusive locks every table in the join, which would serialize all views in the workspace.
     let row: Option<(bool, uuid::Uuid, Value)> = sqlx::query_as(
         r#"SELECT v.is_locked, v.owned_by_id, v.filters FROM issue_views v
            JOIN workspaces w ON w.id = v.workspace_id AND w.deleted_at IS NULL
@@ -2528,29 +2627,59 @@ async fn workspace_destroy(
     let now = chrono::Utc::now();
     // `view.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
     // `save()` (`updated_at`, CRUM `updated_by`).
-    sqlx::query(r#"UPDATE issue_views SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#)
-        .bind(pk)
-        .bind(now)
-        .bind(user_id)
-        .execute(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    {
+        use sea_orm::sea_query::Expr;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        issue_views::Entity::update_many()
+            .col_expr(
+                issue_views::Column::DeletedAt,
+                Expr::value(now.fixed_offset()),
+            )
+            .col_expr(
+                issue_views::Column::UpdatedAt,
+                Expr::value(now.fixed_offset()),
+            )
+            .col_expr(issue_views::Column::UpdatedById, Expr::value(Some(user_id)))
+            .filter(issue_views::Column::Id.eq(pk))
+            .exec(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    }
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:78`): stamp,
     // then enqueue — before the bulk favorites cleanup below, which
     // is a queryset delete with no job.
     enqueue_message(&pool, soft_delete_message(&pk)).await;
-    sqlx::query(
-        r#"UPDATE user_favorites SET deleted_at = $3 FROM workspaces w
-           WHERE user_favorites.workspace_id = w.id AND w.slug = $1 AND w.deleted_at IS NULL
-             AND user_favorites.entity_identifier = $2 AND user_favorites.project_id IS NULL
-             AND user_favorites.entity_type = 'view' AND user_favorites.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .bind(pk)
-    .bind(now)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    {
+        use sea_orm::sea_query::Expr;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        // The JOIN-scope update resolves the workspace id first; a missing
+        // or soft-deleted workspace matches zero rows, exactly like the
+        // `FROM workspaces w ... AND w.deleted_at IS NULL` join.
+        let ws: Option<uuid::Uuid> = workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Id)
+            .filter(workspaces::Column::Slug.eq(slug.as_str()))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        if let Some(ws_id) = ws {
+            user_favorites::Entity::update_many()
+                .col_expr(
+                    user_favorites::Column::DeletedAt,
+                    Expr::value(now.fixed_offset()),
+                )
+                .filter(user_favorites::Column::WorkspaceId.eq(ws_id))
+                .filter(user_favorites::Column::EntityIdentifier.eq(pk))
+                .filter(user_favorites::Column::ProjectId.is_null())
+                .filter(user_favorites::Column::EntityType.eq("view"))
+                .filter(user_favorites::Column::DeletedAt.is_null())
+                .exec(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+        }
+    }
     Ok(json_response(StatusCode::NO_CONTENT, String::new()))
 }
 
@@ -2568,15 +2697,20 @@ struct ProjectRow {
 }
 
 async fn project_row(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<ProjectRow, Denial> {
-    let row: Option<(uuid::Uuid, uuid::Uuid, Option<bool>)> = sqlx::query_as(
-        r#"SELECT id, workspace_id, guest_view_all_features FROM projects
-           WHERE id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((_, workspace_id, guest_view_all_features)) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(uuid::Uuid, Option<bool>)> = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::WorkspaceId,
+            projects::Column::GuestViewAllFeatures,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some((workspace_id, guest_view_all_features)) = row else {
         return Err(Denial::NotFound);
     };
     Ok(ProjectRow {
@@ -2789,6 +2923,7 @@ async fn lock_project_view(
     project_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<(bool, uuid::Uuid, Value), Denial> {
+    // raw-sql: FOR UPDATE OF v locks only the view row (not the joined workspace row); SeaORM lock_exclusive locks every table in the join, which would serialize all views in the workspace.
     let row: Option<(bool, uuid::Uuid, Value)> = sqlx::query_as(
         r#"SELECT v.is_locked, v.owned_by_id, v.filters FROM issue_views v
            JOIN workspaces w ON w.id = v.workspace_id AND w.deleted_at IS NULL
@@ -2933,42 +3068,65 @@ async fn project_destroy(
     let now = chrono::Utc::now();
     // `view.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
     // `save()` (`updated_at`, CRUM `updated_by`).
-    sqlx::query(r#"UPDATE issue_views SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#)
-        .bind(pk)
-        .bind(now)
-        .bind(user_id)
-        .execute(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    {
+        use sea_orm::sea_query::Expr;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        issue_views::Entity::update_many()
+            .col_expr(
+                issue_views::Column::DeletedAt,
+                Expr::value(now.fixed_offset()),
+            )
+            .col_expr(
+                issue_views::Column::UpdatedAt,
+                Expr::value(now.fixed_offset()),
+            )
+            .col_expr(issue_views::Column::UpdatedById, Expr::value(Some(user_id)))
+            .filter(issue_views::Column::Id.eq(pk))
+            .exec(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    }
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:78`): stamp,
     // then enqueue — same order as the mixin, before the favorites and
     // recent-visits cleanup below (`base.py:379-392`).
     enqueue_message(&pool, soft_delete_message(&pk)).await;
-    sqlx::query(
-        r#"UPDATE user_favorites SET deleted_at = $4 FROM workspaces w
-           WHERE user_favorites.workspace_id = w.id AND w.slug = $1 AND w.deleted_at IS NULL
-             AND user_favorites.project_id = $2 AND user_favorites.entity_identifier = $3
-             AND user_favorites.entity_type = 'view' AND user_favorites.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(pk)
-    .bind(now)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    sqlx::query(
-        r#"DELETE FROM user_recent_visits USING workspaces w
-           WHERE user_recent_visits.workspace_id = w.id AND w.slug = $1 AND w.deleted_at IS NULL
-             AND user_recent_visits.project_id = $2 AND user_recent_visits.entity_identifier = $3
-             AND user_recent_visits.entity_name = 'view'"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    {
+        use pidash_db::entity::user_recent_visits;
+        use sea_orm::sea_query::Expr;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let ws: Option<uuid::Uuid> = workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Id)
+            .filter(workspaces::Column::Slug.eq(slug.as_str()))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        if let Some(ws_id) = ws {
+            user_favorites::Entity::update_many()
+                .col_expr(
+                    user_favorites::Column::DeletedAt,
+                    Expr::value(now.fixed_offset()),
+                )
+                .filter(user_favorites::Column::WorkspaceId.eq(ws_id))
+                .filter(user_favorites::Column::ProjectId.eq(project_id))
+                .filter(user_favorites::Column::EntityIdentifier.eq(pk))
+                .filter(user_favorites::Column::EntityType.eq("view"))
+                .filter(user_favorites::Column::DeletedAt.is_null())
+                .exec(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            user_recent_visits::Entity::delete_many()
+                .filter(user_recent_visits::Column::WorkspaceId.eq(ws_id))
+                .filter(user_recent_visits::Column::ProjectId.eq(project_id))
+                .filter(user_recent_visits::Column::EntityIdentifier.eq(pk))
+                .filter(user_recent_visits::Column::EntityName.eq("view"))
+                .exec(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+        }
+    }
     Ok(json_response(StatusCode::NO_CONTENT, String::new()))
 }
 
@@ -3046,48 +3204,70 @@ async fn favorite_create(
     let id = uuid::Uuid::new_v4();
     // `sequence` bumps over the workspace maximum on add
     // (`db/models/favorite.py:52-64`).
-    let largest: Option<(Option<f64>,)> = sqlx::query_as(
-        r#"SELECT MAX(sequence) FROM user_favorites WHERE workspace_id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(project.workspace_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let sequence = largest
-        .and_then(|row| row.0)
-        .map(|max| max + 10000.0)
-        .unwrap_or(65535.0);
-    let result = sqlx::query(
-        r#"INSERT INTO user_favorites
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, project_id, user_id, entity_type, entity_identifier,
-            name, is_folder, sequence, parent_id)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, 'view', $8,
-                   NULL, FALSE, $9, NULL)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(project.workspace_id)
-    .bind(project_id)
-    .bind(user_id)
-    .bind(entity_identifier)
-    .bind(sequence)
-    .execute(&pool)
-    .await;
-    match result {
-        Ok(_) => Ok(json_response(StatusCode::NO_CONTENT, String::new())),
-        Err(error) => {
-            if let sqlx::Error::Database(db_error) = &error {
-                if db_error.code().is_some() {
+    {
+        use sea_orm::sea_query::{Alias, Expr, Func, Query};
+        use sea_orm::{ConnectionTrait, FromQueryResult};
+        #[derive(Debug, sea_orm::FromQueryResult)]
+        struct MaxSeqRow {
+            max_seq: Option<f64>,
+        }
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let mut stmt = Query::select();
+        stmt.expr_as(
+            Func::max(Expr::col(Alias::new("sequence"))),
+            Alias::new("max_seq"),
+        )
+        .from(Alias::new("user_favorites"))
+        .cond_where(Expr::col(Alias::new("workspace_id")).eq(project.workspace_id))
+        .cond_where(Expr::col(Alias::new("deleted_at")).is_null());
+        let largest: Option<Option<f64>> = {
+            let rows = db
+                .query_all(sea_orm::DbBackend::Postgres.build(&stmt))
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            match rows.first() {
+                Some(row) => Some(
+                    MaxSeqRow::from_query_result(row, "")
+                        .map_err(|_| Denial::ServerError)?
+                        .max_seq,
+                ),
+                None => None,
+            }
+        };
+        let sequence = largest
+            .flatten()
+            .map(|max| max + 10000.0)
+            .unwrap_or(65535.0);
+        let result = user_favorites::Entity::insert(user_favorites::ActiveModel {
+            id: Set(id),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(Some(user_id)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            workspace_id: Set(project.workspace_id),
+            project_id: Set(Some(project_id)),
+            user_id: Set(user_id),
+            entity_type: Set("view".to_owned()),
+            entity_identifier: Set(entity_identifier),
+            name: Set(None),
+            is_folder: Set(false),
+            sequence: Set(sequence),
+            parent_id: Set(None),
+        })
+        .exec_without_returning(&db)
+        .await;
+        match result {
+            Ok(_) => Ok(json_response(StatusCode::NO_CONTENT, String::new())),
+            Err(error) => {
+                if pidash_db::orm_tx::is_integrity_violation(&error) {
                     return Err(Denial::Raw(
                         StatusCode::BAD_REQUEST,
                         INVALID_PAYLOAD_BODY.to_owned(),
                     ));
                 }
+                Err(Denial::ServerError)
             }
-            Err(Denial::ServerError)
         }
     }
 }
@@ -3123,26 +3303,31 @@ async fn favorite_destroy(
             r#"{"error":"Please provide valid detail"}"#.to_owned(),
         )
     })?;
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT uf.id FROM user_favorites uf
-           JOIN workspaces w ON w.id = uf.workspace_id AND w.deleted_at IS NULL
-           WHERE uf.project_id = $1 AND uf.user_id = $2 AND w.slug = $3
-             AND uf.entity_type = 'view' AND uf.entity_identifier = $4
-             AND uf.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(user_id)
-    .bind(&slug)
-    .bind(view_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((id,)) = row else {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let id: Option<uuid::Uuid> = user_favorites::Entity::find()
+        .select_only()
+        .column(user_favorites::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            user_favorites::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(user_favorites::Column::ProjectId.eq(project_id))
+        .filter(user_favorites::Column::UserId.eq(user_id))
+        .filter(user_favorites::Column::EntityType.eq("view"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(view_id))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(id) = id else {
         return Err(Denial::NotFound);
     };
-    sqlx::query(r#"DELETE FROM user_favorites WHERE id = $1"#)
-        .bind(id)
-        .execute(&pool)
+    user_favorites::Entity::delete_many()
+        .filter(user_favorites::Column::Id.eq(id))
+        .exec(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::NO_CONTENT, String::new()))
@@ -3538,39 +3723,57 @@ async fn view_issues_list(
     let mut label_map: HashMap<String, Vec<String>> = HashMap::new();
     let mut module_map: HashMap<String, Vec<String>> = HashMap::new();
     if !page_ids.is_empty() {
-        let assignee_rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-            "SELECT issue_id, assignee_id FROM issue_assignees WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC",
-        )
-        .bind(&page_ids)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        use pidash_db::entity::{issue_assignees, issue_labels, module_issues};
+        use sea_orm::{QueryOrder, QuerySelect};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let assignee_rows: Vec<(uuid::Uuid, uuid::Uuid)> = issue_assignees::Entity::find()
+            .select_only()
+            .columns([
+                issue_assignees::Column::IssueId,
+                issue_assignees::Column::AssigneeId,
+            ])
+            .filter(issue_assignees::Column::IssueId.is_in(page_ids.clone()))
+            .filter(issue_assignees::Column::DeletedAt.is_null())
+            .order_by_desc(issue_assignees::Column::CreatedAt)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
         for (issue_id, assignee_id) in assignee_rows {
             assignee_map
                 .entry(issue_id.to_string())
                 .or_default()
                 .push(assignee_id.to_string());
         }
-        let label_rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-            "SELECT issue_id, label_id FROM issue_labels WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC",
-        )
-        .bind(&page_ids)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let label_rows: Vec<(uuid::Uuid, uuid::Uuid)> = issue_labels::Entity::find()
+            .select_only()
+            .columns([issue_labels::Column::IssueId, issue_labels::Column::LabelId])
+            .filter(issue_labels::Column::IssueId.is_in(page_ids.clone()))
+            .filter(issue_labels::Column::DeletedAt.is_null())
+            .order_by_desc(issue_labels::Column::CreatedAt)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
         for (issue_id, label_id) in label_rows {
             label_map
                 .entry(issue_id.to_string())
                 .or_default()
                 .push(label_id.to_string());
         }
-        let module_rows: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-            "SELECT issue_id, module_id FROM module_issues WHERE issue_id = ANY($1) AND deleted_at IS NULL ORDER BY created_at DESC",
-        )
-        .bind(&page_ids)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let module_rows: Vec<(uuid::Uuid, uuid::Uuid)> = module_issues::Entity::find()
+            .select_only()
+            .columns([
+                module_issues::Column::IssueId,
+                module_issues::Column::ModuleId,
+            ])
+            .filter(module_issues::Column::IssueId.is_in(page_ids.clone()))
+            .filter(module_issues::Column::DeletedAt.is_null())
+            .order_by_desc(module_issues::Column::CreatedAt)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
         for (issue_id, module_id) in module_rows {
             module_map
                 .entry(issue_id.to_string())
@@ -3615,6 +3818,59 @@ async fn view_issues_list(
 #[cfg(test)]
 mod pidashconv_736_tests {
     use super::normalize_resolve_identifier;
+
+    #[test]
+    fn seaorm_statement_shapes_pin_view_lookups() {
+        use pidash_db::entity::{workspace_members, workspaces};
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QuerySelect, QueryTrait,
+            RelationTrait,
+        };
+        let uid = uuid::Uuid::new_v4();
+        // membership workspace join keeps the soft-deleted-workspace filter.
+        let ws = workspace_members::Entity::find()
+            .select_only()
+            .column(workspace_members::Column::Role)
+            .join(
+                JoinType::InnerJoin,
+                workspace_members::Relation::Workspaces.def(),
+            )
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .filter(workspace_members::Column::MemberId.eq(uid))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(ws.contains("INNER JOIN"), "membership join: {ws}");
+        assert!(ws.contains("deleted_at"), "membership scope: {ws}");
+        // next_sort_order aggregate shape (Query::select MAX, the form
+        // production uses; Entity column_as does not accept FunctionCall).
+        use sea_orm::sea_query::{Alias, Expr, Func, PostgresQueryBuilder, Query};
+        let mut stmt = Query::select();
+        stmt.expr_as(
+            Func::max(Expr::col(Alias::new("sort_order"))),
+            Alias::new("max_sort"),
+        )
+        .from(Alias::new("issue_views"))
+        .cond_where(Expr::col(Alias::new("project_id")).eq(uid))
+        .cond_where(Expr::col(Alias::new("deleted_at")).is_null());
+        let agg = stmt.to_string(PostgresQueryBuilder);
+        assert!(agg.contains("MAX"), "sort aggregate: {agg}");
+    }
+
+    #[test]
+    fn fetch_view_by_id_statement_shape() {
+        use pidash_db::entity::issue_views;
+        use sea_orm::{ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryTrait};
+        let uid = uuid::Uuid::new_v4();
+        let sql = issue_views::Entity::find_by_id(uid)
+            .filter(issue_views::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("WHERE"), "fetch by id: {sql}");
+        assert!(sql.contains("deleted_at"), "fetch scope: {sql}");
+    }
 
     #[test]
     fn resolve_identifier_strips_py_whitespace() {
