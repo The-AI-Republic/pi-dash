@@ -18,6 +18,15 @@ use uuid::Uuid;
 use super::email_notification::py_str;
 use super::mention_ids_in_html;
 use pidash_compat::datetime::django_str_datetime;
+use pidash_db::entity::{
+    email_notification_logs as logs_entity, issue_activities as issue_activities_entity,
+    issue_assignees as assignees_entity, issue_comments as comments_entity,
+    issue_mentions as mentions_entity, issue_subscribers as subscribers_entity,
+    issues as issues_entity, notifications as notifications_entity,
+    project_members as project_members_entity, projects as projects_entity,
+    states as states_entity, user_notification_preferences as pref_entity, users as users_entity,
+    workspaces as workspaces_entity,
+};
 
 /// One `issue_mentions` row to insert: `update_mentions_for_issue` builds
 /// `IssueMention(mention_id=…, issue=…, project=…,
@@ -79,18 +88,23 @@ pub const PROJECT_WORKSPACE_SQL: &str =
 /// soft-deletes the removed ids. The soft-delete UPDATE always runs, even
 /// when both lists are empty.
 pub async fn update_mentions_for_issue(
-    db: &sqlx::PgPool,
+    db_pool: &sqlx::PgPool,
     issue_id: Uuid,
     project_id: Uuid,
     workspace_id: Uuid,
     new_mentions: &[Uuid],
     removed_mentions: &[Uuid],
     now: DateTime<Utc>,
-) -> Result<Vec<NewIssueMention>, sqlx::Error> {
+) -> Result<Vec<NewIssueMention>, sea_orm::DbErr> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
     let mut inserted = Vec::with_capacity(new_mentions.len());
     for chunk in new_mentions.chunks(BULK_BATCH_SIZE) {
-        let mut builder = sqlx::QueryBuilder::new(ISSUE_MENTION_INSERT_SQL);
-        let mut first = true;
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut rows = Vec::with_capacity(chunk.len());
         for mention_id in chunk {
             let row = NewIssueMention {
                 id: Uuid::new_v4(),
@@ -99,34 +113,38 @@ pub async fn update_mentions_for_issue(
                 project_id,
                 workspace_id,
             };
-            if !first {
-                builder.push(", ");
-            }
-            first = false;
-            builder.push("(");
-            builder.push_bind(row.id);
-            builder.push(", ");
-            builder.push_bind(now);
-            builder.push(", ");
-            builder.push_bind(now);
-            builder.push(", NULL, NULL, NULL, ");
-            builder.push_bind(row.issue_id);
-            builder.push(", ");
-            builder.push_bind(row.mention_id);
-            builder.push(", ");
-            builder.push_bind(row.project_id);
-            builder.push(", ");
-            builder.push_bind(row.workspace_id);
-            builder.push(")");
+            rows.push(row.clone());
             inserted.push(row);
         }
-        builder.build().execute(db).await?;
+        let models: Vec<mentions_entity::ActiveModel> = rows
+            .iter()
+            .map(|r| mentions_entity::ActiveModel {
+                id: sea_orm::ActiveValue::Set(r.id),
+                issue_id: sea_orm::ActiveValue::Set(r.issue_id),
+                mention_id: sea_orm::ActiveValue::Set(r.mention_id),
+                project_id: sea_orm::ActiveValue::Set(r.project_id),
+                workspace_id: sea_orm::ActiveValue::Set(r.workspace_id),
+                created_at: sea_orm::ActiveValue::Set(now_tz),
+                updated_at: sea_orm::ActiveValue::Set(now_tz),
+                created_by_id: sea_orm::ActiveValue::Set(None),
+                updated_by_id: sea_orm::ActiveValue::Set(None),
+                deleted_at: sea_orm::ActiveValue::Set(None),
+            })
+            .collect();
+        mentions_entity::Entity::insert_many(models)
+            .exec(&db)
+            .await?;
     }
-    sqlx::query(ISSUE_MENTION_SOFT_DELETE_SQL)
-        .bind(now)
-        .bind(issue_id)
-        .bind(removed_mentions)
-        .execute(db)
+    // Soft-delete the removed ids (always runs, even when empty).
+    mentions_entity::Entity::update_many()
+        .col_expr(
+            mentions_entity::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(Some(now_tz)),
+        )
+        .filter(mentions_entity::Column::DeletedAt.is_null())
+        .filter(mentions_entity::Column::IssueId.eq(issue_id))
+        .filter(mentions_entity::Column::MentionId.is_in(removed_mentions.to_vec()))
+        .exec(&db)
         .await?;
     Ok(inserted)
 }
@@ -166,47 +184,60 @@ pub fn get_removed_mentions(requested_instance: &str, current_instance: &str) ->
 /// Python. Nothing is written here — the returned rows are the
 /// `bulk_mention_subscribers` list the task bulk-creates.
 pub async fn extract_mentions_as_subscribers(
-    db: &sqlx::PgPool,
+    db_pool: &sqlx::PgPool,
     project_id: Uuid,
     issue_id: Uuid,
     mentions: &[Uuid],
-) -> Result<Vec<NewIssueSubscriber>, sqlx::Error> {
+) -> Result<Vec<NewIssueSubscriber>, sea_orm::DbErr> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
     let mut subscribers = Vec::new();
     for mention_id in mentions {
-        let subscribed: bool = sqlx::query_scalar(SUBSCRIBER_GUARD_SQL)
-            .bind(issue_id)
-            .bind(mention_id)
-            .bind(project_id)
-            .fetch_one(db)
-            .await?;
-        let assigned: bool = sqlx::query_scalar(ASSIGNEE_GUARD_SQL)
-            .bind(project_id)
-            .bind(issue_id)
-            .bind(mention_id)
-            .fetch_one(db)
-            .await?;
-        let creator: bool = sqlx::query_scalar(CREATOR_GUARD_SQL)
-            .bind(project_id)
-            .bind(issue_id)
-            .bind(mention_id)
-            .fetch_one(db)
-            .await?;
-        let active_member: bool = sqlx::query_scalar(MEMBER_GUARD_SQL)
-            .bind(project_id)
-            .bind(mention_id)
-            .fetch_one(db)
-            .await?;
+        let subscribed = subscribers_entity::Entity::find()
+            .filter(subscribers_entity::Column::DeletedAt.is_null())
+            .filter(subscribers_entity::Column::IssueId.eq(issue_id))
+            .filter(subscribers_entity::Column::SubscriberId.eq(*mention_id))
+            .filter(subscribers_entity::Column::ProjectId.eq(project_id))
+            .one(&db)
+            .await?
+            .is_some();
+        let assigned = assignees_entity::Entity::find()
+            .filter(assignees_entity::Column::DeletedAt.is_null())
+            .filter(assignees_entity::Column::ProjectId.eq(project_id))
+            .filter(assignees_entity::Column::IssueId.eq(issue_id))
+            .filter(assignees_entity::Column::AssigneeId.eq(*mention_id))
+            .one(&db)
+            .await?
+            .is_some();
+        let creator = issues_entity::Entity::find()
+            .filter(issues_entity::Column::DeletedAt.is_null())
+            .filter(issues_entity::Column::ProjectId.eq(project_id))
+            .filter(issues_entity::Column::Id.eq(issue_id))
+            .filter(issues_entity::Column::CreatedById.eq(Some(*mention_id)))
+            .one(&db)
+            .await?
+            .is_some();
+        let active_member = project_members_entity::Entity::find()
+            .filter(project_members_entity::Column::DeletedAt.is_null())
+            .filter(project_members_entity::Column::ProjectId.eq(project_id))
+            .filter(project_members_entity::Column::MemberId.eq(Some(*mention_id)))
+            .filter(project_members_entity::Column::IsActive.eq(true))
+            .one(&db)
+            .await?
+            .is_some();
         if !subscribed && !assigned && !creator && active_member {
-            let workspace_id: Uuid = sqlx::query_scalar(PROJECT_WORKSPACE_SQL)
-                .bind(project_id)
-                .fetch_one(db)
-                .await?;
+            let proj = projects_entity::Entity::find()
+                .filter(projects_entity::Column::DeletedAt.is_null())
+                .filter(projects_entity::Column::Id.eq(project_id))
+                .one(&db)
+                .await?
+                .ok_or_else(|| sea_orm::DbErr::RecordNotFound("project".to_owned()))?;
             subscribers.push(NewIssueSubscriber {
                 id: Uuid::new_v4(),
                 issue_id,
                 subscriber_id: *mention_id,
                 project_id,
-                workspace_id,
+                workspace_id: proj.workspace_id,
             });
         }
     }
@@ -616,6 +647,12 @@ impl From<sqlx::Error> for TaskSwallow {
     }
 }
 
+impl From<sea_orm::DbErr> for TaskSwallow {
+    fn from(error: sea_orm::DbErr) -> Self {
+        Self(error.to_string())
+    }
+}
+
 /// Bound task arguments (`notifications(type, issue_id, project_id, actor_id,
 /// subscriber, issue_activities_created, requested_data, current_instance)`,
 /// `:191-200`). The live caller (`issue_activities_task.py:1587`) passes all
@@ -831,35 +868,48 @@ pub fn stale_loop_activity(
         .ok_or_else(|| TaskSwallow::message("notifications: unbound issue_activity (:559)"))
 }
 
-async fn active_member_ids(db: &sqlx::PgPool, project_id: Uuid) -> Result<Vec<Uuid>, TaskSwallow> {
-    Ok(sqlx::query_scalar(ACTIVE_MEMBER_IDS_SQL)
-        .bind(project_id)
-        .fetch_all(db)
-        .await?)
-}
-
-async fn fetch_preference(db: &sqlx::PgPool, user_id: Uuid) -> Result<Preference, TaskSwallow> {
-    let row: Option<(bool, bool, bool, bool, bool)> = sqlx::query_as(PREFERENCE_SQL)
-        .bind(user_id)
-        .fetch_optional(db)
+async fn active_member_ids(
+    db_pool: &sqlx::PgPool,
+    project_id: Uuid,
+) -> Result<Vec<Uuid>, TaskSwallow> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let rows = project_members_entity::Entity::find()
+        .filter(project_members_entity::Column::DeletedAt.is_null())
+        .filter(project_members_entity::Column::ProjectId.eq(project_id))
+        .filter(project_members_entity::Column::IsActive.eq(true))
+        .all(&db)
         .await?;
-    row.map(
-        |(property_change, state_change, comment, mention, issue_completed)| Preference {
-            property_change,
-            state_change,
-            comment,
-            mention,
-            issue_completed,
-        },
-    )
-    .ok_or_else(|| {
-        TaskSwallow::message(
-            "notifications: UserNotificationPreference matching query does not exist",
-        )
-    })
+    Ok(rows.into_iter().filter_map(|m| m.member_id).collect())
 }
 
-/// Decoded [`ISSUE_SHAPE_SQL`] row, in select order.
+async fn fetch_preference(
+    db_pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Preference, TaskSwallow> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let model = pref_entity::Entity::find()
+        .filter(pref_entity::Column::DeletedAt.is_null())
+        .filter(pref_entity::Column::UserId.eq(user_id))
+        .one(&db)
+        .await?;
+    model
+        .map(|m| Preference {
+            property_change: m.property_change,
+            state_change: m.state_change,
+            comment: m.comment,
+            mention: m.mention,
+            issue_completed: m.issue_completed,
+        })
+        .ok_or_else(|| {
+            TaskSwallow::message(
+                "notifications: UserNotificationPreference matching query does not exist",
+            )
+        })
+}
+
+#[allow(dead_code)]
 type IssueShapeRow = (
     Uuid,
     String,
@@ -874,42 +924,81 @@ type IssueShapeRow = (
 );
 
 async fn fetch_issue_shape(
-    db: &sqlx::PgPool,
+    db_pool: &sqlx::PgPool,
     issue_id: Uuid,
 ) -> Result<IssueNotifShape, TaskSwallow> {
-    let row: Option<IssueShapeRow> = sqlx::query_as(ISSUE_SHAPE_SQL)
-        .bind(issue_id)
-        .fetch_optional(db)
+    use sea_orm::sea_query::JoinType;
+    use sea_orm::{
+        ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, RelationTrait,
+    };
+
+    #[derive(Debug, Clone, FromQueryResult)]
+    struct IssueShapeRowSea {
+        pub id: Uuid,
+        pub i_name: String,
+        pub i_sequence_id: i32,
+        pub i_created_by_id: Option<Uuid>,
+        pub p_id: Uuid,
+        pub p_identifier: String,
+        pub p_workspace_id: Uuid,
+        pub s_name: String,
+        pub s_group: String,
+        pub w_slug: String,
+    }
+
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    // ISSUE_SHAPE_SQL: issues JOIN projects (deleted_at scope) JOIN states
+    // (deleted_at scope) JOIN workspaces (no scope). Use select_only +
+    // column_as with unique aliases per orm-migration.md §3.2.
+    let row = issues_entity::Entity::find()
+        .select_only()
+        .columns([
+            issues_entity::Column::Id,
+            issues_entity::Column::Name,
+            issues_entity::Column::SequenceId,
+            issues_entity::Column::CreatedById,
+        ])
+        .column_as(projects_entity::Column::Id, "p_id")
+        .column_as(projects_entity::Column::Identifier, "p_identifier")
+        .column_as(projects_entity::Column::WorkspaceId, "p_workspace_id")
+        .column_as(states_entity::Column::Name, "s_name")
+        .column_as(states_entity::Column::Group, "s_group")
+        .column_as(workspaces_entity::Column::Slug, "w_slug")
+        .join(JoinType::InnerJoin, issues_entity::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues_entity::Relation::States.def())
+        .join(
+            JoinType::InnerJoin,
+            projects_entity::Relation::Workspaces.def(),
+        )
+        .filter(issues_entity::Column::DeletedAt.is_null())
+        .filter(issues_entity::Column::Id.eq(issue_id))
+        .filter(projects_entity::Column::DeletedAt.is_null())
+        .filter(states_entity::Column::DeletedAt.is_null())
+        .into_model::<IssueShapeRowSea>()
+        .one(&db)
         .await?;
-    row.map(
-        |(
-            id,
-            name,
-            sequence_id,
-            created_by_id,
-            project_id,
-            project_identifier,
-            workspace_id,
-            state_name,
-            state_group,
-            workspace_slug,
-        )| IssueNotifShape {
-            id,
-            name,
-            sequence_id,
-            created_by_id,
-            project_id,
-            project_identifier,
-            workspace_id,
-            workspace_slug,
-            state_name,
-            state_group,
-        },
-    )
-    .ok_or_else(|| TaskSwallow::message("notifications: issue has no live row"))
+
+    if let Some(r) = row {
+        // The Entity path with column_as needs distinct column names for
+        // the base columns; we used i_name etc. above but the base columns
+        // produce ambiguous names, so fetch via direct model fields.
+        return Ok(IssueNotifShape {
+            id: r.id,
+            name: r.i_name,
+            sequence_id: r.i_sequence_id,
+            created_by_id: r.i_created_by_id,
+            project_id: r.p_id,
+            project_identifier: r.p_identifier,
+            workspace_id: r.p_workspace_id,
+            workspace_slug: r.w_slug,
+            state_name: r.s_name,
+            state_group: r.s_group,
+        });
+    }
+    Err(TaskSwallow::message("notifications: issue has no live row"))
 }
 
-/// Decoded [`LAST_ACTIVITY_SQL`] row, in select order.
+#[allow(dead_code)]
 type LastActivityRow = (
     Uuid,
     String,
@@ -921,24 +1010,26 @@ type LastActivityRow = (
 );
 
 async fn fetch_last_activity(
-    db: &sqlx::PgPool,
+    db_pool: &sqlx::PgPool,
     issue_id: Uuid,
 ) -> Result<Option<LastActivity>, TaskSwallow> {
-    let row: Option<LastActivityRow> = sqlx::query_as(LAST_ACTIVITY_SQL)
-        .bind(issue_id)
-        .fetch_optional(db)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let model = issue_activities_entity::Entity::find()
+        .filter(issue_activities_entity::Column::DeletedAt.is_null())
+        .filter(issue_activities_entity::Column::IssueId.eq(Some(issue_id)))
+        .order_by_desc(issue_activities_entity::Column::CreatedAt)
+        .one(&db)
         .await?;
-    Ok(row.map(
-        |(id, verb, field, actor_id, new_value, old_value, created_at)| LastActivity {
-            id,
-            verb,
-            field,
-            actor_id,
-            new_value,
-            old_value,
-            created_at,
-        },
-    ))
+    Ok(model.map(|m| LastActivity {
+        id: m.id,
+        verb: m.verb,
+        field: m.field,
+        actor_id: m.actor_id,
+        new_value: m.new_value,
+        old_value: m.old_value,
+        created_at: m.created_at.with_timezone(&Utc),
+    }))
 }
 
 fn parse_mention_ids(ids: &[String]) -> Result<Vec<Uuid>, TaskSwallow> {
@@ -953,87 +1044,95 @@ fn parse_mention_ids(ids: &[String]) -> Result<Vec<Uuid>, TaskSwallow> {
 /// Bulk-write one `Notification` batch chunk (`bulk_create(…, batch_size=100)`,
 /// `:669`). An empty list writes nothing, like Django.
 async fn insert_notification_chunk(
-    db: &sqlx::PgPool,
+    db_pool: &sqlx::PgPool,
     rows: &[NewNotification],
     now: DateTime<Utc>,
 ) -> Result<(), TaskSwallow> {
+    use sea_orm::EntityTrait;
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder = sqlx::QueryBuilder::new(NOTIFICATION_INSERT_SQL);
-    let mut first = true;
-    for row in rows {
-        if !first {
-            builder.push(", ");
-        }
-        first = false;
-        builder.push("(");
-        builder.push_bind(row.id);
-        builder.push(", ");
-        builder.push_bind(now);
-        builder.push(", ");
-        builder.push_bind(now);
-        builder.push(", NULL, NULL, NULL, ");
-        builder.push_bind(row.workspace_id);
-        builder.push(", ");
-        builder.push_bind(row.project_id);
-        builder.push(", ");
-        builder.push_bind(&row.data);
-        builder.push(", ");
-        builder.push_bind(row.entity_identifier);
-        builder.push(", 'issue', ");
-        builder.push_bind(row.title.clone());
-        builder.push(", ");
-        builder.push_bind(row.message.clone());
-        builder.push(", ");
-        builder.push_bind(MESSAGE_HTML_DEFAULT);
-        builder.push(", NULL, ");
-        builder.push_bind(row.sender);
-        builder.push(", ");
-        builder.push_bind(row.triggered_by_id);
-        builder.push(", ");
-        builder.push_bind(row.receiver_id);
-        builder.push(", NULL, NULL, NULL)");
+    // Preserve the original failure mode: a NULL title violates the
+    // non-null column and the whole chunk dies (outer swallow). Detect
+    // it before insert to keep the same atomicity without a DB error.
+    if rows.iter().any(|r| r.title.is_none()) {
+        return Err(TaskSwallow::message(
+            "notifications: null value in column \"title\" violates not-null constraint",
+        ));
     }
-    builder.build().execute(db).await?;
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    let models: Vec<notifications_entity::ActiveModel> = rows
+        .iter()
+        .map(|r| notifications_entity::ActiveModel {
+            id: sea_orm::ActiveValue::Set(r.id),
+            created_at: sea_orm::ActiveValue::Set(now_tz),
+            updated_at: sea_orm::ActiveValue::Set(now_tz),
+            created_by_id: sea_orm::ActiveValue::Set(None),
+            updated_by_id: sea_orm::ActiveValue::Set(None),
+            deleted_at: sea_orm::ActiveValue::Set(None),
+            workspace_id: sea_orm::ActiveValue::Set(r.workspace_id),
+            project_id: sea_orm::ActiveValue::Set(Some(r.project_id)),
+            data: sea_orm::ActiveValue::Set(Some(r.data.clone())),
+            entity_identifier: sea_orm::ActiveValue::Set(Some(r.entity_identifier)),
+            entity_name: sea_orm::ActiveValue::Set("issue".to_owned()),
+            title: sea_orm::ActiveValue::Set(r.title.clone().unwrap_or_default()),
+            message: sea_orm::ActiveValue::Set(r.message.clone()),
+            message_html: sea_orm::ActiveValue::Set(MESSAGE_HTML_DEFAULT.to_owned()),
+            message_stripped: sea_orm::ActiveValue::Set(None),
+            sender: sea_orm::ActiveValue::Set(r.sender.to_owned()),
+            triggered_by_id: sea_orm::ActiveValue::Set(Some(r.triggered_by_id)),
+            receiver_id: sea_orm::ActiveValue::Set(r.receiver_id),
+            read_at: sea_orm::ActiveValue::Set(None),
+            snoozed_till: sea_orm::ActiveValue::Set(None),
+            archived_at: sea_orm::ActiveValue::Set(None),
+        })
+        .collect();
+    notifications_entity::Entity::insert_many(models)
+        .exec(&db)
+        .await?;
     Ok(())
 }
 
 /// Bulk-write one `EmailNotificationLog` batch chunk (`bulk_create(…,
 /// batch_size=100, ignore_conflicts=True)`, `:670`).
 async fn insert_email_log_chunk(
-    db: &sqlx::PgPool,
+    db_pool: &sqlx::PgPool,
     rows: &[NewEmailLog],
     now: DateTime<Utc>,
 ) -> Result<(), TaskSwallow> {
+    use sea_orm::sea_query::OnConflict;
+    use sea_orm::EntityTrait;
     if rows.is_empty() {
         return Ok(());
     }
-    let mut builder = sqlx::QueryBuilder::new(EMAIL_LOG_INSERT_SQL);
-    let mut first = true;
-    for row in rows {
-        if !first {
-            builder.push(", ");
-        }
-        first = false;
-        builder.push("(");
-        builder.push_bind(row.id);
-        builder.push(", ");
-        builder.push_bind(now);
-        builder.push(", ");
-        builder.push_bind(now);
-        builder.push(", NULL, NULL, NULL, ");
-        builder.push_bind(row.receiver_id);
-        builder.push(", ");
-        builder.push_bind(row.triggered_by_id);
-        builder.push(", ");
-        builder.push_bind(row.entity_identifier);
-        builder.push(", 'issue', ");
-        builder.push_bind(&row.data);
-        builder.push(", NULL, NULL, '', NULL, NULL)");
-    }
-    builder.push(" ON CONFLICT DO NOTHING");
-    builder.build().execute(db).await?;
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    let models: Vec<logs_entity::ActiveModel> = rows
+        .iter()
+        .map(|r| logs_entity::ActiveModel {
+            id: sea_orm::ActiveValue::Set(r.id),
+            created_at: sea_orm::ActiveValue::Set(now_tz),
+            updated_at: sea_orm::ActiveValue::Set(now_tz),
+            created_by_id: sea_orm::ActiveValue::Set(None),
+            updated_by_id: sea_orm::ActiveValue::Set(None),
+            deleted_at: sea_orm::ActiveValue::Set(None),
+            receiver_id: sea_orm::ActiveValue::Set(r.receiver_id),
+            triggered_by_id: sea_orm::ActiveValue::Set(r.triggered_by_id),
+            entity_identifier: sea_orm::ActiveValue::Set(Some(r.entity_identifier)),
+            entity_name: sea_orm::ActiveValue::Set("issue".to_owned()),
+            data: sea_orm::ActiveValue::Set(Some(r.data.clone())),
+            processed_at: sea_orm::ActiveValue::Set(None),
+            sent_at: sea_orm::ActiveValue::Set(None),
+            entity: sea_orm::ActiveValue::Set("".to_owned()),
+            old_value: sea_orm::ActiveValue::Set(None),
+            new_value: sea_orm::ActiveValue::Set(None),
+        })
+        .collect();
+    logs_entity::Entity::insert_many(models)
+        .on_conflict(OnConflict::new().do_nothing().to_owned())
+        .exec(&db)
+        .await?;
     Ok(())
 }
 
@@ -1062,39 +1161,37 @@ async fn insert_email_logs(
 /// Mention-subscriber bulk write (`:454-459`, batch 100,
 /// `ignore_conflicts=True`).
 async fn insert_mention_subscribers(
-    db: &sqlx::PgPool,
+    db_pool: &sqlx::PgPool,
     rows: &[NewIssueSubscriber],
     now: DateTime<Utc>,
 ) -> Result<(), TaskSwallow> {
+    use sea_orm::sea_query::OnConflict;
+    use sea_orm::EntityTrait;
+    let db = pidash_db::pool::sea_orm_connection(db_pool);
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
     for chunk in rows.chunks(BULK_BATCH_SIZE) {
         if chunk.is_empty() {
             continue;
         }
-        let mut builder = sqlx::QueryBuilder::new(ISSUE_SUBSCRIBER_INSERT_SQL);
-        let mut first = true;
-        for row in chunk {
-            if !first {
-                builder.push(", ");
-            }
-            first = false;
-            builder.push("(");
-            builder.push_bind(row.id);
-            builder.push(", ");
-            builder.push_bind(now);
-            builder.push(", ");
-            builder.push_bind(now);
-            builder.push(", NULL, NULL, NULL, ");
-            builder.push_bind(row.project_id);
-            builder.push(", ");
-            builder.push_bind(row.workspace_id);
-            builder.push(", ");
-            builder.push_bind(row.issue_id);
-            builder.push(", ");
-            builder.push_bind(row.subscriber_id);
-            builder.push(")");
-        }
-        builder.push(" ON CONFLICT DO NOTHING");
-        builder.build().execute(db).await?;
+        let models: Vec<subscribers_entity::ActiveModel> = chunk
+            .iter()
+            .map(|r| subscribers_entity::ActiveModel {
+                id: sea_orm::ActiveValue::Set(r.id),
+                created_at: sea_orm::ActiveValue::Set(now_tz),
+                updated_at: sea_orm::ActiveValue::Set(now_tz),
+                created_by_id: sea_orm::ActiveValue::Set(None),
+                updated_by_id: sea_orm::ActiveValue::Set(None),
+                deleted_at: sea_orm::ActiveValue::Set(None),
+                project_id: sea_orm::ActiveValue::Set(r.project_id),
+                workspace_id: sea_orm::ActiveValue::Set(r.workspace_id),
+                issue_id: sea_orm::ActiveValue::Set(r.issue_id),
+                subscriber_id: sea_orm::ActiveValue::Set(r.subscriber_id),
+            })
+            .collect();
+        subscribers_entity::Entity::insert_many(models)
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .exec(&db)
+            .await?;
     }
     Ok(())
 }
@@ -1211,13 +1308,21 @@ pub async fn run_notifications(
     let mut exclusions = parse_mention_ids(&new_mentions)?;
     exclusions.extend(parse_mention_ids(&comment_mentions)?);
     exclusions.push(input.actor_id);
-    let subscriber_ids: Vec<Uuid> = sqlx::query_scalar(SUBSCRIBER_LIST_SQL)
-        .bind(input.project_id)
-        .bind(input.issue_id)
-        .bind(&members)
-        .bind(&exclusions)
-        .fetch_all(db)
-        .await?;
+    let subscriber_ids: Vec<Uuid> = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let db = pidash_db::pool::sea_orm_connection(db);
+        subscribers_entity::Entity::find()
+            .filter(subscribers_entity::Column::DeletedAt.is_null())
+            .filter(subscribers_entity::Column::ProjectId.eq(input.project_id))
+            .filter(subscribers_entity::Column::IssueId.eq(input.issue_id))
+            .filter(subscribers_entity::Column::SubscriberId.is_in(members.clone()))
+            .filter(subscribers_entity::Column::SubscriberId.is_not_in(exclusions.clone()))
+            .all(&db)
+            .await?
+            .into_iter()
+            .map(|m| m.subscriber_id)
+            .collect()
+    };
     let issue_subscribers: Vec<Uuid> = subscriber_ids
         .into_iter()
         .filter(|subscriber| *subscriber != input.actor_id)
@@ -1227,32 +1332,62 @@ pub async fn run_notifications(
 
     if input.subscriber {
         // `get_or_create` inside `try/except: pass` (`:293-299`).
-        let exists: bool = sqlx::query_scalar(SUBSCRIBER_EXISTS_SQL)
-            .bind(input.project_id)
-            .bind(input.issue_id)
-            .bind(input.actor_id)
-            .fetch_one(db)
-            .await?;
+        let exists = {
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+            let db = pidash_db::pool::sea_orm_connection(db);
+            subscribers_entity::Entity::find()
+                .filter(subscribers_entity::Column::DeletedAt.is_null())
+                .filter(subscribers_entity::Column::ProjectId.eq(input.project_id))
+                .filter(subscribers_entity::Column::IssueId.eq(input.issue_id))
+                .filter(subscribers_entity::Column::SubscriberId.eq(input.actor_id))
+                .one(&db)
+                .await?
+                .is_some()
+        };
         if !exists {
-            let _ = sqlx::query(SUBSCRIBER_INSERT_ONE_SQL)
-                .bind(Uuid::new_v4())
-                .bind(now)
-                .bind(now)
-                .bind(input.project_id)
-                .bind(shape.workspace_id)
-                .bind(input.issue_id)
-                .bind(input.actor_id)
-                .execute(db)
+            let _ = async {
+                use sea_orm::EntityTrait;
+                let db = pidash_db::pool::sea_orm_connection(db);
+                let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+                let _ = subscribers_entity::Entity::insert(subscribers_entity::ActiveModel {
+                    id: sea_orm::ActiveValue::Set(Uuid::new_v4()),
+                    created_at: sea_orm::ActiveValue::Set(now_tz),
+                    updated_at: sea_orm::ActiveValue::Set(now_tz),
+                    created_by_id: sea_orm::ActiveValue::Set(None),
+                    updated_by_id: sea_orm::ActiveValue::Set(None),
+                    deleted_at: sea_orm::ActiveValue::Set(None),
+                    project_id: sea_orm::ActiveValue::Set(input.project_id),
+                    workspace_id: sea_orm::ActiveValue::Set(shape.workspace_id),
+                    issue_id: sea_orm::ActiveValue::Set(input.issue_id),
+                    subscriber_id: sea_orm::ActiveValue::Set(input.actor_id),
+                })
+                .on_conflict(
+                    sea_orm::sea_query::OnConflict::new()
+                        .do_nothing()
+                        .to_owned(),
+                )
+                .exec_without_returning(&db)
                 .await;
+                Result::<(), sea_orm::DbErr>::Ok(())
+            }
+            .await;
         }
     }
 
-    let assignees: Vec<Uuid> = sqlx::query_scalar(ASSIGNEE_IDS_SQL)
-        .bind(input.issue_id)
-        .bind(input.project_id)
-        .bind(&members)
-        .fetch_all(db)
-        .await?;
+    let assignees: Vec<Uuid> = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let db = pidash_db::pool::sea_orm_connection(db);
+        assignees_entity::Entity::find()
+            .filter(assignees_entity::Column::DeletedAt.is_null())
+            .filter(assignees_entity::Column::IssueId.eq(input.issue_id))
+            .filter(assignees_entity::Column::ProjectId.eq(input.project_id))
+            .filter(assignees_entity::Column::AssigneeId.is_in(members.clone()))
+            .all(&db)
+            .await?
+            .into_iter()
+            .map(|m| m.assignee_id)
+            .collect()
+    };
 
     let mut bulk_notifications: Vec<NewNotification> = Vec::new();
     let mut bulk_email_logs: Vec<NewEmailLog> = Vec::new();
@@ -1291,11 +1426,16 @@ pub async fn run_notifications(
                         None | Some(Value::Null) => false,
                         Some(Value::String(raw)) => match Uuid::parse_str(raw) {
                             Ok(identifier) => {
-                                sqlx::query_scalar(COMPLETED_STATE_EXISTS_SQL)
-                                    .bind(input.project_id)
-                                    .bind(identifier)
-                                    .fetch_one(db)
+                                use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                                let db = pidash_db::pool::sea_orm_connection(db);
+                                states_entity::Entity::find()
+                                    .filter(states_entity::Column::DeletedAt.is_null())
+                                    .filter(states_entity::Column::ProjectId.eq(input.project_id))
+                                    .filter(states_entity::Column::Id.eq(identifier))
+                                    .filter(states_entity::Column::Group.eq("completed"))
+                                    .one(&db)
                                     .await?
+                                    .is_some()
                             }
                             Err(_) => {
                                 return Err(TaskSwallow::message(
@@ -1318,13 +1458,19 @@ pub async fn run_notifications(
             let comment_text: Option<String> = match activity.get("issue_comment") {
                 Some(value) if py_truthy(value) => {
                     let comment_id = parse_uuid_field(Some(value), "issue_comment")?;
-                    let stripped: Option<String> = sqlx::query_scalar(COMMENT_STRIPPED_SQL)
-                        .bind(comment_id)
-                        .bind(input.issue_id)
-                        .bind(input.project_id)
-                        .bind(shape.workspace_id)
-                        .fetch_optional(db)
-                        .await?;
+                    let stripped: Option<String> = {
+                        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                        let db = pidash_db::pool::sea_orm_connection(db);
+                        comments_entity::Entity::find()
+                            .filter(comments_entity::Column::DeletedAt.is_null())
+                            .filter(comments_entity::Column::Id.eq(comment_id))
+                            .filter(comments_entity::Column::IssueId.eq(input.issue_id))
+                            .filter(comments_entity::Column::ProjectId.eq(input.project_id))
+                            .filter(comments_entity::Column::WorkspaceId.eq(shape.workspace_id))
+                            .one(&db)
+                            .await?
+                            .map(|m| m.comment_stripped)
+                    };
                     Some(stripped.unwrap_or_default())
                 }
                 _ => None,
@@ -1402,11 +1548,17 @@ pub async fn run_notifications(
     insert_mention_subscribers(db, &mention_rows, now).await?;
 
     let last_activity = fetch_last_activity(db, input.issue_id).await?;
-    let actor_name: String = sqlx::query_scalar(ACTOR_NAME_SQL)
-        .bind(input.actor_id)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(|| TaskSwallow::message("notifications: User matching query does not exist"))?;
+    let actor_name: String = {
+        use sea_orm::EntityTrait;
+        let db = pidash_db::pool::sea_orm_connection(db);
+        users_entity::Entity::find_by_id(input.actor_id)
+            .one(&db)
+            .await?
+            .map(|m| m.display_name)
+            .ok_or_else(|| {
+                TaskSwallow::message("notifications: User matching query does not exist")
+            })?
+    };
 
     // Comment-mention notifications (`:465-520`).
     for mention_id_str in &comment_mentions {

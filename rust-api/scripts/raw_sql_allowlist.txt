@@ -193,11 +193,6 @@ crates/jobs/src/tasks_cleanup/expiry.rs 2
 crates/jobs/src/tasks_cleanup/versions.rs 17
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
-crates/jobs/src/tasks_export/issue.rs 15
-crates/jobs/src/tasks_mail/email_notification.rs 2
-crates/jobs/src/tasks_mail/live.rs 6
-crates/jobs/src/tasks_mail/membership_mail.rs 14
-crates/jobs/src/tasks_mail/notifications.rs 21
 crates/jobs/src/tasks_ticker/fire_binding.rs 9
 crates/jobs/src/tasks_ticker/fire_tick.rs 7
 crates/jobs/src/tasks_ticker/scan.rs 1

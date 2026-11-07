@@ -46,12 +46,21 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    bind_export_task_call, export_project_narrow_clause, fetch_exporter_by_token_sql,
-    mark_failed_sql, mark_processing_sql, mark_uploaded_sql, task_export_filename,
-    validate_task_provider, ExportTaskCall, ISSUE_EXPORT_TASK, STATUS_FAILED, STATUS_PROCESSING,
+    bind_export_task_call, task_export_filename, validate_task_provider, ExportTaskCall,
+    ISSUE_EXPORT_TASK, STATUS_FAILED, STATUS_PROCESSING,
 };
 use crate::queue::JobRow;
 use crate::worker::{Handler, Verdict};
+use pidash_db::entity::{
+    cycle_issues as cycle_issues_entity, cycles as cycles_entity,
+    estimate_points as estimate_entity, exporters as exporters_entity,
+    issue_assignees as assignees_entity, issue_comments as comments_entity,
+    issue_labels as issue_labels_entity, issue_links as links_entity,
+    issue_relations as relations_entity, issue_subscribers as subscribers_entity,
+    issues as issues_entity, labels as labels_entity, module_issues as module_issues_entity,
+    modules as modules_entity, project_members as project_members_entity,
+    projects as projects_entity, states as states_entity, users as users_entity,
+};
 
 /// Row keys in serializer `Meta.fields` order
 /// (`porters/serializers/issue.py:95-124`) MINUS the three `Count`
@@ -329,111 +338,169 @@ async fn fetch_issues(
     narrow: Option<Uuid>,
 ) -> Result<Vec<IssueRow>, String> {
     if projects.is_empty() {
-        // `filter(project_id__in=[])` is Django's `EmptyResultSet`: no
-        // query runs, zero rows come back (never `IN ()`).
         return Ok(Vec::new());
     }
-    // Placeholders: $1 workspace, $2.. project ids, member, narrow.
-    let mut index = 1;
-    let workspace_ph = format!("${index}");
-    let mut project_phs = Vec::with_capacity(projects.len());
-    for _ in projects {
-        index += 1;
-        project_phs.push(format!("${index}"));
-    }
-    index += 1;
-    let member_ph = format!("${index}");
-    let extra = match narrow {
-        Some(_) => {
-            index += 1;
-            Some(export_project_narrow_clause(&format!("${index}")))
-        }
-        None => None,
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // SeaORM equivalent of the single-statement `export_issues_sql`
+    // (Batch MAIL-EXPORT-1). The original is one statement with six
+    // joins; this is one statement on `issues` plus three lookups for
+    // the scope filtering (member/project), and per-row joins for the
+    // `select_related` legs – the same rows, same filters, same order;
+    // statement count is higher (documented) but the WHERE semantics
+    // (workspace, project_id__in, member active, archived_at, deleted_at,
+    // narrow) are identical.
+    let eff_projects: Vec<Uuid> = narrow.map(|n| vec![n]).unwrap_or_else(|| projects.to_vec());
+    // Fetch project ids that satisfy the member/active and archived scopes.
+    let member_project_ids: Vec<Uuid> = {
+        let rows = project_members_entity::Entity::find()
+            .filter(project_members_entity::Column::ProjectId.is_in(projects.to_vec()))
+            .filter(project_members_entity::Column::MemberId.eq(Some(member)))
+            .filter(project_members_entity::Column::IsActive.eq(true))
+            .all(&db)
+            .await
+            .map_err(|e| format!("issue_export_task: issue query failed ({e})"))?;
+        rows.into_iter().map(|m| m.project_id).collect()
     };
-    let sql = export_issues_sql(&workspace_ph, &project_phs, &member_ph, extra.as_deref());
-    let mut query = sqlx::query(&sql).bind(workspace);
-    for project in projects {
-        query = query.bind(project);
+    if member_project_ids.is_empty() {
+        return Ok(Vec::new());
     }
-    query = query.bind(member);
-    if let Some(narrow) = narrow {
-        query = query.bind(narrow);
+    let valid_project_ids: Vec<Uuid> = {
+        let rows = projects_entity::Entity::find()
+            .filter(projects_entity::Column::Id.is_in(member_project_ids.clone()))
+            .filter(projects_entity::Column::ArchivedAt.is_null())
+            .all(&db)
+            .await
+            .map_err(|e| format!("issue_export_task: issue query failed ({e})"))?;
+        rows.into_iter().map(|p| p.id).collect()
+    };
+    if valid_project_ids.is_empty() {
+        return Ok(Vec::new());
     }
-    let rows = query
-        .fetch_all(pool)
+    let final_projects: Vec<Uuid> = eff_projects
+        .into_iter()
+        .filter(|p| valid_project_ids.contains(p))
+        .collect();
+    if final_projects.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Main issue fetch: scope to live rows, ordering `-created_at` like
+    // Django default.
+    let issues_models = issues_entity::Entity::find()
+        .filter(issues_entity::Column::WorkspaceId.eq(workspace))
+        .filter(issues_entity::Column::ProjectId.is_in(final_projects.clone()))
+        .filter(issues_entity::Column::DeletedAt.is_null())
+        .order_by_desc(issues_entity::Column::CreatedAt)
+        .all(&db)
         .await
-        .map_err(|error| format!("issue_export_task: issue query failed ({error})"))?;
-    let mut issues = Vec::with_capacity(rows.len());
-    for row in rows {
-        use sqlx::Row;
-        issues.push(IssueRow {
-            id: row
-                .try_get("id")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            parent_id: row
-                .try_get("parent_id")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            project_id: row
-                .try_get("project_id")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            project_name: row
-                .try_get("project_name")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            project_identifier: row
-                .try_get("project_identifier")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            sequence_id: row
-                .try_get("sequence_id")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            name: row
-                .try_get("name")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            state_name: row
-                .try_get("state_name")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            priority: row
-                .try_get("priority")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            complexity_score: row
-                .try_get("complexity_score")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            estimate_value: row
-                .try_get("estimate_value")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            created_first: row
-                .try_get("created_first")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            created_last: row
-                .try_get("created_last")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            has_creator: row
-                .try_get::<Option<Uuid>, _>("creator_id")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?
-                .is_some(),
-            start_date: row
-                .try_get("start_date")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            target_date: row
-                .try_get("target_date")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            completed_at: row
-                .try_get("completed_at")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            created_at: row
-                .try_get("created_at")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            updated_at: row
-                .try_get("updated_at")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            archived_at: row
-                .try_get("archived_at")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
-            is_draft: row
-                .try_get("is_draft")
-                .map_err(|error| format!("issue_export_task: bad issue row ({error})"))?,
+        .map_err(|e| format!("issue_export_task: issue query failed ({e})"))?;
+    // Batch-fetch related rows for the select_related legs.
+    let project_ids: Vec<Uuid> = issues_models.iter().map(|i| i.project_id).collect();
+    let state_ids: Vec<Uuid> = issues_models.iter().filter_map(|i| i.state_id).collect();
+    let creator_ids: Vec<Uuid> = issues_models
+        .iter()
+        .filter_map(|i| i.created_by_id)
+        .collect();
+    let estimate_ids: Vec<Uuid> = issues_models
+        .iter()
+        .filter_map(|i| i.estimate_point_id)
+        .collect();
+
+    let projects_map: std::collections::HashMap<Uuid, projects_entity::Model> = {
+        let rows = projects_entity::Entity::find()
+            .filter(projects_entity::Column::Id.is_in(project_ids.clone()))
+            .all(&db)
+            .await
+            .map_err(|e| format!("issue_export_task: issue query failed ({e})"))?;
+        rows.into_iter().map(|p| (p.id, p)).collect()
+    };
+    let states_map: std::collections::HashMap<Uuid, states_entity::Model> = {
+        if state_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let rows = states_entity::Entity::find()
+                .filter(states_entity::Column::Id.is_in(state_ids.clone()))
+                .all(&db)
+                .await
+                .map_err(|e| format!("issue_export_task: issue query failed ({e})"))?;
+            rows.into_iter().map(|s| (s.id, s)).collect()
+        }
+    };
+    let users_map: std::collections::HashMap<Uuid, users_entity::Model> = {
+        if creator_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let rows = users_entity::Entity::find()
+                .filter(users_entity::Column::Id.is_in(creator_ids.clone()))
+                .all(&db)
+                .await
+                .map_err(|e| format!("issue_export_task: issue query failed ({e})"))?;
+            rows.into_iter().map(|u| (u.id, u)).collect()
+        }
+    };
+    let estimates_map: std::collections::HashMap<Uuid, estimate_entity::Model> = {
+        if estimate_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let rows = estimate_entity::Entity::find()
+                .filter(estimate_entity::Column::Id.is_in(estimate_ids.clone()))
+                .all(&db)
+                .await
+                .map_err(|e| format!("issue_export_task: issue query failed ({e})"))?;
+            rows.into_iter().map(|e| (e.id, e)).collect()
+        }
+    };
+
+    let mut out = Vec::with_capacity(issues_models.len());
+    for im in issues_models {
+        let proj = projects_map
+            .get(&im.project_id)
+            .ok_or_else(|| "issue_export_task: issue query failed (missing project)".to_string())?;
+        let project_name = proj.name.clone();
+        let project_identifier = proj.identifier.clone();
+        let state_name = im
+            .state_id
+            .and_then(|id| states_map.get(&id))
+            .map(|s| s.name.clone());
+        let (created_first, created_last, has_creator) = match im.created_by_id {
+            Some(cid) => {
+                if let Some(u) = users_map.get(&cid) {
+                    (Some(u.first_name.clone()), Some(u.last_name.clone()), true)
+                } else {
+                    (None, None, false)
+                }
+            }
+            None => (None, None, false),
+        };
+        let estimate_value = im
+            .estimate_point_id
+            .and_then(|id| estimates_map.get(&id))
+            .map(|e| e.value.clone());
+        out.push(IssueRow {
+            id: im.id,
+            parent_id: im.parent_id,
+            project_id: im.project_id,
+            project_name,
+            project_identifier,
+            sequence_id: im.sequence_id,
+            name: im.name,
+            state_name,
+            priority: im.priority,
+            complexity_score: im.complexity_score,
+            estimate_value,
+            created_first,
+            created_last,
+            has_creator,
+            start_date: im.start_date,
+            target_date: im.target_date,
+            completed_at: im.completed_at.map(|d| d.with_timezone(&Utc)),
+            created_at: im.created_at.with_timezone(&Utc),
+            updated_at: im.updated_at.with_timezone(&Utc),
+            archived_at: im.archived_at,
+            is_draft: im.is_draft,
         });
     }
-    Ok(issues)
+    Ok(out)
 }
 
 /// One issue's prefetched relations, keyed by issue id. Manager
@@ -474,180 +541,247 @@ pub struct IssueRelations {
 }
 
 async fn fetch_relations(pool: &PgPool, issue_ids: &[Uuid]) -> Result<IssueRelations, String> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
     let mut relations = IssueRelations::default();
     if issue_ids.is_empty() {
         return Ok(relations);
     }
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let failed =
-        |leg: &str, error: sqlx::Error| format!("issue_export_task: {leg} query failed ({error})");
+        |leg: &str, e: sea_orm::DbErr| format!("issue_export_task: {leg} query failed ({e})");
+
     // Assignees: unscoped through join, active users, user -created_at.
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT \"issue_assignees\".\"issue_id\", \"users\".\"first_name\", \
-         \"users\".\"last_name\" FROM \"issue_assignees\" \
-         INNER JOIN \"users\" ON (\"issue_assignees\".\"assignee_id\" = \"users\".\"id\") \
-         WHERE \"issue_assignees\".\"issue_id\" = ANY($1) AND \"users\".\"is_active\" \
-         ORDER BY \"users\".\"created_at\" DESC",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("assignee", error))?;
-    for (issue_id, first, last) in rows {
-        relations
-            .assignees
-            .entry(issue_id)
-            .or_default()
-            .push((first, last));
+    {
+        let rows = assignees_entity::Entity::find()
+            .filter(assignees_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .all(&db)
+            .await
+            .map_err(|e| failed("assignee", e))?;
+        if !rows.is_empty() {
+            let assignee_ids: Vec<Uuid> = rows.iter().map(|r| r.assignee_id).collect();
+            let users = users_entity::Entity::find()
+                .filter(users_entity::Column::Id.is_in(assignee_ids))
+                .filter(users_entity::Column::IsActive.eq(true))
+                .order_by_desc(users_entity::Column::CreatedAt)
+                .all(&db)
+                .await
+                .map_err(|e| failed("assignee", e))?;
+            let umap: HashMap<Uuid, users_entity::Model> =
+                users.into_iter().map(|u| (u.id, u)).collect();
+            for r in rows {
+                if let Some(u) = umap.get(&r.assignee_id) {
+                    relations
+                        .assignees
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push((u.first_name.clone(), u.last_name.clone()));
+                }
+            }
+        }
     }
-    // Labels / cycles / modules: scoped through rows, through -created_at.
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT \"issue_labels\".\"issue_id\", \"labels\".\"name\" FROM \"issue_labels\" \
-         INNER JOIN \"labels\" ON (\"issue_labels\".\"label_id\" = \"labels\".\"id\") \
-         WHERE \"issue_labels\".\"issue_id\" = ANY($1) \
-         AND \"issue_labels\".\"deleted_at\" IS NULL \
-         ORDER BY \"issue_labels\".\"created_at\" DESC",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("label", error))?;
-    for (issue_id, name) in rows {
-        relations.labels.entry(issue_id).or_default().push(name);
+    // Labels: scoped through rows, through -created_at.
+    {
+        let rows = issue_labels_entity::Entity::find()
+            .filter(issue_labels_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .filter(issue_labels_entity::Column::DeletedAt.is_null())
+            .order_by_desc(issue_labels_entity::Column::CreatedAt)
+            .all(&db)
+            .await
+            .map_err(|e| failed("label", e))?;
+        if !rows.is_empty() {
+            let label_ids: Vec<Uuid> = rows.iter().map(|r| r.label_id).collect();
+            let labels = labels_entity::Entity::find()
+                .filter(labels_entity::Column::Id.is_in(label_ids))
+                .all(&db)
+                .await
+                .map_err(|e| failed("label", e))?;
+            let lmap: HashMap<Uuid, String> =
+                labels.into_iter().map(|l| (l.id, l.name.clone())).collect();
+            for r in rows {
+                if let Some(name) = lmap.get(&r.label_id) {
+                    relations
+                        .labels
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
     }
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT \"cycle_issues\".\"issue_id\", \"cycles\".\"name\" FROM \"cycle_issues\" \
-         INNER JOIN \"cycles\" ON (\"cycle_issues\".\"cycle_id\" = \"cycles\".\"id\") \
-         WHERE \"cycle_issues\".\"issue_id\" = ANY($1) \
-         AND \"cycle_issues\".\"deleted_at\" IS NULL \
-         ORDER BY \"cycle_issues\".\"created_at\" DESC",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("cycle", error))?;
-    for (issue_id, name) in rows {
-        relations.cycles.entry(issue_id).or_default().push(name);
+    // Cycles
+    {
+        let rows = cycle_issues_entity::Entity::find()
+            .filter(cycle_issues_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .filter(cycle_issues_entity::Column::DeletedAt.is_null())
+            .order_by_desc(cycle_issues_entity::Column::CreatedAt)
+            .all(&db)
+            .await
+            .map_err(|e| failed("cycle", e))?;
+        if !rows.is_empty() {
+            let cids: Vec<Uuid> = rows.iter().map(|r| r.cycle_id).collect();
+            let cycles = cycles_entity::Entity::find()
+                .filter(cycles_entity::Column::Id.is_in(cids))
+                .all(&db)
+                .await
+                .map_err(|e| failed("cycle", e))?;
+            let cmap: HashMap<Uuid, String> =
+                cycles.into_iter().map(|c| (c.id, c.name.clone())).collect();
+            for r in rows {
+                if let Some(name) = cmap.get(&r.cycle_id) {
+                    relations
+                        .cycles
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
     }
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT \"module_issues\".\"issue_id\", \"modules\".\"name\" FROM \"module_issues\" \
-         INNER JOIN \"modules\" ON (\"module_issues\".\"module_id\" = \"modules\".\"id\") \
-         WHERE \"module_issues\".\"issue_id\" = ANY($1) \
-         AND \"module_issues\".\"deleted_at\" IS NULL \
-         ORDER BY \"module_issues\".\"created_at\" DESC",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("module", error))?;
-    for (issue_id, name) in rows {
-        relations.modules.entry(issue_id).or_default().push(name);
+    // Modules
+    {
+        let rows = module_issues_entity::Entity::find()
+            .filter(module_issues_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .filter(module_issues_entity::Column::DeletedAt.is_null())
+            .order_by_desc(module_issues_entity::Column::CreatedAt)
+            .all(&db)
+            .await
+            .map_err(|e| failed("module", e))?;
+        if !rows.is_empty() {
+            let mids: Vec<Uuid> = rows.iter().map(|r| r.module_id).collect();
+            let mods = modules_entity::Entity::find()
+                .filter(modules_entity::Column::Id.is_in(mids))
+                .all(&db)
+                .await
+                .map_err(|e| failed("module", e))?;
+            let mmap: HashMap<Uuid, String> =
+                mods.into_iter().map(|m| (m.id, m.name.clone())).collect();
+            for r in rows {
+                if let Some(name) = mmap.get(&r.module_id) {
+                    relations
+                        .modules
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+        }
     }
     // Comments: scoped, actor left-joined, created_at ASC.
-    #[allow(clippy::type_complexity)]
-    let rows: Vec<(
-        Uuid,
-        String,
-        Option<Uuid>,
-        Option<String>,
-        Option<String>,
-        Option<DateTime<Utc>>,
-    )> = sqlx::query_as(
-        "SELECT \"issue_comments\".\"issue_id\", \
-         \"issue_comments\".\"comment_stripped\", \"issue_comments\".\"actor_id\", \
-         \"users\".\"first_name\", \"users\".\"last_name\", \
-         \"issue_comments\".\"created_at\" \
-         FROM \"issue_comments\" \
-         LEFT OUTER JOIN \"users\" ON (\"issue_comments\".\"actor_id\" = \"users\".\"id\") \
-         WHERE \"issue_comments\".\"issue_id\" = ANY($1) \
-         AND \"issue_comments\".\"deleted_at\" IS NULL \
-         ORDER BY \"issue_comments\".\"created_at\" ASC",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("comment", error))?;
-    for (issue_id, stripped, actor_id, first_name, last_name, created_at) in rows {
-        relations
-            .comments
-            .entry(issue_id)
-            .or_default()
-            .push(CommentRow {
-                stripped,
-                first_name,
-                last_name,
-                has_actor: actor_id.is_some(),
-                created_at,
-            });
+    {
+        let rows = comments_entity::Entity::find()
+            .filter(comments_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .filter(comments_entity::Column::DeletedAt.is_null())
+            .order_by_asc(comments_entity::Column::CreatedAt)
+            .all(&db)
+            .await
+            .map_err(|e| failed("comment", e))?;
+        let actor_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.actor_id).collect();
+        let users_map: HashMap<Uuid, users_entity::Model> = if actor_ids.is_empty() {
+            HashMap::new()
+        } else {
+            users_entity::Entity::find()
+                .filter(users_entity::Column::Id.is_in(actor_ids))
+                .all(&db)
+                .await
+                .map_err(|e| failed("comment", e))?
+                .into_iter()
+                .map(|u| (u.id, u))
+                .collect()
+        };
+        for r in rows {
+            let (first, last) = r
+                .actor_id
+                .and_then(|id| users_map.get(&id))
+                .map_or((None, None), |u| {
+                    (Some(u.first_name.clone()), Some(u.last_name.clone()))
+                });
+            relations
+                .comments
+                .entry(r.issue_id)
+                .or_default()
+                .push(CommentRow {
+                    stripped: r.comment_stripped,
+                    first_name: first,
+                    last_name: last,
+                    has_actor: r.actor_id.is_some(),
+                    created_at: Some(r.created_at.with_timezone(&Utc)),
+                });
+        }
     }
     // Subscribers: scoped, through -created_at.
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT \"issue_subscribers\".\"issue_id\", \"users\".\"first_name\", \
-         \"users\".\"last_name\" FROM \"issue_subscribers\" \
-         INNER JOIN \"users\" ON (\"issue_subscribers\".\"subscriber_id\" = \"users\".\"id\") \
-         WHERE \"issue_subscribers\".\"issue_id\" = ANY($1) \
-         AND \"issue_subscribers\".\"deleted_at\" IS NULL \
-         ORDER BY \"issue_subscribers\".\"created_at\" DESC",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("subscriber", error))?;
-    for (issue_id, first, last) in rows {
-        relations
-            .subscribers
-            .entry(issue_id)
-            .or_default()
-            .push((first, last));
+    {
+        let rows = subscribers_entity::Entity::find()
+            .filter(subscribers_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .filter(subscribers_entity::Column::DeletedAt.is_null())
+            .order_by_desc(subscribers_entity::Column::CreatedAt)
+            .all(&db)
+            .await
+            .map_err(|e| failed("subscriber", e))?;
+        if !rows.is_empty() {
+            let sids: Vec<Uuid> = rows.iter().map(|r| r.subscriber_id).collect();
+            let users = users_entity::Entity::find()
+                .filter(users_entity::Column::Id.is_in(sids))
+                .all(&db)
+                .await
+                .map_err(|e| failed("subscriber", e))?;
+            let umap: HashMap<Uuid, users_entity::Model> =
+                users.into_iter().map(|u| (u.id, u)).collect();
+            for r in rows {
+                if let Some(u) = umap.get(&r.subscriber_id) {
+                    relations
+                        .subscribers
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push((u.first_name.clone(), u.last_name.clone()));
+                }
+            }
+        }
     }
     // Links: scoped, through -created_at.
-    let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
-        "SELECT \"issue_id\", \"url\", \"title\" FROM \"issue_links\" \
-         WHERE \"issue_id\" = ANY($1) AND \"deleted_at\" IS NULL \
-         ORDER BY \"created_at\" DESC",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("link", error))?;
-    for (issue_id, url, title) in rows {
-        relations
-            .links
-            .entry(issue_id)
-            .or_default()
-            .push((url, title));
+    {
+        let rows = links_entity::Entity::find()
+            .filter(links_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .filter(links_entity::Column::DeletedAt.is_null())
+            .order_by_desc(links_entity::Column::CreatedAt)
+            .all(&db)
+            .await
+            .map_err(|e| failed("link", e))?;
+        for r in rows {
+            relations
+                .links
+                .entry(r.issue_id)
+                .or_default()
+                .push((r.url, r.title));
+        }
     }
-    // Relations, both directions: scoped, unordered like Django.
-    let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT \"issue_id\", \"related_issue_id\", \"relation_type\" \
-         FROM \"issue_relations\" \
-         WHERE \"issue_id\" = ANY($1) AND \"deleted_at\" IS NULL",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("relation", error))?;
-    for (issue_id, related_id, relation) in rows {
-        relations
-            .outgoing
-            .entry(issue_id)
-            .or_default()
-            .push((relation, related_id));
-    }
-    let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT \"related_issue_id\", \"issue_id\", \"relation_type\" \
-         FROM \"issue_relations\" \
-         WHERE \"related_issue_id\" = ANY($1) AND \"deleted_at\" IS NULL",
-    )
-    .bind(issue_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| failed("relation", error))?;
-    for (issue_id, other_id, relation) in rows {
-        relations
-            .incoming
-            .entry(issue_id)
-            .or_default()
-            .push((relation, other_id));
+    // Relations, both directions: scoped, unordered.
+    {
+        let rows = relations_entity::Entity::find()
+            .filter(relations_entity::Column::IssueId.is_in(issue_ids.to_vec()))
+            .filter(relations_entity::Column::DeletedAt.is_null())
+            .all(&db)
+            .await
+            .map_err(|e| failed("relation", e))?;
+        for r in rows {
+            relations
+                .outgoing
+                .entry(r.issue_id)
+                .or_default()
+                .push((r.relation_type, r.related_issue_id));
+        }
+        let rows = relations_entity::Entity::find()
+            .filter(relations_entity::Column::RelatedIssueId.is_in(issue_ids.to_vec()))
+            .filter(relations_entity::Column::DeletedAt.is_null())
+            .all(&db)
+            .await
+            .map_err(|e| failed("relation", e))?;
+        for r in rows {
+            relations
+                .incoming
+                .entry(r.related_issue_id)
+                .or_default()
+                .push((r.relation_type, r.issue_id));
+        }
     }
     Ok(relations)
 }
@@ -661,19 +795,30 @@ async fn fetch_identifiers(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows: Vec<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT \"issues\".\"id\", \"projects\".\"identifier\", \"issues\".\"sequence_id\" \
-         FROM \"issues\" \
-         INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") \
-         WHERE \"issues\".\"id\" = ANY($1)",
-    )
-    .bind(ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| format!("issue_export_task: identifier query failed ({error})"))?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = issues_entity::Entity::find()
+        .filter(issues_entity::Column::Id.is_in(ids.to_vec()))
+        .all(&db)
+        .await
+        .map_err(|e| format!("issue_export_task: identifier query failed ({e})"))?;
+    let project_ids: Vec<Uuid> = rows.iter().map(|r| r.project_id).collect();
+    let projects = projects_entity::Entity::find()
+        .filter(projects_entity::Column::Id.is_in(project_ids))
+        .all(&db)
+        .await
+        .map_err(|e| format!("issue_export_task: identifier query failed ({e})"))?;
+    let proj_map: HashMap<Uuid, String> = projects
+        .into_iter()
+        .map(|p| (p.id, p.identifier.clone()))
+        .collect();
     Ok(rows
         .into_iter()
-        .map(|(id, identifier, sequence)| (id, (identifier, i64::from(sequence))))
+        .filter_map(|r| {
+            proj_map
+                .get(&r.project_id)
+                .map(|ident| (r.id, (ident.clone(), i64::from(r.sequence_id))))
+        })
         .collect())
 }
 
@@ -1136,15 +1281,20 @@ pub struct ExporterRow {
 }
 
 async fn fetch_exporter(pool: &PgPool, token: &str) -> Result<ExporterRow, String> {
-    let sql = fetch_exporter_by_token_sql("$1");
-    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(&sql)
-        .bind(token)
-        .fetch_all(pool)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = exporters_entity::Entity::find()
+        .filter(exporters_entity::Column::Token.eq(token.to_owned()))
+        .select_only()
+        .columns([
+            exporters_entity::Column::Id,
+            exporters_entity::Column::InitiatedById,
+        ])
+        .into_tuple::<(Uuid, Uuid)>()
+        .all(&db)
         .await
-        .map_err(|error| format!("issue_export_task: exporter query failed ({error})"))?;
+        .map_err(|e| format!("issue_export_task: exporter query failed ({e})"))?;
     if rows.is_empty() {
-        // `.get()` misses: the outer `except`'s own `.get()` re-raises,
-        // so the task dies uncaught (Celery FAILURE, no redelivery).
         return Err("issue_export_task: ExporterHistory matching query does not exist.".to_owned());
     }
     if rows.len() > 1 {
@@ -1155,23 +1305,36 @@ async fn fetch_exporter(pool: &PgPool, token: &str) -> Result<ExporterRow, Strin
 }
 
 async fn mark_processing(pool: &PgPool, id: Uuid) -> Result<(), String> {
-    sqlx::query(&mark_processing_sql("$1", "$2"))
-        .bind(STATUS_PROCESSING)
-        .bind(id)
-        .execute(pool)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    exporters_entity::Entity::update_many()
+        .col_expr(
+            exporters_entity::Column::Status,
+            sea_orm::sea_query::Expr::value(STATUS_PROCESSING.to_owned()),
+        )
+        .filter(exporters_entity::Column::Id.eq(id))
+        .exec(&db)
         .await
-        .map_err(|error| format!("issue_export_task: status write failed ({error})"))?;
+        .map_err(|e| format!("issue_export_task: status write failed ({e})"))?;
     Ok(())
 }
 
 async fn mark_failed(pool: &PgPool, id: Uuid, reason: &str) -> Result<(), String> {
-    sqlx::query(&mark_failed_sql("$1", "$2", "$3"))
-        .bind(STATUS_FAILED)
-        .bind(reason)
-        .bind(id)
-        .execute(pool)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    exporters_entity::Entity::update_many()
+        .col_expr(
+            exporters_entity::Column::Status,
+            sea_orm::sea_query::Expr::value(STATUS_FAILED.to_owned()),
+        )
+        .col_expr(
+            exporters_entity::Column::Reason,
+            sea_orm::sea_query::Expr::value(reason.to_owned()),
+        )
+        .filter(exporters_entity::Column::Id.eq(id))
+        .exec(&db)
         .await
-        .map_err(|error| format!("issue_export_task: status write failed ({error})"))?;
+        .map_err(|e| format!("issue_export_task: status write failed ({e})"))?;
     Ok(())
 }
 
@@ -1182,14 +1345,25 @@ async fn mark_uploaded(
     url: &str,
     key: &str,
 ) -> Result<(), String> {
-    sqlx::query(&mark_uploaded_sql("$1", "$2", "$3", "$4"))
-        .bind(status)
-        .bind(url)
-        .bind(key)
-        .bind(id)
-        .execute(pool)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    exporters_entity::Entity::update_many()
+        .col_expr(
+            exporters_entity::Column::Status,
+            sea_orm::sea_query::Expr::value(status.to_owned()),
+        )
+        .col_expr(
+            exporters_entity::Column::Url,
+            sea_orm::sea_query::Expr::value(Some(url.to_owned())),
+        )
+        .col_expr(
+            exporters_entity::Column::Key,
+            sea_orm::sea_query::Expr::value(key.to_owned()),
+        )
+        .filter(exporters_entity::Column::Id.eq(id))
+        .exec(&db)
         .await
-        .map_err(|error| format!("issue_export_task: status write failed ({error})"))?;
+        .map_err(|e| format!("issue_export_task: status write failed ({e})"))?;
     Ok(())
 }
 
