@@ -505,7 +505,7 @@ mod tests {
             None,
         );
 
-        let mut local: Vec<&str> = git_sync::TASK_NAMES.to_vec();
+        let local: Vec<&str> = git_sync::TASK_NAMES.to_vec();
         assert_eq!(local.len(), 3, "D-05 local task count drifted");
         for name in local {
             assert!(registry.owns(name), "{name} must be worker-owned");
