@@ -89,7 +89,6 @@ export const AgentRunSummary = z.object({
   id: uuid(),
   status: z.string(),
   executor_kind: z.string(),
-  queue_position: z.nullable(z.number()),
   runner: nullableUuid(),
   runner_name: z.nullable(z.string()),
   /**
