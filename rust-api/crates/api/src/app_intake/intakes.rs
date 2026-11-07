@@ -572,6 +572,35 @@ async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Projec
 }
 
 /// `cover_image_url` (`db/models/project.py:176-185`): the cover asset's
+/// Decision from one `file_assets` cover lookup. The pre-migration
+/// `Option<(String,)>` decode made a present row with a NULL
+/// `entity_type` a decode error (500); preserved exactly here. Do not
+/// align to Django (which returns the asset URL, `None` for NULL or
+/// unmatched types) — that divergence is tracked separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverDecision {
+    /// No asset row, or a non-static entity type: serve the raw
+    /// `cover_image` text (or null).
+    Raw,
+    /// A static cover type: serve `/api/assets/v2/static/<id>/`.
+    Static,
+    /// A present row with a NULL `entity_type`: preserve the old 500.
+    ServerError,
+}
+
+fn cover_decision(row: Option<Option<String>>) -> CoverDecision {
+    match row {
+        None => CoverDecision::Raw,
+        Some(None) => CoverDecision::ServerError,
+        Some(Some(entity_type)) => match entity_type.as_str() {
+            "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+                CoverDecision::Static
+            }
+            _ => CoverDecision::Raw,
+        },
+    }
+}
+
 /// URL, else the raw `cover_image` text, else null.
 async fn cover_image_url(pool: &PgPool, project: &ProjectRow) -> Result<Option<String>, Denial> {
     if let Some(asset_id) = project.cover_image_asset_id {
@@ -583,13 +612,12 @@ async fn cover_image_url(pool: &PgPool, project: &ProjectRow) -> Result<Option<S
             .one(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
-        if let Some(Some(entity_type)) = row {
-            match entity_type.as_str() {
-                "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-                    return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
-                }
-                _ => return Ok(project.cover_image.clone()),
+        match cover_decision(row) {
+            CoverDecision::ServerError => return Err(Denial::ServerError),
+            CoverDecision::Static => {
+                return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
             }
+            CoverDecision::Raw => return Ok(project.cover_image.clone()),
         }
     }
     Ok(project.cover_image.clone())
@@ -1225,6 +1253,38 @@ mod tests {
             assert!(
                 validate_datetime(&mut errs, "deleted_at", &json!(text), true).is_none(),
                 "{text:?}"
+            );
+        }
+    }
+
+    /// `cover_image_url` lookup outcome (NEWPIDASH-113): the
+    /// pre-migration `Option<(String,)>` decode made a present row
+    /// with a NULL `entity_type` a 500; preserved exactly.
+    #[test]
+    fn cover_decision_preserves_old_null_decode_error() {
+        // No row: raw fall-through, as before.
+        assert_eq!(cover_decision(None), CoverDecision::Raw);
+        // NULL entity_type: the old 500, not a raw-text fallback.
+        assert_eq!(cover_decision(Some(None)), CoverDecision::ServerError);
+        // Static cover types serve the static path.
+        for kind in [
+            "WORKSPACE_LOGO",
+            "USER_AVATAR",
+            "USER_COVER",
+            "PROJECT_COVER",
+        ] {
+            assert_eq!(
+                cover_decision(Some(Some(kind.to_owned()))),
+                CoverDecision::Static,
+                "{kind}"
+            );
+        }
+        // Anything else (incl. empty) serves the raw text, as before.
+        for kind in ["ISSUE_ATTACHMENT", "unknown", ""] {
+            assert_eq!(
+                cover_decision(Some(Some(kind.to_owned()))),
+                CoverDecision::Raw,
+                "{kind}"
             );
         }
     }
