@@ -693,8 +693,8 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
 // Annotated module rows (Q1 over `get_queryset`, `base.py:78-292`)
 // ---------------------------------------------------------------------------
 
-/// (Former `MODULE_BASE_COLUMNS` deleted with the raw-SQL annotated-row
-/// fetch: the SeaORM statement selects by column.)
+// (Former `MODULE_BASE_COLUMNS` deleted with the raw-SQL annotated-row
+// fetch: the SeaORM statement selects by column.)
 
 /// Annotated-row key order shared by create/list/partial_update: the
 /// `.values()` calls list the same 28 keys in different orders, but
@@ -737,8 +737,8 @@ const SHARED_ROW_ORDER: &[&str] = &[
 /// Shared with sibling handler issue 407 (archived detail).
 pub(crate) const DETAIL_ROW_ORDER: &[&str] = shape::MODULE_LIST_FIELD_ORDER;
 
-/// (Former `bind_placeholders` deleted with the raw-SQL annotated-row
-/// fetch: the SeaORM statement binds by column, not by placeholder.)
+// (Former `bind_placeholders` deleted with the raw-SQL annotated-row
+// fetch: the SeaORM statement binds by column, not by placeholder.)
 
 /// One annotated module row, decoded by name (the `row_to_json` /
 /// `GROUP BY` statement twin).

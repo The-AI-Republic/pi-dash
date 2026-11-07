@@ -514,9 +514,9 @@ async fn archived_list(
 // Archived detail (the `else` branch of `get`, `archive.py:294-543`)
 // ---------------------------------------------------------------------------
 
-/// `fetch_archive_label_estimate` lives on `handlers_modules` (SeaORM,
-/// `distribution_scope` with `scope_deleted_guard=false`) and is imported
-/// above; the archive detail calls it under the same name.
+// `fetch_archive_label_estimate` lives on `handlers_modules` (SeaORM,
+// `distribution_scope` with `scope_deleted_guard=false`) and is imported
+// above; the archive detail calls it under the same name.
 
 /// `GET archived-modules/<pk>/`: the detail shell plus the
 /// estimate/distribution blocks. There is no 404: a miss answers 200 with
