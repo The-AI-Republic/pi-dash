@@ -828,7 +828,12 @@ pub fn issue_create_validate(
                 .expect("known value parses")
                 .value()
                 .to_owned();
-            if normalized != executor && instance.is_some() && (probes.has_active_run)() {
+            // `str(attrs["agent_executor"]) != str(instance.agent_executor)`:
+            // the mid-flight refusal compares the NORMALIZED write against
+            // the stored value, not against the input.
+            if instance.is_some_and(|instance| {
+                instance.agent_executor != Some(normalized.as_str()) && (probes.has_active_run)()
+            }) {
                 return Err(CreateValidateError::Field {
                     field: "agent_executor",
                     message: Cow::Borrowed(EXECUTOR_MID_FLIGHT_MESSAGE),
@@ -836,6 +841,15 @@ pub fn issue_create_validate(
             }
             validated.agent_executor = Some(Some(normalized));
         } else {
+            // Explicit clear: `str(None)` vs the stored value.
+            if instance.is_some_and(|instance| {
+                instance.agent_executor.is_some() && (probes.has_active_run)()
+            }) {
+                return Err(CreateValidateError::Field {
+                    field: "agent_executor",
+                    message: Cow::Borrowed(EXECUTOR_MID_FLIGHT_MESSAGE),
+                });
+            }
             validated.agent_executor = Some(None);
         }
     }
@@ -2129,24 +2143,28 @@ mod tests {
             issue_create_validate(&attrs, &ctx, None, &policy, &probes).expect("local passes");
         assert_eq!(local.agent_executor, Some(Some("local_runner".to_owned())));
 
-        // Mid-flight: a translation CHANGED the value while the
-        // instance has an active run is refused; an unchanged value
-        // skips the mid-flight check.
+        // Mid-flight: `str(normalized) != str(instance)` under a live
+        // run is refused; a translated write that lands on the stored
+        // value skips the check (Django `normalize_issue_executor`).
         let mut busy = ProbeBank::permissive();
         busy.has_active_run = Box::new(|| true);
         let busy_probes = busy.probes();
         let mut flying = instance(locked_values(&instance_json));
         flying.agent_executor = Some("local_runner");
         attrs.agent_executor = Some(Some("cloud_agent"));
+        issue_create_validate(&attrs, &ctx, Some(&flying), &policy, &busy_probes)
+            .expect("translated write landing on stored value skips mid-flight");
+        attrs.agent_executor = Some(Some("local_runner"));
+        issue_create_validate(&attrs, &ctx, Some(&flying), &policy, &busy_probes)
+            .expect("unchanged executor skips mid-flight");
+        flying.agent_executor = Some("cloud_agent");
+        attrs.agent_executor = Some(Some("local_runner"));
         let err = issue_create_validate(&attrs, &ctx, Some(&flying), &policy, &busy_probes)
-            .expect_err("mid-flight translated change fails");
+            .expect_err("mid-flight change fails");
         assert_eq!(
             err.raised_detail().expect("raised"),
             serde_json::json!({ "agent_executor": EXECUTOR_MID_FLIGHT_MESSAGE }),
         );
-        attrs.agent_executor = Some(Some("local_runner"));
-        issue_create_validate(&attrs, &ctx, Some(&flying), &policy, &busy_probes)
-            .expect("unchanged executor skips mid-flight");
     }
 
     #[test]
