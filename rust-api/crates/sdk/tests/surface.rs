@@ -435,7 +435,6 @@ surface_snapshot! {
     jobs::DispatchOutcome,
     jobs::DispatchTarget,
     jobs::EXPORT_TASK_NAMES,
-    jobs::GITHUB_SYNC_TASK_NAMES,
     jobs::GIT_SYNC_TASK_NAMES,
     jobs::Handler,
     jobs::ISSUE_ACTIVITY_TASK,

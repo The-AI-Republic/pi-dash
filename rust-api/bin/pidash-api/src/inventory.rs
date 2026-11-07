@@ -1280,15 +1280,6 @@ pub const TASKS: &[TaskRow] = &[
         name: "pi_dash.bgtasks.git_sync_task.sync_one_binding",
     },
     TaskRow {
-        name: "pi_dash.bgtasks.github_sync_task.post_completion_comment",
-    },
-    TaskRow {
-        name: "pi_dash.bgtasks.github_sync_task.sync_all_repos",
-    },
-    TaskRow {
-        name: "pi_dash.bgtasks.github_sync_task.sync_one_repo",
-    },
-    TaskRow {
         name: "pi_dash.bgtasks.issue_activities_task.issue_activity",
     },
     TaskRow {
@@ -1872,12 +1863,6 @@ mod tests {
             pidash_jobs::integrations::git_sync::LiveProviders::from_env(),
             None,
         );
-        pidash_jobs::integrations::github_sync::register_github_sync_tasks(
-            &mut registry,
-            pool.clone(),
-            pidash_jobs::integrations::github_sync::LiveTransports::from_env(),
-            None,
-        );
         pidash_jobs::license::tasks::register(&mut registry, pool.clone());
         pidash_jobs::assistant::register_sweep_handler(
             &mut registry,
@@ -2081,7 +2066,6 @@ mod tests {
         ]);
         expected_rust.extend(pidash_jobs::tasks_webhooks::link_crawl::TASK_NAMES);
         expected_rust.extend(pidash_jobs::integrations::git_sync::TASK_NAMES);
-        expected_rust.extend(pidash_jobs::integrations::github_sync::TASK_NAMES);
         expected_rust.insert(pidash_jobs::license::tasks::TASK_NAME);
         expected_rust.extend(pidash_jobs::assistant::TASK_NAMES);
         expected_rust.extend(pidash_jobs::loop_scan::TASK_NAMES);
@@ -2127,11 +2111,6 @@ mod tests {
             "git_sync group drifted"
         );
         assert_eq!(
-            pidash_jobs::integrations::github_sync::TASK_NAMES.len(),
-            3,
-            "github_sync group drifted"
-        );
-        assert_eq!(
             pidash_jobs::loop_scan::TASK_NAMES.len(),
             2,
             "loop_scan group drifted"
@@ -2151,7 +2130,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 74, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();

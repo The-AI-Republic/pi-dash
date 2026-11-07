@@ -377,7 +377,6 @@ pidash_sdk::jobs::AgentExecutorKind
 pidash_sdk::jobs::DispatchOutcome
 pidash_sdk::jobs::DispatchTarget
 pidash_sdk::jobs::EXPORT_TASK_NAMES
-pidash_sdk::jobs::GITHUB_SYNC_TASK_NAMES
 pidash_sdk::jobs::GIT_SYNC_TASK_NAMES
 pidash_sdk::jobs::Handler
 pidash_sdk::jobs::ISSUE_ACTIVITY_TASK

@@ -479,15 +479,15 @@ mod tests {
         }
     }
 
-    /// PIDASHCONV-238: the worker owns all six D-05 task names with live
-    /// providers. Mirrors the `WorkerBuilder` registration: the real
+    /// PIDASHCONV-238: the worker owns all three D-05 task names with
+    /// live providers. Mirrors the `WorkerBuilder` registration: the real
     /// register fns over a lazy pool (no I/O) plus `from_env` providers
     /// (`Keyring::from_env` falls back to an empty secret, so no env is
     /// needed). `github_signals` owns no names of its own — its dispatch
     /// targets the git `post_completion_comment` task.
     #[tokio::test]
     async fn worker_registry_owns_all_d05_local_tasks() {
-        use pidash_jobs::integrations::{git_sync, github_sync};
+        use pidash_jobs::integrations::git_sync;
         use pidash_jobs::worker::Registry;
 
         // `connect_lazy` never touches the network (it needs a Tokio
@@ -504,16 +504,9 @@ mod tests {
             git_sync::LiveProviders::from_env(),
             None,
         );
-        github_sync::register_github_sync_tasks(
-            &mut registry,
-            pool.clone(),
-            github_sync::LiveTransports::from_env(),
-            None,
-        );
 
         let mut local: Vec<&str> = git_sync::TASK_NAMES.to_vec();
-        local.extend(github_sync::TASK_NAMES);
-        assert_eq!(local.len(), 6, "D-05 local task count drifted");
+        assert_eq!(local.len(), 3, "D-05 local task count drifted");
         for name in local {
             assert!(registry.owns(name), "{name} must be worker-owned");
         }
