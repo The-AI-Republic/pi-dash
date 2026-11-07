@@ -11,10 +11,7 @@ crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
 crates/api/src/app_cycles/handlers_analytics.rs 12
 crates/api/src/app_cycles/handlers_favorites.rs 5
 crates/api/src/app_cycles/handlers_progress.rs 6
-crates/api/src/app_intake/intakes.rs 7
 crates/api/src/app_intake/issues.rs 71
-crates/api/src/app_intake/mod.rs 9
-crates/api/src/app_intake/versions.rs 4
 crates/api/src/app_issues/mod.rs 2
 crates/api/src/app_modules/handlers_archive.rs 5
 crates/api/src/app_modules/handlers_module_issues.rs 10
