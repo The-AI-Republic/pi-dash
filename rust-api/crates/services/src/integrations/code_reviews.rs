@@ -579,6 +579,7 @@ pub async fn backfill_github_pr_links(
 ) -> Result<u64, crate::integrations::accounts::StoreError> {
     use sqlx::Row as _;
     // Fetch legacy rows whose generic counterpart is missing.
+    // raw-sql: cross-table NOT EXISTS on metadata JSON key has no SeaORM equivalent (one-off backfill helper).
     let legacy_rows = sqlx::query(
         "SELECT id, project_id, workspace_id, issue_id, repo_owner, repo_name, pr_number, \
          url, title, state, merged, draft, pr_updated_at, created_at, updated_at, created_by_id, updated_by_id \
@@ -656,6 +657,7 @@ pub async fn backfill_github_pr_links(
             "open".to_owned()
         };
         // Try to resolve repo_external_id via GitRepository, if present.
+        // raw-sql: LOWER() case-insensitive repo lookup in backfill has no SeaORM equivalent.
         let repo_external_id: String = sqlx::query_scalar(
             "SELECT external_id FROM git_repositories WHERE provider='github' AND host_url='https://github.com' AND LOWER(namespace)=LOWER($1) AND LOWER(name)=LOWER($2) AND deleted_at IS NULL LIMIT 1",
         )
@@ -670,6 +672,7 @@ pub async fn backfill_github_pr_links(
             serde_json::json!({"legacy_github_pull_request_link_id": legacy_id.to_string()});
         let new_id = uuid::Uuid::new_v4();
         // Use ON CONFLICT DO NOTHING to keep idempotency if a concurrent backfill inserts.
+        // raw-sql: INSERT ... ON CONFLICT DO NOTHING for idempotent backfill has no SeaORM equivalent.
         let res = sqlx::query(
             "INSERT INTO git_code_review_links (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, provider, host_url, namespace, repo_name, repo_external_id, external_id, external_iid, url, title, state, merged, draft, remote_updated_at, metadata) \
              VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, 'github', 'https://github.com', $9, $10, $11, '', $12, $13, $14, $15, $16, $17, $18, $19) \
