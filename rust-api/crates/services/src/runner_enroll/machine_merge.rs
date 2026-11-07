@@ -35,7 +35,7 @@ use pidash_db::entity::{
     projects as project_entity, runner as runner_entity, workspaces as workspace_entity,
 };
 
-use crate::domain::engine_credential::{self, revoke_reason};
+use crate::domain::engine_credential;
 use crate::domain::tokens;
 use crate::runner_enroll::engine_naming;
 use crate::runner_enroll::queries::enroll_reads;
@@ -671,7 +671,7 @@ pub async fn merge_dev_machine(
         .exec(db)
         .await
         .map(drop)?;
-    engine_credential::revoke_engine_credential(db, source.id, revoke_reason::MACHINE_MERGED, now)
+    engine_credential::revoke_engine_credential(db, source.id, "machine_merged", now)
         .await
         .map_err(|err| MergeError::Db(err.to_string()))?;
     let mut drain_pod_ids: Vec<Uuid> = drain_pods.into_iter().collect();

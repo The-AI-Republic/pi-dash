@@ -78,6 +78,8 @@ pub struct MachineTokenLookup {
     pub dev_machine_id: Option<Uuid>,
     pub workspace_id: Uuid,
     pub revoked_at: Option<DateTime<Utc>>,
+    /// 60-day idle expiry (`NEWPIDASH-50`); judged by the token kernel.
+    pub expires_at: Option<DateTime<Utc>>,
     /// `dev_machine.revoked_at IS NOT NULL` over the LEFT JOIN: `false`
     /// when the token has no device.
     pub dev_revoked: Option<bool>,
@@ -98,6 +100,7 @@ pub async fn machine_token_with_device<C: ConnectionTrait>(
             machine_token::Column::DevMachineId,
             machine_token::Column::WorkspaceId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .column_as(
             Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),

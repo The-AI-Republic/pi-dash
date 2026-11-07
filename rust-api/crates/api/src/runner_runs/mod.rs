@@ -639,6 +639,7 @@ async fn fetch_machine_token(
             machine_token::Column::DevMachineId,
             machine_token::Column::HostLabel,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .column_as(
             Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),

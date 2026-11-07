@@ -19,6 +19,16 @@
 //!   touches, XACK, plan), the sliced eviction-aware wait, PEL-marker
 //!   discipline, 200 envelope.
 //!
+//! # Built-in engine additions (#2910, NEWPIDASH-50)
+//!
+//! * Open stores the authenticating token id (`machine_token_id`). The
+//!   one session serves every workspace on the machine (§4.9): any
+//!   workspace's token of the machine may open, poll and close it.
+//! * Poll evicts with `session_evicted` 409 when the token the session
+//!   was opened with was revoked or expired, while another workspace's
+//!   token keeps it alive. A poll body carrying an `engine_state` dict
+//!   records the heartbeat's engine report (failures log, never 500).
+//!
 //! `permission_classes=[]`, `throttle_classes=[]` on both DRF endpoints
 //! are preserved as-is: no permission or throttle checks run here.
 //!
@@ -53,6 +63,10 @@
 //! * A 500 body is the shared runner JSON; Django renders its HTML
 //!   error page on these paths. Contract tests pin the 500 status
 //!   only.
+//! * The poll's opened-with revoke is a SeaORM conditional update
+//!   (`revoked_at IS NULL` guard, like Django's
+//!   `filter(pk=…, revoked_at__isnull=True)`); the open/delete revoke
+//!   stays the bare by-id `REVOKE_SQL` (`save()` there).
 //! * Integer/float ack ids render via CPython `repr()` spelling
 //!   (`XACK` arg bytes may differ for exotic magnitudes like `1e100`
 //!   vs `1e+100`; the status never does — both sides `XACK` and 200).
@@ -78,6 +92,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use pidash_db::entity::dev_machine;
+use pidash_db::entity::machine_token;
 use pidash_db::orm_tx::TxConn;
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
@@ -120,6 +135,32 @@ fn dev_machine_touch_statement(
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
 /// Revoke reason stamped at delete (`:156`).
 const REASON_CLEAN_SHUTDOWN: &str = "clean_shutdown";
+/// Revoke reason when the token the session was opened with was revoked
+/// (`:198-199`, #2910 §4.9).
+const REASON_MACHINE_TOKEN_REVOKED: &str = "machine_token_revoked";
+/// Revoke reason when the token the session was opened with expired
+/// (`:198-199`, #2910 §4.9).
+const REASON_MACHINE_TOKEN_EXPIRED: &str = "machine_token_expired";
+
+/// The opened-with eviction reason (`:198-199`, #2910 §4.9): revoking or
+/// expiring the token a session was opened with ends the session, while
+/// revoking a different workspace's token keeps it. `None` means the
+/// session stays: no opening token (pre-#2910 rows), or the opening
+/// token is live. The reason is the token's own state: revoked beats
+/// expired (Django checks `revoked_at` first).
+fn opened_with_eviction_reason(
+    opened_revoked_at: Option<DateTime<Utc>>,
+    opened_expires_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<&'static str> {
+    if opened_revoked_at.is_some() {
+        Some(REASON_MACHINE_TOKEN_REVOKED)
+    } else if opened_expires_at.is_some_and(|expires| expires <= now) {
+        Some(REASON_MACHINE_TOKEN_EXPIRED)
+    } else {
+        None
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -396,15 +437,18 @@ pub async fn machine_session_open(
     }
     // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
     // first, then `auto_now_add` stamps `created_at` — two calls, in
-    // that order (captured micros differ).
+    // that order (captured micros differ). `$8` is the authenticating
+    // token: the session remembers which token opened it (#2910 §4.9).
     let new_sid = Uuid::new_v4();
     let last_seen_at = Utc::now();
     let created_at = Utc::now();
+    let opened_token_id = auth.as_ref().map(|auth| auth.token.id);
     if pidash_db::entity::machine_session::Entity::insert(machine_session::open_insert_row(
         new_sid,
         dev_machine_id,
         created_at,
         last_seen_at,
+        opened_token_id,
     ))
     .exec_without_returning(&conn)
     .await
@@ -739,9 +783,53 @@ pub async fn machine_session_poll(
     let Some(row) = row else {
         return render(session_evicted_poll(None));
     };
+    let opened_token_id = row.machine_token_id;
     let session = machine_session_from_model(row);
     if session.revoked_at.is_some() {
         return render(session_evicted_poll(Some(&session.revoked_reason)));
+    }
+    // The token the session was opened with (#2910 §4.9): `opened_with`
+    // may be `None` on pre-#2910 rows, and `SET_NULL` leaves it so after
+    // a token delete — both keep the session, exactly like Django's
+    // `opened_with is not None` guard. A deleted-then-null token id reads
+    // as no opening token here too (the row is gone in both cases).
+    if let Some(token_id) = opened_token_id {
+        let sea = pidash_db::pool::sea_orm_connection(&pool);
+        let opened = match machine_token::Entity::find_by_id(token_id).one(&sea).await {
+            Ok(opened) => opened,
+            Err(_) => return server_error(),
+        };
+        if let Some(opened) = opened {
+            let eviction = opened_with_eviction_reason(
+                opened.revoked_at.map(|instant| instant.with_timezone(&Utc)),
+                opened.expires_at.map(|instant| instant.with_timezone(&Utc)),
+                Utc::now(),
+            );
+            if let Some(reason) = eviction {
+                // Django revokes with a live-only guard
+                // (`filter(pk=…, revoked_at__isnull=True)`), so a
+                // session closed concurrently in between is not
+                // re-revoked under a new reason. SeaORM carries the
+                // same guard (no extra raw SQL site).
+                let revoked = pidash_db::entity::machine_session::Entity::update_many()
+                    .col_expr(
+                        pidash_db::entity::machine_session::Column::RevokedAt,
+                        sea_orm::sea_query::Expr::value(Utc::now().fixed_offset()),
+                    )
+                    .col_expr(
+                        pidash_db::entity::machine_session::Column::RevokedReason,
+                        sea_orm::sea_query::Expr::value(reason),
+                    )
+                    .filter(pidash_db::entity::machine_session::Column::Id.eq(sid))
+                    .filter(pidash_db::entity::machine_session::Column::RevokedAt.is_null())
+                    .exec(&sea)
+                    .await;
+                if revoked.is_err() {
+                    return server_error();
+                }
+                return render(session_evicted_poll(Some(reason)));
+            }
+        }
     }
     let ack_ids = match ack_ids_from_body(&body) {
         Ok(ids) => ids,
@@ -761,6 +849,26 @@ pub async fn machine_session_poll(
         .is_err()
     {
         return server_error();
+    }
+    // From #2910: the poll body may carry engine_state. A dict records the
+    // heartbeat's engine report; a bad report logs and never fails the
+    // poll that delivers the machine's control messages.
+    if let Some(Value::Object(report)) = body.get("engine_state") {
+        let sea = pidash_db::pool::sea_orm_connection(&pool);
+        if let Err(error) = pidash_services::domain::engine_state::record_engine_state_report(
+            &sea,
+            dev_machine_id,
+            report,
+            now,
+        )
+        .await
+        {
+            tracing::error!(
+                dev_machine_id = %dev_machine_id,
+                error = %error,
+                "engine_state report failed"
+            );
+        }
     }
     let redis = client_from_settings(state.settings());
     if !ack_ids.is_empty()
@@ -1056,5 +1164,35 @@ mod tests {
             "UPDATE \"dev_machine\" SET \"last_seen_at\" = '2026-01-02 03:04:05.000000 +00:00' \
              WHERE \"dev_machine\".\"id\" = '00000000-0000-0000-0000-000000000000'"
         );
+    }
+
+    /// Opened-with eviction (#2910 §4.9): revoked beats expired
+    /// (Django checks `revoked_at` first); a live token — including a
+    /// legacy row with no expiry — keeps the session.
+    #[test]
+    fn opened_with_eviction_reason_matrix() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 11, 6, 10, 0, 0).unwrap();
+        let past = now - chrono::Duration::days(1);
+        let future = now + chrono::Duration::days(30);
+        assert_eq!(
+            opened_with_eviction_reason(Some(past), Some(past), now),
+            Some(REASON_MACHINE_TOKEN_REVOKED)
+        );
+        assert_eq!(
+            opened_with_eviction_reason(Some(past), Some(future), now),
+            Some(REASON_MACHINE_TOKEN_REVOKED)
+        );
+        assert_eq!(
+            opened_with_eviction_reason(None, Some(past), now),
+            Some(REASON_MACHINE_TOKEN_EXPIRED)
+        );
+        // At-or-past expiry is expired (`MachineToken.is_expired`).
+        assert_eq!(
+            opened_with_eviction_reason(None, Some(now), now),
+            Some(REASON_MACHINE_TOKEN_EXPIRED)
+        );
+        assert_eq!(opened_with_eviction_reason(None, Some(future), now), None);
+        assert_eq!(opened_with_eviction_reason(None, None, now), None);
     }
 }

@@ -486,6 +486,7 @@ async fn machine_token_with_device(
             machine_token::Column::UserId,
             machine_token::Column::WorkspaceId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
             machine_token::Column::DevMachineId,
         ])
         .column_as(
@@ -543,9 +544,14 @@ async fn authenticate_machine_token(
         token_hash: token_hash.clone(),
         revoked_at_unix: row.revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: row.dev_machine_id.is_some() && row.dev_revoked_at.is_some(),
+        expires_at_unix: row.expires_at.map(|dt| dt.timestamp()),
     };
-    auth_token::validate_machine_token_static(Some(&kernel_row), &token_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    auth_token::validate_machine_token_static(
+        Some(&kernel_row),
+        &token_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: a non-member is revoked
     // first, then denied — exactly like Python.
     let member = is_active_workspace_member(pool, row.workspace_id, row.user_id).await?;
@@ -573,6 +579,7 @@ struct MachineTokenLookup {
     user_id: Uuid,
     workspace_id: Uuid,
     revoked_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
     dev_machine_id: Option<Uuid>,
     dev_revoked_at: Option<DateTime<Utc>>,
 }

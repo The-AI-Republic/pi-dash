@@ -445,6 +445,8 @@ struct MachineTokenLookup {
     dev_machine_id: Option<uuid::Uuid>,
     workspace_id: uuid::Uuid,
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (#2910); `None` never expires.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// `dev_machine.revoked_at IS NOT NULL` over the LEFT JOIN: `false`
     /// when the token has no device.
     dev_revoked: Option<bool>,
@@ -465,6 +467,7 @@ async fn machine_token_with_device<C: ConnectionTrait>(
             machine_token::Column::DevMachineId,
             machine_token::Column::WorkspaceId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .column_as(
             Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
@@ -677,6 +680,7 @@ async fn resolve_machine_token(
         dev_machine_id: _,
         workspace_id,
         revoked_at,
+        expires_at,
         dev_revoked,
     }) = row
     else {
@@ -686,11 +690,16 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
     // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
     let member = is_active_workspace_member(&db, workspace_id, user_id)

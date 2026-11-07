@@ -888,7 +888,7 @@ async fn post_approve(
                         now,
                     );
                 let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                    &db, &machine, now,
+                    &db, machine.id, now,
                 )
                 .await
                 .unwrap_or(false);
@@ -1201,7 +1201,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 now,
             );
             let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                &db_conn, &machine, now,
+                &db_conn, machine.id, now,
             )
             .await
             .unwrap_or(false);
@@ -1248,18 +1248,16 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         let secret = state.settings().secret_key.clone();
         let issued = pidash_services::domain::engine_credential::issue_engine_credential(
             &db_conn,
+            secret.as_bytes(),
             user_id,
             machine_id,
-            secret.as_bytes(),
             !row_interactive,
             now,
         )
         .await;
         let issued = match issued {
             Ok(i) => i,
-            Err(e)
-                if e.code == pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED =>
-            {
+            Err(pidash_services::domain::engine_credential::IssueError::SilentRenewalRefused) => {
                 // Lost race: reuse silent-refused body with fresh state.
                 let fresh = {
                     use sea_orm::EntityTrait;

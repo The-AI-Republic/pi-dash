@@ -11,11 +11,13 @@ use a 40s client timeout and assert the envelope shape, not timing.
 
 from __future__ import annotations
 
+import secrets
 import uuid
 
 import pytest
 
 from _harness.http import bearer_client
+from _harness.tokens import hash_token
 
 from .conftest import DAEMON
 
@@ -271,3 +273,119 @@ def test_daemon_machine_command_result_rejects_cross_machine(
         )
     assert response.status_code == 403
     assert response.json() == {"error": "dev_machine_mismatch"}
+
+
+# -- one machine session serves every workspace (§4.9) ----------------------
+#
+# A single machine session is opened with one workspace's machine token;
+# any workspace token of the same machine may poll it. When the token
+# that opened the session is revoked or idle-expired, the daemon is
+# evicted (409 session_evicted) and re-opens with a live token; revoking
+# a token that did not open the session does not evict it.
+
+
+def _two_workspace_tokens(seeder, daemon_world, machine_flow):
+    """(token A = the flow's live token, token B on a second workspace)
+    for the flow's machine. The flow's token already holds the
+    (workspace, machine) key, so the helper must not mint a second one
+    for it (``machine_token_one_active_per_ws_dev_machine``)."""
+    machine_id = _machine_ids(seeder, machine_flow)
+    ws_b = seeder.create_workspace(daemon_world["owner"]["id"])
+    seeder.create_member(ws_b["id"], daemon_world["owner"]["id"])
+    token_b = seeder.create_machine_token(
+        daemon_world["owner"]["id"], ws_b["id"],
+        "mt_" + secrets.token_urlsafe(24), dev_machine_id=machine_id,
+    )["token"]
+    return machine_id, machine_flow["machine_token"], token_b
+
+
+def _open_machine_session(client, machine_id: str) -> str:
+    response = client.post(f"{DAEMON}/dev-machines/{machine_id}/sessions/", json={})
+    assert response.status_code == 201, response.text
+    return response.json()["session_id"]
+
+
+def _poll_machine(client, machine_id: str, session_id: str, payload: dict):
+    return _post_poll(
+        client,
+        f"{DAEMON}/dev-machines/{machine_id}/sessions/{session_id}/poll",
+        payload,
+    )
+
+
+def test_one_machine_session_serves_every_workspace(settings, seeder, daemon_world, machine_flow):
+    """Open with A's token; poll with B's token (another workspace)."""
+    machine_id, token_a, token_b = _two_workspace_tokens(seeder, daemon_world, machine_flow)
+    with bearer_client(settings.base_url, token_a, timeout=40.0) as client_a:
+        session_id = _open_machine_session(client_a, machine_id)
+    with bearer_client(settings.base_url, token_b, timeout=40.0) as client_b:
+        response = _poll_machine(client_b, machine_id, session_id, {})
+    assert response.status_code == 200, response.text
+    assert isinstance(response.json()["messages"], list)
+
+
+def test_revoking_another_workspace_token_keeps_the_session(
+    settings, seeder, daemon_world, machine_flow,
+):
+    """Revoking a token that did not open the session does not evict it."""
+    machine_id, token_a, token_b = _two_workspace_tokens(seeder, daemon_world, machine_flow)
+    with bearer_client(settings.base_url, token_a, timeout=40.0) as client_a:
+        session_id = _open_machine_session(client_a, machine_id)
+    seeder.db.execute(
+        "UPDATE machine_token SET revoked_at = now() WHERE user_id = %s AND token_hash = %s",
+        (
+            daemon_world["owner"]["id"],
+            hash_token(token_b, seeder.secret_key),
+        ),
+    )
+    with bearer_client(settings.base_url, token_a, timeout=40.0) as client_a:
+        response = _poll_machine(client_a, machine_id, session_id, {})
+    assert response.status_code == 200, response.text
+
+
+def test_revoking_the_opening_token_evicts_the_session(
+    settings, seeder, daemon_world, machine_flow,
+):
+    """Revoking the token that opened the session ends it (409
+    session_evicted / machine_token_revoked); the daemon re-opens with a
+    live token."""
+    machine_id, token_a, token_b = _two_workspace_tokens(seeder, daemon_world, machine_flow)
+    with bearer_client(settings.base_url, token_a, timeout=40.0) as client_a:
+        session_id = _open_machine_session(client_a, machine_id)
+    seeder.db.execute(
+        "UPDATE machine_token SET revoked_at = now() WHERE user_id = %s AND token_hash = %s",
+        (
+            daemon_world["owner"]["id"],
+            hash_token(token_a, seeder.secret_key),
+        ),
+    )
+    with bearer_client(settings.base_url, token_b, timeout=40.0) as client_b:
+        evicted = _poll_machine(client_b, machine_id, session_id, {})
+    assert evicted.status_code == 409, evicted.text
+    assert evicted.json() == {"error": "session_evicted", "reason": "machine_token_revoked"}
+    # The daemon re-opens with B's token.
+    with bearer_client(settings.base_url, token_b, timeout=40.0) as client_b:
+        new_session = _open_machine_session(client_b, machine_id)
+        assert _poll_machine(client_b, machine_id, new_session, {}).status_code == 200
+
+
+def test_expiring_the_opening_token_evicts_the_session(
+    settings, seeder, daemon_world, machine_flow,
+):
+    """An idle-expired opening token also evicts (machine_token_expired);
+    the session itself is revoked by the backend."""
+    machine_id, token_a, token_b = _two_workspace_tokens(seeder, daemon_world, machine_flow)
+    with bearer_client(settings.base_url, token_a, timeout=40.0) as client_a:
+        session_id = _open_machine_session(client_a, machine_id)
+    seeder.db.execute(
+        "UPDATE machine_token SET expires_at = now() - interval '1 second'"
+        " WHERE user_id = %s AND token_hash = %s",
+        (
+            daemon_world["owner"]["id"],
+            hash_token(token_a, seeder.secret_key),
+        ),
+    )
+    with bearer_client(settings.base_url, token_b, timeout=40.0) as client_b:
+        evicted = _poll_machine(client_b, machine_id, session_id, {})
+    assert evicted.status_code == 409, evicted.text
+    assert evicted.json() == {"error": "session_evicted", "reason": "machine_token_expired"}
