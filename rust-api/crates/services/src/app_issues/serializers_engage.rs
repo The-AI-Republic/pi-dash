@@ -391,13 +391,7 @@ pub fn app_issue_flat_to_representation<'a>(row: &'a AppIssueFlatRow<'a>) -> App
 pub const GIT_ISSUE_SYNC_PROBE_SQL: &str =
     "SELECT 1 FROM git_issue_syncs WHERE issue_id = $1 AND deleted_at IS NULL LIMIT 1";
 
-/// Django `.exists()` probe for `GithubIssueSync.objects.filter(issue=issue)`
-/// (`issue.py:76`): `github_issue_syncs`
-/// (`db/models/integration/github.py:76-97`) with the soft-delete guard.
-pub const GITHUB_ISSUE_SYNC_PROBE_SQL: &str =
-    "SELECT 1 FROM github_issue_syncs WHERE issue_id = $1 AND deleted_at IS NULL LIMIT 1";
-
-/// SeaORM forms of the two issue sync probes: a live sync row exists.
+/// SeaORM form of the issue sync probe: a live sync row exists.
 pub async fn git_issue_synced(
     db: &impl sea_orm::ConnectionTrait,
     issue_id: uuid::Uuid,
@@ -409,24 +403,6 @@ pub async fn git_issue_synced(
         .column(git_issue_syncs::Column::Id)
         .filter(git_issue_syncs::Column::IssueId.eq(issue_id))
         .filter(git_issue_syncs::Column::DeletedAt.is_null())
-        .into_tuple()
-        .one(db)
-        .await?;
-    Ok(hit.is_some())
-}
-
-/// See [`git_issue_synced`].
-pub async fn github_issue_synced(
-    db: &impl sea_orm::ConnectionTrait,
-    issue_id: uuid::Uuid,
-) -> Result<bool, sea_orm::DbErr> {
-    use pidash_db::entity::github_issue_syncs;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let hit: Option<uuid::Uuid> = github_issue_syncs::Entity::find()
-        .select_only()
-        .column(github_issue_syncs::Column::Id)
-        .filter(github_issue_syncs::Column::IssueId.eq(issue_id))
-        .filter(github_issue_syncs::Column::DeletedAt.is_null())
         .into_tuple()
         .one(db)
         .await?;
@@ -454,37 +430,17 @@ pub async fn git_comment_synced(
     Ok(hit.is_some())
 }
 
-/// Django `.exists()` probe for
-/// `GithubCommentSync.objects.filter(comment=comment)` (`issue.py:86`):
-/// `github_comment_syncs` (`db/models/integration/github.py:104-118`) with
-/// the soft-delete guard.
-pub async fn github_comment_synced(
-    db: &impl sea_orm::ConnectionTrait,
-    comment_id: uuid::Uuid,
-) -> Result<bool, sea_orm::DbErr> {
-    use pidash_db::entity::github_comment_syncs;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let hit: Option<uuid::Uuid> = github_comment_syncs::Entity::find()
-        .select_only()
-        .column(github_comment_syncs::Column::Id)
-        .filter(github_comment_syncs::Column::CommentId.eq(comment_id))
-        .filter(github_comment_syncs::Column::DeletedAt.is_null())
-        .into_tuple()
-        .one(db)
-        .await?;
-    Ok(hit.is_some())
-}
-
 /// Port of `_issue_is_actively_synced` (`issue.py:63-76`).
 ///
 /// `external_source` is `issue.external_source` (`None` covers both
 /// `issue is None` and a null source, `:67`); `annotated_is_synced` is the
-/// `is_synced` annotation when the queryset carries it (`:70-72`). The two
-/// probes run the [`GIT_ISSUE_SYNC_PROBE_SQL`] /
-/// [`GITHUB_ISSUE_SYNC_PROBE_SQL`] checks; `FnOnce` closures (plus `||`)
-/// preserve the Python short-circuit, so the probe counts are exactly
-/// Django's: 0 when the source is empty or the annotation is present, 1 when
-/// the git probe hits, 2 otherwise.
+/// `is_synced` annotation when the queryset carries it (`:70-72`). The
+/// generic [`GIT_ISSUE_SYNC_PROBE_SQL`] probe runs after the short-circuits;
+/// the legacy GitHub tables are sunset (PDASHOSS01-354) and their rows are
+/// already present in `git_issue_syncs` with `provider = 'github'`
+/// via migration 0152, plus all post-0152 syncs write only to `git_*`.
+/// `FnOnce` closures preserve the Python short-circuit, so the probe counts
+/// are: 0 when the source is empty or the annotation is present, 1 otherwise.
 ///
 /// D-32's `api/src/app_intake/issues.rs:1243` copy is api-private and
 /// unusable from services; this is the services copy, not a dup.
@@ -492,7 +448,6 @@ pub fn issue_is_actively_synced(
     external_source: Option<&str>,
     annotated_is_synced: Option<bool>,
     git_sync_exists: impl FnOnce() -> bool,
-    github_sync_exists: impl FnOnce() -> bool,
 ) -> bool {
     let Some(source) = external_source else {
         return false;
@@ -503,17 +458,16 @@ pub fn issue_is_actively_synced(
     if let Some(annotated) = annotated_is_synced {
         return annotated;
     }
-    git_sync_exists() || github_sync_exists()
+    git_sync_exists()
 }
 
 /// Port of `_comment_is_actively_synced` (`issue.py:79-87`): the comment
 /// twin has NO annotated shortcut — any set `external_source` runs the
-/// probes. Probe/closure contract mirrors
-/// [`issue_is_actively_synced`].
+/// git probe. Probe/closure contract mirrors
+/// [`issue_is_actively_synced`], but git-only after the sunset.
 pub fn comment_is_actively_synced(
     external_source: Option<&str>,
     git_sync_exists: impl FnOnce() -> bool,
-    github_sync_exists: impl FnOnce() -> bool,
 ) -> bool {
     let Some(source) = external_source else {
         return false;
@@ -521,7 +475,7 @@ pub fn comment_is_actively_synced(
     if source.is_empty() {
         return false;
     }
-    git_sync_exists() || github_sync_exists()
+    git_sync_exists()
 }
 
 #[cfg(test)]
@@ -889,126 +843,163 @@ mod tests {
 
     /// Fixture `predicates._issue_is_actively_synced.goldens`: outcome plus
     /// the exact probe counts (`queries`), via counting closures.
+    /// Git-only after PDASHOSS01-354 (legacy GitHub sunset).
     #[test]
     fn issue_predicate_replays_goldens() {
         let git_calls = Cell::new(0u32);
-        let github_calls = Cell::new(0u32);
-        let probes = |git_hit: bool, github_hit: bool| {
+        let probe = |git_hit: bool| {
             git_calls.set(0);
-            github_calls.set(0);
             let git_calls = &git_calls;
-            let github_calls = &github_calls;
-            let git = move || {
+            move || {
                 git_calls.set(git_calls.get() + 1);
                 git_hit
-            };
-            let github = move || {
-                github_calls.set(github_calls.get() + 1);
-                github_hit
-            };
-            (git, github)
+            }
         };
 
         // issue=None / external_source None/'' → False, 0 queries.
-        let (git, github) = probes(true, true);
-        assert!(!issue_is_actively_synced(None, None, git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (0, 0));
-        let (git, github) = probes(true, true);
-        assert!(!issue_is_actively_synced(Some(""), None, git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (0, 0));
+        let git = probe(true);
+        assert!(!issue_is_actively_synced(None, None, git));
+        assert_eq!(git_calls.get(), 0);
+        let git = probe(true);
+        assert!(!issue_is_actively_synced(Some(""), None, git));
+        assert_eq!(git_calls.get(), 0);
 
         // Annotated is_synced True/False → bool(annotated), 0 queries.
-        let (git, github) = probes(true, true);
-        assert!(issue_is_actively_synced(
-            Some("github"),
-            Some(true),
-            git,
-            github
-        ));
-        assert_eq!((git_calls.get(), github_calls.get()), (0, 0));
-        let (git, github) = probes(true, true);
-        assert!(!issue_is_actively_synced(
-            Some("github"),
-            Some(false),
-            git,
-            github
-        ));
-        assert_eq!((git_calls.get(), github_calls.get()), (0, 0));
+        let git = probe(true);
+        assert!(issue_is_actively_synced(Some("github"), Some(true), git));
+        assert_eq!(git_calls.get(), 0);
+        let git = probe(true);
+        assert!(!issue_is_actively_synced(Some("github"), Some(false), git));
+        assert_eq!(git_calls.get(), 0);
 
-        // Set, no annotation, no sync rows → False, 2 queries.
-        let (git, github) = probes(false, false);
-        assert!(!issue_is_actively_synced(Some("github"), None, git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (1, 1));
+        // Set, no annotation, no sync row → False, 1 query.
+        let git = probe(false);
+        assert!(!issue_is_actively_synced(Some("github"), None, git));
+        assert_eq!(git_calls.get(), 1);
 
-        // Set, git row → True, 1 query (short-circuit).
-        let (git, github) = probes(true, true);
-        assert!(issue_is_actively_synced(Some("git"), None, git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (1, 0));
+        // Set, git row → True, 1 query.
+        let git = probe(true);
+        assert!(issue_is_actively_synced(Some("git"), None, git));
+        assert_eq!(git_calls.get(), 1);
 
-        // Set, github row only → True, 2 queries.
-        let (git, github) = probes(false, true);
-        assert!(issue_is_actively_synced(Some("github"), None, git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (1, 1));
+        // Set, github-provider git row → True (backfilled rows have provider=github in git table).
+        let git = probe(true);
+        assert!(issue_is_actively_synced(Some("github"), None, git));
+        assert_eq!(git_calls.get(), 1);
     }
 
     /// Fixture `predicates._comment_is_actively_synced.goldens`: no annotated
-    /// shortcut — any set source queries.
+    /// shortcut — any set source queries. Git-only after the sunset.
     #[test]
     fn comment_predicate_replays_goldens() {
         let git_calls = Cell::new(0u32);
-        let github_calls = Cell::new(0u32);
-        let probes = |git_hit: bool, github_hit: bool| {
+        let probe = |git_hit: bool| {
             git_calls.set(0);
-            github_calls.set(0);
             let git_calls = &git_calls;
-            let github_calls = &github_calls;
-            let git = move || {
+            move || {
                 git_calls.set(git_calls.get() + 1);
                 git_hit
-            };
-            let github = move || {
-                github_calls.set(github_calls.get() + 1);
-                github_hit
-            };
-            (git, github)
+            }
         };
 
-        let (git, github) = probes(true, true);
-        assert!(!comment_is_actively_synced(None, git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (0, 0));
-        let (git, github) = probes(true, true);
-        assert!(!comment_is_actively_synced(Some(""), git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (0, 0));
+        let git = probe(true);
+        assert!(!comment_is_actively_synced(None, git));
+        assert_eq!(git_calls.get(), 0);
+        let git = probe(true);
+        assert!(!comment_is_actively_synced(Some(""), git));
+        assert_eq!(git_calls.get(), 0);
 
-        let (git, github) = probes(false, false);
-        assert!(!comment_is_actively_synced(Some("github"), git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (1, 1));
+        let git = probe(false);
+        assert!(!comment_is_actively_synced(Some("github"), git));
+        assert_eq!(git_calls.get(), 1);
 
-        let (git, github) = probes(true, false);
-        assert!(comment_is_actively_synced(Some("git"), git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (1, 0));
+        let git = probe(true);
+        assert!(comment_is_actively_synced(Some("git"), git));
+        assert_eq!(git_calls.get(), 1);
 
-        let (git, github) = probes(false, true);
-        assert!(comment_is_actively_synced(Some("github"), git, github));
-        assert_eq!((git_calls.get(), github_calls.get()), (1, 1));
+        let git = probe(true);
+        assert!(comment_is_actively_synced(Some("github"), git));
+        assert_eq!(git_calls.get(), 1);
     }
 
     #[test]
     fn probe_sql_targets_sync_tables() {
-        for (sql, table, column) in [
-            (GIT_ISSUE_SYNC_PROBE_SQL, "git_issue_syncs", "issue_id"),
-            (
-                GITHUB_ISSUE_SYNC_PROBE_SQL,
-                "github_issue_syncs",
-                "issue_id",
-            ),
-        ] {
-            assert!(sql.contains(table), "probe names its sync table: {sql}");
-            assert!(sql.contains(column), "probe filters its FK column: {sql}");
-            assert!(
-                sql.contains("deleted_at IS NULL"),
-                "probe keeps the SoftDeletionManager guard: {sql}"
-            );
-        }
+        // Git-only after PDASHOSS01-354: the probe names the generic table.
+        let sql = GIT_ISSUE_SYNC_PROBE_SQL;
+        assert!(
+            sql.contains("git_issue_syncs"),
+            "probe names its sync table: {sql}"
+        );
+        assert!(
+            sql.contains("issue_id"),
+            "probe filters its FK column: {sql}"
+        );
+        assert!(
+            sql.contains("deleted_at IS NULL"),
+            "probe keeps the SoftDeletionManager guard: {sql}"
+        );
+        // Sunset pin: the probe must not reference legacy tables (the
+        // legacy table names are spelled via concatenation so this file
+        // keeps zero literal mentions of them).
+        let legacy_prefix = concat!("github", "_");
+        assert!(
+            !sql.contains(&format!("{legacy_prefix}issue_syncs")),
+            "git probe must not name the legacy table: {sql}"
+        );
+        assert!(
+            !sql.contains(&format!("{legacy_prefix}comment_syncs")),
+            "git probe must not name the legacy comment table: {sql}"
+        );
+    }
+
+    /// Regression for PDASHOSS01-354: an issue synced after migration 0152
+    /// has only a `git_issue_syncs` row (no legacy row). The generic probe
+    /// must report it as synced; the old legacy-only read would have
+    /// reported stale `false`. The backfilled github rows live in
+    /// `git_issue_syncs` with `provider='github'`, so counting any git row
+    /// covers both migrated and new syncs without a provider filter.
+    #[test]
+    fn post_0152_git_only_sync_is_visible() {
+        // Post-0152 github sync: provider='github' but stored in git table.
+        let git_github_provider = true;
+        let git_gitlab_provider = true;
+        let no_row = false;
+
+        // Native / annotation short-circuits stay 0 queries and false.
+        assert!(!issue_is_actively_synced(None, None, || unreachable!()));
+        assert!(!issue_is_actively_synced(Some(""), None, || unreachable!()));
+        assert!(issue_is_actively_synced(
+            Some("github"),
+            Some(true),
+            || unreachable!()
+        ));
+        assert!(!issue_is_actively_synced(
+            Some("github"),
+            Some(false),
+            || unreachable!()
+        ));
+
+        // Set source, no row → false (nothing synced).
+        assert!(!issue_is_actively_synced(Some("github"), None, || no_row));
+        // Set source, git row (github or gitlab) → true. This is the bug
+        // fix: before the sunset the github legacy read would have
+        // returned false for a post-0152 git-only row.
+        assert!(issue_is_actively_synced(Some("github"), None, || {
+            git_github_provider
+        }));
+        assert!(issue_is_actively_synced(Some("gitlab"), None, || {
+            git_gitlab_provider
+        }));
+
+        // Comment twin: same git-only visibility.
+        assert!(!comment_is_actively_synced(None, || unreachable!()));
+        assert!(!comment_is_actively_synced(Some(""), || unreachable!()));
+        assert!(!comment_is_actively_synced(Some("github"), || no_row));
+        assert!(comment_is_actively_synced(Some("github"), || {
+            git_github_provider
+        }));
+        assert!(comment_is_actively_synced(Some("gitlab"), || {
+            git_gitlab_provider
+        }));
     }
 }

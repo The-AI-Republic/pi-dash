@@ -662,11 +662,8 @@ pub struct ExecutorPolicy<'a> {
 #[derive(Clone, Copy)]
 pub struct ValidateProbes<'a> {
     /// [`GIT_ISSUE_SYNC_PROBE_SQL`](super::serializers_engage::GIT_ISSUE_SYNC_PROBE_SQL)
-    /// verdict.
+    /// verdict (git-only after PDASHOSS01-354).
     pub git_sync_exists: &'a dyn Fn() -> bool,
-    /// [`GITHUB_ISSUE_SYNC_PROBE_SQL`](super::serializers_engage::GITHUB_ISSUE_SYNC_PROBE_SQL)
-    /// verdict.
-    pub github_sync_exists: &'a dyn Fn() -> bool,
     /// [`HAS_ACTIVE_RUN_SQL`] verdict. Called up to twice (pod + executor
     /// mid-flight checks), exactly like the `has_active_run` property.
     pub has_active_run: &'a dyn Fn() -> bool,
@@ -765,12 +762,9 @@ pub fn issue_create_validate(
 ) -> Result<ValidatedAttrs, CreateValidateError> {
     // Step 1. Sync lock (:216-229).
     if let Some(current) = instance {
-        if issue_is_actively_synced(
-            current.external_source,
-            current.annotated_is_synced,
-            || (probes.git_sync_exists)(),
-            || (probes.github_sync_exists)(),
-        ) {
+        if issue_is_actively_synced(current.external_source, current.annotated_is_synced, || {
+            (probes.git_sync_exists)()
+        }) {
             let blocked = sync_locked_blocked(&attrs.locked, &current.locked);
             if !blocked.is_empty() {
                 return Err(CreateValidateError::Fields(
@@ -1501,7 +1495,6 @@ mod tests {
     /// Owned probe closures with a borrowing [`ValidateProbes`] view.
     struct ProbeBank {
         git_sync_exists: Box<dyn Fn() -> bool>,
-        github_sync_exists: Box<dyn Fn() -> bool>,
         has_active_run: Box<dyn Fn() -> bool>,
         filter_assignees: IdFilter,
         filter_labels: IdFilter,
@@ -1522,7 +1515,6 @@ mod tests {
             let resolved = project();
             Self {
                 git_sync_exists: Box::new(|| false),
-                github_sync_exists: Box::new(|| false),
                 has_active_run: Box::new(|| false),
                 filter_assignees: Box::new(|ids| ids.to_vec()),
                 filter_labels: Box::new(|ids| ids.to_vec()),
@@ -1544,7 +1536,6 @@ mod tests {
         fn probes(&self) -> ValidateProbes<'_> {
             ValidateProbes {
                 git_sync_exists: &self.git_sync_exists,
-                github_sync_exists: &self.github_sync_exists,
                 has_active_run: &self.has_active_run,
                 filter_assignees: &self.filter_assignees,
                 filter_labels: &self.filter_labels,
@@ -1958,21 +1949,13 @@ mod tests {
         // Create path (no instance) skips the lock entirely.
         issue_create_validate(&attrs, &ctx, None, &policy, &probes).expect("create skips lock");
 
-        // Unsynced instance skips the lock; the git probe short-circuits.
+        // Unsynced instance skips the lock; the git probe decides (git-only after the sunset).
         current.annotated_is_synced = None;
         let git_calls = Rc::new(Cell::new(0u32));
-        let github_calls = Rc::new(Cell::new(0u32));
         let mut counting = ProbeBank::permissive();
         {
             let calls = Rc::clone(&git_calls);
             counting.git_sync_exists = Box::new(move || {
-                calls.set(calls.get() + 1);
-                true
-            });
-        }
-        {
-            let calls = Rc::clone(&github_calls);
-            counting.github_sync_exists = Box::new(move || {
                 calls.set(calls.get() + 1);
                 true
             });
@@ -1982,7 +1965,6 @@ mod tests {
             .expect_err("git probe hit locks");
         assert!(matches!(err, CreateValidateError::Fields(_)));
         assert_eq!(git_calls.get(), 1);
-        assert_eq!(github_calls.get(), 0, "git hit short-circuits github");
     }
 
     #[test]
@@ -2562,7 +2544,6 @@ mod tests {
         };
         // Each closure owns its counter; probes must stay silent on empty attrs.
         let git = bump(0);
-        let github = bump(1);
         let active = bump(2);
         let assignees = bump(3);
         let labels = bump(4);
@@ -2576,10 +2557,6 @@ mod tests {
         let bank = ProbeBank {
             git_sync_exists: Box::new(move || {
                 git();
-                false
-            }),
-            github_sync_exists: Box::new(move || {
-                github();
                 false
             }),
             has_active_run: Box::new(move || {

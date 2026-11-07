@@ -33,10 +33,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use chrono_tz::Tz;
 use pidash_db::entity::{
-    cycle_issues, cycles, estimate_points, file_assets, git_issue_syncs, github_issue_syncs,
-    intake_issues, issue_assignees, issue_labels, issue_links, issue_mentions, issue_subscribers,
-    issue_types, issues, labels, module_issues, modules, project_members, projects, states, users,
-    workspaces,
+    cycle_issues, cycles, estimate_points, file_assets, git_issue_syncs, intake_issues,
+    issue_assignees, issue_labels, issue_links, issue_mentions, issue_subscribers, issue_types,
+    issues, labels, module_issues, modules, project_members, projects, states, users, workspaces,
 };
 use pidash_db::filterset::{FilterKind, ISSUE_FILTERSET};
 use pidash_db::issue_filters::FilterValue;
@@ -919,7 +918,7 @@ pub fn annotate(stmt: &mut SelectStatement, ann: Annotations) {
 
 /// The flat `fields=`/`expand=` branch's `IssueSerializer` columns, with
 /// `is_synced` (empty `external_source` short-circuits false; otherwise a
-/// live git or GitHub sync row).
+/// live git sync row — git-only after PDASHOSS01-354).
 pub fn serializer_columns(stmt: &mut SelectStatement) {
     let synced = |table: SelectStatement| Expr::exists(table);
     let mut git = select_one_from(git_issue_syncs::Entity, "g");
@@ -927,12 +926,6 @@ pub fn serializer_columns(stmt: &mut SelectStatement) {
         col("g", git_issue_syncs::Column::IssueId).equals((a("issue"), issues::Column::Id)),
     )
     .and_where(col("g", git_issue_syncs::Column::DeletedAt).is_null());
-    let mut github = select_one_from(github_issue_syncs::Entity, "gh");
-    github
-        .and_where(
-            col("gh", github_issue_syncs::Column::IssueId).equals((a("issue"), issues::Column::Id)),
-        )
-        .and_where(col("gh", github_issue_syncs::Column::DeletedAt).is_null());
     let is_synced = CaseStatement::new()
         .case(
             issue(issues::Column::ExternalSource)
@@ -940,7 +933,7 @@ pub fn serializer_columns(stmt: &mut SelectStatement) {
                 .or(issue(issues::Column::ExternalSource).eq("")),
             Expr::val(false),
         )
-        .finally(synced(git).or(synced(github)));
+        .finally(synced(git));
     stmt.column((a("issue"), issues::Column::Id))
         .column((a("issue"), issues::Column::WorkspaceId))
         .column((a("issue"), issues::Column::Name))

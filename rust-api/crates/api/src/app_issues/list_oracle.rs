@@ -701,10 +701,8 @@ pub(crate) fn serializer_sql(filtered: &FilteredSet) -> String {
         issue.created_by_id AS created_by, issue.updated_by_id AS updated_by,
         issue.is_draft, issue.archived_at,
         (CASE WHEN issue.external_source IS NULL OR issue.external_source = '' THEN FALSE
-         ELSE (EXISTS (SELECT 1 FROM git_issue_syncs g
-                       WHERE g.issue_id = issue.id AND g.deleted_at IS NULL)
-            OR EXISTS (SELECT 1 FROM github_issue_syncs gh
-                       WHERE gh.issue_id = issue.id AND gh.deleted_at IS NULL))
+         ELSE EXISTS (SELECT 1 FROM git_issue_syncs g
+                      WHERE g.issue_id = issue.id AND g.deleted_at IS NULL)
          END) AS is_synced"#;
     format!(
         "SELECT {selects} {} ORDER BY issue.created_at DESC",
@@ -999,7 +997,6 @@ pub(crate) mod live {
         "cycles",
         "issue_types",
         "git_issue_syncs",
-        "github_issue_syncs",
     ];
 
     pub(crate) fn uid(n: u128) -> uuid::Uuid {
@@ -1366,7 +1363,7 @@ pub(crate) mod live {
             ));
         }
         sql.push(format!(
-            "INSERT INTO github_issue_syncs (id, issue_id, deleted_at) VALUES (gen_random_uuid(), {}, NULL)",
+            "INSERT INTO git_issue_syncs (id, issue_id, deleted_at) VALUES (gen_random_uuid(), {}, NULL)",
             q(100)
         ));
         sql.push(format!(

@@ -1624,7 +1624,7 @@ fn render_issue_snapshot(
 
 /// Whether the issue is git-synced (`app/serializers/issue.py:63-76`):
 /// empty `external_source` short-circuits before any query; otherwise a
-/// `GitIssueSync`/`GithubIssueSync` row decides.
+/// `GitIssueSync` row decides (git-only after PDASHOSS01-354).
 async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1638,16 +1638,7 @@ async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error>
             .fetch_optional(pool)
             .await?
             .flatten();
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM \"github_issue_syncs\" WHERE \"github_issue_syncs\".\"deleted_at\" IS NULL AND \"github_issue_syncs\".\"issue_id\" = $1 LIMIT 1")
-            .bind(issue.id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// `get_is_epic` (`app/serializers/issue.py:1109-1112`): false when the
