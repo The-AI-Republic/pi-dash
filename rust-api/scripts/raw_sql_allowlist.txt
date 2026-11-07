@@ -65,7 +65,7 @@ crates/api/src/v1_openapi/mod.rs 1
 crates/api/src/v1_schedulers/handlers.rs 7
 crates/api/src/v1_schedulers/mod.rs 7
 crates/api/src/v1_schedulers/writes.rs 12
-crates/api/src/v1_work_items/handlers_pr_links.rs 38
+crates/api/src/v1_work_items/handlers_pr_links.rs 35
 crates/compat/src/db.rs 1
 crates/db/src/app_intake/queries.rs 14
 crates/db/src/config/accessor.rs 1
@@ -84,8 +84,7 @@ crates/db/src/v1_cli_auth/queries.rs 1
 crates/jobs/src/dispatch/dispatch.rs 11
 crates/jobs/src/dispatch/execute.rs 19
 crates/jobs/src/integrations/git_sync.rs 26
-crates/jobs/src/integrations/github_signals.rs 4
-crates/jobs/src/integrations/github_sync.rs 33
+crates/jobs/src/integrations/github_signals.rs 3
 crates/jobs/src/license/commands.rs 9
 crates/jobs/src/license/tasks.rs 4
 crates/jobs/src/runner_enroll.rs 5
