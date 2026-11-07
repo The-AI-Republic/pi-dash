@@ -71,20 +71,17 @@ def _issue_is_actively_synced(issue) -> bool:
     if annotated_is_synced is not None:
         return bool(annotated_is_synced)
 
-    from pi_dash.db.models import GitIssueSync, GithubIssueSync
+    from pi_dash.db.models import GitIssueSync
 
-    return GitIssueSync.objects.filter(issue=issue).exists() or GithubIssueSync.objects.filter(issue=issue).exists()
+    return GitIssueSync.objects.filter(issue=issue).exists()
 
 
 def _comment_is_actively_synced(comment) -> bool:
     if comment is None or not comment.external_source:
         return False
-    from pi_dash.db.models import GitCommentSync, GithubCommentSync
+    from pi_dash.db.models import GitCommentSync
 
-    return (
-        GitCommentSync.objects.filter(comment=comment).exists()
-        or GithubCommentSync.objects.filter(comment=comment).exists()
-    )
+    return GitCommentSync.objects.filter(comment=comment).exists()
 
 
 #: User-facing copy for a refused ``managed_runner`` pin, keyed by the reason
