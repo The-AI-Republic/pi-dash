@@ -4043,6 +4043,35 @@ fn owned_values(binds: &[OwnedBind]) -> Vec<Value> {
         .collect()
 }
 
+/// The compiled fragment numbers its binds statement-globally (`$3..`,
+/// after intake/project). sea-query's `cust_with_values` re-indexes each
+/// `$N` against the fragment's OWN value vec (`values[N - 1]`), so emit
+/// fragment-local numbering (`$1..`); sea-query re-projects the values to
+/// statement-global positions itself.
+fn renumber_binds(fragment: &str) -> String {
+    let mut out = String::with_capacity(fragment.len());
+    let mut chars = fragment.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' && chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+            let mut digits = String::new();
+            while let Some(&d) = chars.peek() {
+                if !d.is_ascii_digit() {
+                    break;
+                }
+                digits.push(d);
+                chars.next();
+            }
+            let number: usize = digits.parse().expect("placeholder digits are numeric");
+            assert!(number >= 3, "fragment binds start at $3: ${number}");
+            out.push('$');
+            out.push_str(&(number - 2).to_string());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Parse the compiled `order_to_sql` text back into a sea-query
 /// ordering (same mapping, no new dispatch).
 fn order_expr<'a>(order_sql: &'a str) -> Option<(sea_orm::sea_query::SimpleExpr, Order)> {
@@ -4107,7 +4136,7 @@ fn list_spine(
     if let Some(fragment) = &compiled.fragment {
         let binds = owned_values(&compiled.binds);
         // raw-sql: caller-compiled `issue_filters` predicate text (Django `filter()` output, `$N` binds in order).
-        stmt.and_where(Expr::cust_with_values(fragment.clone(), binds));
+        stmt.and_where(Expr::cust_with_values(renumber_binds(fragment), binds));
     }
     if let Some(statuses) = statuses {
         stmt.and_where(col_expr("intake_issues", "status").is_in(statuses.iter().copied()));
@@ -4911,6 +4940,19 @@ struct ListIssue {
     created_by_id: Option<Uuid>,
 }
 
+/// The 7-column projection [`fetch_list_issues`] selects (decoded by name
+/// through [`FromQueryResult`]).
+#[derive(Debug, FromQueryResult)]
+struct ListIssueProjection {
+    id: Uuid,
+    name: String,
+    priority: String,
+    sequence_id: i32,
+    project_id: Uuid,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    created_by_id: Option<Uuid>,
+}
+
 /// One `IN` fetch for the page's issues (what `select_related("issue")`
 /// folds into the Django query).
 async fn fetch_list_issues(
@@ -4933,6 +4975,7 @@ async fn fetch_list_issues(
             issue_entity::Column::CreatedAt,
             issue_entity::Column::CreatedById,
         ])
+        .into_model::<ListIssueProjection>()
         .all(&sea_conn(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
@@ -7263,5 +7306,42 @@ mod tests {
         .expect("order parses");
         let guest_rows = execute_stmt(guest_stmt, &db).await.expect("guest read");
         assert_eq!(guest_rows.len(), 1, "guest scope: only own row");
+        // The nested `IN` fetch (`select_related("issue")` fold-in) decodes
+        // its 7-column projection by name.
+        let nested = fetch_list_issues(&pool, &[i1, i2])
+            .await
+            .expect("nested fetch");
+        assert_eq!(nested.len(), 2, "nested IN fetch returns both issues");
+        assert_eq!(nested.get(&i1).expect("i1").name, "One");
+        // A compiled-filter fragment (`$3` numbering) executes through
+        // `cust_with_values` (renumbered fragment-locally): the status
+        // gate's one bind is the only statement value after intake/project.
+        let filtered = CompiledFilter {
+            joins: Vec::new(),
+            fragment: Some("\"intake_issues\".\"id\" = $3".to_owned()),
+            binds: vec![OwnedBind::Uuid(
+                ids.first().expect("rows present").to_owned(),
+            )],
+        };
+        let filtered_stmt = list_stmt(
+            &filtered,
+            intake,
+            proj,
+            &Some(vec![-2]),
+            false,
+            guest,
+            "\"issues\".\"created_at\" DESC",
+            50,
+            0,
+        )
+        .expect("order parses");
+        let filtered_rows = execute_stmt(filtered_stmt, &db)
+            .await
+            .expect("fragment read");
+        assert_eq!(
+            filtered_rows.len(),
+            1,
+            "fragment narrows the page to one row"
+        );
     }
 }
