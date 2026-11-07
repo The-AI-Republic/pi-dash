@@ -254,7 +254,10 @@ pub async fn pinned_queued_pod_ids(
 }
 
 /// S4b (`models.py:650`): unpin the QUEUED follow-ups. The driver calls
-/// this only when S4a is non-empty.
+/// this only when S4a is non-empty. H-13: dedicated pins are owned by
+/// the issue, never unpinned — the lost-runner handling (§13.1) fails
+/// their queued runs and clears the assignment instead, so the update
+/// excludes `pin_kind = dedicated`.
 pub async fn unpin_queued_runs_for_runner(
     db: &impl ConnectionTrait,
     runner_id: Uuid,
@@ -263,6 +266,7 @@ pub async fn unpin_queued_runs_for_runner(
         .col_expr(agent_run::Column::PinnedRunnerId, Expr::value(None::<Uuid>))
         .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
         .filter(agent_run::Column::Status.eq("queued"))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
         .exec(db)
         .await
         .map(drop)
@@ -272,6 +276,9 @@ fn pinned_queued(runner_id: Uuid) -> sea_orm::Select<agent_run::Entity> {
     agent_run::Entity::find()
         .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
         .filter(agent_run::Column::Status.eq("queued"))
+        // H-13 locality only (§12.1): dedicated pins are the
+        // lost-runner handling's, never this sweep's drain set.
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
 }
 
 /// Revoke-finalize `UPDATE` performer: the planned `values` as one
@@ -590,6 +597,21 @@ pub trait RevokeStore {
     /// when S4a is non-empty.
     async fn unpin_queued_runs(&mut self, runner_id: Uuid) -> Result<(), RevokeError>;
 
+    /// §13.1 dedicated-issue set for the revoked runner: issues
+    /// assigned to it plus the work items of its QUEUED
+    /// dedicated-pinned runs.
+    async fn dedicated_issue_ids(&mut self, runner_id: Uuid) -> Result<Vec<Uuid>, RevokeError>;
+
+    /// §13.1 lost-runner handling for one issue, in the revoke
+    /// transaction: fail its queued dedicated runs, clear the
+    /// assignment, and report the bounce/recreate for the caller's
+    /// post-commit drain. System-attributed (Django `actor=None`).
+    async fn apply_lost_runner(
+        &mut self,
+        issue_id: Uuid,
+        reason: &str,
+    ) -> Result<crate::domain::issue_assignment::LostRunnerOutcome, RevokeError>;
+
     /// Collect one project-move handoff for the post-commit drain
     /// (`:653-674`, one closure over all runs — the executor fires one
     /// call per collected id, in collection order). The executor runs
@@ -607,6 +629,28 @@ pub trait RevokeStore {
     /// (`:681-685`, always). The executor calls D-14
     /// `schedule_stream_cleanup_for_runner` after commit.
     fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid);
+
+    /// Collect the §13.1 ticking-issue bounce (reason
+    /// `dedicated-runner-revoked`). The executor fires
+    /// `_bounce_issue_no_eligible_runner` after commit.
+    fn bounce_dedicated_after_commit(
+        &mut self,
+        issue_id: Uuid,
+        runner_name: Option<&str>,
+        reason: &str,
+        triggered_by: &str,
+    );
+
+    /// Collect the §13.1 `fall_back` step-2 recreate (cancelled run
+    /// re-dispatched in the default pod). The executor re-dispatches
+    /// via the continuation driver after commit.
+    fn recreate_dedicated_after_commit(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        trigger: &str,
+        creator: Option<Uuid>,
+    );
 }
 
 /// The handoff-failure log line (`models.py:666-671`).
@@ -681,6 +725,48 @@ pub async fn revoke_runner<S: RevokeStore>(
     if !pinned_pod_ids.is_empty() {
         store.unpin_queued_runs(runner_id).await?;
     }
+    // §13.1: per issue dedicated to this runner — whether or not it
+    // has a queued dedicated run — apply the project's lost-runner
+    // handling, which clears the assignment. Bounce/recreate ride
+    // the post-commit drain (Django's `_bounce_issue_no_eligible_runner`
+    // and the default-pod recreate). "The revoking transaction
+    // itself" (§13.1): all of this is in-tx.
+    let mut dedicated_bounce_effects: Vec<(Uuid, Option<String>, String, String)> = Vec::new();
+    let mut dedicated_recreate_effects: Vec<(Uuid, Uuid, String, Option<Uuid>)> = Vec::new();
+    let mut dedicated_drain_pods: Vec<Uuid> = Vec::new();
+    for issue_id in store.dedicated_issue_ids(runner_id).await? {
+        let outcome = store.apply_lost_runner(issue_id, reason).await?;
+        if outcome.bounce {
+            let reason_name = outcome
+                .runner_name
+                .unwrap_or_else(|| "the dedicated runner".to_owned());
+            dedicated_bounce_effects.push((
+                issue_id,
+                Some(reason_name),
+                outcome
+                    .bounce_reason
+                    .unwrap_or_else(|| "no-eligible-runner".to_owned()),
+                outcome
+                    .bounce_triggered_by
+                    .unwrap_or_else(|| reason.to_owned()),
+            ));
+        }
+        if let Some(pod_id) = outcome.fell_back_pod {
+            if !dedicated_drain_pods.contains(&pod_id) {
+                dedicated_drain_pods.push(pod_id);
+            }
+        }
+        if let Some(pod_id) = outcome.recreate_in_pod {
+            dedicated_recreate_effects.push((
+                issue_id,
+                pod_id,
+                outcome
+                    .recreate_trigger
+                    .unwrap_or_else(|| "tick".to_owned()),
+                outcome.recreate_creator,
+            ));
+        }
+    }
     // `affected_pod_ids`: S3 pods then S4a pods, non-null, first-seen
     // order (the set-order quirk — see the module docs).
     let mut drained_pod_ids: Vec<Uuid> = Vec::new();
@@ -696,11 +782,27 @@ pub async fn revoke_runner<S: RevokeStore>(
             drained_pod_ids.push(*pod_id);
         }
     }
+    for pod_id in &dedicated_drain_pods {
+        if !drained_pod_ids.contains(pod_id) {
+            drained_pod_ids.push(*pod_id);
+        }
+    }
     for run_id in &cancelled_run_ids {
         store.complete_handoff_after_commit(*run_id);
     }
     for pod_id in &drained_pod_ids {
         store.drain_pod_after_commit(*pod_id);
+    }
+    for (issue_id, runner_name, reason_name, triggered_by) in &dedicated_bounce_effects {
+        store.bounce_dedicated_after_commit(
+            *issue_id,
+            runner_name.as_deref(),
+            reason_name,
+            triggered_by,
+        );
+    }
+    for (issue_id, pod_id, trigger, creator) in &dedicated_recreate_effects {
+        store.recreate_dedicated_after_commit(*issue_id, *pod_id, trigger, *creator);
     }
     store.schedule_stream_cleanup_after_commit(runner_id);
     Ok(RevokeOutcome {
@@ -930,6 +1032,39 @@ mod tests {
 
         fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
             self.calls.push(Call::Cleanup(runner_id));
+        }
+
+        async fn dedicated_issue_ids(
+            &mut self,
+            _runner_id: Uuid,
+        ) -> Result<Vec<Uuid>, RevokeError> {
+            Ok(Vec::new())
+        }
+
+        async fn apply_lost_runner(
+            &mut self,
+            _issue_id: Uuid,
+            _reason: &str,
+        ) -> Result<crate::domain::issue_assignment::LostRunnerOutcome, RevokeError> {
+            Ok(crate::domain::issue_assignment::LostRunnerOutcome::default())
+        }
+
+        fn bounce_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _runner_name: Option<&str>,
+            _reason: &str,
+            _triggered_by: &str,
+        ) {
+        }
+
+        fn recreate_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _pod_id: Uuid,
+            _trigger: &str,
+            _creator: Option<Uuid>,
+        ) {
         }
     }
 

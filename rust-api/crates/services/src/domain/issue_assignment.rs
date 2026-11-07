@@ -665,7 +665,8 @@ pub async fn resolve_run_pin(
                     // Stale: clear with an activity/comment record. The
                     // caller owns the transaction; the clear does its own
                     // entity writes on this connection (no commit here).
-                    clear_dedicated_runner(db, issue.id, "stale_at_dispatch", actor_id).await?;
+                    clear_dedicated_runner(db, issue.id, "stale_at_dispatch", Some(actor_id))
+                        .await?
                 } else {
                     return Ok(ResolvedPin {
                         runner: Some(assigned),
@@ -1096,7 +1097,7 @@ pub async fn clear_dedicated_runner(
     db: &impl ConnectionTrait,
     issue_id: Uuid,
     reason: &str,
-    actor_id: Uuid,
+    actor_id: Option<Uuid>,
 ) -> Result<(), sea_orm::DbErr> {
     let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
         return Ok(());
@@ -1125,12 +1126,12 @@ pub async fn clear_dedicated_runner(
         id: sea_orm::Set(Uuid::new_v4()),
         comment_stripped: sea_orm::Set(body.clone()),
         attachments: sea_orm::Set(Vec::new()),
-        created_by_id: sea_orm::Set(Some(actor_id)),
+        created_by_id: sea_orm::Set(actor_id),
         issue_id: sea_orm::Set(issue.id),
         project_id: sea_orm::Set(issue.project_id),
-        updated_by_id: sea_orm::Set(Some(actor_id)),
+        updated_by_id: sea_orm::Set(actor_id),
         workspace_id: sea_orm::Set(issue.workspace_id),
-        actor_id: sea_orm::Set(Some(actor_id)),
+        actor_id: sea_orm::Set(actor_id),
         comment_html: sea_orm::Set(body),
         comment_json: sea_orm::Set(json!({})),
         access: sea_orm::Set("full".to_owned()),
@@ -1158,13 +1159,13 @@ pub async fn clear_dedicated_runner(
             "cleared the dedicated runner {runner_name}: {reason}"
         )),
         attachments: sea_orm::Set(Vec::new()),
-        created_by_id: sea_orm::Set(Some(actor_id)),
+        created_by_id: sea_orm::Set(actor_id),
         issue_id: sea_orm::Set(Some(issue.id)),
         issue_comment_id: sea_orm::Set(None),
         project_id: sea_orm::Set(issue.project_id),
-        updated_by_id: sea_orm::Set(Some(actor_id)),
+        updated_by_id: sea_orm::Set(actor_id),
         workspace_id: sea_orm::Set(issue.workspace_id),
-        actor_id: sea_orm::Set(Some(actor_id)),
+        actor_id: sea_orm::Set(actor_id),
         new_identifier: sea_orm::Set(None),
         old_identifier: sea_orm::Set(runner_id),
         epoch: sea_orm::Set(None),
@@ -1972,6 +1973,76 @@ pub struct LostRunnerOutcome {
     pub fell_back_pod: Option<Uuid>,
     /// `fall_back` step 2: cancel+recreate descriptor for the default pod.
     pub recreate_in_pod: Option<Uuid>,
+    /// The revoked runner's name (the caller's bounce names it, §13.1).
+    pub runner_name: Option<String>,
+    /// The bounce reason (`dedicated-runner-revoked` for
+    /// `fail_to_backlog`, `no-eligible-runner` for `fall_back`
+    /// step 3 — Django's two `triggered_by`/`reason` pairs).
+    pub bounce_reason: Option<String>,
+    /// The bounce's `triggered_by`: the revoke reason for
+    /// `fail_to_backlog`, `runner_revoked` for step 3.
+    pub bounce_triggered_by: Option<String>,
+    /// `fall_back` step-2 recreate parent: the cancelled run's
+    /// trigger and creator (Django `_create_and_dispatch_run` args).
+    pub recreate_trigger: Option<String>,
+    /// `fall_back` step-2 recreate creator: the parent run's
+    /// `created_by`.
+    pub recreate_creator: Option<Uuid>,
+}
+
+/// §13.1 pod-move follow: every issue dedicated to `runner_id`
+/// tracks the runner to `new_pod_id` (Django
+/// `Issue.objects.filter(assigned_runner=runner).update(assigned_pod=new_pod)`
+/// — the `updated_at` auto-stamp rides along).
+pub async fn follow_pod_move(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+    new_pod_id: Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    issues::Entity::update_many()
+        .col_expr(
+            issues::Column::AssignedPodId,
+            sea_orm::sea_query::Expr::value(Some(new_pod_id)),
+        )
+        .col_expr(
+            issues::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(Utc::now()),
+        )
+        .filter(issues::Column::AssignedRunnerId.eq(runner_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// The dedicated-issue set for a revoked runner (§13.1): issues
+/// assigned to the runner, plus the work items of its QUEUED
+/// dedicated-pinned runs. Returns de-duplicated ids, non-null.
+pub async fn dedicated_issue_ids_for_runner(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Vec<Uuid>, sea_orm::DbErr> {
+    let mut ids: Vec<Uuid> = issues::Entity::find()
+        .filter(issues::Column::AssignedRunnerId.eq(runner_id))
+        .select_only()
+        .column(issues::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await?;
+    let queue_ids: Vec<Option<Uuid>> = agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::WorkItemId)
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinKind.eq(PIN_DEDICATED))
+        .into_tuple()
+        .all(db)
+        .await?;
+    for id in queue_ids.into_iter().flatten() {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
 }
 
 /// Apply the project's lost-runner handling to one issue (§13.1).
@@ -1992,65 +2063,64 @@ pub struct LostRunnerOutcome {
 /// (`pod_has_runner_for_issue_principal` with `pod_once`), so steps 2
 /// and 3 cannot disagree.
 pub async fn apply_lost_runner_policy(
-    db: &sea_orm::DatabaseConnection,
+    db: &impl ConnectionTrait,
     issue_id: Uuid,
     reason: &str,
-    actor_id: Uuid,
+    actor_id: Option<Uuid>,
 ) -> Result<LostRunnerOutcome, sea_orm::DbErr> {
-    db.transaction(|txn| {
-        Box::pin(async move {
-            let issue = issues::Entity::find_by_id(issue_id)
-                .lock(LockType::Update)
+    {
+        let txn = db;
+        let issue = issues::Entity::find_by_id(issue_id)
+            .lock(LockType::Update)
+            .one(txn)
+            .await?
+            .ok_or_else(|| sea_orm::DbErr::RecordNotFound("issue".to_owned()))?;
+        let runner_name = match issue.assigned_runner_id {
+            Some(id) => runner::Entity::find_by_id(id)
                 .one(txn)
                 .await?
-                .ok_or_else(|| sea_orm::DbErr::RecordNotFound("issue".to_owned()))?;
-            let runner_name = match issue.assigned_runner_id {
-                Some(id) => runner::Entity::find_by_id(id)
-                    .one(txn)
-                    .await?
-                    .map(|r| r.name)
-                    .unwrap_or_else(|| "the dedicated runner".to_owned()),
-                None => "the dedicated runner".to_owned(),
-            };
-            let queued = agent_run::Entity::find()
-                .filter(agent_run::Column::WorkItemId.eq(issue.id))
-                .filter(agent_run::Column::PinKind.eq(PIN_DEDICATED))
-                .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
-                .all(txn)
-                .await?;
-            let project = projects::Entity::find_by_id(issue.project_id)
-                .one(txn)
-                .await?;
-            let policy = project
-                .as_ref()
-                .map(|p| p.dedicated_runner_lost_action.as_str())
-                .unwrap_or("fail_to_backlog");
-            if policy == "fall_back" {
-                return apply_fall_back(txn, &issue, &queued, &runner_name, actor_id).await;
-            }
-            for run in &queued {
-                let error = lost_runner_revoke_error(&runner_name);
-                fail_queued_run(txn, run.id, "dedicated_runner_revoked", &error, None).await?;
-            }
-            // The ticking check needs the issue state; the caller finishes
-            // it (the bounce seam lives outside domain).
-            let bounce = is_ticking_issue(txn, &issue).await?;
-            clear_dedicated_runner(
-                txn,
-                issue.id,
-                "runner lost — run failed, issue moved to backlog",
-                actor_id,
-            )
+                .map(|r| r.name)
+                .unwrap_or_else(|| "the dedicated runner".to_owned()),
+            None => "the dedicated runner".to_owned(),
+        };
+        let queued = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(issue.id))
+            .filter(agent_run::Column::PinKind.eq(PIN_DEDICATED))
+            .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+            .all(txn)
             .await?;
-            let _ = reason;
-            Ok(LostRunnerOutcome {
-                bounce,
-                ..Default::default()
-            })
+        let project = projects::Entity::find_by_id(issue.project_id)
+            .one(txn)
+            .await?;
+        let policy = project
+            .as_ref()
+            .map(|p| p.dedicated_runner_lost_action.as_str())
+            .unwrap_or("fail_to_backlog");
+        if policy == "fall_back" {
+            return apply_fall_back(txn, &issue, &queued, &runner_name, actor_id).await;
+        }
+        for run in &queued {
+            let error = lost_runner_revoke_error(&runner_name);
+            fail_queued_run(txn, run.id, "dedicated_runner_revoked", &error, None).await?;
+        }
+        // The ticking check needs the issue state; the caller finishes
+        // it (the bounce seam lives outside domain).
+        let bounce = is_ticking_issue(txn, &issue).await?;
+        clear_dedicated_runner(
+            txn,
+            issue.id,
+            "runner lost — run failed, issue moved to backlog",
+            actor_id,
+        )
+        .await?;
+        Ok(LostRunnerOutcome {
+            bounce,
+            runner_name: Some(runner_name),
+            bounce_reason: bounce.then(|| "dedicated-runner-revoked".to_owned()),
+            bounce_triggered_by: bounce.then(|| reason.to_owned()),
+            ..Default::default()
         })
-    })
-    .await
-    .map_err(unmap)
+    }
 }
 
 /// `fall_back` arm of [`apply_lost_runner_policy`] (§13.1).
@@ -2059,7 +2129,7 @@ async fn apply_fall_back(
     issue: &issues::Model,
     queued: &[agent_run::Model],
     runner_name: &str,
-    actor_id: Uuid,
+    actor_id: Option<Uuid>,
 ) -> Result<LostRunnerOutcome, sea_orm::DbErr> {
     let mut outcome = LostRunnerOutcome::default();
     let run = queued.first();
@@ -2124,6 +2194,10 @@ async fn apply_fall_back(
             .await?;
         }
         outcome.recreate_in_pod = default_pod;
+        if let Some(parent) = queued.first() {
+            outcome.recreate_trigger = Some(parent.trigger.clone());
+            outcome.recreate_creator = Some(parent.created_by_id);
+        }
         clear_dedicated_runner(
             db,
             issue.id,
@@ -2148,6 +2222,10 @@ async fn apply_fall_back(
     )
     .await?;
     outcome.bounce = is_ticking_issue(db, issue).await?;
+    if outcome.bounce {
+        outcome.bounce_reason = Some("no-eligible-runner".to_owned());
+        outcome.bounce_triggered_by = Some("runner_revoked".to_owned());
+    }
     Ok(outcome)
 }
 
@@ -2157,7 +2235,7 @@ async fn post_fall_back_comment(
     issue: &issues::Model,
     runner_name: &str,
     pod_id: Option<Uuid>,
-    actor_id: Uuid,
+    actor_id: Option<Uuid>,
 ) -> Result<(), sea_orm::DbErr> {
     let pod_name = match pod_id {
         Some(id) => pod::Entity::find_by_id(id)
@@ -2175,12 +2253,12 @@ async fn post_fall_back_comment(
         id: sea_orm::Set(Uuid::new_v4()),
         comment_stripped: sea_orm::Set(body.clone()),
         attachments: sea_orm::Set(Vec::new()),
-        created_by_id: sea_orm::Set(Some(actor_id)),
+        created_by_id: sea_orm::Set(actor_id),
         issue_id: sea_orm::Set(issue.id),
         project_id: sea_orm::Set(issue.project_id),
-        updated_by_id: sea_orm::Set(Some(actor_id)),
+        updated_by_id: sea_orm::Set(actor_id),
         workspace_id: sea_orm::Set(issue.workspace_id),
-        actor_id: sea_orm::Set(Some(actor_id)),
+        actor_id: sea_orm::Set(actor_id),
         comment_html: sea_orm::Set(body),
         comment_json: sea_orm::Set(json!({})),
         access: sea_orm::Set("full".to_owned()),
