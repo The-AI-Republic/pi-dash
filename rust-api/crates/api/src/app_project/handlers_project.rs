@@ -5101,6 +5101,7 @@ fn project_columns() -> &'static str {
      p.agent_default_interval_seconds, p.agent_default_max_ticks, \
      p.agent_review_default_interval_seconds, p.agent_test_default_interval_seconds, \
      p.agent_ticking_enabled, p.default_agent_executor, p.members_can_edit_states, \
+     p.dedicated_runner_lost_action, \
      p.created_at, p.updated_at, p.created_by_id, p.updated_by_id, p.deleted_at"
 }
 
