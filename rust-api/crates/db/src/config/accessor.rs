@@ -89,21 +89,54 @@ impl PgConfigStore {
         "SELECT key, value, is_encrypted FROM instance_configurations WHERE key = ANY($1) AND deleted_at IS NULL";
 }
 
+/// Narrow decode of [`PgConfigStore::QUERY`]: the three selected columns
+/// by name (orm-migration.md §3.2), so a renamed column is a decode
+/// error, not a silent wrong value.
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct ConfigRowDto {
+    key: String,
+    value: Option<String>,
+    is_encrypted: bool,
+}
+
+/// SeaORM form of [`PgConfigStore::QUERY`]: keyed lookup over the live
+/// `instance_configurations` rows, key + value + flag only. `QUERY`
+/// pins the text; this builder pins the shape in tests.
+fn config_rows_select(
+    keys: &[&str],
+) -> sea_orm::Select<crate::entity::instance_configurations::Entity> {
+    use crate::entity::instance_configurations;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    instance_configurations::Entity::find()
+        .select_only()
+        .columns([
+            instance_configurations::Column::Key,
+            instance_configurations::Column::Value,
+            instance_configurations::Column::IsEncrypted,
+        ])
+        .filter(instance_configurations::Column::Key.is_in(keys.iter().map(|k| (*k).to_owned())))
+        .filter(instance_configurations::Column::DeletedAt.is_null())
+}
+
 impl ConfigStore for PgConfigStore {
     async fn fetch(&self, keys: &[&str]) -> Result<HashMap<String, ConfigRow>, ConfigError> {
-        let rows: Vec<(String, Option<String>, bool)> = sqlx::query_as(Self::QUERY)
-            .bind(keys)
-            .fetch_all(&self.pool)
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let db = crate::pool::sea_orm_connection(&self.pool);
+        let rows = config_rows_select(keys)
+            .into_model::<ConfigRowDto>()
+            .all(&db)
             .await
             .map_err(|e| ConfigError::Store(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .map(|(key, value, is_encrypted)| {
+            .map(|row| {
                 (
-                    key,
+                    row.key,
                     ConfigRow {
-                        value,
-                        is_encrypted,
+                        value: row.value,
+                        is_encrypted: row.is_encrypted,
                     },
                 )
             })
@@ -746,6 +779,23 @@ mod tests {
             PgConfigStore::QUERY.contains("deleted_at IS NULL"),
             "{}",
             PgConfigStore::QUERY
+        );
+    }
+
+    #[test]
+    fn config_rows_statement_shape() {
+        let sql = sea_orm::QueryTrait::build(
+            &config_rows_select(&["A", "B"]),
+            sea_orm::DbBackend::Postgres,
+        )
+        .to_string();
+        assert!(sql.contains("\"instance_configurations\""), "table: {sql}");
+        assert!(sql.contains("\"key\""), "key column: {sql}");
+        assert!(sql.contains("\"value\""), "value column: {sql}");
+        assert!(sql.contains("\"is_encrypted\""), "flag column: {sql}");
+        assert!(
+            sql.contains("deleted_at\" IS NULL"),
+            "soft-delete scope: {sql}"
         );
     }
 

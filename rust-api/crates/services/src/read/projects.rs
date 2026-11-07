@@ -18,19 +18,27 @@ use super::{DbError, Error};
 /// trip serves many ids. The ids arrive pre-scoped; the `deleted_at`
 /// guard keeps a row deleted in the race window out (it then reports
 /// as vanished). Empty input returns empty without querying.
+/// SeaORM form of the `SELECT * ... WHERE id = ANY($1) AND
+/// deleted_at IS NULL` read: one round trip for many ids.
+fn project_rows_select(ids: &[Uuid]) -> sea_orm::Select<pidash_db::entity::projects::Entity> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    pidash_db::entity::projects::Entity::find()
+        .filter(pidash_db::entity::projects::Column::Id.is_in(ids.iter().copied()))
+        .filter(pidash_db::entity::projects::Column::DeletedAt.is_null())
+}
+
 pub async fn fetch_project_rows(
     pool: &PgPool,
     ids: &[Uuid],
-) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
+) -> Result<Vec<pidash_db::entity::projects::Model>, Error> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows =
-        sqlx::query(r#"SELECT * FROM "projects" WHERE "id" = ANY($1) AND "deleted_at" IS NULL"#)
-            .bind(ids)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| DbError::new("project-rows", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = project_rows_select(ids)
+        .all(&db)
+        .await
+        .map_err(|error| DbError::from_orm("project-rows", error))?;
     Ok(rows)
 }
 
@@ -64,8 +72,6 @@ pub async fn fetch_state_columns(
 
 #[cfg(test)]
 mod live {
-    use sqlx::Row;
-
     use super::*;
     use crate::read::test_support::{pool, seed_world};
 
@@ -92,8 +98,7 @@ mod live {
             .await
             .expect("hit");
         assert_eq!(rows.len(), 1);
-        let name: String = rows[0].try_get("name").expect("name");
-        assert_eq!(name, "Seed Project");
+        assert_eq!(rows[0].name, "Seed Project");
         let missing = fetch_project_rows(&db, &[Uuid::new_v4()])
             .await
             .expect("miss");
@@ -136,5 +141,17 @@ mod live {
             .await
             .expect("hit after member soft-delete");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn project_rows_statement_shape() {
+        let sql = sea_orm::QueryTrait::build(
+            &project_rows_select(&[Uuid::nil(), Uuid::max()]),
+            sea_orm::DbBackend::Postgres,
+        )
+        .to_string();
+        assert!(sql.contains("\"projects\""), "table: {sql}");
+        assert!(sql.contains("\"id\" IN"), "id set: {sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "soft scope: {sql}");
     }
 }
