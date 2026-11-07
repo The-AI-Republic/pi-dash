@@ -573,8 +573,7 @@ def test_create_tool_in_ticking_default_arms_ticker_and_dispatches_entry_run(
         assert entry["runner_id"] is None
         assert entry["pinned_runner_id"] is None
         assert entry["scheduler_binding_id"] is None
-        assert entry["error"] == ""
-        assert entry["error_code"] == ""
+        assert entry["error_details"] == {}  # agent_run has no error/error_code columns
         assert entry["dispatch_attempts"] == 0
         base_branch = db.fetchone(
             "SELECT base_branch FROM projects WHERE id = %s", (project["id"],)
@@ -726,8 +725,9 @@ def test_create_tool_with_managed_default_creates_local_issue(
     db, broker, seeder, world
 ):
     """#2903: a project whose ``default_agent_executor`` is managed_runner
-    still files pod-level work — the entry run is a local one, and the
-    issue stores local_runner (no managed refusal, no managed run)."""
+    still files pod-level work — the entry run is a local one and the
+    tool leaves the issue's ``agent_executor`` unset (no managed
+    refusal, no managed run)."""
     owner, ws, project = world["owner"], world["workspace"], world["project"]
     seeder.db.execute(
         "UPDATE projects SET default_agent_executor = 'managed_runner' WHERE id = %s",
@@ -766,8 +766,8 @@ def test_create_tool_with_managed_default_creates_local_issue(
 
         issue = _issue_by_name(db, project["id"], title)
         assert issue is not None, "the tool call must create the issue"
-        assert issue["agent_executor"] == "local_runner", (
-            "the managed default must translate to local_runner on the issue"
+        assert issue["agent_executor"] is None, (
+            "the create tool leaves agent_executor unset (Django tools.py:345-371)"
         )
         _track_side_effects(seeder, db, run["id"], issue["id"])
 
