@@ -65,6 +65,18 @@ use crate::state::AppState;
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
+use pidash_db::entity::{pages, project_members, projects, workspaces};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, RelationTrait, Select,
+};
+
+/// SeaORM connection over the request's sqlx pool (no I/O; the
+/// `app_issues` precedent).
+fn orm(pool: &sqlx::PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
 /// Exact bytes of the DRF `IsAuthenticated` denial (401): what anonymous
 /// callers on every page route receive before any gate runs.
 pub const UNAUTHENTICATED_BODY: &str =
@@ -229,35 +241,65 @@ pub async fn tenant_context(
     user_id: &uuid::Uuid,
 ) -> Result<TenantFacts, Denial> {
     // `role` is a `PositiveSmallIntegerField` (SMALLINT): decode as `i16`.
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let role = role.map(|row| i32::from(row.0)).ok_or(Denial::Forbidden)?;
-    let project: Option<(uuid::Uuid, bool)> = sqlx::query_as(
-        r#"SELECT p.workspace_id, p.guest_view_all_features FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_id, guest_view_all) = project.ok_or(Denial::Forbidden)?;
+    let role: Option<i16> = role_query(project_id, user_id, slug)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let role = role.map(i32::from).ok_or(Denial::Forbidden)?;
+    let project: Option<ProjectFactsRow> = project_query(project_id, slug)
+        .into_model()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project = project.ok_or(Denial::Forbidden)?;
     Ok(TenantFacts {
-        workspace_id,
+        workspace_id: project.workspace_id,
         role,
-        guest_view_all,
+        guest_view_all: project.guest_view_all_features,
     })
+}
+
+/// `role` lookup (`_check_project_member_access`, `page.py:55-68`):
+/// active membership in the slugged workspace. Factored so the unit tests
+/// pin the join, filters and output column.
+fn role_query(
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    slug: &str,
+) -> Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+}
+
+/// The project facts (`_check_project_member_access`'s project read):
+/// deliberately WITHOUT a `deleted_at IS NULL` filter (see
+/// [`tenant_context`]). Decoded by name into [`ProjectFactsRow`].
+fn project_query(project_id: &uuid::Uuid, slug: &str) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .column(projects::Column::GuestViewAllFeatures)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+}
+
+/// The tenant project row, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct ProjectFactsRow {
+    workspace_id: uuid::Uuid,
+    guest_view_all_features: bool,
 }
 
 /// `Page.objects.get(id=page_id, workspace__slug=slug)` (`page.py:42`):
@@ -271,20 +313,35 @@ async fn fetch_page(
     user_id: &uuid::Uuid,
 ) -> Result<Option<PageRef>, Denial> {
     // `access` is a `PositiveSmallIntegerField` (SMALLINT): decode as `i16`.
-    let row: Option<(uuid::Uuid, i16)> = sqlx::query_as(
-        r#"SELECT p.owned_by_id, p.access FROM pages p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(page_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(owned_by_id, access)| PageRef {
-        owned_by_requester: owned_by_id == *user_id,
-        is_private: access == PRIVATE_ACCESS as i16,
+    let row: Option<PageFactsRow2> = page_query(page_id, slug)
+        .into_model()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| PageRef {
+        owned_by_requester: row.owned_by_id == *user_id,
+        is_private: row.access == PRIVATE_ACCESS as i16,
     }))
+}
+
+/// Page lookup (`page.py:42`): workspace-slugged, live only. Factored so
+/// the unit tests pin the join, filters and output columns.
+fn page_query(page_id: &uuid::Uuid, slug: &str) -> Select<pages::Entity> {
+    pages::Entity::find()
+        .select_only()
+        .column(pages::Column::OwnedById)
+        .column(pages::Column::Access)
+        .join(JoinType::InnerJoin, pages::Relation::Workspaces.def())
+        .filter(pages::Column::Id.eq(*page_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(pages::Column::DeletedAt.is_null())
+}
+
+/// The page facts, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct PageFactsRow2 {
+    owned_by_id: uuid::Uuid,
+    access: i16,
 }
 
 /// `request.user` from the Django session (`_auth_user_id`). No session,
@@ -835,5 +892,141 @@ mod tests {
         );
         assert_eq!(PRIVATE_ACCESS, 1);
         assert_eq!(PUBLIC_ACCESS, 0);
+    }
+
+    /// The converted gate lookups build SeaORM statements with the same
+    /// joins, filters and output columns as the ported SQL — no database
+    /// needed.
+    #[test]
+    fn gate_queries_build_expected_statements() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let project_id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111101").unwrap();
+        let user_id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111102").unwrap();
+
+        let role_sql = role_query(&project_id, &user_id, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(role_sql.contains("INNER JOIN"), "{role_sql}");
+        assert!(role_sql.contains("workspaces"), "{role_sql}");
+        assert!(role_sql.contains("is_active"), "{role_sql}");
+        assert!(role_sql.contains("IS NULL"), "{role_sql}");
+        // Single output column — no duplicate names possible.
+        assert!(
+            role_sql.starts_with("SELECT \"project_members\".\"role\" FROM"),
+            "{role_sql}"
+        );
+
+        let project_sql = project_query(&project_id, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(project_sql.contains("INNER JOIN"), "{project_sql}");
+        assert!(
+            project_sql.contains("guest_view_all_features"),
+            "{project_sql}"
+        );
+        // The project read must NOT filter soft deletes (see tenant_context).
+        assert!(!project_sql.contains("deleted_at"), "{project_sql}");
+
+        let page_sql = page_query(&project_id, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(page_sql.contains("INNER JOIN"), "{page_sql}");
+        assert!(page_sql.contains("owned_by_id"), "{page_sql}");
+        assert!(page_sql.contains("IS NULL"), "{page_sql}");
+    }
+
+    /// Live-database check for the gate lookups: seeds a workspace, project,
+    /// membership and page, then asserts the converted queries resolve
+    /// them and that soft-deleted / inactive rows are invisible (project
+    /// row reads stay visible — no deleted filter, matching Django).
+    /// Skips when DATABASE_URL is not set.
+    #[tokio::test]
+    async fn gate_queries_live_database() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let db = orm(&pool);
+        let slug = format!("gate65{}", uuid::Uuid::new_v4());
+        let slug = slug.split('-').next().unwrap().to_owned();
+        let workspace_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let page_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query("INSERT INTO users (id, username, email, created_at, updated_at) VALUES ($1,$2,$3,$4,$4) ON CONFLICT (id) DO NOTHING")
+            .bind(user_id).bind(format!("u-{user_id}")).bind(format!("{user_id}@example.com")).bind(now)
+            .execute(&pool).await.expect("seed user");
+        sqlx::query("INSERT INTO workspaces (id, slug, name, created_at, updated_at) VALUES ($1,$2,$3,$4,$4) ON CONFLICT (id) DO NOTHING")
+            .bind(workspace_id).bind(&slug).bind("Gate Workspace").bind(now)
+            .execute(&pool).await.expect("seed workspace");
+        sqlx::query("INSERT INTO projects (id, workspace_id, name, identifier, created_at, updated_at, guest_view_all_features) VALUES ($1,$2,$3,$4,$4,$4,$5) ON CONFLICT (id) DO NOTHING")
+            .bind(project_id).bind(workspace_id).bind("Gate Project").bind(format!("G{project_id}")).bind(now).bind(false)
+            .execute(&pool).await.expect("seed project");
+        sqlx::query("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$4,$4) ON CONFLICT (id) DO NOTHING")
+            .bind(uuid::Uuid::new_v4()).bind(workspace_id).bind(project_id).bind(user_id).bind(5i16).bind(true).bind(now)
+            .execute(&pool).await.expect("seed member");
+        sqlx::query("INSERT INTO pages (id, workspace_id, name, description_json, description_html, owned_by_id, access, color, created_at, updated_at, view_props, logo_props, is_global, sort_order) VALUES ($1,$2,$3,'{}'::jsonb,'', $4,$5,'',$4,$4,'{}'::jsonb,'{}'::jsonb,$6,$7) ON CONFLICT (id) DO NOTHING")
+            .bind(page_id).bind(workspace_id).bind("Gate Page").bind(user_id).bind(1i16).bind(false).bind(0f64)
+            .execute(&pool).await.expect("seed page");
+
+        let role: Option<i16> = role_query(&project_id, &user_id, &slug)
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("role query");
+        assert_eq!(role, Some(5));
+
+        let project: Option<ProjectFactsRow> = project_query(&project_id, &slug)
+            .into_model()
+            .one(&db)
+            .await
+            .expect("project query");
+        assert_eq!(project.expect("project row").workspace_id, workspace_id);
+
+        let page: Option<PageFactsRow2> = page_query(&page_id, &slug)
+            .into_model()
+            .one(&db)
+            .await
+            .expect("page query");
+        let page = page.expect("page row");
+        assert_eq!(page.owned_by_id, user_id);
+        assert_eq!(page.access, 1);
+
+        // Wrong slug resolves nothing.
+        assert!(role_query(&project_id, &user_id, "no-such-slug-65")
+            .into_tuple::<i16>()
+            .one(&db)
+            .await
+            .expect("miss query")
+            .is_none());
+
+        sqlx::query("DELETE FROM pages WHERE id = $1")
+            .bind(page_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup page");
+        sqlx::query("DELETE FROM project_members WHERE member_id = $1 AND project_id = $2")
+            .bind(user_id)
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup member");
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup project");
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
     }
 }
