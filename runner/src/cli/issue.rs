@@ -294,7 +294,12 @@ pub struct ListArgs {
     pub state: Option<String>,
 
     /// Only items in these state groups — comma-separated from `backlog`,
-    /// `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`.
+    /// `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`,
+    /// plus shortcuts `open` (`backlog,unstarted,started,review,test`),
+    /// `closed` (`completed,cancelled`) and `all` (no filter). Aliases may be
+    /// mixed with concrete groups, e.g. `open,completed`. Defaults to `open`
+    /// when neither `--state` nor `--state-group` is given. If `--state` or
+    /// `--state-group` is given, the default is disabled.
     #[arg(long)]
     pub state_group: Option<String>,
 
@@ -410,10 +415,15 @@ pub struct SearchArgs {
     #[arg(long)]
     pub project: Option<String>,
 
-    /// Filter by status: `open` (in progress), `closed` (completed or
-    /// cancelled), or `all` (default).
+    /// Filter by status: `open` (open), `closed` (completed/cancelled) or
+    /// `all` (default). Alias of `--state-group` for search.
     #[arg(long, default_value = "all")]
     pub status: String,
+
+    /// Alias of `--status` for consistency with `issue list` — `open`,
+    /// `closed` or `all`. When set, it takes precedence over `--status`.
+    #[arg(long = "state-group", value_name = "GROUP")]
+    pub state_group: Option<String>,
 
     /// Lower bound on `updated_at`, ISO 8601 (e.g. `2025-01-01T00:00:00Z`).
     #[arg(long)]
@@ -635,9 +645,140 @@ async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+const OPEN_STATE_GROUPS: &[&str] = &["backlog", "unstarted", "started", "review", "test"];
+const CLOSED_STATE_GROUPS: &[&str] = &["completed", "cancelled"];
+const STATE_GROUP_ORDER: &[&str] = &[
+    "backlog",
+    "unstarted",
+    "started",
+    "review",
+    "test",
+    "completed",
+    "cancelled",
+];
+
+/// Expand a `--state-group` value into what the server expects.
+///
+/// Input is comma-separated tokens, case-insensitive, trimmed. Allowed
+/// tokens are the concrete groups (`backlog`, `unstarted`, `started`,
+/// `review`, `test`, `completed`, `cancelled`) and the shortcuts `open`,
+/// `closed`, `all`. `open` → `backlog,unstarted,started,review,test`,
+/// `closed` → `completed,cancelled`, `all` → `None` (no filter, today's
+/// behaviour). Mixed tokens expand and de-duplicate, ordered by
+/// `STATE_GROUP_ORDER`. If any token is `all`, the result is `None` — `all`
+/// wins over other tokens because it means "everything".
+fn expand_state_group_input(raw: &str) -> Result<Option<String>, CliError> {
+    let tokens: Vec<String> = raw
+        .split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "--state-group must not be empty",
+        ));
+    }
+    const CONCRETE: &[&str] = STATE_GROUP_ORDER;
+    for token in &tokens {
+        if token != "open"
+            && token != "closed"
+            && token != "all"
+            && !CONCRETE.contains(&token.as_str())
+        {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                format!(
+                    "unknown state group '{token}' (valid: backlog, unstarted, started, review, test, completed, cancelled, open, closed, all)"
+                ),
+            ));
+        }
+    }
+    if tokens.iter().any(|t| t == "all") {
+        return Ok(None);
+    }
+    let mut expanded: Vec<String> = Vec::new();
+    for token in &tokens {
+        match token.as_str() {
+            "open" => {
+                for g in OPEN_STATE_GROUPS {
+                    if !expanded.iter().any(|e| e == g) {
+                        expanded.push((*g).to_string());
+                    }
+                }
+            }
+            "closed" => {
+                for g in CLOSED_STATE_GROUPS {
+                    if !expanded.iter().any(|e| e == g) {
+                        expanded.push((*g).to_string());
+                    }
+                }
+            }
+            other => {
+                if !expanded.iter().any(|e| e == other) {
+                    expanded.push(other.to_string());
+                }
+            }
+        }
+    }
+    expanded.sort_by(|a, b| {
+        let ia = STATE_GROUP_ORDER
+            .iter()
+            .position(|g| g == a)
+            .unwrap_or(usize::MAX);
+        let ib = STATE_GROUP_ORDER
+            .iter()
+            .position(|g| g == b)
+            .unwrap_or(usize::MAX);
+        ia.cmp(&ib)
+    });
+    Ok(Some(expanded.join(",")))
+}
+
+/// What the CLI prints as `state_group` to make the applied filter visible.
+/// `None` means no state-group filter was applied (e.g. `--state` alone or
+/// `--state-group all` — in the latter case the caller shows `"all"`).
+fn visible_state_group(args: &ListArgs) -> Option<String> {
+    // Default: no flags → open
+    if args.state.is_none() && args.state_group.is_none() {
+        return Some("open".to_string());
+    }
+    let raw = args.state_group.as_ref()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let tokens: Vec<String> = trimmed
+        .split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    // If the value expands to no filter (contains `all`), show `all`
+    match expand_state_group_input(trimmed) {
+        Ok(None) => Some("all".to_string()),
+        Ok(Some(_expanded)) => {
+            // If the input was a single alias, show the alias; otherwise show
+            // the original token list so `open,completed` stays visible.
+            if tokens.len() == 1 {
+                Some(tokens[0].clone())
+            } else {
+                // Check if tokens are all concrete and just an identity list —
+                // still show the original order as given.
+                // If the input is pure concrete groups, show expanded (same).
+                // Otherwise preserve input for alias-mixed cases.
+                Some(tokens.join(","))
+            }
+        }
+        Err(_) => Some(tokens.join(",")),
+    }
+}
+
 /// Fetch one page of `pidash issue list`. Resolves `--parent PROJ-123` to a
-/// UUID client-side (like `create --parent`); every other filter is passed
-/// through and validated by the server.
+/// UUID client-side (like `create --parent`); state filters are expanded
+/// client-side and the `state_group` default is applied here.
 pub async fn list_issues(client: &ApiClient, args: &ListArgs) -> Result<Value, CliError> {
     if args.project.trim().is_empty() {
         return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
@@ -653,7 +794,28 @@ pub async fn list_issues(client: &ApiClient, args: &ListArgs) -> Result<Value, C
         client.env.workspace_slug,
         args.project.trim()
     );
-    client.get(&path).await
+    let mut resp = client.get(&path).await?;
+    if let Some(obj) = resp.as_object_mut() {
+        if let Some(vis) = visible_state_group(args) {
+            obj.insert("state_group".into(), Value::String(vis));
+        } else {
+            // No state_group filter was applied (explicit --state or --state-group all)
+            // Show `all` for explicit all, otherwise omit? The spec example shows
+            // `"state_group": "open"` for the default; for explicit --state we
+            // keep the key absent so agents don't assume a state_group filter.
+            // For `--state-group all` we show `"all"` via visible_state_group.
+            // When visible is None due to explicit --state, don't insert.
+            if args
+                .state_group
+                .as_deref()
+                .map(|s| s.trim().eq_ignore_ascii_case("all"))
+                .unwrap_or(false)
+            {
+                obj.insert("state_group".into(), Value::String("all".to_string()));
+            }
+        }
+    }
+    Ok(resp)
 }
 
 fn is_null_parent(parent: &str) -> bool {
@@ -664,6 +826,11 @@ fn is_null_parent(parent: &str) -> bool {
 /// Assemble the list query string from the args and the already-resolved
 /// parent (`"null"` or a UUID). Pure so the flag → query-param contract is
 /// unit-testable.
+///
+/// With neither `--state` nor `--state-group` the query filters to the open
+/// groups (`backlog,unstarted,started,review,test`). An explicit `--state`
+/// or `--state-group` disables that default and is applied verbatim (after
+/// alias expansion for `--state-group`).
 fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, CliError> {
     let mut params: Vec<(&str, String)> = Vec::new();
     if let Some(c) = args.cursor.as_ref() {
@@ -675,14 +842,44 @@ fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, C
     if let Some(o) = args.order_by.as_ref() {
         params.push(("order_by", o.clone()));
     }
-    let filters = [
-        ("state", "--state", &args.state),
-        ("state_group", "--state-group", &args.state_group),
+
+    let has_explicit_filter = args.state.is_some() || args.state_group.is_some();
+    if let Some(v) = &args.state
+        && v.trim().is_empty()
+    {
+        return Err(CliError::new(EXIT_INVALID, "--state must not be empty"));
+    }
+    if let Some(v) = &args.state_group
+        && v.trim().is_empty()
+    {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "--state-group must not be empty",
+        ));
+    }
+
+    // Preserve original order: state, state_group, then the rest.
+    if let Some(v) = &args.state {
+        params.push(("state", v.trim().to_string()));
+    }
+    if !has_explicit_filter {
+        // Default: open only.
+        params.push(("state_group", OPEN_STATE_GROUPS.join(",")));
+    } else if let Some(raw) = &args.state_group {
+        match expand_state_group_input(raw)? {
+            Some(expanded) => params.push(("state_group", expanded)),
+            None => { /* `all` → no filter, omit param (today's behaviour) */ }
+        }
+    }
+    // When only `--state` is given (no `--state-group`), no state_group is sent —
+    // the explicit `--state` disables the default per proposal.
+
+    let rest_filters = [
         ("labels", "--label", &args.label),
         ("priority", "--priority", &args.priority),
         ("fields", "--fields", &args.fields),
     ];
-    for (key, flag, value) in filters {
+    for (key, flag, value) in rest_filters {
         if let Some(v) = value {
             let v = v.trim();
             if v.is_empty() {
@@ -694,6 +891,7 @@ fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, C
             params.push((key, v.to_string()));
         }
     }
+
     if let Some(p) = parent {
         params.push(("parent", p));
     }
@@ -1039,10 +1237,21 @@ fn build_search_params(args: &SearchArgs) -> Result<Vec<(&'static str, String)>,
     {
         params.push(("project", p.to_string()));
     }
-    // Send `status` only when it differs from the server default to keep
-    // the URL terse on the common path.
-    if args.status != "all" {
-        params.push(("status", args.status.clone()));
+    // `--state-group` is an alias for `--status` (consistency with `issue list`):
+    // `open|closed|all` map directly to the server's `status` param.
+    let effective_status = args
+        .state_group
+        .as_ref()
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_else(|| args.status.clone());
+    if effective_status != "all" {
+        if effective_status != "open" && effective_status != "closed" && effective_status != "all" {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                format!("unknown status '{effective_status}' (valid: open, closed, all)"),
+            ));
+        }
+        params.push(("status", effective_status));
     }
     if let Some(since) = args.since.as_ref() {
         params.push(("since", since.clone()));
@@ -1443,13 +1652,199 @@ mod tests {
     }
 
     #[test]
-    fn build_list_query_without_filters_is_unchanged() {
+    fn build_list_query_without_filters_defaults_to_open() {
         let args = ListArgs {
             project: "ENG".into(),
             per_page: Some(10),
             ..Default::default()
         };
-        assert_eq!(build_list_query(&args, None).unwrap(), "?per_page=10");
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?per_page=10&state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        );
+    }
+
+    #[test]
+    fn build_list_query_open_expands() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("open".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        );
+    }
+
+    #[test]
+    fn build_list_query_closed_expands() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("closed".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=completed%2Ccancelled"
+        );
+    }
+
+    #[test]
+    fn build_list_query_all_omits_filter() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "");
+        // With an additional param, `all` still omits state_group.
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all".into()),
+            per_page: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "?per_page=5");
+    }
+
+    #[test]
+    fn build_list_query_mixed_alias_and_concrete_expands() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("open,completed".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        );
+    }
+
+    #[test]
+    fn build_list_query_mixed_open_closed_deduplicates() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("open,closed".into()),
+            ..Default::default()
+        };
+        // open + closed = all 7 concrete groups, canonical order.
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted%2Ccancelled"
+        );
+    }
+
+    #[test]
+    fn build_list_query_explicit_state_disables_default() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "?state=Backlog");
+    }
+
+    #[test]
+    fn build_list_query_explicit_state_group_disables_default() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("cancelled".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=cancelled"
+        );
+    }
+
+    #[test]
+    fn build_list_query_state_and_state_group_both_apply() {
+        // Explicit both: no default, state kept verbatim, state_group expanded.
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog".into()),
+            state_group: Some("open".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state=Backlog&state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        );
+    }
+
+    #[test]
+    fn build_list_query_state_group_is_case_insensitive_and_trims() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("  OPEN , Completed ".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        );
+    }
+
+    #[test]
+    fn build_list_query_all_with_other_tokens_still_omits() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all,completed".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "");
+    }
+
+    #[test]
+    fn build_list_query_unknown_state_group_is_invalid() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("bogus".into()),
+            ..Default::default()
+        };
+        let err = build_list_query(&args, None).unwrap_err();
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("bogus"));
+    }
+
+    #[test]
+    fn visible_state_group_default_is_open() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args).as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn visible_state_group_explicit_alias() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("closed".into()),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args).as_deref(), Some("closed"));
+    }
+
+    #[test]
+    fn visible_state_group_all_is_all() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all".into()),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args).as_deref(), Some("all"));
+    }
+
+    #[test]
+    fn visible_state_group_explicit_state_is_none() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog".into()),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args), None);
     }
 
     #[test]
@@ -1494,6 +1889,7 @@ mod tests {
             query: query.to_string(),
             project: None,
             status: "all".to_string(),
+            state_group: None,
             since: None,
             limit: None,
             sort: None,
@@ -1532,6 +1928,7 @@ mod tests {
             query: "cache".to_string(),
             project: Some("ENG".to_string()),
             status: "closed".to_string(),
+            state_group: None,
             since: Some("2025-01-01T00:00:00Z".to_string()),
             limit: Some(5),
             sort: Some("-created".to_string()),
@@ -1560,6 +1957,7 @@ mod tests {
             query: "x".to_string(),
             project: None,
             status: "open".to_string(),
+            state_group: None,
             since: None,
             limit: Some(10),
             sort: None,
@@ -1567,6 +1965,53 @@ mod tests {
         let params = build_search_params(&args).expect("valid args");
         let query_string = build_query_string(&params);
         assert_eq!(query_string, "?q=x&status=open&limit=10");
+    }
+
+    #[test]
+    fn build_search_params_state_group_alias() {
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: None,
+            status: "all".to_string(),
+            state_group: Some("closed".to_string()),
+            since: None,
+            limit: None,
+            sort: None,
+        };
+        let params = build_search_params(&args).expect("valid");
+        assert_eq!(
+            params,
+            vec![("q", "x".to_string()), ("status", "closed".to_string())]
+        );
+    }
+
+    #[test]
+    fn build_search_params_state_group_all_omits_status() {
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: None,
+            status: "open".to_string(),
+            state_group: Some("all".to_string()),
+            since: None,
+            limit: None,
+            sort: None,
+        };
+        let params = build_search_params(&args).expect("valid");
+        assert_eq!(params, vec![("q", "x".to_string())]);
+    }
+
+    #[test]
+    fn build_search_params_unknown_state_group_is_invalid() {
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: None,
+            status: "all".to_string(),
+            state_group: Some("bogus".to_string()),
+            since: None,
+            limit: None,
+            sort: None,
+        };
+        assert!(build_search_params(&args).is_err());
     }
 
     #[test]
@@ -1578,6 +2023,7 @@ mod tests {
             query: "x".to_string(),
             project: Some("   ".to_string()),
             status: "all".to_string(),
+            state_group: None,
             since: None,
             limit: None,
             sort: None,
