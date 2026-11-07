@@ -787,10 +787,19 @@ async fn bindings_of_scheduler(
             projects::Column::Name,
         ])
         .filter(projects::Column::Id.is_in(project_ids.iter().copied()))
+        .order_by_asc(projects::Column::Name)
         .into_model::<ProjectRow>()
         .all(&db)
         .await
         .map_err(|error| db_error(error, "v1-definition-bindings"))?;
+    // `ORDER BY project__name ASC` in the database: the project leg is
+    // ordered by Postgres so the blast-radius list inherits the Django
+    // collation, not Rust's byte-wise `cmp`.
+    let rank: std::collections::HashMap<Uuid, usize> = project_rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id, index))
+        .collect();
     let by_project: std::collections::HashMap<Uuid, (String, String)> = project_rows
         .into_iter()
         .map(|row| (row.id, (row.identifier, row.name)))
@@ -806,9 +815,7 @@ async fn bindings_of_scheduler(
             })
         })
         .collect();
-    // `ORDER BY project__name ASC` (the old single statement ordered in
-    // the database; here the join leg is in Rust).
-    affected.sort_by(|left, right| left.project_name.cmp(&right.project_name));
+    affected.sort_by_key(|row| rank[&row.binding.project_id]);
     Ok(affected)
 }
 

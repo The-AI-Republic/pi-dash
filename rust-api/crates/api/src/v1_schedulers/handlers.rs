@@ -185,7 +185,7 @@ const SCHEDULER_COLUMNS: [schedulers::Column; 11] = [
 ];
 
 /// The `scheduler_bindings` columns every render projects.
-pub(crate) const BINDING_COLUMNS: [scheduler_bindings::Column; 17] = [
+pub(crate) const BINDING_COLUMNS: [scheduler_bindings::Column; 18] = [
     scheduler_bindings::Column::CreatedAt,
     scheduler_bindings::Column::UpdatedAt,
     scheduler_bindings::Column::Id,
@@ -203,6 +203,7 @@ pub(crate) const BINDING_COLUMNS: [scheduler_bindings::Column; 17] = [
     scheduler_bindings::Column::NextRunAt,
     scheduler_bindings::Column::LastRunId,
     scheduler_bindings::Column::LastError,
+    scheduler_bindings::Column::PodId,
 ];
 
 /// Join `workspaces` on the scheduler's `workspace_id` (the slug filter).
@@ -1699,5 +1700,116 @@ mod tests {
         ] {
             assert!(!is_canonical_uuid(raw), "{raw}");
         }
+    }
+
+    #[test]
+    fn binding_select_projects_pod_id() {
+        use sea_orm::QueryTrait;
+        // `BINDING_RENDER_SELECT` on main selected 18 binding columns
+        // including `"b"."pod_id"`; dropping it made `into_model`
+        // fail to decode `pod_id` (NEWPIDASH-106 P1).
+        assert!(
+            BINDING_COLUMNS
+                .iter()
+                .any(|c| matches!(c, scheduler_bindings::Column::PodId)),
+            "BINDING_COLUMNS must project pod_id"
+        );
+        assert_eq!(BINDING_COLUMNS.len(), 18);
+        let sql = binding_select().build(sea_orm::DbBackend::Postgres).sql;
+        for alias in [
+            "\"pod_id\"",
+            "\"scheduler_slug\"",
+            "\"scheduler_name\"",
+            "\"pod_name\"",
+            "\"last_run_status\"",
+            "\"last_run_started_at\"",
+            "\"last_run_ended_at\"",
+        ] {
+            assert!(sql.contains(alias), "missing {alias} in {sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_binding_read_decodes_pod_id() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        for table in [
+            "workspaces",
+            "schedulers",
+            "projects",
+            "pod",
+            "scheduler_bindings",
+            "agent_run",
+        ] {
+            shadow(&pool, table).await;
+        }
+        let workspace_id = uuid::Uuid::new_v4();
+        let scheduler_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let pod_id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, slug, owner_id, timezone, background_color, created_at, updated_at) \
+             VALUES ($1, 'Acme', 'acme', $2, 'UTC', '#000000', $3, $3)",
+        )
+        .bind(workspace_id)
+        .bind(uuid::Uuid::new_v4())
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO schedulers (id, workspace_id, slug, name, description, prompt, source, is_enabled, color, created_at, updated_at) \
+             VALUES ($1, $2, 'nightly', 'Nightly', 'd', 'p', 'custom', true, '#000000', $3, $3)",
+        )
+        .bind(scheduler_id)
+        .bind(workspace_id)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed scheduler");
+        sqlx::query(
+            "INSERT INTO projects (id, workspace_id, identifier, name, created_at, updated_at) \
+             VALUES ($1, $2, 'PR', 'Proj', $3, $3)",
+        )
+        .bind(project_id)
+        .bind(workspace_id)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO pod (id, name, created_at, updated_at) VALUES ($1, 'runner-1', $2, $2)",
+        )
+        .bind(pod_id)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed pod");
+        let binding_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO scheduler_bindings (id, workspace_id, project_id, scheduler_id, dtstart, tzid, rrule, rdates, exdates, extra_context, enabled, outcome_mode, pod_id, last_error, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, 'UTC', 'FREQ=HOURLY', '[]', '[]', '', true, 'create_issue', $6, '', $5, $5)",
+        )
+        .bind(binding_id)
+        .bind(workspace_id)
+        .bind(project_id)
+        .bind(scheduler_id)
+        .bind(now)
+        .bind(pod_id)
+        .execute(&pool)
+        .await
+        .expect("seed binding");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let row = binding_select()
+            .filter(pidash_db::entity::scheduler_bindings::Column::Id.eq(binding_id))
+            .into_model::<BindingRow>()
+            .one(&db)
+            .await
+            .expect("binding decodes")
+            .expect("binding exists");
+        assert_eq!(row.pod_id, Some(pod_id), "pod_id decodes by name");
+        assert_eq!(row.pod_name.as_deref(), Some("runner-1"));
     }
 }
