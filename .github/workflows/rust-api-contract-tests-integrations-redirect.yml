@@ -34,7 +34,7 @@ concurrency:
 jobs:
   integrations-redirect-django:
     name: redirect suite vs Django worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -163,7 +163,7 @@ jobs:
 
   integrations-redirect-rust:
     name: redirect suite vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:

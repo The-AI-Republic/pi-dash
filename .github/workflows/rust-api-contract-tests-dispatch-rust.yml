@@ -34,7 +34,7 @@ concurrency:
 jobs:
   dispatch-rust-oracle:
     name: dispatch oracle vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
