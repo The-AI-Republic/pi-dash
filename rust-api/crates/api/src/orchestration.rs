@@ -145,7 +145,24 @@ fn orm_error_text(error: sea_orm::DbErr) -> String {
 }
 
 fn outbox_from_orm(error: sea_orm::DbErr) -> OutboxError {
-    OutboxError::from(sqlx::Error::Protocol(orm_error_text(error)))
+    OutboxError::from(orm_sqlx(error))
+}
+
+/// A SeaORM failure as the sqlx error the old read raised (preserves
+/// the wrapped driver error and its Postgres code).
+fn orm_sqlx(error: sea_orm::DbErr) -> sqlx::Error {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner,
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            sqlx::Error::PoolTimedOut
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            sqlx::Error::PoolClosed
+        }
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
 }
 
 fn drain_from_orm(error: sea_orm::DbErr) -> MoveDrainError {
