@@ -63,10 +63,22 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QueryResult, QuerySelect, TryGetable, UpdateMany,
+};
+use sea_query::{
+    Alias, Condition, Expr, Func, InsertStatement, JoinType, Order, Query, ReturningClause,
+    SelectStatement,
+};
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    instance_admins, instances, loop_jobs, loop_targets, loop_user_preferences,
+};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::r#loop::queries;
 use pidash_services::r#loop::shape::{job_payload, AdminJobRow};
 
@@ -225,13 +237,15 @@ async fn authed_user(
 /// `Instance.objects.first()`: `Meta.ordering = ("-created_at",)` over the
 /// soft-deletion manager.
 async fn instance_first(pool: &PgPool) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM instances WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    let db = pidash_db::sea_orm_connection(pool);
+    let row: Option<instances::Model> = instances::Entity::find()
+        .filter(instances::Column::DeletedAt.is_null())
+        .order_by_desc(instances::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| row.id))
 }
 
 /// `InstanceAdminPermission.has_permission`
@@ -243,15 +257,16 @@ async fn require_instance_admin(pool: &PgPool, user_id: &Uuid) -> Result<Uuid, D
     let Some(instance_id) = instance_first(pool).await? else {
         return Err(Denial::DefaultForbidden);
     };
-    let row: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM instance_admins WHERE instance_id = $1 AND user_id = $2 AND role >= 15 AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(instance_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if row.is_none() {
+    let db = pidash_db::sea_orm_connection(pool);
+    let found = instance_admins::Entity::find()
+        .filter(instance_admins::Column::InstanceId.eq(instance_id))
+        .filter(instance_admins::Column::UserId.eq(*user_id))
+        .filter(instance_admins::Column::Role.gte(15))
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .exists(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if !found {
         return Err(Denial::DefaultForbidden);
     }
     Ok(instance_id)
@@ -453,7 +468,7 @@ fn iso_or_null(dt: Option<&DateTime<Utc>>) -> Value {
 // ---------------------------------------------------------------------------
 
 /// One `loop_jobs` row projected for the admin payload.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 struct JobRow {
     id: Uuid,
     slug: String,
@@ -471,21 +486,327 @@ struct JobRow {
     updated_at: DateTime<Utc>,
 }
 
-const JOB_ROW_SELECT: &str = "id AS id, slug AS slug, name AS name, public_name AS public_name, public_description AS public_description, prompt AS prompt, min_role AS min_role, enabled AS enabled, is_builtin AS is_builtin, dtstart AS dtstart, rrule AS rrule, tzid AS tzid, created_at AS created_at, updated_at AS updated_at";
+fn map_job_row(model: loop_jobs::Model) -> JobRow {
+    JobRow {
+        id: model.id,
+        slug: model.slug,
+        name: model.name,
+        public_name: model.public_name,
+        public_description: model.public_description,
+        prompt: model.prompt,
+        min_role: model.min_role,
+        enabled: model.enabled,
+        is_builtin: model.is_builtin,
+        dtstart: model.dtstart.with_timezone(&Utc),
+        rrule: model.rrule,
+        tzid: model.tzid,
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+    }
+}
+
+/// Decode one `JobRow`-projected row off a SeaORM `QueryResult` (column
+/// names, order-independent).
+fn map_job_row_query(row: &QueryResult) -> Result<JobRow, sqlx::Error> {
+    fn get<T: TryGetable>(row: &QueryResult, column: &str) -> Result<T, sqlx::Error> {
+        row.try_get::<T>("", column).map_err(into_sqlx)
+    }
+    Ok(JobRow {
+        id: get(row, "id")?,
+        slug: get(row, "slug")?,
+        name: get(row, "name")?,
+        public_name: get(row, "public_name")?,
+        public_description: get(row, "public_description")?,
+        prompt: get(row, "prompt")?,
+        min_role: get(row, "min_role")?,
+        enabled: get(row, "enabled")?,
+        is_builtin: get(row, "is_builtin")?,
+        dtstart: get(row, "dtstart")?,
+        rrule: get(row, "rrule")?,
+        tzid: get(row, "tzid")?,
+        created_at: get(row, "created_at")?,
+        updated_at: get(row, "updated_at")?,
+    })
+}
+
+/// The `POST` job insert: explicit column list, `gen_random_uuid()`
+/// id, `is_builtin` FALSE, `updated_by_id`/`deleted_at` NULL, and the
+/// 14-column `RETURNING` the payload projects. Explicit nulls stay
+/// `NULL` binds (the 23502 `IntegrityError` 400), never defaults.
+#[allow(clippy::too_many_arguments)]
+fn job_insert(
+    slug: String,
+    name: Option<String>,
+    public_name: Option<String>,
+    public_description: Option<String>,
+    prompt: Option<String>,
+    min_role: i16,
+    enabled: Option<bool>,
+    dtstart: Option<DateTime<Utc>>,
+    rrule: Option<String>,
+    tzid: Option<String>,
+    now: DateTime<Utc>,
+    actor: Uuid,
+) -> InsertStatement {
+    use loop_jobs::Column as C;
+    Query::insert()
+        .into_table(loop_jobs::Entity)
+        .columns([
+            C::Id,
+            C::Slug,
+            C::Name,
+            C::PublicName,
+            C::PublicDescription,
+            C::Prompt,
+            C::MinRole,
+            C::Enabled,
+            C::IsBuiltin,
+            C::Dtstart,
+            C::Rrule,
+            C::Tzid,
+            C::CreatedAt,
+            C::UpdatedAt,
+            C::CreatedById,
+            C::UpdatedById,
+            C::DeletedAt,
+        ])
+        .values_panic([
+            Func::cust(Alias::new("gen_random_uuid")).into(),
+            slug.into(),
+            name.into(),
+            public_name.into(),
+            public_description.into(),
+            prompt.into(),
+            min_role.into(),
+            enabled.into(),
+            false.into(),
+            dtstart.into(),
+            rrule.into(),
+            tzid.into(),
+            now.into(),
+            now.into(),
+            actor.into(),
+            Expr::value(Option::<Uuid>::None),
+            Expr::value(Option::<DateTime<Utc>>::None),
+        ])
+        .returning(ReturningClause::Exprs(vec![
+            Expr::col(C::Id).into(),
+            Expr::col(C::Slug).into(),
+            Expr::col(C::Name).into(),
+            Expr::col(C::PublicName).into(),
+            Expr::col(C::PublicDescription).into(),
+            Expr::col(C::Prompt).into(),
+            Expr::col(C::MinRole).into(),
+            Expr::col(C::Enabled).into(),
+            Expr::col(C::IsBuiltin).into(),
+            Expr::col(C::Dtstart).into(),
+            Expr::col(C::Rrule).into(),
+            Expr::col(C::Tzid).into(),
+            Expr::col(C::CreatedAt).into(),
+            Expr::col(C::UpdatedAt).into(),
+        ]))
+        .to_owned()
+}
+
+/// Run one built `INSERT ... RETURNING` and decode its single row.
+async fn insert_job_row(
+    db: &impl sea_orm::ConnectionTrait,
+    stmt: &InsertStatement,
+) -> Result<JobRow, sqlx::Error> {
+    let row = db
+        .query_one(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(into_sqlx)?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    map_job_row_query(&row)
+}
+
+/// The `PATCH` job update: `updated_at`/`updated_by_id` always, plus
+/// every column present in `cleaned` (explicit nulls included, same
+/// `patch_columns` order as the hand-written bind list), filtered to
+/// the live row. `RETURNING` comes from `exec_with_returning`.
+fn patch_job_update(
+    write: &mut PreparedWrite,
+    columns: &[&'static str],
+    now: DateTime<Utc>,
+    actor: Uuid,
+    job_id: Uuid,
+) -> UpdateMany<loop_jobs::Entity> {
+    let mut update = loop_jobs::Entity::update_many();
+    update = update.col_expr(loop_jobs::Column::UpdatedAt, Expr::value(now));
+    update = update.col_expr(loop_jobs::Column::UpdatedById, Expr::value(Some(actor)));
+    for col in columns {
+        update = match *col {
+            "slug" => update.col_expr(loop_jobs::Column::Slug, Expr::value(write.slug.take())),
+            "name" => update.col_expr(loop_jobs::Column::Name, Expr::value(write.name.take())),
+            "public_name" => update.col_expr(
+                loop_jobs::Column::PublicName,
+                Expr::value(write.public_name.take()),
+            ),
+            "public_description" => update.col_expr(
+                loop_jobs::Column::PublicDescription,
+                Expr::value(write.public_description.take()),
+            ),
+            "prompt" => {
+                update.col_expr(loop_jobs::Column::Prompt, Expr::value(write.prompt.take()))
+            }
+            "min_role" => update.col_expr(
+                loop_jobs::Column::MinRole,
+                Expr::value(write.min_role.take()),
+            ),
+            "enabled" => update.col_expr(
+                loop_jobs::Column::Enabled,
+                Expr::value(write.enabled.take()),
+            ),
+            "dtstart" => update.col_expr(
+                loop_jobs::Column::Dtstart,
+                Expr::value(write.dtstart.take()),
+            ),
+            "rrule" => update.col_expr(loop_jobs::Column::Rrule, Expr::value(write.rrule.take())),
+            "tzid" => update.col_expr(loop_jobs::Column::Tzid, Expr::value(write.tzid.take())),
+            _ => unreachable!("patch_columns only yields writable columns"),
+        };
+    }
+    update
+        .filter(loop_jobs::Column::Id.eq(job_id))
+        .filter(loop_jobs::Column::DeletedAt.is_null())
+}
+
+/// The targets list (`admin_views.py:183-210`): the `select_related`
+/// join over workspace/user/last-run, the `t.deleted_at IS NULL` +
+/// job filter, the three optional equality filters in
+/// `skip_reason, workspace_slug, run_status` order, `-updated_at`
+/// order, and the page window. Columns are aliased because four joined
+/// tables share names and row mapping is by name.
+fn targets_list_select(
+    job_id: Uuid,
+    filter: &queries::TargetsFilter,
+    page: i64,
+) -> SelectStatement {
+    let t = Alias::new("t");
+    let w = Alias::new("w");
+    let u = Alias::new("u");
+    let turn = Alias::new("turn");
+    let mut cond = Condition::all()
+        .add(Expr::col((t.clone(), Alias::new("deleted_at"))).is_null())
+        .add(Expr::col((t.clone(), Alias::new("job_id"))).eq(job_id));
+    // Bind order follows the filter order above (`$1 = job_id`, then
+    // `skip_reason`, `workspace_slug`, `run_status`).
+    if let Some(reason) = &filter.skip_reason {
+        cond = cond.add(Expr::col((t.clone(), Alias::new("last_skip_reason"))).eq(reason.as_str()));
+    }
+    if let Some(slug) = &filter.workspace_slug {
+        cond = cond.add(Expr::col((w.clone(), Alias::new("slug"))).eq(slug.as_str()));
+    }
+    if let Some(status) = &filter.run_status {
+        cond = cond.add(Expr::col((turn.clone(), Alias::new("status"))).eq(status.as_str()));
+    }
+    let (limit, offset) = queries::targets_page_window(page);
+    let mut sel = Query::select();
+    sel.expr_as(Expr::col((t.clone(), Alias::new("id"))), Alias::new("id"))
+        .expr_as(
+            Expr::col((t.clone(), Alias::new("next_run_at"))),
+            Alias::new("next_run_at"),
+        )
+        .expr_as(
+            Expr::col((t.clone(), Alias::new("last_skipped_at"))),
+            Alias::new("last_skipped_at"),
+        )
+        .expr_as(
+            Expr::col((t.clone(), Alias::new("last_skip_reason"))),
+            Alias::new("last_skip_reason"),
+        )
+        .expr_as(
+            Expr::col((w.clone(), Alias::new("slug"))),
+            Alias::new("workspace_slug"),
+        )
+        .expr_as(
+            Expr::col((u.clone(), Alias::new("email"))),
+            Alias::new("user_email"),
+        )
+        .expr_as(
+            Expr::col((turn.clone(), Alias::new("status"))),
+            Alias::new("run_status"),
+        )
+        .expr_as(
+            Expr::col((turn.clone(), Alias::new("error_code"))),
+            Alias::new("run_error_code"),
+        )
+        .expr_as(
+            Expr::col((turn.clone(), Alias::new("model_used"))),
+            Alias::new("run_model_used"),
+        )
+        .expr_as(
+            Expr::col((turn.clone(), Alias::new("usage"))),
+            Alias::new("run_usage"),
+        )
+        .expr_as(
+            Expr::col((turn, Alias::new("completed_at"))),
+            Alias::new("run_completed_at"),
+        )
+        .from_as(Alias::new("loop_targets"), t.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("workspaces"),
+            w.clone(),
+            Expr::col((t.clone(), Alias::new("workspace_id")))
+                .equals((w.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("users"),
+            u.clone(),
+            Expr::col((t.clone(), Alias::new("user_id"))).equals((u.clone(), Alias::new("id"))),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new(queries::ASSISTANT_TURN_TABLE),
+            Alias::new("turn"),
+            Expr::col((t.clone(), Alias::new("last_run_id")))
+                .equals((Alias::new(queries::ASSISTANT_TURN_TABLE), Alias::new("id"))),
+        )
+        .cond_where(cond)
+        .order_by((t, Alias::new("updated_at")), Order::Desc)
+        .limit(limit as u64);
+    if offset > 0 {
+        sel.offset(offset as u64);
+    }
+    sel
+}
+
+/// Decode one targets-list row by output name (order-independent).
+fn map_target_row(row: &QueryResult) -> Result<TargetRow, sqlx::Error> {
+    fn get<T: TryGetable>(row: &QueryResult, column: &str) -> Result<T, sqlx::Error> {
+        row.try_get::<T>("", column).map_err(into_sqlx)
+    }
+    Ok(TargetRow {
+        id: get(row, "id")?,
+        next_run_at: get(row, "next_run_at")?,
+        last_skipped_at: get(row, "last_skipped_at")?,
+        last_skip_reason: get(row, "last_skip_reason")?,
+        workspace_slug: get(row, "workspace_slug")?,
+        user_email: get(row, "user_email")?,
+        run_status: get(row, "run_status")?,
+        run_error_code: get(row, "run_error_code")?,
+        run_model_used: get(row, "run_model_used")?,
+        run_usage: get(row, "run_usage")?,
+        run_completed_at: get(row, "run_completed_at")?,
+    })
+}
 
 async fn fetch_job(pool: &PgPool, job_id: &Uuid) -> Result<Option<JobRow>, Denial> {
-    sqlx::query_as(&format!(
-        "SELECT {JOB_ROW_SELECT} FROM loop_jobs WHERE id = $1 AND deleted_at IS NULL"
-    ))
-    .bind(job_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    let db = pidash_db::sea_orm_connection(pool);
+    loop_jobs::Entity::find_by_id(*job_id)
+        .filter(loop_jobs::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map(|model| model.map(map_job_row))
+        .map_err(|_| Denial::ServerError)
 }
 
 /// One targets-list entry with its joined columns (explicit aliases: the
 /// underlying select joins four tables, so bare names would collide).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 struct TargetRow {
     id: Uuid,
     next_run_at: Option<DateTime<Utc>>,
@@ -727,12 +1048,14 @@ async fn list_jobs(
     let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
-    let rows: Vec<JobRow> = sqlx::query_as(&format!(
-        "SELECT {JOB_ROW_SELECT} FROM loop_jobs WHERE deleted_at IS NULL ORDER BY created_at DESC"
-    ))
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::sea_orm_connection(pool);
+    let rows: Vec<JobRow> = loop_jobs::Entity::find()
+        .filter(loop_jobs::Column::DeletedAt.is_null())
+        .order_by_desc(loop_jobs::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map(|models| models.into_iter().map(map_job_row).collect())
+        .map_err(|_| Denial::ServerError)?;
 
     let mut items = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -761,13 +1084,13 @@ async fn create_job(
         .get("slug")
         .and_then(guards::python_str)
         .ok_or(Denial::ServerError)?;
-    let slug_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM loop_jobs WHERE slug = $1 AND deleted_at IS NULL)",
-    )
-    .bind(&slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::sea_orm_connection(pool);
+    let slug_exists = loop_jobs::Entity::find()
+        .filter(loop_jobs::Column::Slug.eq(slug.clone()))
+        .filter(loop_jobs::Column::DeletedAt.is_null())
+        .exists(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if guards::slug_taken_on_create(slug_exists) {
         return Err(Denial::Guard(
             axum::http::StatusCode::CONFLICT,
@@ -777,35 +1100,30 @@ async fn create_job(
 
     let write = prepare_write(&cleaned)?;
     let now = Utc::now();
-    let created: Result<JobRow, sqlx::Error> = sqlx::query_as(&format!(
-        "INSERT INTO loop_jobs (id, slug, name, public_name, public_description, prompt, min_role, enabled, is_builtin, dtstart, rrule, tzid, created_at, updated_at, created_by_id, updated_by_id, deleted_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, FALSE, $8, $9, $10, $11, $12, $13, NULL, NULL) RETURNING {JOB_ROW_SELECT}"
-    ))
-    .bind(write.slug.unwrap_or(slug))
-    .bind(write.name)
-    .bind(write.public_name)
-    .bind(or_default_when_absent(
-        &cleaned,
-        "public_description",
-        write.public_description,
-        String::new(),
-    ))
-    .bind(write.prompt)
-    .bind(write.min_role.unwrap_or(15))
-    .bind(or_default_when_absent(&cleaned, "enabled", write.enabled, true))
-    .bind(or_default_when_absent(&cleaned, "dtstart", write.dtstart, now))
-    .bind(write.rrule)
-    .bind(or_default_when_absent(
-        &cleaned,
-        "tzid",
-        write.tzid,
-        "UTC".to_owned(),
-    ))
-    .bind(now)
-    .bind(now)
-    .bind(actor)
-    .fetch_one(pool)
-    .await;
-    let row = created.map_err(map_write_error)?;
+    let row = insert_job_row(
+        &db,
+        &job_insert(
+            write.slug.unwrap_or(slug),
+            write.name,
+            write.public_name,
+            or_default_when_absent(
+                &cleaned,
+                "public_description",
+                write.public_description,
+                String::new(),
+            ),
+            write.prompt,
+            write.min_role.unwrap_or(15),
+            or_default_when_absent(&cleaned, "enabled", write.enabled, true),
+            or_default_when_absent(&cleaned, "dtstart", write.dtstart, now),
+            write.rrule,
+            or_default_when_absent(&cleaned, "tzid", write.tzid, "UTC".to_owned()),
+            now,
+            actor,
+        ),
+    )
+    .await
+    .map_err(map_write_error)?;
 
     if write.dtstart_was_string {
         return Err(StringDtstart.into());
@@ -844,7 +1162,8 @@ async fn detail_job(
     let Some(row) = fetch_job(pool, &job_id).await? else {
         return Err(Denial::NotFound);
     };
-    let stats = queries::fetch_job_stats(pool, job_id, Utc::now() - chrono::Duration::hours(24))
+    let db = pidash_db::sea_orm_connection(pool);
+    let stats = queries::fetch_job_stats(&db, job_id, Utc::now() - chrono::Duration::hours(24))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut body = render_job(&row, None).map_err(Denial::from)?;
@@ -885,15 +1204,15 @@ async fn patch_job(
     let data = parse_json_body(&headers, &body)?;
     let cleaned = guards::validate_writes(&data, true).map_err(Denial::from)?;
 
+    let db = pidash_db::sea_orm_connection(pool);
     if let Some(raw_slug) = cleaned.get("slug").and_then(guards::python_str) {
-        let clash: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM loop_jobs WHERE slug = $1 AND deleted_at IS NULL AND id <> $2)",
-        )
-        .bind(&raw_slug)
-        .bind(job_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let clash = loop_jobs::Entity::find()
+            .filter(loop_jobs::Column::Slug.eq(raw_slug.clone()))
+            .filter(loop_jobs::Column::DeletedAt.is_null())
+            .filter(loop_jobs::Column::Id.ne(job_id))
+            .exists(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
         if guards::slug_taken_on_patch(Some(raw_slug.as_str()), &current.slug, clash) {
             return Err(Denial::Guard(
                 axum::http::StatusCode::CONFLICT,
@@ -909,39 +1228,15 @@ async fn patch_job(
     // one helper so the SET list and the binds cannot drift apart; an
     // explicit null binds NULL (never skips).
     let columns = patch_columns(&cleaned);
-    let mut sets = vec![
-        "updated_at = $1".to_owned(),
-        "updated_by_id = $2".to_owned(),
-    ];
-    let mut next = 3i64;
-    for col in &columns {
-        sets.push(format!("{col} = ${next}"));
-        next += 1;
-    }
-    let sql = format!(
-        "UPDATE loop_jobs SET {} WHERE id = ${} AND deleted_at IS NULL RETURNING {JOB_ROW_SELECT}",
-        sets.join(", "),
-        next
-    );
-    let mut query = sqlx::query_as::<_, JobRow>(&sql).bind(now).bind(actor);
-    for col in &columns {
-        match *col {
-            "slug" => query = query.bind(write.slug.take()),
-            "name" => query = query.bind(write.name.take()),
-            "public_name" => query = query.bind(write.public_name.take()),
-            "public_description" => query = query.bind(write.public_description.take()),
-            "prompt" => query = query.bind(write.prompt.take()),
-            "min_role" => query = query.bind(write.min_role.take()),
-            "enabled" => query = query.bind(write.enabled.take()),
-            "dtstart" => query = query.bind(write.dtstart.take()),
-            "rrule" => query = query.bind(write.rrule.take()),
-            "tzid" => query = query.bind(write.tzid.take()),
-            _ => unreachable!("patch_columns only yields writable columns"),
-        }
-    }
-    let query = query.bind(job_id);
-    let row: Option<JobRow> = query.fetch_optional(pool).await.map_err(map_write_error)?;
-    let row = row.ok_or(Denial::NotFound)?;
+    let updated = patch_job_update(&mut write, &columns, now, actor, job_id)
+        .exec_with_returning(&db)
+        .await
+        .map_err(|err| map_write_error(into_sqlx(err)))?;
+    let row = updated
+        .into_iter()
+        .next()
+        .map(map_job_row)
+        .ok_or(Denial::NotFound)?;
 
     if write.dtstart_was_string {
         return Err(StringDtstart.into());
@@ -988,32 +1283,35 @@ async fn delete_job(
     // old stamp (`db/mixins.py:57-58`).
     let now = Utc::now();
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    let marked = sqlx::query(
-        "UPDATE loop_jobs SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3 AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(actor)
-    .bind(job_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if marked.rows_affected() == 0 {
-        return Err(Denial::NotFound);
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let marked = loop_jobs::Entity::update_many()
+            .col_expr(loop_jobs::Column::DeletedAt, Expr::value(now))
+            .col_expr(loop_jobs::Column::UpdatedAt, Expr::value(now))
+            .col_expr(loop_jobs::Column::UpdatedById, Expr::value(Some(actor)))
+            .filter(loop_jobs::Column::Id.eq(job_id))
+            .filter(loop_jobs::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        if marked.rows_affected == 0 {
+            return Err(Denial::NotFound);
+        }
+        loop_targets::Entity::update_many()
+            .col_expr(loop_targets::Column::DeletedAt, Expr::value(now))
+            .filter(loop_targets::Column::JobId.eq(job_id))
+            .filter(loop_targets::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        loop_user_preferences::Entity::update_many()
+            .col_expr(loop_user_preferences::Column::DeletedAt, Expr::value(now))
+            .filter(loop_user_preferences::Column::JobId.eq(job_id))
+            .filter(loop_user_preferences::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     }
-    sqlx::query("UPDATE loop_targets SET deleted_at = $1 WHERE job_id = $2 AND deleted_at IS NULL")
-        .bind(now)
-        .bind(job_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    sqlx::query(
-        "UPDATE loop_user_preferences SET deleted_at = $1 WHERE job_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(job_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
     tx.commit().await.map_err(|_| Denial::ServerError)?;
 
     Ok(Response::builder()
@@ -1062,51 +1360,19 @@ async fn job_targets(
         params.get("status").map(String::as_str),
     );
     let page = queries::clamp_page(params.get("page").map(String::as_str));
-    let (limit, offset) = queries::targets_page_window(page);
 
     // Same join/filter/order/slice semantics as
     // `queries::targets_list_sql` (which the queries layer pins against
     // the fixture SQL); columns are aliased here because four joined
     // tables share names (`id`, …) and row mapping is by name.
-    let mut where_parts = vec![
-        "t.deleted_at IS NULL".to_owned(),
-        "t.job_id = $1".to_owned(),
-    ];
-    let mut next_bind = 2i64;
-    for (present, fragment) in [
-        (filter.skip_reason.is_some(), "t.last_skip_reason"),
-        (filter.workspace_slug.is_some(), "w.slug"),
-        (filter.run_status.is_some(), "turn.status"),
-    ] {
-        if present {
-            where_parts.push(format!("{fragment} = ${next_bind}"));
-            next_bind += 1;
-        }
-    }
-    let mut sql = format!(
-        "SELECT t.id AS id, t.next_run_at AS next_run_at, t.last_skipped_at AS last_skipped_at, t.last_skip_reason AS last_skip_reason, w.slug AS workspace_slug, u.email AS user_email, turn.status AS run_status, turn.error_code AS run_error_code, turn.model_used AS run_model_used, turn.usage AS run_usage, turn.completed_at AS run_completed_at FROM loop_targets t INNER JOIN workspaces w ON (t.workspace_id = w.id) INNER JOIN users u ON (t.user_id = u.id) LEFT OUTER JOIN {} turn ON (t.last_run_id = turn.id) WHERE ({}) ORDER BY t.updated_at DESC LIMIT {limit}",
-        queries::ASSISTANT_TURN_TABLE,
-        where_parts.join(" AND "),
-    );
-    if offset > 0 {
-        use std::fmt::Write as _;
-        let _ = write!(sql, " OFFSET {offset}");
-    }
-    let mut query = sqlx::query_as::<_, TargetRow>(&sql).bind(job_id);
-    // Bind order follows the filter order above
-    // (`skip_reason`, `workspace_slug`, `run_status`).
-    if let Some(reason) = &filter.skip_reason {
-        query = query.bind(reason.as_str());
-    }
-    if let Some(slug) = &filter.workspace_slug {
-        query = query.bind(slug);
-    }
-    if let Some(status) = &filter.run_status {
-        query = query.bind(status);
-    }
-    let rows: Vec<TargetRow> = query
-        .fetch_all(pool)
+    let db = pidash_db::sea_orm_connection(pool);
+    let rows: Vec<TargetRow> = db
+        .query_all(DbBackend::Postgres.build(&targets_list_select(job_id, &filter, page)))
         .await
+        .map_err(|_| Denial::ServerError)?
+        .iter()
+        .map(map_target_row)
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|_| Denial::ServerError)?;
 
     let body = json!({
@@ -1525,6 +1791,129 @@ mod tests {
             .collect();
         assert_eq!(order.last(), Some(&"stats"));
         assert_eq!(order.len(), 15);
+    }
+
+    // SeaORM statement shapes (`orm-migration.md` §3.2): the create
+    // insert names every column, generates the id server-side, marks
+    // `is_builtin` false, leaves `updated_by_id`/`deleted_at` NULL,
+    // and returns the 14 projected columns; the patch update names
+    // the cleaned columns plus `updated_at`/`updated_by_id` and
+    // filters the live row; the targets select keeps the four-table
+    // join, the job filter, and the page window.
+    #[test]
+    fn job_insert_names_every_column_with_projected_returning() {
+        let now =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).expect("epoch valid");
+        let sql = DbBackend::Postgres
+            .build(&job_insert(
+                "fxloop-job".to_owned(),
+                Some("Job".to_owned()),
+                Some("Public".to_owned()),
+                Some("Desc".to_owned()),
+                Some("Prompt".to_owned()),
+                15,
+                Some(true),
+                Some(now),
+                Some("FREQ=HOURLY".to_owned()),
+                Some("UTC".to_owned()),
+                now,
+                Uuid::nil(),
+            ))
+            .to_string();
+        assert!(
+            sql.contains(r#"INSERT INTO "loop_jobs" ("id", "slug", "name", "public_name", "public_description", "prompt", "min_role", "enabled", "is_builtin", "dtstart", "rrule", "tzid", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at")"#),
+            "columns: {sql}"
+        );
+        assert!(sql.contains("gen_random_uuid()"), "server id: {sql}");
+        assert!(sql.contains("FALSE"), "is_builtin: {sql}");
+        assert!(
+            sql.contains(r#"RETURNING "id", "slug", "name", "public_name", "public_description", "prompt", "min_role", "enabled", "is_builtin", "dtstart", "rrule", "tzid", "created_at", "updated_at""#),
+            "returning: {sql}"
+        );
+    }
+
+    #[test]
+    fn patch_update_names_cleaned_columns_on_live_row() {
+        use sea_orm::QueryTrait;
+        let now =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).expect("epoch valid");
+        let cleaned = guards::validate_writes(&json!({"name": "Renamed", "enabled": null}), true)
+            .expect("patch validates");
+        let mut write = prepare_write(&cleaned).expect("prepares");
+        let sql = patch_job_update(
+            &mut write,
+            &patch_columns(&cleaned),
+            now,
+            Uuid::nil(),
+            Uuid::nil(),
+        )
+        .build(DbBackend::Postgres)
+        .to_string();
+        assert!(sql.contains(r#"UPDATE "loop_jobs" SET"#), "update: {sql}");
+        assert!(sql.contains(r#""updated_at" = "#), "updated_at: {sql}");
+        assert!(
+            sql.contains(r#""updated_by_id" = "#),
+            "updated_by_id: {sql}"
+        );
+        assert!(sql.contains(r#""name" = 'Renamed'"#), "name: {sql}");
+        // An explicit null stays a NULL bind, never a skipped column.
+        assert!(sql.contains(r#""enabled" = NULL"#), "null bind: {sql}");
+        // Absent columns do not move.
+        assert!(!sql.contains(r#""prompt" = "#), "prompt untouched: {sql}");
+        assert!(
+            sql.contains(r#""id" = '00000000-0000-0000-0000-000000000000'"#),
+            "filter: {sql}"
+        );
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "live filter: {sql}"
+        );
+    }
+
+    #[test]
+    fn targets_select_keeps_join_filters_and_window() {
+        let job = Uuid::nil();
+        let plain = targets_list_select(job, &queries::TargetsFilter::default(), 1);
+        let sql = plain.to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.contains(r#"FROM "loop_targets" AS "t" INNER JOIN "workspaces" AS "w" ON "t"."workspace_id" = "w"."id" INNER JOIN "users" AS "u" ON "t"."user_id" = "u"."id" LEFT JOIN "assistant_turn" AS "turn" ON "t"."last_run_id" = "assistant_turn"."id""#),
+            "join: {sql}"
+        );
+        assert!(
+            sql.contains(r#""t"."deleted_at" IS NULL AND "t"."job_id" = '00000000-0000-0000-0000-000000000000'"#),
+            "live job filter, one deleted_at: {sql}"
+        );
+        assert!(sql.contains(r#"AS "workspace_slug""#), "alias: {sql}");
+        assert!(sql.contains(r#"AS "run_completed_at""#), "alias: {sql}");
+        assert!(
+            sql.contains(r#"ORDER BY "t"."updated_at" DESC LIMIT 50"#),
+            "order+limit: {sql}"
+        );
+        // Page 1 omits OFFSET; page 2 offsets by one window.
+        assert!(!sql.contains("OFFSET"), "no offset page 1: {sql}");
+        let page_two = targets_list_select(job, &queries::TargetsFilter::default(), 2);
+        let sql = page_two.to_string(sea_query::PostgresQueryBuilder);
+        assert!(sql.ends_with("LIMIT 50 OFFSET 50"), "window: {sql}");
+
+        // Filters bind in skip_reason, workspace, status order.
+        let filtered = targets_list_select(
+            job,
+            &queries::TargetsFilter::from_params(
+                Some("min_role"),
+                Some("fxloop-ws"),
+                Some("completed"),
+            ),
+            1,
+        );
+        let sql = filtered.to_string(sea_query::PostgresQueryBuilder);
+        let skip = sql
+            .find(r#""t"."last_skip_reason" = 'min_role'"#)
+            .expect("skip");
+        let ws = sql.find(r#""w"."slug" = 'fxloop-ws'"#).expect("workspace");
+        let status = sql
+            .find(r#""turn"."status" = 'completed'"#)
+            .expect("status");
+        assert!(skip < ws && ws < status, "filter order: {sql}");
     }
 
     #[test]

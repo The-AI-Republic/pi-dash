@@ -7,10 +7,7 @@
 //! FX-WEB-02, FX-WEB-03
 //! (`rust-api/fixtures/app_integrations/fx-web-0[123]-*.json`, PIDASHCONV-337).
 //!
-//! Same conventions as [`super::queries_git`]: sea-query builders for the
-//! slug-scoped reads, static SQL for the fixed writes, runtime
-//! `sqlx::query` (no `query!` macros: no build-time database), executors
-//! generic over `sqlx::Executor`, row structs reused from
+//! Same conventions as [`super::queries_git`]: SeaORM entities (`ConnectionTrait`), row structs reused from
 //! [`super::models_webhook`]. The workspace-slug lookup is the shared
 //! [`super::workspace_by_slug_sql`] / [`super::fetch_workspace_id_by_slug`]
 //! (the POST `Workspace.objects.get(slug=slug)`, `base.py:23`); no
@@ -52,47 +49,71 @@
 //!   (`base.py:31-35`) is raised from the `IntegrityError` message text,
 //!   not from a pre-check query — there is no existence SELECT to port.
 
-use sea_query::{Alias, Condition, Expr, JoinType, Order, Query};
-use sqlx::postgres::PgRow;
-use sqlx::Row;
-
-use super::models_webhook::{
-    generate_secret_key,
-    webhook::{self, Webhook},
-    webhook_log::{self, WebhookLog},
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, Select, Set,
 };
-use super::WORKSPACE_TABLE;
 
-// ---------------------------------------------------------------------------
-// Shared fragments
-// ---------------------------------------------------------------------------
+use super::models_webhook::{generate_secret_key, webhook::Webhook, webhook_log::WebhookLog};
+use crate::entity::{webhook_logs, webhooks, workspaces};
 
-/// `SELECT` the full webhook column list, table-qualified, in
-/// [`webhook::COLUMNS`] order (order cosmetic; membership is the contract).
-fn select_webhook_columns(sel: &mut sea_query::SelectStatement) {
-    for col in webhook::COLUMNS {
-        sel.column((Alias::new(webhook::TABLE), Alias::new(*col)));
+fn ts(value: chrono::DateTime<chrono::Utc>) -> sea_orm::prelude::DateTimeWithTimeZone {
+    value.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero offset"))
+}
+
+fn opt_ts(
+    value: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<sea_orm::prelude::DateTimeWithTimeZone> {
+    value.map(ts)
+}
+
+impl From<webhooks::Model> for Webhook {
+    fn from(row: webhooks::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+        Self {
+            id: row.id,
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+            deleted_at: row.deleted_at.map(at),
+            workspace_id: row.workspace_id,
+            url: row.url,
+            is_active: row.is_active,
+            secret_key: row.secret_key,
+            project: row.project,
+            issue: row.issue,
+            module: row.module,
+            cycle: row.cycle,
+            issue_comment: row.issue_comment,
+            is_internal: row.is_internal,
+            version: row.version,
+        }
     }
 }
 
-/// `SELECT` the full webhook-log column list, table-qualified.
-fn select_webhook_log_columns(sel: &mut sea_query::SelectStatement) {
-    for col in webhook_log::COLUMNS {
-        sel.column((Alias::new(webhook_log::TABLE), Alias::new(*col)));
+impl From<webhook_logs::Model> for WebhookLog {
+    fn from(row: webhook_logs::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+        Self {
+            id: row.id,
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+            deleted_at: row.deleted_at.map(at),
+            workspace_id: row.workspace_id,
+            webhook: row.webhook,
+            event_type: row.event_type,
+            request_method: row.request_method,
+            request_headers: row.request_headers,
+            request_body: row.request_body,
+            response_status: row.response_status,
+            response_headers: row.response_headers,
+            response_body: row.response_body,
+            retry_count: row.retry_count,
+        }
     }
-}
-
-/// `workspace__slug` traversal (`base.py:41,60,80,106,124`): the FK is
-/// non-nullable, so Django emits `INNER JOIN`.
-fn join_workspace(sel: &mut sea_query::SelectStatement, table: &str) {
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((Alias::new(table), Alias::new("workspace_id")))
-                .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -100,41 +121,25 @@ fn join_workspace(sel: &mut sea_query::SelectStatement, table: &str) {
 // ---------------------------------------------------------------------------
 
 /// `Webhook.objects.filter(workspace__slug=slug)` (`base.py:41`), newest
-/// first (`Meta.ordering`, `db/models/webhook.py:59`).
-/// Binds `$1 = workspace slug`.
-pub fn webhook_list_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(webhook::TABLE.to_owned()));
-    select_webhook_columns(&mut sel);
-    join_workspace(&mut sel, webhook::TABLE);
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(webhook::TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$1"))),
-    )
-    .order_by(
-        (Alias::new(webhook::TABLE), Alias::new("created_at")),
-        Order::Desc,
-    );
-    sel.to_string(PostgresQueryBuilder)
+/// first (`Meta.ordering`, `db/models/webhook.py:59`). The `workspace__slug`
+/// traversal inner-joins `workspaces` (non-nullable FK).
+pub fn webhook_list_query(workspace_slug: &str) -> Select<webhooks::Entity> {
+    webhooks::Entity::find()
+        .join(JoinType::InnerJoin, webhooks::Relation::Workspaces.def())
+        .filter(webhooks::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+        .order_by_desc(webhooks::Column::CreatedAt)
 }
 
 /// Newest-first live webhooks for one workspace slug
 /// (`base.py:41-58`, `200`).
-pub async fn fetch_webhook_list<'e, E>(
-    ex: E,
+pub async fn fetch_webhook_list(
+    db: &impl ConnectionTrait,
     workspace_slug: &str,
-) -> Result<Vec<Webhook>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&webhook_list_sql())
-        .bind(workspace_slug)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_webhook_row).collect()
+) -> Result<Vec<Webhook>, sea_orm::DbErr> {
+    let rows = webhook_list_query(workspace_slug).all(db).await?;
+    Ok(rows.into_iter().map(Webhook::from).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -144,102 +149,70 @@ where
 /// `Webhook.objects.get(workspace__slug=slug, pk=pk)` (`base.py:60,80`);
 /// the delete path (`base.py:106`,
 /// `get(pk=pk, workspace__slug=slug)`) carries the same predicates.
-/// Binds `$1 = webhook id`, `$2 = workspace slug`.
-pub fn webhook_detail_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(webhook::TABLE.to_owned()));
-    select_webhook_columns(&mut sel);
-    join_workspace(&mut sel, webhook::TABLE);
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(webhook::TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(webhook::TABLE), Alias::new("id"))).eq(Expr::cust("$1")))
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$2"))),
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
+pub fn webhook_detail_query(
+    webhook_id: uuid::Uuid,
+    workspace_slug: &str,
+) -> Select<webhooks::Entity> {
+    webhooks::Entity::find()
+        .join(JoinType::InnerJoin, webhooks::Relation::Workspaces.def())
+        .filter(webhooks::Column::DeletedAt.is_null())
+        .filter(webhooks::Column::Id.eq(webhook_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+        .limit(1)
 }
 
 /// One live webhook by id scoped to a workspace slug, or `None` (the
 /// view's 404 branch).
-pub async fn fetch_webhook_detail<'e, E>(
-    ex: E,
+pub async fn fetch_webhook_detail(
+    db: &impl ConnectionTrait,
     webhook_id: uuid::Uuid,
     workspace_slug: &str,
-) -> Result<Option<Webhook>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&webhook_detail_sql())
-        .bind(webhook_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
+) -> Result<Option<Webhook>, sea_orm::DbErr> {
+    let row = webhook_detail_query(webhook_id, workspace_slug)
+        .one(db)
         .await?;
-    row.map(|r| map_webhook_row(&r)).transpose()
-}
-
-/// Map one full `webhooks` row (column names, order-independent).
-pub fn map_webhook_row(row: &PgRow) -> Result<Webhook, sqlx::Error> {
-    Ok(Webhook {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        workspace_id: row.try_get("workspace_id")?,
-        url: row.try_get("url")?,
-        is_active: row.try_get("is_active")?,
-        secret_key: row.try_get("secret_key")?,
-        project: row.try_get("project")?,
-        issue: row.try_get("issue")?,
-        module: row.try_get("module")?,
-        cycle: row.try_get("cycle")?,
-        issue_comment: row.try_get("issue_comment")?,
-        is_internal: row.try_get("is_internal")?,
-        version: row.try_get("version")?,
-    })
+    Ok(row.map(Webhook::from))
 }
 
 // ---------------------------------------------------------------------------
 // Webhook create (serializers/webhook.py:22-55, via base.py:25-28)
 // ---------------------------------------------------------------------------
 
-/// `Webhook.objects.create(**validated_data)` (`serializers/webhook.py:55`):
-/// full-row INSERT; the id is client-assigned (`BaseModel.id` defaults to
-/// `uuid4`, `db/models/base.py:18`). Binds `$1..$17` the
-/// [`webhook::COLUMNS`] in order.
-pub const WEBHOOK_INSERT_SQL: &str = "INSERT INTO \"webhooks\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"url\", \"is_active\", \"secret_key\", \"project\", \"issue\", \"module\", \"cycle\", \"issue_comment\", \"is_internal\", \"version\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING \"webhooks\".\"id\"";
+fn webhook_active(row: &Webhook) -> webhooks::ActiveModel {
+    webhooks::ActiveModel {
+        id: Set(row.id),
+        created_at: Set(ts(row.created_at)),
+        updated_at: Set(ts(row.updated_at)),
+        created_by_id: Set(row.created_by_id),
+        updated_by_id: Set(row.updated_by_id),
+        deleted_at: Set(opt_ts(row.deleted_at)),
+        workspace_id: Set(row.workspace_id),
+        url: Set(row.url.clone()),
+        is_active: Set(row.is_active),
+        secret_key: Set(row.secret_key.clone()),
+        project: Set(row.project),
+        issue: Set(row.issue),
+        module: Set(row.module),
+        cycle: Set(row.cycle),
+        issue_comment: Set(row.issue_comment),
+        is_internal: Set(row.is_internal),
+        version: Set(row.version.clone()),
+    }
+}
 
 /// Insert one webhook row; returns the assigned id
 /// (`201 + serializer.data`, `base.py:26-28`).
-pub async fn create_webhook<'e, E>(ex: E, row: &Webhook) -> Result<uuid::Uuid, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let saved: PgRow = sqlx::query(WEBHOOK_INSERT_SQL)
-        .bind(row.id)
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .bind(row.created_by_id)
-        .bind(row.updated_by_id)
-        .bind(row.deleted_at)
-        .bind(row.workspace_id)
-        .bind(&row.url)
-        .bind(row.is_active)
-        .bind(&row.secret_key)
-        .bind(row.project)
-        .bind(row.issue)
-        .bind(row.module)
-        .bind(row.cycle)
-        .bind(row.issue_comment)
-        .bind(row.is_internal)
-        .bind(&row.version)
-        .fetch_one(ex)
-        .await?;
-    saved.try_get("id")
+/// `Webhook.objects.create(**validated_data)` (`serializers/webhook.py:55`):
+/// full-row INSERT; the id is client-assigned (`BaseModel.id` defaults to
+/// `uuid4`, `db/models/base.py:18`).
+pub async fn create_webhook(
+    db: &impl ConnectionTrait,
+    row: &Webhook,
+) -> Result<uuid::Uuid, sea_orm::DbErr> {
+    use sea_orm::ActiveModelTrait;
+    let inserted = webhook_active(row).insert(db).await?;
+    Ok(inserted.id)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,37 +220,16 @@ where
 // soft delete (db/mixins.py:74-76)
 // ---------------------------------------------------------------------------
 
-/// DRF `instance.save()` full-row UPDATE: every non-pk column is rewritten
-/// in [`webhook::COLUMNS`] order minus `id`. Binds `$1..$16` the SET
-/// columns, `$17 = id`. The caller advances `updated_at` (`auto_now`);
-/// `secret_key` / `deleted_at` travel in the struct like any other field.
-pub const WEBHOOK_FULL_UPDATE_SQL: &str = "UPDATE \"webhooks\" SET \"created_at\" = $1, \"updated_at\" = $2, \"created_by_id\" = $3, \"updated_by_id\" = $4, \"deleted_at\" = $5, \"workspace_id\" = $6, \"url\" = $7, \"is_active\" = $8, \"secret_key\" = $9, \"project\" = $10, \"issue\" = $11, \"module\" = $12, \"cycle\" = $13, \"issue_comment\" = $14, \"is_internal\" = $15, \"version\" = $16 WHERE \"webhooks\".\"id\" = $17";
-
-/// Rewrite one webhook row from the struct as Django's `save()` does.
-pub async fn update_webhook_full<'e, E>(ex: E, row: &Webhook) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(WEBHOOK_FULL_UPDATE_SQL)
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .bind(row.created_by_id)
-        .bind(row.updated_by_id)
-        .bind(row.deleted_at)
-        .bind(row.workspace_id)
-        .bind(&row.url)
-        .bind(row.is_active)
-        .bind(&row.secret_key)
-        .bind(row.project)
-        .bind(row.issue)
-        .bind(row.module)
-        .bind(row.cycle)
-        .bind(row.issue_comment)
-        .bind(row.is_internal)
-        .bind(&row.version)
-        .bind(row.id)
-        .execute(ex)
-        .await?;
+/// Rewrite one webhook row from the struct as Django's `save()` does:
+/// DRF full-row UPDATE — every non-pk column is rewritten. The caller
+/// advances `updated_at` (`auto_now`); `secret_key` / `deleted_at` travel
+/// in the struct like any other field.
+pub async fn update_webhook_full(
+    db: &impl ConnectionTrait,
+    row: &Webhook,
+) -> Result<(), sea_orm::DbErr> {
+    use sea_orm::ActiveModelTrait;
+    webhook_active(row).update(db).await?;
     Ok(())
 }
 
@@ -312,115 +264,73 @@ pub fn stamp_soft_delete(row: &mut Webhook) {
 /// `WebhookLog.objects.filter(workspace__slug=slug, webhook=webhook_id)`
 /// (`base.py:124`), newest first (`Meta.ordering`, `webhook.py:88`).
 /// `webhook` is a plain UUID column, not a FK — the predicate is a bare
-/// equality. Binds `$1 = workspace slug`, `$2 = webhook id`.
-pub fn webhook_logs_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(webhook_log::TABLE.to_owned()));
-    select_webhook_log_columns(&mut sel);
-    join_workspace(&mut sel, webhook_log::TABLE);
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(webhook_log::TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$1")))
-            .add(
-                Expr::col((Alias::new(webhook_log::TABLE), Alias::new("webhook")))
-                    .eq(Expr::cust("$2")),
-            ),
-    )
-    .order_by(
-        (Alias::new(webhook_log::TABLE), Alias::new("created_at")),
-        Order::Desc,
-    );
-    sel.to_string(PostgresQueryBuilder)
+/// equality.
+pub fn webhook_logs_query(
+    workspace_slug: &str,
+    webhook_id: uuid::Uuid,
+) -> Select<webhook_logs::Entity> {
+    webhook_logs::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            webhook_logs::Relation::Workspaces.def(),
+        )
+        .filter(webhook_logs::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+        .filter(webhook_logs::Column::Webhook.eq(webhook_id))
+        .order_by_desc(webhook_logs::Column::CreatedAt)
 }
 
 /// Newest-first log rows for one webhook scoped to a workspace slug
 /// (`base.py:124-126`, `200`).
-pub async fn fetch_webhook_logs<'e, E>(
-    ex: E,
-    workspace_slug: &str,
-    webhook_id: uuid::Uuid,
-) -> Result<Vec<WebhookLog>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&webhook_logs_sql())
-        .bind(workspace_slug)
-        .bind(webhook_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(map_webhook_log_row).collect()
-}
-
-/// Map one full `webhook_logs` row (column names, order-independent).
 /// `response_status` stays text: Django stores mixed types there
 /// (ported BUG, see module docs).
-pub fn map_webhook_log_row(row: &PgRow) -> Result<WebhookLog, sqlx::Error> {
-    Ok(WebhookLog {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        workspace_id: row.try_get("workspace_id")?,
-        webhook: row.try_get("webhook")?,
-        event_type: row.try_get("event_type")?,
-        request_method: row.try_get("request_method")?,
-        request_headers: row.try_get("request_headers")?,
-        request_body: row.try_get("request_body")?,
-        response_status: row.try_get("response_status")?,
-        response_headers: row.try_get("response_headers")?,
-        response_body: row.try_get("response_body")?,
-        retry_count: row.try_get("retry_count")?,
-    })
+pub async fn fetch_webhook_logs(
+    db: &impl ConnectionTrait,
+    workspace_slug: &str,
+    webhook_id: uuid::Uuid,
+) -> Result<Vec<WebhookLog>, sea_orm::DbErr> {
+    let rows = webhook_logs_query(workspace_slug, webhook_id)
+        .all(db)
+        .await?;
+    Ok(rows.into_iter().map(WebhookLog::from).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn webhook_select_prefix() -> String {
-        let cols: Vec<String> = webhook::COLUMNS
-            .iter()
-            .map(|c| format!("\"webhooks\".\"{c}\""))
-            .collect();
-        format!("SELECT {}", cols.join(", "))
-    }
+    use sea_orm::{DbBackend, QueryTrait};
 
     #[test]
-    fn list_sql_scopes_to_workspace_slug_newest_first() {
-        let sql = webhook_list_sql();
-        assert!(sql.starts_with(&webhook_select_prefix()), "{sql}");
+    fn list_scopes_to_workspace_slug_newest_first() {
+        let sql = webhook_list_query("acme")
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sql.contains("FROM \"webhooks\""), "{sql}");
         assert!(sql.contains("INNER JOIN \"workspaces\""), "{sql}");
         assert!(
             sql.contains("\"webhooks\".\"workspace_id\" = \"workspaces\".\"id\""),
             "{sql}"
         );
-        assert!(sql.contains("\"webhooks\".\"deleted_at\" IS NULL"), "{sql}");
-        assert!(
-            sql.contains("\"workspaces\".\"deleted_at\" IS NULL"),
-            "{sql}"
-        );
-        assert!(sql.contains("\"workspaces\".\"slug\" = ($1)"), "{sql}");
-        assert!(
-            sql.contains("ORDER BY \"webhooks\".\"created_at\" DESC"),
-            "{sql}"
-        );
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"workspaces\".\"slug\" = 'acme'"), "{sql}");
+        assert!(sql.contains("ORDER BY"), "{sql}");
+        assert!(sql.contains("DESC"), "{sql}");
         assert!(!sql.contains("LIMIT"), "{sql}");
     }
 
     #[test]
-    fn detail_sql_is_scoped_get_without_ordering() {
-        let sql = webhook_detail_sql();
-        assert!(sql.starts_with(&webhook_select_prefix()), "{sql}");
+    fn detail_is_scoped_get_without_ordering() {
+        let sql = webhook_detail_query(uuid::Uuid::nil(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("FROM \"webhooks\""), "{sql}");
         assert!(sql.contains("INNER JOIN \"workspaces\""), "{sql}");
-        assert!(sql.contains("\"webhooks\".\"id\" = ($1)"), "{sql}");
-        assert!(sql.contains("\"workspaces\".\"slug\" = ($2)"), "{sql}");
-        assert!(sql.contains("\"webhooks\".\"deleted_at\" IS NULL"), "{sql}");
+        assert!(
+            sql.contains("\"id\" = '00000000-0000-0000-0000-000000000000'"),
+            "{sql}"
+        );
+        assert!(sql.contains("\"slug\" = 'acme'"), "{sql}");
         // `get()` clears `Meta.ordering` and caps rows (domain convention:
         // `LIMIT 1` on unique predicates — same row as Django's `LIMIT 21`).
         assert!(!sql.contains("ORDER BY"), "{sql}");
@@ -428,44 +338,21 @@ mod tests {
     }
 
     #[test]
-    fn logs_sql_filters_plain_uuid_column_newest_first() {
-        let sql = webhook_logs_sql();
-        for col in webhook_log::COLUMNS {
-            assert!(
-                sql.contains(&format!("\"webhook_logs\".\"{col}\"")),
-                "{sql}"
-            );
-        }
+    fn logs_filters_plain_uuid_column_newest_first() {
+        let sql = webhook_logs_query("acme", uuid::Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("FROM \"webhook_logs\""), "{sql}");
         assert!(sql.contains("INNER JOIN \"workspaces\""), "{sql}");
-        assert!(sql.contains("\"workspaces\".\"slug\" = ($1)"), "{sql}");
         // Plain UUID column, not a FK: bare equality, no `_id` remap.
-        assert!(sql.contains("\"webhook_logs\".\"webhook\" = ($2)"), "{sql}");
-        assert!(!sql.contains("webhook_id"), "{sql}");
         assert!(
-            sql.contains("ORDER BY \"webhook_logs\".\"created_at\" DESC"),
+            sql.contains("\"webhook\" = '00000000-0000-0000-0000-000000000000'"),
             "{sql}"
         );
+        assert!(sql.contains("\"slug\" = 'acme'"), "{sql}");
+        assert!(sql.contains("ORDER BY"), "{sql}");
+        assert!(sql.contains("DESC"), "{sql}");
         assert!(!sql.contains("LIMIT"), "{sql}");
-    }
-
-    #[test]
-    fn write_statements_cover_every_column() {
-        for col in webhook::COLUMNS {
-            assert!(WEBHOOK_INSERT_SQL.contains(&format!("\"{col}\"")), "{col}");
-        }
-        assert!(WEBHOOK_INSERT_SQL.contains("RETURNING \"webhooks\".\"id\""),);
-        for n in 1..=17 {
-            assert!(WEBHOOK_INSERT_SQL.contains(&format!("${n}")), "${n}");
-        }
-        // Full save rewrites every non-pk column; the pk only scopes.
-        for col in webhook::COLUMNS.iter().filter(|c| **c != "id") {
-            assert!(
-                WEBHOOK_FULL_UPDATE_SQL.contains(&format!("\"{col}\" = ")),
-                "{col}"
-            );
-        }
-        assert!(WEBHOOK_FULL_UPDATE_SQL.contains("\"secret_key\" = $9"),);
-        assert!(WEBHOOK_FULL_UPDATE_SQL.contains("WHERE \"webhooks\".\"id\" = $17"),);
     }
 
     #[test]
@@ -616,29 +503,31 @@ mod tests {
             (23, other, "https://c.example/hook", 1_700_000_500, None),
         ] {
             let row = live_webhook(live_uuid(suffix), workspace, url, live_ts(ts), deleted);
-            create_webhook(&mut *tx, &row).await.expect("seed webhook");
+            let conn = crate::orm_tx::TxConn::new(&mut tx);
+            create_webhook(&conn, &row).await.expect("seed webhook");
         }
         // List: live rows of this workspace only, newest first.
-        let list = fetch_webhook_list(&mut *tx, "acme").await.expect("list");
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let list = fetch_webhook_list(&conn, "acme").await.expect("list");
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].url, "https://b.example/hook");
         assert_eq!(list[1].url, "https://a.example/hook");
         // Detail: hit, soft-deleted miss, cross-workspace miss.
-        let hit = fetch_webhook_detail(&mut *tx, live_uuid(20), "acme")
+        let hit = fetch_webhook_detail(&conn, live_uuid(20), "acme")
             .await
             .expect("detail")
             .expect("row");
         assert_eq!(hit.url, "https://a.example/hook");
         assert!(hit.project);
-        assert!(fetch_webhook_detail(&mut *tx, live_uuid(22), "acme")
+        assert!(fetch_webhook_detail(&conn, live_uuid(22), "acme")
             .await
             .expect("deleted")
             .is_none());
-        assert!(fetch_webhook_detail(&mut *tx, live_uuid(20), "other")
+        assert!(fetch_webhook_detail(&conn, live_uuid(20), "other")
             .await
             .expect("scoped")
             .is_none());
-        assert!(fetch_webhook_detail(&mut *tx, live_uuid(23), "acme")
+        assert!(fetch_webhook_detail(&conn, live_uuid(23), "acme")
             .await
             .expect("foreign")
             .is_none());
@@ -661,8 +550,9 @@ mod tests {
             live_ts(1_700_000_100),
             None,
         );
-        create_webhook(&mut *tx, &before).await.expect("seed");
-        let mut after = fetch_webhook_detail(&mut *tx, id, "acme")
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        create_webhook(&conn, &before).await.expect("seed");
+        let mut after = fetch_webhook_detail(&conn, id, "acme")
             .await
             .expect("lookup")
             .expect("row");
@@ -675,7 +565,7 @@ mod tests {
             after.updated_at.timestamp_subsec_micros() * 1000,
         )
         .expect("microsecond truncation stays in range");
-        update_webhook_full(&mut *tx, &after).await.expect("save");
+        update_webhook_full(&conn, &after).await.expect("save");
         assert_ne!(after.secret_key, before.secret_key);
         assert!(after.secret_key.starts_with("pi_dash_wh_"));
         assert_eq!(after.secret_key.len(), "pi_dash_wh_".len() + 32);
@@ -683,13 +573,13 @@ mod tests {
         // Untouched columns round-trip; the row reads back identically.
         assert_eq!(after.url, before.url);
         assert_eq!(after.workspace_id, before.workspace_id);
-        let reread = fetch_webhook_detail(&mut *tx, id, "acme")
+        let reread = fetch_webhook_detail(&conn, id, "acme")
             .await
             .expect("reread")
             .expect("row");
         assert_eq!(reread, after);
         // Miss returns None (the 404 branch).
-        assert!(fetch_webhook_detail(&mut *tx, live_uuid(99), "acme")
+        assert!(fetch_webhook_detail(&conn, live_uuid(99), "acme")
             .await
             .expect("miss")
             .is_none());
@@ -705,8 +595,9 @@ mod tests {
         let ws = live_uuid(10);
         seed_workspace(&mut tx, ws, "acme").await;
         let id = live_uuid(20);
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
         create_webhook(
-            &mut *tx,
+            &conn,
             &live_webhook(
                 id,
                 ws,
@@ -717,19 +608,19 @@ mod tests {
         )
         .await
         .expect("seed");
-        let mut stamped = fetch_webhook_detail(&mut *tx, id, "acme")
+        let mut stamped = fetch_webhook_detail(&conn, id, "acme")
             .await
             .expect("lookup")
             .expect("row");
         stamp_soft_delete(&mut stamped);
-        update_webhook_full(&mut *tx, &stamped).await.expect("save");
+        update_webhook_full(&conn, &stamped).await.expect("save");
         assert!(stamped.deleted_at.is_some());
         // The row leaves the default-manager reads (list + detail).
-        assert!(fetch_webhook_list(&mut *tx, "acme")
+        assert!(fetch_webhook_list(&conn, "acme")
             .await
             .expect("list")
             .is_empty());
-        assert!(fetch_webhook_detail(&mut *tx, id, "acme")
+        assert!(fetch_webhook_detail(&conn, id, "acme")
             .await
             .expect("detail")
             .is_none());
@@ -755,8 +646,9 @@ mod tests {
         seed_workspace(&mut tx, ws, "acme").await;
         let hook = live_uuid(20);
         let foreign_hook = live_uuid(21);
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
         create_webhook(
-            &mut *tx,
+            &conn,
             &live_webhook(
                 hook,
                 ws,
@@ -785,9 +677,8 @@ mod tests {
                 .await
                 .expect("seed log");
         }
-        let logs = fetch_webhook_logs(&mut *tx, "acme", hook)
-            .await
-            .expect("logs");
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let logs = fetch_webhook_logs(&conn, "acme", hook).await.expect("logs");
         assert_eq!(logs.len(), 2);
         assert_eq!(
             logs[0].response_status.as_deref(),
@@ -801,8 +692,9 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("hard delete hook");
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
         assert_eq!(
-            fetch_webhook_logs(&mut *tx, "acme", hook)
+            fetch_webhook_logs(&conn, "acme", hook)
                 .await
                 .expect("orphans")
                 .len(),

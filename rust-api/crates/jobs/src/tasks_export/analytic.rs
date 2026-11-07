@@ -706,6 +706,7 @@ async fn fetch_count_plot(
 ) -> Result<Vec<(Option<String>, Option<String>, i64)>, String> {
     let wrapped = wrapped_plot_sql(sql, "count", segment);
     if segment.filter(|segment| !segment.is_empty()).is_some() {
+        // raw-sql: dynamic plot SQL from services base_plot_count builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
         let rows: Vec<(Option<String>, Option<String>, i64)> =
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
@@ -713,6 +714,7 @@ async fn fetch_count_plot(
                 .map_err(|error| format!("analytic_export_task: plot query failed ({error})"))?;
         Ok(rows)
     } else {
+        // raw-sql: dynamic plot SQL from services base_plot_count builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
         let rows: Vec<(Option<String>, i64)> =
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
@@ -734,6 +736,7 @@ async fn fetch_estimate_plot(
 ) -> Result<Vec<(Option<String>, Option<String>, Option<f64>)>, String> {
     let wrapped = wrapped_plot_sql(sql, "estimate", segment);
     if segment.filter(|segment| !segment.is_empty()).is_some() {
+        // raw-sql: dynamic plot SQL from services base_plot_estimate builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
         let rows: Vec<(Option<String>, Option<String>, Option<f64>)> =
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
@@ -741,6 +744,7 @@ async fn fetch_estimate_plot(
                 .map_err(|error| format!("analytic_export_task: plot query failed ({error})"))?;
         Ok(rows)
     } else {
+        // raw-sql: dynamic plot SQL from services base_plot_estimate builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
         let rows: Vec<(Option<String>, Option<f64>)> =
             bind_all_as(sqlx::query_as(&wrapped), slug, binds.values())
                 .fetch_all(pool)
@@ -773,6 +777,7 @@ async fn fetch_state_details(
     binds: &Binds,
 ) -> Result<Vec<HashMap<String, String>>, String> {
     let sql = detail_statement(exports_dto::STATE_ID, fragment, true)?;
+    // raw-sql: dynamic detail SQL from services base_state_details builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
     let rows: Vec<(Option<uuid::Uuid>, Option<String>, Option<String>)> =
         bind_all_as(sqlx::query_as(&sql), slug, binds.values())
             .fetch_all(pool)
@@ -797,6 +802,7 @@ async fn fetch_label_details(
     binds: &Binds,
 ) -> Result<Vec<HashMap<String, String>>, String> {
     let sql = detail_statement(exports_dto::LABEL_ID, fragment, false)?;
+    // raw-sql: dynamic detail SQL from services base_label_details builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
     let rows: Vec<(uuid::Uuid, Option<String>, Option<String>)> =
         bind_all_as(sqlx::query_as(&sql), slug, binds.values())
             .fetch_all(pool)
@@ -822,6 +828,7 @@ async fn fetch_assignee_details(
 ) -> Result<Vec<HashMap<String, String>>, String> {
     let sql = detail_statement(exports_dto::ASSIGNEE_ID, fragment, true)?;
     #[allow(clippy::type_complexity)]
+    // raw-sql: dynamic detail SQL from services base_assignee_details builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
     let rows: Vec<(
         uuid::Uuid,
         Option<String>,
@@ -856,6 +863,7 @@ async fn fetch_cycle_details(
     binds: &Binds,
 ) -> Result<Vec<HashMap<String, String>>, String> {
     let sql = detail_statement(exports_dto::CYCLE_ID, fragment, true)?;
+    // raw-sql: dynamic detail SQL from services base_cycle_details builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
     let rows: Vec<(uuid::Uuid, Option<String>)> =
         bind_all_as(sqlx::query_as(&sql), slug, binds.values())
             .fetch_all(pool)
@@ -879,6 +887,7 @@ async fn fetch_module_details(
     binds: &Binds,
 ) -> Result<Vec<HashMap<String, String>>, String> {
     let sql = detail_statement(exports_dto::MODULE_ID, fragment, true)?;
+    // raw-sql: dynamic detail SQL from services base_module_details builder; sea-query rebuild requires shared helper change outside exclusive batch scope (dependency).
     let rows: Vec<(uuid::Uuid, Option<String>)> =
         bind_all_as(sqlx::query_as(&sql), slug, binds.values())
             .fetch_all(pool)

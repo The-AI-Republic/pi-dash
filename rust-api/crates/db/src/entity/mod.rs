@@ -147,6 +147,7 @@ pub mod draft_issue_labels;
 pub mod draft_issue_modules;
 pub mod draft_issues;
 pub mod email_notification_logs;
+pub mod engine_credential;
 pub mod estimate_points;
 pub mod estimates;
 pub mod exporters;

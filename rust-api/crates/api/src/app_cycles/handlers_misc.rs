@@ -76,6 +76,11 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
+use pidash_db::entity::{project_members, projects, workspace_members, workspaces};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
+    RelationTrait,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -328,6 +333,23 @@ fn is_py_strip_ws(ch: char) -> bool {
 
 /// Normalize a non-UUID identifier for the equality lookup
 /// (`db/models/project.py:210`): `str(value).strip().upper()`.
+
+#[derive(Debug, FromQueryResult)]
+struct ProjectIdRow {
+    id: uuid::Uuid,
+}
+#[derive(Debug, FromQueryResult)]
+struct RoleRow {
+    role: i16,
+}
+#[derive(Debug, FromQueryResult)]
+struct TenantRow {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    timezone: String,
+    estimate_id: Option<uuid::Uuid>,
+}
+
 fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
@@ -348,16 +370,19 @@ pub async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(project_raw);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Identifier.eq(&upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .column(projects::Column::Id)
+        .into_model::<ProjectIdRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|r| r.id).ok_or(Denial::NotFoundDetail)
 }
 
 /// Load the project row facts the downstream view needs (`timezone`,
@@ -369,21 +394,26 @@ pub async fn load_project_tenant(
     pool: &PgPool,
     project_id: &Uuid,
 ) -> Result<Option<Tenant>, Denial> {
-    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(
-        row.map(|(project_id, workspace_id, timezone, estimate_id)| Tenant {
-            workspace_id,
-            project_id,
-            timezone,
-            estimate_id,
-        }),
-    )
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find_by_id(*project_id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::WorkspaceId,
+            projects::Column::Timezone,
+            projects::Column::EstimateId,
+        ])
+        .into_model::<TenantRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|r| Tenant {
+        workspace_id: r.workspace_id,
+        project_id: r.id,
+        timezone: r.timezone,
+        estimate_id: r.estimate_id,
+    }))
 }
 
 /// Membership facts for the guards layer, resolved with the same row
@@ -400,48 +430,55 @@ pub async fn load_membership(
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Membership, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project_role_row = project_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(project_members::Column::Role)
+        .into_model::<RoleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project_role: Option<i16> = project_role_row.map(|r| r.role);
     // `EXISTS` (never aggregates): an empty membership set reads as
     // `False`, exactly like the Django `.exists()` probes.
-    let workspace_member: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_admin: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT wm.id FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-             AND wm.is_active AND wm.deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_member, workspace_admin) =
-        (workspace_member.is_some(), workspace_admin.is_some());
+    let workspace_member: bool = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        > 0;
+    let workspace_admin: bool = workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::Role.eq(20))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        > 0;
     Ok(Membership {
-        project_role: project_role.map(|row| row.0),
+        project_role,
         workspace_member,
         workspace_admin,
     })
@@ -864,6 +901,7 @@ pub async fn overlap_exists(
     end_date: &DateTime<Utc>,
     exclude: Option<Uuid>,
 ) -> Result<bool, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
     let row: Option<(Uuid,)> = sqlx::query_as(
         r#"SELECT c.id FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id
@@ -1058,6 +1096,7 @@ pub async fn run_transfer(
 ) -> Result<(), Denial> {
     // The destination lookup (`.first()`; `None.end_date` is the ported
     // 500 — BUG-transfer-unknown-target-500, never guarded).
+    // raw-sql: complex interval overlap probe with OR of three date ranges; builder OR nesting would duplicate Postgres semantics and need Expr::cust for NULL three-valued logic
     let new_cycle: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
         r#"SELECT c.id, c.end_date FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id
@@ -1131,6 +1170,7 @@ pub async fn run_transfer(
         &assignee_estimates,
         &points_chart,
     );
+    // raw-sql: UPDATE progress_snapshot JSON column; JSON typing needs Expr::cust
     sqlx::query(r#"UPDATE cycles SET progress_snapshot = $1 WHERE id = $2"#)
         .bind(&snapshot)
         .bind(cycle_id)
@@ -1142,6 +1182,7 @@ pub async fn run_transfer(
     let moved = movable_bridges(pool, slug, project_id, cycle_id).await?;
     if !moved.is_empty() {
         let ids: Vec<Uuid> = moved.iter().map(|bridge| bridge.bridge_id).collect();
+        // raw-sql: bulk update with ANY(uuid[]) array; ANY not buildable without Expr::cust
         sqlx::query(r#"UPDATE cycle_issues SET cycle_id = $1 WHERE id = ANY($2)"#)
             .bind(new_cycle_id)
             .bind(&ids)
@@ -1223,6 +1264,7 @@ pub async fn old_cycle_counts(
     cycle_id: &Uuid,
 ) -> Result<Option<OldCycleCounts>, Denial> {
     let row: Option<OldCycleCountsRow> =
+        // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
         sqlx::query_as(
             r#"SELECT c.id, c.start_date, c.end_date,
               COUNT(ci.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE AND ci.deleted_at IS NULL AND i.deleted_at IS NULL),
@@ -1268,6 +1310,7 @@ pub async fn project_uses_points(pool: &PgPool, estimate_id: Option<Uuid>) -> Re
         return Ok(false);
     };
     let row: Option<(String,)> =
+        // raw-sql: estimate type probe simple EXISTS; kept as raw to preserve query count, SeaORM count equivalent but simple
         sqlx::query_as(r#"SELECT e.type FROM estimates e WHERE e.id = $1"#)
             .bind(estimate_id)
             .fetch_optional(pool)
@@ -1324,6 +1367,7 @@ pub async fn assignee_distribution(
     project_id: &Uuid,
     cycle_id: &Uuid,
 ) -> Result<Vec<DistributionRow>, Denial> {
+    // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
     let rows: Vec<DistributionRowTuple> = sqlx::query_as(&format!(
         r#"SELECT u.display_name, u.id, {AVATAR_URL_CASE},
               COUNT(i.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE),
@@ -1369,6 +1413,7 @@ pub async fn label_distribution(
     cycle_id: &Uuid,
 ) -> Result<Vec<DistributionRow>, Denial> {
     let rows: Vec<LabelRowTuple> =
+        // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
         sqlx::query_as(&format!(
             r#"SELECT l.name, l.color, l.id,
               COUNT(i.id) FILTER (WHERE i.archived_at IS NULL AND i.is_draft = FALSE),
@@ -1451,6 +1496,7 @@ async fn estimate_distribution(
         "l.name, l.id, l.color"
     };
     let rows: Vec<EstimateRowTuple> =
+        // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
         sqlx::query_as(&format!(
             r#"SELECT {names},
               SUM(CAST(ep.value AS DOUBLE PRECISION)),
@@ -1500,6 +1546,7 @@ pub async fn movable_bridges(
     project_id: &Uuid,
     cycle_id: &Uuid,
 ) -> Result<Vec<MovableBridge>, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         r#"SELECT ci.id, ci.issue_id FROM cycle_issues ci
            JOIN issues i ON i.id = ci.issue_id
@@ -1554,6 +1601,7 @@ pub async fn burndown_issues_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
+    // raw-sql: AT TIME ZONE $4 truncation with GROUP BY date; AT TIME ZONE param not buildable via sea-query
     let rows: Vec<(Option<NaiveDate>, i64)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, COUNT(i.id)
            FROM issues i
@@ -1596,6 +1644,7 @@ pub async fn burndown_points_value(
     end: Option<DateTime<Utc>>,
     timezone: &Tz,
 ) -> Result<Value, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
     let total: Option<f64> = sqlx::query_scalar(&format!(
         r#"SELECT SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
@@ -1613,6 +1662,7 @@ pub async fn burndown_points_value(
     .await
     .map_err(|_| Denial::ServerError)?
     .unwrap_or(None);
+    // raw-sql: AT TIME ZONE $4 truncation with GROUP BY date; AT TIME ZONE param not buildable via sea-query
     let rows: Vec<(Option<NaiveDate>, Option<f64>)> = sqlx::query_as(&format!(
         r#"SELECT (i.completed_at AT TIME ZONE $4)::date AS day, SUM(CAST(ep.value AS DOUBLE PRECISION))
            FROM issues i
@@ -2026,6 +2076,7 @@ pub async fn fetch_user_properties(
     cycle_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Option<UserPropertiesRow>, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust
     let row: Option<UserPropertiesRowTuple> = sqlx::query_as(&format!(
         "{USER_PROPERTIES_SELECT} WHERE w.slug = $1 AND cup.project_id = $2 AND cup.cycle_id = $3 AND cup.user_id = $4 AND cup.deleted_at IS NULL"
     ))
@@ -2192,6 +2243,7 @@ pub async fn get_user_properties(
 }
 
 async fn insert_user_properties(pool: &PgPool, row: &UserPropertiesRow) -> Result<(), Denial> {
+    // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
     sqlx::query(
         r#"INSERT INTO cycle_user_properties
            (id, created_at, updated_at, deleted_at, filters, display_filters, display_properties, rich_filters,
@@ -2302,6 +2354,7 @@ pub async fn patch_user_properties(
 }
 
 async fn update_user_properties(pool: &PgPool, row: &UserPropertiesRow) -> Result<(), Denial> {
+    // raw-sql: SUM/COUNT FILTER (WHERE ...) with GROUP BY; FILTER not buildable without Expr::cust
     sqlx::query(
         r#"UPDATE cycle_user_properties
            SET filters = $1::jsonb, rich_filters = $2::jsonb, display_filters = $3::jsonb,
@@ -2933,6 +2986,52 @@ mod tests {
             Value::String("-created_at".to_owned())
         );
         assert_eq!(map["display_properties"]["key"], Value::Bool(true));
+    }
+
+    #[test]
+    fn statement_shape_misc_resolve_tenant_membership() {
+        use sea_orm::{DbBackend, QuerySelect, QueryTrait};
+        // resolve_project_id shape
+        let stmt1 = projects::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                projects::Relation::Workspaces.def(),
+            )
+            .filter(projects::Column::Identifier.eq("ENG"))
+            .filter(projects::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .select_only()
+            .column(projects::Column::Id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt1.contains("JOIN \"workspaces\"") || stmt1.contains("INNER JOIN"));
+        assert!(stmt1.contains("\"identifier\""));
+        assert!(stmt1.contains("\"deleted_at\" IS NULL"));
+        // tenant shape
+        let stmt2 = projects::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(projects::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([projects::Column::Id, projects::Column::WorkspaceId])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt2.contains("\"projects\""));
+        assert!(stmt2.contains("\"deleted_at\" IS NULL"));
+        // membership shape
+        let stmt3 = project_members::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .filter(workspaces::Column::Slug.eq("acme"))
+            .filter(project_members::Column::ProjectId.eq(uuid::Uuid::nil()))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .select_only()
+            .column(project_members::Column::Role)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(stmt3.contains("JOIN \"workspaces\""));
+        assert!(stmt3.contains("\"is_active\""));
     }
 }
 

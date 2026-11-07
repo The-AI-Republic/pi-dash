@@ -31,7 +31,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch};
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use uuid::Uuid;
 
 use super::common::{
@@ -84,49 +84,40 @@ async fn list_threads(
     let role = role_for(pool, &actor.id, &slug).await?;
     require_member(role)?;
     reap_empty_threads(pool, &actor.id, &slug).await?;
-    let rows = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, String, bool, Option<Uuid>, DateTime<Utc>, DateTime<Utc>)>(
-        "SELECT \"assistant_thread\".\"id\", \"assistant_thread\".\"workspace_id\", \
-         \"assistant_thread\".\"user_id\", \"assistant_thread\".\"title\", \
-         \"assistant_thread\".\"kind\", \"assistant_thread\".\"is_archived\", \
-         \"assistant_thread\".\"active_turn_id\", \"assistant_thread\".\"created_at\", \
-         \"assistant_thread\".\"updated_at\" \
-         FROM \"assistant_thread\" \
-         INNER JOIN \"workspaces\" ON (\"assistant_thread\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"assistant_thread\".\"user_id\" = $1 \
-         AND \"workspaces\".\"slug\" = $2 \
-         AND \"assistant_thread\".\"is_archived\" = false \
-         AND \"assistant_thread\".\"kind\" = 'chat') \
-         ORDER BY \"assistant_thread\".\"updated_at\" DESC LIMIT 50",
-    )
-    .bind(actor.id)
-    .bind(&slug)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let rows = {
+        use sea_orm::{
+            ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+        };
+        use sea_query::JoinType;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        pidash_db::entity::assistant_thread::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                pidash_db::entity::assistant_thread::Relation::Workspaces.def(),
+            )
+            .filter(pidash_db::entity::assistant_thread::Column::UserId.eq(actor.id))
+            .filter(pidash_db::entity::workspaces::Column::Slug.eq(slug.clone()))
+            .filter(pidash_db::entity::assistant_thread::Column::IsArchived.eq(false))
+            .filter(pidash_db::entity::assistant_thread::Column::Kind.eq("chat"))
+            .order_by_desc(pidash_db::entity::assistant_thread::Column::UpdatedAt)
+            .limit(50)
+            .all(&db)
+            .await
+            .map_err(|_| server_error())?
+    };
     let mut bodies = Vec::with_capacity(rows.len());
-    for (
-        id,
-        workspace_id,
-        user_id,
-        title,
-        kind,
-        is_archived,
-        active_turn_id,
-        created_at,
-        updated_at,
-    ) in rows
-    {
+    for row in rows {
         bodies.push(thread_json(
             &ThreadRow {
-                id,
-                workspace_id,
-                user_id,
-                title,
-                kind,
-                is_archived,
-                active_turn_id,
-                created_at,
-                updated_at,
+                id: row.id,
+                workspace_id: row.workspace_id,
+                user_id: row.user_id,
+                title: row.title,
+                kind: row.kind,
+                is_archived: row.is_archived,
+                active_turn_id: row.active_turn_id,
+                created_at: row.created_at.with_timezone(&Utc),
+                updated_at: row.updated_at.with_timezone(&Utc),
             },
             &actor.timezone,
         ));
@@ -151,15 +142,47 @@ async fn list_threads(
 /// deleted in the same transaction. Leaf-first order (events, messages,
 /// turns, thread) mirrors the collector.
 async fn delete_thread_rows(conn: &mut sqlx::PgConnection, thread_id: &Uuid) -> HandlerResult<()> {
-    for statement in [
-        "UPDATE \"loop_targets\" SET \"thread_id\" = NULL WHERE \"thread_id\" = $1",
-        "UPDATE \"loop_targets\" SET \"last_run_id\" = NULL \
-         WHERE \"last_run_id\" IN (SELECT \"id\" FROM \"assistant_turn\" WHERE \"thread_id\" = $1)",
-        "DELETE FROM \"assistant_event\" WHERE \"thread_id\" = $1",
-    ] {
-        sqlx::query(statement)
-            .bind(thread_id)
-            .execute(&mut *conn)
+    {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let tx = pidash_db::orm_tx::TxConn::new(&mut *conn);
+        // SET_NULL sides first (loop targets), then leaf CASCADE rows.
+        pidash_db::entity::loop_targets::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::loop_targets::Column::ThreadId,
+                Expr::value(None::<Uuid>),
+            )
+            .filter(pidash_db::entity::loop_targets::Column::ThreadId.eq(*thread_id))
+            .exec(&tx)
+            .await
+            .map_err(|_| server_error())?;
+        // `last_run_id IN (SELECT id FROM assistant_turn WHERE thread_id)`:
+        // set NULL on targets whose last run belongs to this thread — one
+        // statement with a subquery, exactly as before.
+        {
+            use sea_orm::sea_query::{Alias, Expr, Query};
+            use sea_orm::{ConnectionTrait, DbBackend};
+            let mut stmt = Query::update()
+                .table(Alias::new("loop_targets"))
+                .value(Alias::new("last_run_id"), Expr::value(None::<Uuid>))
+                .and_where(
+                    Expr::col((Alias::new("loop_targets"), Alias::new("last_run_id"))).in_subquery(
+                        Query::select()
+                            .column(Alias::new("id"))
+                            .from(Alias::new("assistant_turn"))
+                            .and_where(Expr::col(Alias::new("thread_id")).eq(*thread_id))
+                            .to_owned(),
+                    ),
+                )
+                .to_owned();
+            // Ensure the subquery is rendered as a real subselect.
+            let built = DbBackend::Postgres.build(&stmt);
+            tx.execute(built).await.map_err(|_| server_error())?;
+            let _ = &mut stmt;
+        }
+        pidash_db::entity::assistant_event::Entity::delete_many()
+            .filter(pidash_db::entity::assistant_event::Column::ThreadId.eq(*thread_id))
+            .exec(&tx)
             .await
             .map_err(|_| server_error())?;
     }
@@ -171,13 +194,17 @@ async fn delete_thread_rows(conn: &mut sqlx::PgConnection, thread_id: &Uuid) -> 
     )
     .await
     .map_err(|_| server_error())?;
-    for statement in [
-        "DELETE FROM \"assistant_turn\" WHERE \"thread_id\" = $1",
-        "DELETE FROM \"assistant_thread\" WHERE \"id\" = $1",
-    ] {
-        sqlx::query(statement)
-            .bind(thread_id)
-            .execute(&mut *conn)
+    {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let tx = pidash_db::orm_tx::TxConn::new(&mut *conn);
+        pidash_db::entity::assistant_turn::Entity::delete_many()
+            .filter(pidash_db::entity::assistant_turn::Column::ThreadId.eq(*thread_id))
+            .exec(&tx)
+            .await
+            .map_err(|_| server_error())?;
+        pidash_db::entity::assistant_thread::Entity::delete_many()
+            .filter(pidash_db::entity::assistant_thread::Column::Id.eq(*thread_id))
+            .exec(&tx)
             .await
             .map_err(|_| server_error())?;
     }
@@ -195,28 +222,45 @@ async fn delete_thread_rows(conn: &mut sqlx::PgConnection, thread_id: &Uuid) -> 
 /// transaction — a "no turns" thread can still own messages, events, or a
 /// loop-target edge.
 async fn reap_empty_threads(pool: &sqlx::PgPool, user_id: &Uuid, slug: &str) -> HandlerResult<()> {
-    let ids: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT \"assistant_thread\".\"id\" FROM \"assistant_thread\" \
-         INNER JOIN \"workspaces\" ON (\"assistant_thread\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE \"assistant_thread\".\"user_id\" = $1 \
-         AND \"workspaces\".\"slug\" = $2 \
-         AND \"assistant_thread\".\"kind\" = 'chat' \
-         AND \"assistant_thread\".\"title\" = '' \
-         AND \"assistant_thread\".\"active_turn_id\" IS NULL \
-         AND \"assistant_thread\".\"created_at\" < now() - interval '1 hour' \
-         AND NOT EXISTS (SELECT 1 FROM \"assistant_turn\" \
-         WHERE \"assistant_turn\".\"thread_id\" = \"assistant_thread\".\"id\")",
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let ids: Vec<Uuid> = {
+        use sea_orm::{
+            ColumnTrait, Condition, EntityTrait, QueryFilter, QuerySelect, RelationTrait,
+        };
+        use sea_query::{Alias, Expr, JoinType, Query};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+        let has_turn = Query::select()
+            .column(Alias::new("id"))
+            .from(Alias::new("assistant_turn"))
+            .and_where(
+                Expr::col((Alias::new("assistant_turn"), Alias::new("thread_id")))
+                    .equals((Alias::new("assistant_thread"), Alias::new("id"))),
+            )
+            .to_owned();
+        pidash_db::entity::assistant_thread::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                pidash_db::entity::assistant_thread::Relation::Workspaces.def(),
+            )
+            .filter(pidash_db::entity::assistant_thread::Column::UserId.eq(*user_id))
+            .filter(pidash_db::entity::workspaces::Column::Slug.eq(slug.to_owned()))
+            .filter(pidash_db::entity::assistant_thread::Column::Kind.eq("chat"))
+            .filter(pidash_db::entity::assistant_thread::Column::Title.eq(""))
+            .filter(pidash_db::entity::assistant_thread::Column::ActiveTurnId.is_null())
+            .filter(pidash_db::entity::assistant_thread::Column::CreatedAt.lt(cutoff))
+            .filter(Condition::all().add(Expr::exists(has_turn).not()))
+            .select_only()
+            .column(pidash_db::entity::assistant_thread::Column::Id)
+            .into_tuple::<Uuid>()
+            .all(&db)
+            .await
+            .map_err(|_| server_error())?
+    };
     if ids.is_empty() {
         return Ok(());
     }
     let mut tx = pool.begin().await.map_err(|_| server_error())?;
-    for (id,) in &ids {
+    for id in &ids {
         delete_thread_rows(&mut tx, id).await?;
     }
     tx.commit().await.map_err(|_| server_error())?;
@@ -252,57 +296,36 @@ async fn create_thread(
     let Some(workspace_id) = workspace_id_for_slug(pool, &slug).await? else {
         return Err(thread_not_found());
     };
-    let row = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            Uuid,
-            String,
-            String,
-            bool,
-            Option<Uuid>,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        ),
-    >(
-        "INSERT INTO \"assistant_thread\" \
-         (\"id\", \"workspace_id\", \"user_id\", \"title\", \"kind\", \"is_archived\", \
-         \"active_turn_id\", \"created_at\", \"updated_at\") \
-         VALUES (gen_random_uuid(), $1, $2, $3, 'chat', false, NULL, now(), now()) \
-         RETURNING \"id\", \"workspace_id\", \"user_id\", \"title\", \"kind\", \
-         \"is_archived\", \"active_turn_id\", \"created_at\", \"updated_at\"",
-    )
-    .bind(workspace_id)
-    .bind(actor.id)
-    .bind(&title)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let (
-        id,
-        workspace_id,
-        user_id,
-        title,
-        kind,
-        is_archived,
-        active_turn_id,
-        created_at,
-        updated_at,
-    ) = row;
+    let row = {
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now = chrono::Utc::now();
+        let model = pidash_db::entity::assistant_thread::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            workspace_id: Set(workspace_id),
+            user_id: Set(actor.id),
+            title: Set(title.clone()),
+            kind: Set("chat".to_owned()),
+            is_archived: Set(false),
+            active_turn_id: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        };
+        model.insert(&db).await.map_err(|_| server_error())?
+    };
     Ok(json_response(
         StatusCode::CREATED,
         thread_json(
             &ThreadRow {
-                id,
-                workspace_id,
-                user_id,
-                title,
-                kind,
-                is_archived,
-                active_turn_id,
-                created_at,
-                updated_at,
+                id: row.id,
+                workspace_id: row.workspace_id,
+                user_id: row.user_id,
+                title: row.title,
+                kind: row.kind,
+                is_archived: row.is_archived,
+                active_turn_id: row.active_turn_id,
+                created_at: row.created_at.with_timezone(&Utc),
+                updated_at: row.updated_at.with_timezone(&Utc),
             },
             &actor.timezone,
         ),
@@ -353,55 +376,36 @@ async fn patch_thread(
         Some(BodyField::Json(value)) => py_bool(value),
         None => thread.is_archived,
     };
-    let row = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            Uuid,
-            Uuid,
-            String,
-            String,
-            bool,
-            Option<Uuid>,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        ),
-    >(
-        "UPDATE \"assistant_thread\" SET \"title\" = $1, \"is_archived\" = $2, \
-         \"updated_at\" = now() WHERE \"id\" = $3 \
-         RETURNING \"id\", \"workspace_id\", \"user_id\", \"title\", \"kind\", \
-         \"is_archived\", \"active_turn_id\", \"created_at\", \"updated_at\"",
-    )
-    .bind(&title)
-    .bind(is_archived)
-    .bind(thread_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let (
-        id,
-        workspace_id,
-        user_id,
-        title,
-        kind,
-        is_archived,
-        active_turn_id,
-        created_at,
-        updated_at,
-    ) = row;
+    let row = {
+        use sea_orm::{ActiveModelTrait, NotSet, Set};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now = chrono::Utc::now();
+        let model = pidash_db::entity::assistant_thread::ActiveModel {
+            id: Set(thread_id),
+            title: Set(title.clone()),
+            is_archived: Set(is_archived),
+            updated_at: Set(now.into()),
+            workspace_id: NotSet,
+            user_id: NotSet,
+            kind: NotSet,
+            active_turn_id: NotSet,
+            created_at: NotSet,
+        };
+        model.update(&db).await.map_err(|_| server_error())?
+    };
     Ok(json_response(
         StatusCode::OK,
         thread_json(
             &ThreadRow {
-                id,
-                workspace_id,
-                user_id,
-                title,
-                kind,
-                is_archived,
-                active_turn_id,
-                created_at,
-                updated_at,
+                id: row.id,
+                workspace_id: row.workspace_id,
+                user_id: row.user_id,
+                title: row.title,
+                kind: row.kind,
+                is_archived: row.is_archived,
+                active_turn_id: row.active_turn_id,
+                created_at: row.created_at.with_timezone(&Utc),
+                updated_at: row.updated_at.with_timezone(&Utc),
             },
             &actor.timezone,
         ),
@@ -442,4 +446,29 @@ async fn delete_thread(
         .status(StatusCode::NO_CONTENT)
         .body(axum::body::Body::empty())
         .expect("empty 204 builds"))
+}
+
+#[cfg(test)]
+mod tests_assistant_orm {
+    #[test]
+    fn list_threads_seaorm_shape_pins_join_and_filters() {
+        use sea_orm::{
+            ColumnTrait, EntityTrait, QueryFilter, QuerySelect, QueryTrait, RelationTrait,
+        };
+        use sea_query::JoinType;
+        let sql = pidash_db::entity::assistant_thread::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                pidash_db::entity::assistant_thread::Relation::Workspaces.def(),
+            )
+            .filter(pidash_db::entity::assistant_thread::Column::UserId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::workspaces::Column::Slug.eq("ws".to_owned()))
+            .filter(pidash_db::entity::assistant_thread::Column::IsArchived.eq(false))
+            .filter(pidash_db::entity::assistant_thread::Column::Kind.eq("chat"))
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("INNER JOIN"), "join: {sql}");
+        assert!(sql.contains("workspaces"), "join table: {sql}");
+        assert!(sql.contains("is_archived"), "archived filter: {sql}");
+    }
 }

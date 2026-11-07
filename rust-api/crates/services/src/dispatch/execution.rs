@@ -167,6 +167,36 @@ pub const WORKSPACE_LOCK_SQL: &str =
 /// workspace id (uuid).
 pub const QUEUED_CLOUD_COUNT_SQL: &str = "SELECT COUNT(*) FROM agent_run \
     WHERE workspace_id = $1 AND executor_kind = 'cloud_agent' AND status = 'queued'";
+
+/// SeaORM form of [`WORKSPACE_LOCK_SQL`]: the live workspace row,
+/// `FOR UPDATE`, projecting a constant (`SELECT 1`). No row means the
+/// workspace is missing or soft-deleted, as `.get()` raising does.
+pub fn workspace_lock_select(workspace_id: Uuid) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::workspaces;
+    use sea_orm::sea_query::{Expr, LockType, Query};
+    Query::select()
+        .expr(Expr::val(1))
+        .from(workspaces::Entity)
+        .and_where(Expr::col((workspaces::Entity, workspaces::Column::Id)).eq(workspace_id))
+        .and_where(Expr::col((workspaces::Entity, workspaces::Column::DeletedAt)).is_null())
+        .lock(LockType::Update)
+        .to_owned()
+}
+
+/// SeaORM form of [`QUEUED_CLOUD_COUNT_SQL`]: the workspace's queued
+/// cloud runs, `COUNT(*)` under the output name `n`.
+pub fn queued_cloud_count_select(workspace_id: Uuid) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::agent_run;
+    use sea_orm::sea_query::{Alias, Asterisk, Expr, Query};
+    let col = |column: agent_run::Column| Expr::col((agent_run::Entity, column));
+    Query::select()
+        .expr_as(Expr::col(Asterisk).count(), Alias::new("n"))
+        .from(agent_run::Entity)
+        .and_where(col(agent_run::Column::WorkspaceId).eq(workspace_id))
+        .and_where(col(agent_run::Column::ExecutorKind).eq("cloud_agent"))
+        .and_where(col(agent_run::Column::Status).eq("queued"))
+        .to_owned()
+}
 /// The automatic-waiting pin (`creation.py:125`):
 /// `enrolled_managed_runners(...).order_by("-last_heartbeat_at").first()`.
 /// Same `WHERE` shape as L4's [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`] plus

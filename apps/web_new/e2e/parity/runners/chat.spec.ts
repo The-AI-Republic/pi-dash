@@ -706,6 +706,53 @@ test(
 );
 
 test(
+  specTitle(["RUN-029"], "a busy runner refusal names the busy strip row and banner, not Failed"),
+  { tag: specTags(["RUN-029"]) },
+  async ({ driver, seed }) => {
+    const session = await signInSession(seed.email, seed.password);
+    const wsId = await serverWorkspaceIdBySlug(seed.workspaceSlug);
+    const runner = await plantRunner(seed, "busyrefuse", "online");
+    try {
+      const chat = await serverCreateChatSession({ workspaceId: wsId, runnerId: runner.id }, session);
+      // One user turn mounts the message list (and with it the strip).
+      await serverSendChatMessage(chat.id, "busy turn", session);
+      await driver.openEntry();
+      await driver.signInWithPassword(seed.email, seed.password);
+      // Installed before the page subscribes, so the stub frames carry
+      // the serve-time stamp and read as live on both apps.
+      await driver.runnerChatStubStream(chat.id, [
+        { seq: 1, kind: "chat_failed", payload: { code: "runner_busy", detail: "" } },
+      ]);
+      await driver.runnerChatOpen(seed.workspaceSlug, runner.id, chat.id);
+
+      await test.step("the busy refusal reads as busy, not as a bare failure", async () => {
+        await expect
+          .poll(() => driver.runnerChatActivityStrip(), { timeout: 20_000 })
+          .toEqual(["Runner busy with an issue run"]);
+        // Same explanation on both apps, words differ per app (the new
+        // app writes its banner fresh): same busy-with-run meaning.
+        const busyBanner =
+          driver.target === "web_new"
+            ? "This runner is busy with an issue run in the same working folder. Wait for the run to finish, then send your message again."
+            : "This runner is busy with an issue run, which uses the same folder. Chat again when the run finishes.";
+        await expect.poll(() => driver.runnerChatAlertText(), { timeout: 20_000 }).toContain(busyBanner);
+      });
+
+      await test.step("a generic failure keeps the plain Failed row and no banner", async () => {
+        await driver.runnerChatStubStream(chat.id, [
+          { seq: 2, kind: "chat_failed", payload: { code: "dispatch_failed", detail: "boom" } },
+        ]);
+        await expect.poll(() => driver.runnerChatAlertText(), { timeout: 30_000 }).toBeNull();
+        expect(await driver.runnerChatActivityStrip()).toEqual(["Runner busy with an issue run", "Failed"]);
+        await driver.runnerChatClearStreamStub(chat.id);
+      });
+    } finally {
+      await serverCleanupRunner(runner.id);
+    }
+  }
+);
+
+test(
   specTitle(["RUN-030"], "stop cancels the in-flight turn and refetches sessions"),
   { tag: specTags(["RUN-030"]) },
   async ({ driver, seed }) => {
