@@ -7,7 +7,11 @@
 //! post-op head) or is about to delete (unrelate, pre-op walk).
 //! (Moved from the MCP read tools by PIDASHCONV-1661; Rule 5: queries
 //! on OSS tables live here.)
+//!
+//! SeaORM conversion (READ-1): entity query, decode by name.
 
+use pidash_db::entity::issue_relations;
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -23,6 +27,38 @@ use super::{DbError, Error};
 /// endpoints (after the swap mapping); `canonical_type` is the stored
 /// `relation_type`; `symmetric` adds the mirrored orientation for
 /// symmetric types (`tools.py:726-732`).
+fn live_relation_query(
+    stored_issue_id: Uuid,
+    stored_related_id: Uuid,
+    canonical_type: &str,
+    symmetric: bool,
+) -> sea_orm::Select<issue_relations::Entity> {
+    let filter = if symmetric {
+        Condition::any()
+            .add(
+                Condition::all()
+                    .add(issue_relations::Column::IssueId.eq(stored_issue_id))
+                    .add(issue_relations::Column::RelatedIssueId.eq(stored_related_id)),
+            )
+            .add(
+                Condition::all()
+                    .add(issue_relations::Column::IssueId.eq(stored_related_id))
+                    .add(issue_relations::Column::RelatedIssueId.eq(stored_issue_id)),
+            )
+    } else {
+        Condition::all()
+            .add(issue_relations::Column::IssueId.eq(stored_issue_id))
+            .add(issue_relations::Column::RelatedIssueId.eq(stored_related_id))
+    };
+    issue_relations::Entity::find()
+        .filter(filter)
+        .filter(issue_relations::Column::RelationType.eq(canonical_type.to_owned()))
+        .filter(issue_relations::Column::DeletedAt.is_null())
+        .select_only()
+        .column(issue_relations::Column::Id)
+        .order_by_desc(issue_relations::Column::CreatedAt)
+}
+
 pub async fn fetch_live_relation_ids(
     pool: &PgPool,
     stored_issue_id: Uuid,
@@ -30,26 +66,63 @@ pub async fn fetch_live_relation_ids(
     canonical_type: &str,
     symmetric: bool,
 ) -> Result<Vec<Uuid>, Error> {
-    let sql = if symmetric {
-        "SELECT id FROM issue_relations \
-         WHERE ((issue_id = $1 AND related_issue_id = $2) \
-            OR (issue_id = $2 AND related_issue_id = $1)) \
-           AND relation_type = $3 AND deleted_at IS NULL \
-         ORDER BY created_at DESC"
-    } else {
-        "SELECT id FROM issue_relations \
-         WHERE issue_id = $1 AND related_issue_id = $2 \
-           AND relation_type = $3 AND deleted_at IS NULL \
-         ORDER BY created_at DESC"
-    };
-    let ids = sqlx::query_scalar(sql)
-        .bind(stored_issue_id)
-        .bind(stored_related_id)
-        .bind(canonical_type)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| DbError::new("live-relation-ids", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let ids: Vec<Uuid> = live_relation_query(
+        stored_issue_id,
+        stored_related_id,
+        canonical_type,
+        symmetric,
+    )
+    .into_tuple::<Uuid>()
+    .all(&db)
+    .await
+    .map_err(|error| DbError::from_orm("live-relation-ids", error))?;
     Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{DbBackend, QueryTrait};
+
+    use super::*;
+
+    #[test]
+    fn live_relation_query_asymmetric_filters_pair_type_and_live() {
+        let sql = live_relation_query(Uuid::nil(), Uuid::nil(), "blocked_by", false)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""issue_relations"."issue_id" = "#), "{sql}");
+        assert!(
+            sql.contains(r#""issue_relations"."related_issue_id" = "#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""issue_relations"."relation_type" = "#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""issue_relations"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "issue_relations"."created_at" DESC"#),
+            "{sql}"
+        );
+        // Asymmetric carries no mirrored OR arm.
+        assert!(!sql.contains(" OR "), "{sql}");
+    }
+
+    #[test]
+    fn live_relation_query_symmetric_adds_mirror() {
+        let sql = live_relation_query(Uuid::nil(), Uuid::nil(), "blocking", true)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(" OR "), "{sql}");
+        assert!(
+            sql.contains(r#"ORDER BY "issue_relations"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
 }
 
 #[cfg(test)]
