@@ -232,14 +232,22 @@ pub async fn phase1_claim(
 
     // Freshest-wins re-check under the row lock (`:215`): the same four
     // reads the scanner's advance pass resolves, in the fixed precedence
-    // order shared with `eligibility.check`.
-    let master_paused = !queries::fetch_master_enabled(&mut *tx, claim.user_id).await?;
-    let off_ids = queries::fetch_off_job_ids(&mut *tx, claim.user_id).await?;
-    let job_opted_out = off_ids.contains(&job.id);
+    // order shared with `eligibility.check`. The `queries` reads run on
+    // the same transaction through `TxConn`; `fetch_member_role` stays
+    // on the sqlx executor between them.
+    let (master_paused, job_opted_out) = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let master_paused = !queries::fetch_master_enabled(&conn, claim.user_id).await?;
+        let off_ids = queries::fetch_off_job_ids(&conn, claim.user_id).await?;
+        (master_paused, off_ids.contains(&job.id))
+    };
     let role = fetch_member_role(&mut *tx, &claim.workspace_id, &claim.user_id)
         .await?
         .map(|r| r as i32);
-    let has_llm = queries::fetch_user_has_llm(&mut *tx, claim.user_id).await?;
+    let has_llm = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        queries::fetch_user_has_llm(&conn, claim.user_id).await?
+    };
     let skip = pidash_services::r#loop::eligibility::check(
         master_paused,
         job_opted_out,

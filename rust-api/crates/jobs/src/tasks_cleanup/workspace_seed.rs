@@ -1509,7 +1509,7 @@ impl SeedStore for PgSeedStore {
         let view_props = ws_default_props();
         let issue_props = ws_issue_props();
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedMember {
                 workspace_id,
                 member_id,

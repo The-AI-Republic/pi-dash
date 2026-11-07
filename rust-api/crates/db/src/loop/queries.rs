@@ -7,22 +7,23 @@
 //!   (`Exists`) and row (`SELECT 1 … LIMIT 1`) form.
 //! * `loop/eligibility.py:54-85` (`_member_q`, `_job_off_q`,
 //!   `_master_paused_q`) — the three annotated `Exists` subqueries.
-//! * `loop/eligibility.py:88-100` ([`due_targets_sql`]) and `:103-114`
-//!   ([`eligible_due_targets_sql`]) — the scanner pre-filter closure; the
+//! * `loop/eligibility.py:88-100` ([`due_targets_select`]) and `:103-114`
+//!   ([`eligible_due_targets_select`]) — the scanner pre-filter closure; the
 //!   exact scanner id slice (`bgtasks/loop.py:163-165`,
 //!   `order_by("next_run_at").values_list("id")`) is
-//!   [`eligible_due_target_ids_sql`].
-//! * `loop/views.py:24-49` ([`off_job_ids_sql`], [`master_enabled_sql`],
-//!   [`enabled_jobs_sql`]) — the settings-payload reads.
-//! * `loop/admin_views.py:136-149` ([`job_stats_sql`]) — the 24h rollup.
+//!   [`eligible_due_target_ids_select`].
+//! * `loop/views.py:24-49` ([`off_job_ids_select`], [`master_enabled_select`],
+//!   [`enabled_jobs_select`]) — the settings-payload reads.
+//! * `loop/admin_views.py:136-149` ([`job_stats_select`]) — the 24h rollup.
 //! * `loop/admin_views.py:183-210` ([`targets_list_sql`]) — the filtered,
 //!   paginated targets query; [`TargetListRow`] carries every `_row`
 //!   (`:213-234`) input.
 //!
-//! Dynamic statements are sea-query builders; fixed reads are string
-//! constants executed with runtime `sqlx::query` (no `query!` macros:
-//! there is no build-time database, same as the merged `license/queries`
-//! precedent). Every executor is generic over `sqlx::Executor`.
+//! Statements are sea-query builders executed through SeaORM
+//! (`ConnectionTrait`, errors back to `sqlx::Error` via `into_sqlx`);
+//! rows decode by column name into the hand models. The targets-list
+//! builder stays a `format!` string (executed by the API handler) and
+//! is pinned to its fixture text.
 //!
 //! SQL semantics are Django's, quirks included (translate, don't
 //! redesign):
@@ -45,9 +46,12 @@
 //! `#[cfg(test)]` suite matches every builder against its fixture
 //! statement in normalized semantic form.
 
-use sea_query::{Alias, Condition, Expr, JoinType, Order, Query, SelectStatement};
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult, TryGetable};
+use sea_query::{Alias, Condition, Expr, Func, JoinType, Order, Query, SelectStatement};
 use sqlx::postgres::PgRow;
 use sqlx::Row;
+
+use crate::orm_tx::into_sqlx;
 
 use super::models::{
     loop_job::{self, LoopJob},
@@ -162,12 +166,11 @@ pub fn llm_exists_select() -> SelectStatement {
 /// Join + scope shared by the due-target closures
 /// (`eligibility.py:88-100`): enabled, non-deleted jobs; due or NULL
 /// cursor (`Q(next_run_at__lte=now) | Q(next_run_at__isnull=True)`).
-/// `now` renders as the `$N` bind placeholder at `now_bind`. The OR
-/// is one `SimpleExpr` so the group stays parenthesized under every
-/// trailing conjunct.
-fn due_scope(now_bind: &str) -> Condition {
+/// The OR is one `SimpleExpr` so the group stays parenthesized under
+/// every trailing conjunct.
+fn due_scope(now: chrono::DateTime<chrono::Utc>) -> Condition {
     let due_or = Expr::col((Alias::new(loop_target::TABLE), Alias::new("next_run_at")))
-        .lte(Expr::cust(now_bind.to_owned()))
+        .lte(Expr::val(now.fixed_offset()))
         .or(Expr::col((Alias::new(loop_target::TABLE), Alias::new("next_run_at"))).is_null());
     Condition::all()
         .add(Expr::col((Alias::new(loop_target::TABLE), Alias::new("deleted_at"))).is_null())
@@ -197,27 +200,25 @@ fn target_columns(sel: &mut SelectStatement) {
 // ---------------------------------------------------------------------------
 
 /// All targets whose cursor is due (or NULL), for enabled non-deleted
-/// jobs (`eligibility.py:88-100`). `$1` is `now`. Ordering follows the
-/// executed fixture form (`ORDER BY "loop_targets"."id" ASC`).
-pub fn due_targets_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+/// jobs (`eligibility.py:88-100`). Ordering follows the executed
+/// fixture form (`ORDER BY "loop_targets"."id" ASC`).
+pub fn due_targets_select(now: chrono::DateTime<chrono::Utc>) -> SelectStatement {
     let mut sel = Query::select();
     sel.from(Alias::new(loop_target::TABLE.to_owned()));
     target_columns(&mut sel);
     join_job(&mut sel);
-    sel.cond_where(due_scope("$1")).order_by(
+    sel.cond_where(due_scope(now)).order_by(
         (Alias::new(loop_target::TABLE), Alias::new("id")),
         Order::Asc,
     );
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Due targets passing every eligibility predicate
 /// (`eligibility.py:103-114`): the four annotations plus the
 /// `_member=True, _job_off=False, _paused=False, _llm=True` filter,
 /// which the compiler collapses to `WHERE EXISTS / NOT EXISTS`.
-pub fn eligible_due_targets_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+pub fn eligible_due_targets_select(now: chrono::DateTime<chrono::Utc>) -> SelectStatement {
     let mut sel = Query::select();
     sel.from(Alias::new(loop_target::TABLE.to_owned()));
     target_columns(&mut sel);
@@ -233,7 +234,7 @@ pub fn eligible_due_targets_sql() -> String {
         .expr_as(Expr::exists(llm_exists_select()), Alias::new("_llm"));
     join_job(&mut sel);
     sel.cond_where(
-        due_scope("$1")
+        due_scope(now)
             .add(Expr::exists(job_off_exists_select()).not())
             .add(Expr::exists(llm_exists_select()))
             .add(Expr::exists(member_exists_select()))
@@ -243,20 +244,18 @@ pub fn eligible_due_targets_sql() -> String {
         (Alias::new(loop_target::TABLE), Alias::new("id")),
         Order::Asc,
     );
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// The exact scanner id slice (`bgtasks/loop.py:163-165`):
 /// `eligible_due_targets(now).order_by("next_run_at").values_list("id")`.
-/// `$1` is `now`.
-pub fn eligible_due_target_ids_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+pub fn eligible_due_target_ids_select(now: chrono::DateTime<chrono::Utc>) -> SelectStatement {
     let mut sel = Query::select();
     sel.from(Alias::new(loop_target::TABLE.to_owned()));
     sel.column((Alias::new(loop_target::TABLE), Alias::new("id")));
     join_job(&mut sel);
     sel.cond_where(
-        due_scope("$1")
+        due_scope(now)
             .add(Expr::exists(job_off_exists_select()).not())
             .add(Expr::exists(llm_exists_select()))
             .add(Expr::exists(member_exists_select()))
@@ -266,35 +265,82 @@ pub fn eligible_due_target_ids_sql() -> String {
         (Alias::new(loop_target::TABLE), Alias::new("next_run_at")),
         Order::Asc,
     );
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Row-level form of `llm_available_q` (`eligibility.py:45-51`,
-/// `user_has_llm`): presence check for one user. Binds `$1 = user_id`.
-pub fn user_has_llm_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+/// `user_has_llm`): presence check for one user.
+pub fn user_has_llm_select(user_id: uuid::Uuid) -> SelectStatement {
     let mut sel = Query::select();
     sel.expr(Expr::val(1))
         .from(Alias::new(LLM_CONFIG_TABLE.to_owned()))
         .cond_where(
             Condition::all()
-                .add(Expr::col(Alias::new("user_id")).eq(Expr::cust("$1")))
+                .add(Expr::col(Alias::new("user_id")).eq(user_id))
                 .add(usable_llm_condition()),
         )
         .limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Presence check for one user (`user_has_llm`).
-pub async fn fetch_user_has_llm<'e, E>(ex: E, user_id: uuid::Uuid) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&user_has_llm_sql())
-        .bind(user_id)
-        .fetch_optional(ex)
-        .await?;
+pub async fn fetch_user_has_llm(
+    db: &impl ConnectionTrait,
+    user_id: uuid::Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row = db
+        .query_one(DbBackend::Postgres.build(&user_has_llm_select(user_id)))
+        .await
+        .map_err(into_sqlx)?;
     Ok(row.is_some())
+}
+
+fn get<T: TryGetable>(row: &QueryResult, column: &str) -> Result<T, sqlx::Error> {
+    row.try_get::<T>("", column).map_err(into_sqlx)
+}
+
+/// Map one full `loop_targets` row (column names, order-independent).
+pub fn map_loop_target_row_q(row: &QueryResult) -> Result<LoopTarget, sqlx::Error> {
+    Ok(LoopTarget {
+        created_at: get(row, "created_at")?,
+        updated_at: get(row, "updated_at")?,
+        created_by_id: get(row, "created_by_id")?,
+        updated_by_id: get(row, "updated_by_id")?,
+        deleted_at: get(row, "deleted_at")?,
+        id: get(row, "id")?,
+        job_id: get(row, "job_id")?,
+        workspace_id: get(row, "workspace_id")?,
+        user_id: get(row, "user_id")?,
+        thread_id: get(row, "thread_id")?,
+        next_run_at: get(row, "next_run_at")?,
+        last_run_id: get(row, "last_run_id")?,
+        last_skipped_at: get(row, "last_skipped_at")?,
+        last_skip_reason: get(row, "last_skip_reason")?,
+    })
+}
+
+/// Due targets as typed rows (`advance_ineligible_due`, `eligibility.py:88-100`).
+pub async fn fetch_due_targets(
+    db: &impl ConnectionTrait,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<LoopTarget>, sqlx::Error> {
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&due_targets_select(now)))
+        .await
+        .map_err(into_sqlx)?;
+    rows.iter().map(map_loop_target_row_q).collect()
+}
+
+/// The scanner id slice as typed ids (`scan_due_targets`, `bgtasks/loop.py:163-165`).
+pub async fn fetch_eligible_due_target_ids(
+    db: &impl ConnectionTrait,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<uuid::Uuid>, sqlx::Error> {
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&eligible_due_target_ids_select(now)))
+        .await
+        .map_err(into_sqlx)?;
+    rows.iter().map(|r| get(r, "id")).collect()
 }
 
 /// Map one full `loop_targets` row (column names, order-independent).
@@ -314,6 +360,29 @@ pub fn map_loop_target_row(row: &PgRow) -> Result<LoopTarget, sqlx::Error> {
         last_run_id: row.try_get("last_run_id")?,
         last_skipped_at: row.try_get("last_skipped_at")?,
         last_skip_reason: row.try_get("last_skip_reason")?,
+    })
+}
+
+/// Map one full `loop_jobs` row (column names, order-independent).
+pub fn map_loop_job_row_q(row: &QueryResult) -> Result<LoopJob, sqlx::Error> {
+    Ok(LoopJob {
+        id: get(row, "id")?,
+        created_at: get(row, "created_at")?,
+        updated_at: get(row, "updated_at")?,
+        created_by_id: get(row, "created_by_id")?,
+        updated_by_id: get(row, "updated_by_id")?,
+        deleted_at: get(row, "deleted_at")?,
+        slug: get(row, "slug")?,
+        name: get(row, "name")?,
+        public_name: get(row, "public_name")?,
+        public_description: get(row, "public_description")?,
+        prompt: get(row, "prompt")?,
+        min_role: get(row, "min_role")?,
+        enabled: get(row, "enabled")?,
+        is_builtin: get(row, "is_builtin")?,
+        dtstart: get(row, "dtstart")?,
+        rrule: get(row, "rrule")?,
+        tzid: get(row, "tzid")?,
     })
 }
 
@@ -345,9 +414,8 @@ pub fn map_loop_job_row(row: &PgRow) -> Result<LoopJob, sqlx::Error> {
 // ---------------------------------------------------------------------------
 
 /// Off-job-id set for one user (`views.py:33-40`, `_job_enabled_map`):
-/// live `enabled=False` rows with a job. Binds `$1 = user_id`.
-pub fn off_job_ids_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+/// live `enabled=False` rows with a job.
+pub fn off_job_ids_select(user_id: uuid::Uuid) -> SelectStatement {
     let table = super::models::loop_user_preference::TABLE;
     let mut sel = Query::select();
     sel.from(Alias::new(table.to_owned()));
@@ -358,16 +426,15 @@ pub fn off_job_ids_sql() -> String {
             .add(Expr::col((Alias::new(table), Alias::new("deleted_at"))).is_null())
             .add(Expr::col((Alias::new(table), Alias::new("enabled"))).eq(false))
             .add(Expr::col((Alias::new(table), Alias::new("job_id"))).is_not_null())
-            .add(Expr::col((Alias::new(table), Alias::new("user_id"))).eq(Expr::cust("$1"))),
+            .add(Expr::col((Alias::new(table), Alias::new("user_id"))).eq(user_id)),
     )
     .order_by((Alias::new(table), Alias::new("created_at")), Order::Desc);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Master-switch read for one user (`views.py:24-30`, `_master_enabled`):
-/// the live NULL-job row's `enabled`, first row wins. Binds `$1`.
-pub fn master_enabled_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+/// the live NULL-job row's `enabled`, first row wins.
+pub fn master_enabled_select(user_id: uuid::Uuid) -> SelectStatement {
     let table = super::models::loop_user_preference::TABLE;
     let mut sel = Query::select();
     sel.from(Alias::new(table.to_owned()));
@@ -377,17 +444,16 @@ pub fn master_enabled_sql() -> String {
             .add(Expr::col((Alias::new(table), Alias::new("deleted_at"))).is_null())
             .add(Expr::col((Alias::new(table), Alias::new("deleted_at"))).is_null())
             .add(Expr::col((Alias::new(table), Alias::new("job_id"))).is_null())
-            .add(Expr::col((Alias::new(table), Alias::new("user_id"))).eq(Expr::cust("$1"))),
+            .add(Expr::col((Alias::new(table), Alias::new("user_id"))).eq(user_id)),
     )
     .order_by((Alias::new(table), Alias::new("created_at")), Order::Desc)
     .limit(1);
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Enabled-job cards in display order (`views.py:45`,
 /// `order_by("public_name")`). No binds.
-pub fn enabled_jobs_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
+pub fn enabled_jobs_select() -> SelectStatement {
     let mut sel = Query::select();
     sel.from(Alias::new(loop_job::TABLE.to_owned()));
     for col in loop_job::COLUMNS {
@@ -403,47 +469,44 @@ pub fn enabled_jobs_sql() -> String {
         (Alias::new(loop_job::TABLE), Alias::new("public_name")),
         Order::Asc,
     );
-    sel.to_string(PostgresQueryBuilder)
+    sel
 }
 
 /// Off-job ids for one user (fixed read).
-pub async fn fetch_off_job_ids<'e, E>(
-    ex: E,
+pub async fn fetch_off_job_ids(
+    db: &impl ConnectionTrait,
     user_id: uuid::Uuid,
-) -> Result<Vec<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&off_job_ids_sql())
-        .bind(user_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter().map(|r| r.try_get("job_id")).collect()
+) -> Result<Vec<uuid::Uuid>, sqlx::Error> {
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&off_job_ids_select(user_id)))
+        .await
+        .map_err(into_sqlx)?;
+    rows.iter().map(|r| get(r, "job_id")).collect()
 }
 
 /// Master `enabled` for one user; absent row reads as `true`
 /// (`views.py:30`, `True if pref is None else bool(pref)`).
-pub async fn fetch_master_enabled<'e, E>(ex: E, user_id: uuid::Uuid) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&master_enabled_sql())
-        .bind(user_id)
-        .fetch_optional(ex)
-        .await?;
+pub async fn fetch_master_enabled(
+    db: &impl ConnectionTrait,
+    user_id: uuid::Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row = db
+        .query_one(DbBackend::Postgres.build(&master_enabled_select(user_id)))
+        .await
+        .map_err(into_sqlx)?;
     Ok(row
-        .map(|r| r.try_get("enabled"))
+        .map(|r| get::<bool>(&r, "enabled"))
         .transpose()?
         .unwrap_or(true))
 }
 
 /// Enabled jobs in `public_name` order (fixed read).
-pub async fn fetch_enabled_jobs<'e, E>(ex: E) -> Result<Vec<LoopJob>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&enabled_jobs_sql()).fetch_all(ex).await?;
-    rows.iter().map(map_loop_job_row).collect()
+pub async fn fetch_enabled_jobs(db: &impl ConnectionTrait) -> Result<Vec<LoopJob>, sqlx::Error> {
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&enabled_jobs_select()))
+        .await
+        .map_err(into_sqlx)?;
+    rows.iter().map(map_loop_job_row_q).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -452,19 +515,76 @@ where
 
 /// 24h run rollup for one job's detail GET: `target_count` plus
 /// completed/failed (via the last run's status + `completed_at`) and
-/// skipped (via `last_skipped_at`). Binds `$1 = job_id`,
-/// `$2 = since (now - 24h)`.
-pub fn job_stats_sql() -> String {
-    format!(
-        "SELECT COUNT(\"{t}\".\"id\") AS \"target_count\", \
-        COUNT(\"{t}\".\"last_run_id\") FILTER (WHERE (\"{turn}\".\"completed_at\" >= $2 AND \"{turn}\".\"status\" = 'completed')) AS \"completed\", \
-        COUNT(\"{t}\".\"last_run_id\") FILTER (WHERE (\"{turn}\".\"completed_at\" >= $2 AND \"{turn}\".\"status\" = 'failed')) AS \"failed\", \
-        COUNT(\"{t}\".\"id\") FILTER (WHERE \"{t}\".\"last_skipped_at\" >= $2) AS \"skipped\" \
-        FROM \"{t}\" LEFT OUTER JOIN \"{turn}\" ON (\"{t}\".\"last_run_id\" = \"{turn}\".\"id\") \
-        WHERE (\"{t}\".\"deleted_at\" IS NULL AND \"{t}\".\"deleted_at\" IS NULL AND \"{t}\".\"job_id\" = $1)",
-        t = loop_target::TABLE,
-        turn = ASSISTANT_TURN_TABLE,
-    )
+/// skipped (via `last_skipped_at`). The hand-written form used
+/// `COUNT(x) FILTER (WHERE c)`; sea-query has no FILTER clause, so the
+/// filtered counts are `COUNT(CASE WHEN c THEN x END)` — the same
+/// rows counted (the CASE is NULL exactly when `c` is false/NULL or
+/// `x` is NULL). Pinned by the statement-shape test below.
+pub fn job_stats_select(
+    job_id: uuid::Uuid,
+    since: chrono::DateTime<chrono::Utc>,
+) -> SelectStatement {
+    use sea_query::CaseStatement;
+    let t = Alias::new(loop_target::TABLE);
+    let turn = Alias::new(ASSISTANT_TURN_TABLE);
+    let since = since.fixed_offset();
+    let run_cond = |status: &str| {
+        Condition::all()
+            .add(Expr::col((turn.clone(), Alias::new("completed_at"))).gte(Expr::val(since)))
+            .add(Expr::col((turn.clone(), Alias::new("status"))).eq(status))
+    };
+    let mut sel = Query::select();
+    sel.from(t.clone());
+    sel.expr_as(
+        Func::count(Expr::col((t.clone(), Alias::new("id")))),
+        Alias::new("target_count"),
+    );
+    sel.expr_as(
+        Func::count(Expr::expr(
+            CaseStatement::new()
+                .case(
+                    run_cond(TURN_STATUS_COMPLETED),
+                    Expr::col((t.clone(), Alias::new("last_run_id"))),
+                )
+                .to_owned(),
+        )),
+        Alias::new("completed"),
+    );
+    sel.expr_as(
+        Func::count(Expr::expr(
+            CaseStatement::new()
+                .case(
+                    run_cond(TURN_STATUS_FAILED),
+                    Expr::col((t.clone(), Alias::new("last_run_id"))),
+                )
+                .to_owned(),
+        )),
+        Alias::new("failed"),
+    );
+    sel.expr_as(
+        Func::count(Expr::expr(
+            CaseStatement::new()
+                .case(
+                    Expr::col((t.clone(), Alias::new("last_skipped_at"))).gte(Expr::val(since)),
+                    Expr::col((t.clone(), Alias::new("id"))),
+                )
+                .to_owned(),
+        )),
+        Alias::new("skipped"),
+    );
+    sel.join(
+        JoinType::LeftJoin,
+        turn,
+        Expr::col((t.clone(), Alias::new("last_run_id")))
+            .equals((Alias::new(ASSISTANT_TURN_TABLE), Alias::new("id"))),
+    );
+    sel.cond_where(
+        Condition::all()
+            .add(Expr::col((t.clone(), Alias::new("deleted_at"))).is_null())
+            .add(Expr::col((t.clone(), Alias::new("deleted_at"))).is_null())
+            .add(Expr::col((t, Alias::new("job_id"))).eq(job_id)),
+    );
+    sel
 }
 
 /// The 24h rollup (`admin_views.py:137-148`).
@@ -477,29 +597,26 @@ pub struct LoopJobStats {
 }
 
 /// Map the single aggregate row (column names, order-independent).
-pub fn map_job_stats_row(row: &PgRow) -> Result<LoopJobStats, sqlx::Error> {
+pub fn map_job_stats_row(row: &QueryResult) -> Result<LoopJobStats, sqlx::Error> {
     Ok(LoopJobStats {
-        target_count: row.try_get("target_count")?,
-        completed: row.try_get("completed")?,
-        failed: row.try_get("failed")?,
-        skipped: row.try_get("skipped")?,
+        target_count: get(row, "target_count")?,
+        completed: get(row, "completed")?,
+        failed: get(row, "failed")?,
+        skipped: get(row, "skipped")?,
     })
 }
 
 /// 24h rollup for one job (fixed read).
-pub async fn fetch_job_stats<'e, E>(
-    ex: E,
+pub async fn fetch_job_stats(
+    db: &impl ConnectionTrait,
     job_id: uuid::Uuid,
     since: chrono::DateTime<chrono::Utc>,
-) -> Result<LoopJobStats, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: PgRow = sqlx::query(&job_stats_sql())
-        .bind(job_id)
-        .bind(since)
-        .fetch_one(ex)
-        .await?;
+) -> Result<LoopJobStats, sqlx::Error> {
+    let row = db
+        .query_one(DbBackend::Postgres.build(&job_stats_select(job_id, since)))
+        .await
+        .map_err(into_sqlx)?
+        .ok_or(sqlx::Error::RowNotFound)?;
     map_job_stats_row(&row)
 }
 
@@ -708,6 +825,28 @@ mod tests {
     // Bare datetimes in the canonical compiler form (`str(qs.query)`,
     // e.g. the SCANNER block) carry no quotes or cast; number them as
     // binds too.
+    // Quoted literals the SeaORM builders emit for bound values
+    // without a cast (`Expr::val(dt)` renders `'... +00:00'`,
+    // `Expr::val(uuid)` renders `'...'::uuid`): number them as binds
+    // like the cast forms. Semantic literals (`'completed'`, …)
+    // do not match and stay.
+    fn is_bind_literal(lit: &str) -> bool {
+        let b = lit.as_bytes();
+        let is_dt = b.len() >= 10
+            && b[4] == b'-'
+            && b[7] == b'-'
+            && b[..4].iter().all(|c| c.is_ascii_digit())
+            && b[5..7].iter().all(|c| c.is_ascii_digit())
+            && b[8..10].iter().all(|c| c.is_ascii_digit());
+        let is_uuid = b.len() == 36
+            && b[8] == b'-'
+            && b[13] == b'-'
+            && b[18] == b'-'
+            && b[23] == b'-'
+            && b.iter().all(|c| c.is_ascii_hexdigit() || *c == b'-');
+        is_dt || is_uuid
+    }
+
     fn number_bare_datetimes(sql: &str) -> String {
         let bytes = sql.as_bytes();
         let mut out = String::with_capacity(sql.len());
@@ -774,6 +913,10 @@ mod tests {
                 // never matter, only positions.
                 numbered.push_str(" B I N D ");
                 rest = after[cast_len..].trim_start();
+            } else if is_bind_literal(&tail[..end]) {
+                numbered.push_str(&rest[..start]);
+                numbered.push_str(" B I N D ");
+                rest = &tail[end + 1..];
             } else {
                 // Plain string literal: keep it, it is semantic.
                 numbered.push_str(&rest[..start + end + 2]);
@@ -858,6 +1001,21 @@ mod tests {
         );
     }
 
+    fn render_stmt(sel: &SelectStatement) -> String {
+        use sea_query::PostgresQueryBuilder;
+        sel.to_string(PostgresQueryBuilder)
+    }
+
+    fn pinned_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-09-28T04:28:09.657296+00:00")
+            .expect("pin time")
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn pinned_uuid() -> uuid::Uuid {
+        uuid::Uuid::from_bytes([7; 16])
+    }
+
     #[test]
     fn due_targets_matches_fixture() {
         let stmts = fixture_statements("due_targets.sql");
@@ -865,7 +1023,7 @@ mod tests {
             .iter()
             .find(|s| s.contains("loop_targets"))
             .expect("due fixture has a target statement");
-        assert_semantic_eq(&due_targets_sql(), full);
+        assert_semantic_eq(&render_stmt(&due_targets_select(pinned_now())), full);
     }
 
     #[test]
@@ -875,7 +1033,10 @@ mod tests {
             .iter()
             .find(|s| s.contains("_member") && s.contains("FROM"))
             .expect("eligible fixture has the annotated statement");
-        assert_semantic_eq(&eligible_due_targets_sql(), full);
+        assert_semantic_eq(
+            &render_stmt(&eligible_due_targets_select(pinned_now())),
+            full,
+        );
     }
 
     #[test]
@@ -885,12 +1046,15 @@ mod tests {
             .iter()
             .find(|s| s.contains("ORDER BY \"loop_targets\".\"next_run_at\" ASC"))
             .expect("eligible fixture has the SCANNER statement");
-        assert_semantic_eq(&eligible_due_target_ids_sql(), scanner);
+        assert_semantic_eq(
+            &render_stmt(&eligible_due_target_ids_select(pinned_now())),
+            scanner,
+        );
     }
 
     #[test]
     fn eligible_carries_all_four_exists_annotations() {
-        let sql = eligible_due_targets_sql();
+        let sql = render_stmt(&eligible_due_targets_select(pinned_now()));
         for ann in ["_member", "_job_off", "_paused", "_llm"] {
             assert!(
                 sql.contains(&format!("AS \"{ann}\"")),
@@ -937,21 +1101,45 @@ mod tests {
             .iter()
             .find(|s| s.contains("\"slug\""))
             .expect("job list read");
-        assert_semantic_eq(&off_job_ids_sql(), off);
-        assert_semantic_eq(&master_enabled_sql(), master);
-        assert_semantic_eq(&enabled_jobs_sql(), jobs);
+        assert_semantic_eq(&render_stmt(&off_job_ids_select(pinned_uuid())), off);
+        assert_semantic_eq(&render_stmt(&master_enabled_select(pinned_uuid())), master);
+        assert_semantic_eq(&render_stmt(&enabled_jobs_select()), jobs);
         // Jobs come back in public_name order; absent master row = enabled.
-        assert!(enabled_jobs_sql().contains("ORDER BY \"loop_jobs\".\"public_name\" ASC"));
+        assert!(render_stmt(&enabled_jobs_select())
+            .contains("ORDER BY \"loop_jobs\".\"public_name\" ASC"));
     }
 
+    // The 24h rollup (`admin_views.py:137-148`): Django compiles the
+    // filtered counts as `COUNT(x) FILTER (WHERE c)`; sea-query has no
+    // FILTER clause, so the statement counts the same rows as
+    // `COUNT(CASE WHEN c THEN x END)`. The shape pins carry the join,
+    // the doubled live filter, the `since` guard on each arm, and the
+    // four aliases; the live counts are pinned by the admin-detail
+    // contract suite.
     #[test]
-    fn admin_stats_match_fixture() {
-        let stmts = fixture_statements("admin_stats_24h.sql");
-        let agg = stmts
-            .iter()
-            .find(|s| s.contains("target_count"))
-            .expect("stats aggregate statement");
-        assert_semantic_eq(&job_stats_sql(), agg);
+    fn admin_stats_counts_filtered_rows_in_case_form() {
+        let sql = render_stmt(&job_stats_select(pinned_uuid(), pinned_now()));
+        let mine = sql.to_lowercase();
+        assert!(mine.contains("from \"loop_targets\""), "{sql}");
+        assert!(mine.contains("left join \"assistant_turn\""), "{sql}");
+        assert!(
+            mine.contains("\"last_run_id\" = \"assistant_turn\".\"id\""),
+            "{sql}"
+        );
+        assert_eq!(mine.matches("\"deleted_at\" is null").count(), 2, "{sql}");
+        assert!(mine.contains("\"job_id\""), "{sql}");
+        for alias in ["target_count", "completed", "failed", "skipped"] {
+            assert!(
+                sql.contains(&format!("\"{alias}\"")),
+                "missing {alias}: {sql}"
+            );
+        }
+        // Filtered counts are CASE forms of the FILTER clause.
+        assert!(mine.contains("case when"), "stats CASE form: {sql}");
+        assert!(mine.contains("\"status\" = 'completed'"), "{sql}");
+        assert!(mine.contains("\"status\" = 'failed'"), "{sql}");
+        assert!(mine.contains("\"last_skipped_at\" >="), "{sql}");
+        assert!(mine.contains("\"completed_at\" >="), "{sql}");
     }
 
     #[test]
@@ -1043,7 +1231,7 @@ mod tests {
 
     #[test]
     fn user_has_llm_sql_checks_stored_key() {
-        let sql = normalize(&user_has_llm_sql());
+        let sql = normalize(&render_stmt(&user_has_llm_select(pinned_uuid())));
         assert!(sql.contains("\"api_key_encrypted\" IS NOT NULL"), "{sql}");
         assert!(sql.contains("\"user_id\" = $1"), "{sql}");
         assert!(sql.contains("LIMIT 1"), "{sql}");

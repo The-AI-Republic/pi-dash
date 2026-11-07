@@ -66,11 +66,22 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono_tz::Tz;
+use sea_orm::sea_query::{Alias, Condition, Expr, Func, SelectStatement, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, QueryTrait, Set,
+};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use pidash_auth::permissions::{project, workspace};
 use pidash_auth::scope::TenantScope;
+
+use pidash_db::entity::{
+    api_tokens, dev_machine, estimates, file_assets, intakes, machine_token, project_identifiers,
+    project_members, project_user_properties, projects, states, user_favorites, users,
+    workspace_members, workspaces,
+};
 
 use crate::license::AssetUrl;
 use crate::state::AppState;
@@ -271,35 +282,163 @@ pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 // ---------------------------------------------------------------------------
 
 /// Decoded `api_tokens` row for [`resolve_api_token`].
-type ApiTokenLookup = (
-    String,
-    bool,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-);
+/// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct ApiTokenLookup {
+    token: String,
+    is_active: bool,
+    expired_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_id: uuid::Uuid,
+}
 
-/// Decoded `machine_token` row for [`resolve_machine_token`].
-type MachineTokenLookup = (
-    String,
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<bool>,
-    Option<chrono::DateTime<chrono::Utc>>,
-);
+/// A `machine_token` row by hash plus the revocation bit of its device.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct MachineTokenLookup {
+    token_hash: String,
+    user_id: uuid::Uuid,
+    dev_machine_id: Option<uuid::Uuid>,
+    workspace_id: uuid::Uuid,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// `dev_machine.revoked_at IS NOT NULL` over the LEFT JOIN: `false`
+    /// when the token has no device.
+    dev_revoked: Option<bool>,
+}
 
-/// Decoded `file_assets` row for [`file_asset_url`].
-type FileAssetLookup = (
-    Option<String>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-);
+/// The `file_assets` columns `asset_url` resolves on.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct FileAssetLookup {
+    entity_type: Option<String>,
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
+}
 
 /// Decoded user row for [`expand_user`]: names, nullable `email`
-/// (`db/models/user.py:61`), `avatar` text, avatar-asset FK.
-type ExpandUserLookup = (String, String, Option<String>, String, Option<uuid::Uuid>);
+/// (`db/models/user.py:61`), `avatar` text, avatar-asset FK, display name.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+struct ExpandUserLookup {
+    first_name: String,
+    last_name: String,
+    email: Option<String>,
+    avatar: String,
+    avatar_asset_id: Option<uuid::Uuid>,
+    display_name: String,
+}
+
+/// SeaORM over the request pool (a wrapper, no I/O).
+fn orm(pool: &PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// A row decoded by column name (SeaORM's `QueryResult`).
+type Row = sea_orm::QueryResult;
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS
+/// NULL`, the `SoftDeletionManager` scope, `db/mixins.py:56-66`: a
+/// soft-deleted token 403s instead of authenticating). `is_active` /
+/// `expired_at` are judged by `pidash_auth::token::validate_api_token`.
+async fn live_api_token<C: ConnectionTrait>(
+    db: &C,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, sea_orm::DbErr> {
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::Token,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+            api_tokens::Column::UserId,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(db)
+        .await
+}
+
+/// `MachineToken` by `token_hash`, LEFT JOIN `dev_machine` for its
+/// revocation (`api_authentication.py:47-70`). No liveness scope: the
+/// table has no soft delete.
+async fn machine_token_with_device<C: ConnectionTrait>(
+    db: &C,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, sea_orm::DbErr> {
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::TokenHash,
+            machine_token::Column::UserId,
+            machine_token::Column::DevMachineId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
+            "dev_revoked",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(db)
+        .await
+}
+
+/// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`):
+/// an active, live `workspace_members` row.
+async fn is_active_workspace_member<C: ConnectionTrait>(
+    db: &C,
+    workspace_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    let hit: Option<uuid::Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// The stored `users.user_timezone` name, unparsed (`None` when the user
+/// row is missing).
+async fn user_timezone<C: ConnectionTrait>(
+    db: &C,
+    user_id: uuid::Uuid,
+) -> Result<Option<String>, sea_orm::DbErr> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(user_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
+/// The workspace id for a slug. No liveness predicate (the old read had
+/// none either): an unknown slug is `None`, and every gate then denies.
+async fn workspace_id_by_slug<C: ConnectionTrait>(
+    db: &C,
+    slug: &str,
+) -> Result<Option<uuid::Uuid>, sea_orm::DbErr> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .into_tuple()
+        .one(db)
+        .await
+}
 
 /// Map a database/driver failure to the generic 500 while logging the site
 /// and error for operators (no secrets: messages never include tokens).
@@ -363,14 +502,16 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "api-token-lookup"))?;
-    let Some((token, is_active, expired_at, user_id)) = row else {
+    let row = live_api_token(&orm(pool), presented)
+        .await
+        .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let Some(ApiTokenLookup {
+        token,
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now_unix = chrono::Utc::now().timestamp();
@@ -397,25 +538,18 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at", mt."expires_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
-    )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((
+    let db = orm(pool);
+    let row = machine_token_with_device(&db, &presented_hash)
+        .await
+        .map_err(|error| db_error(error, "machine-token-lookup"))?;
+    let Some(MachineTokenLookup {
         token_hash,
         user_id,
-        _dev_machine_id,
+        dev_machine_id: _,
         workspace_id,
         revoked_at,
         dev_revoked,
-        expires_at,
-    )) = row
+    }) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -423,27 +557,16 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
-        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation and expiry arms.
-    pidash_auth::token::validate_machine_token_static(
-        Some(&static_row),
-        &presented_hash,
-        chrono::Utc::now().timestamp(),
-    )
-    .map_err(|_| Denial::InvalidToken)?;
+    // revocation arms.
+    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
+        .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
-    let member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "machine-token-member"))?
-    .unwrap_or(false);
+    let member = is_active_workspace_member(&db, workspace_id, user_id)
+        .await
+        .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
@@ -466,13 +589,9 @@ async fn resolve_machine_token(
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let name: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "request-timezone"))?;
-    Ok(name.unwrap_or(None))
+    user_timezone(&orm(pool), *user_id)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -515,7 +634,7 @@ pub async fn rewrite_project_id(
     };
     match classify_lookup(raw) {
         ProjectLookup::Pk(id) => Ok(id),
-        ProjectLookup::Identifier(_) => q::fetch_project_id(pool, &scope, raw)
+        ProjectLookup::Identifier(_) => q::fetch_project_id(&orm(pool), &scope, raw)
             .await
             .map_err(|error| db_error(error, "ws-role"))?
             .ok_or(Denial::ProjectNotFound),
@@ -560,19 +679,26 @@ async fn ws_has_role(
     user_id: &uuid::Uuid,
     roles: &[i32],
 ) -> Result<bool, Denial> {
-    // `role` is `smallint` (`PositiveSmallIntegerField`); the bound
-    // `Vec<i32>` encodes as `int4[]`, and Postgres has no
-    // `smallint = integer` operator, so the column casts up.
-    let exists: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "role"::int = ANY($3) AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(roles.to_vec())
-    .fetch_one(pool)
-    .await
-    .map_err(|error| db_error(error, "project-roles"))?;
-    Ok(exists)
+    // `role` is `smallint` (`PositiveSmallIntegerField`); SeaORM reads it
+    // as `i16`, so narrow the `i32` call-site values.
+    let roles_i16: Vec<i16> = roles
+        .iter()
+        .map(|r| i16::try_from(*r).unwrap_or(i16::MAX))
+        .collect();
+    let hit: Option<uuid::Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(*workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::Role.is_in(roles_i16))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "project-roles"))?;
+    Ok(hit.is_some())
 }
 
 async fn project_roles(
@@ -581,17 +707,19 @@ async fn project_roles(
     user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
 ) -> Result<(bool, bool, bool), Denial> {
-    // `role` is `smallint`: sqlx does not widen `INT2` into `i32` on
-    // decode, so read `i16` and compare as integers.
-    let roles: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "project-roles"))?;
+    // `role` is `smallint`: read `i16` and compare as integers.
+    let roles: Vec<i16> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .filter(project_members::Column::WorkspaceId.eq(*workspace_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "project-roles"))?;
     Ok((
         !roles.is_empty(),
         roles.contains(&20),
@@ -699,36 +827,35 @@ pub struct ReadAnnotations {
     pub is_deployed: bool,
 }
 
-fn row_string(row: &sqlx::postgres::PgRow, col: &str) -> Result<String, Denial> {
-    row.try_get(col).map_err(|_| Denial::ServerError)
+fn row_string(row: &Row, col: &str) -> Result<String, Denial> {
+    row.try_get("", col).map_err(|_| Denial::ServerError)
 }
 
-fn row_string_opt(row: &sqlx::postgres::PgRow, col: &str) -> Result<Option<String>, Denial> {
-    row.try_get(col).map_err(|_| Denial::ServerError)
+fn row_string_opt(row: &Row, col: &str) -> Result<Option<String>, Denial> {
+    row.try_get("", col).map_err(|_| Denial::ServerError)
 }
 
-fn row_uuid_opt(row: &sqlx::postgres::PgRow, col: &str) -> Result<Option<uuid::Uuid>, Denial> {
-    row.try_get(col).map_err(|_| Denial::ServerError)
+fn row_uuid_opt(row: &Row, col: &str) -> Result<Option<uuid::Uuid>, Denial> {
+    row.try_get("", col).map_err(|_| Denial::ServerError)
 }
 
-fn row_bool(row: &sqlx::postgres::PgRow, col: &str) -> Result<bool, Denial> {
-    row.try_get(col).map_err(|_| Denial::ServerError)
+fn row_bool(row: &Row, col: &str) -> Result<bool, Denial> {
+    row.try_get("", col).map_err(|_| Denial::ServerError)
 }
 
-fn row_i32(row: &sqlx::postgres::PgRow, col: &str) -> Result<i32, Denial> {
-    row.try_get(col).map_err(|_| Denial::ServerError)
+fn row_i32(row: &Row, col: &str) -> Result<i32, Denial> {
+    row.try_get("", col).map_err(|_| Denial::ServerError)
 }
 
-/// `projects.network` is `PositiveSmallIntegerField` (INT2); sqlx does not
-/// widen INT2 into i32, so decode i16 and widen (same hazard as the
-/// `member_role` fix in PIDASHCONV-478).
-fn row_i16_as_i32(row: &sqlx::postgres::PgRow, col: &str) -> Result<i32, Denial> {
-    let v: i16 = row.try_get(col).map_err(|_| Denial::ServerError)?;
+/// `projects.network` is `PositiveSmallIntegerField` (INT2); decode i16
+/// and widen (same hazard as the `member_role` fix in PIDASHCONV-478).
+fn row_i16_as_i32(row: &Row, col: &str) -> Result<i32, Denial> {
+    let v: i16 = row.try_get("", col).map_err(|_| Denial::ServerError)?;
     Ok(i32::from(v))
 }
 
-fn row_json_opt(row: &sqlx::postgres::PgRow, col: &str) -> Result<Value, Denial> {
-    let value: Option<Value> = row.try_get(col).map_err(|_| Denial::ServerError)?;
+fn row_json_opt(row: &Row, col: &str) -> Result<Value, Denial> {
+    let value: Option<Value> = row.try_get("", col).map_err(|_| Denial::ServerError)?;
     Ok(value.unwrap_or(Value::Null))
 }
 
@@ -760,25 +887,39 @@ async fn cover_image_url(
 /// `Field.get_attribute` (`fields.py:445-451`) turns into `SkipField` for a
 /// read-only field.
 async fn file_asset_url(pool: &PgPool, asset_id: &uuid::Uuid) -> Result<AssetUrl, Denial> {
-    let row: Option<FileAssetLookup> = sqlx::query_as(
-        r#"SELECT fa."entity_type", fa."workspace_id", fa."project_id", fa."issue_id" FROM "file_assets" fa WHERE fa."id" = $1"#,
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
+    let row = file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .into_model::<FileAssetLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(FileAssetLookup {
+        entity_type,
+        workspace_id,
+        project_id,
+        issue_id,
+    }) = row
+    else {
         // Forward-FK row gone (FK-unreachable in practice): the missing
         // attribute reads as null.
         return Ok(AssetUrl::Present(None));
     };
     let workspace_slug: Option<String> = match workspace_id {
-        Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(id)
-            .fetch_optional(pool)
+        Some(id) => workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.eq(id))
+            .into_tuple()
+            .one(&orm(pool))
             .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten(),
+            .map_err(|_| Denial::ServerError)?,
         None => None,
     };
     Ok(crate::license::file_asset_url(
@@ -804,7 +945,7 @@ async fn file_asset_url(pool: &PgPool, asset_id: &uuid::Uuid) -> Result<AssetUrl
 #[allow(clippy::too_many_arguments)]
 pub async fn render_project(
     pool: &PgPool,
-    row: &sqlx::postgres::PgRow,
+    row: &Row,
     ann: Option<&ReadAnnotations>,
     with_sort_order: bool,
     tz: &Tz,
@@ -819,7 +960,7 @@ pub async fn render_project(
         }
     };
 
-    let id: uuid::Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
+    let id: uuid::Uuid = row.try_get("", "id").map_err(|_| Denial::ServerError)?;
     put(&mut map, "id", render_uuid(&id));
     if let Some(ann) = ann {
         put(&mut map, "total_members", Value::from(ann.total_members));
@@ -859,14 +1000,17 @@ pub async fn render_project(
         AssetUrl::Skip => {}
     }
 
-    let created_at: chrono::DateTime<chrono::Utc> =
-        row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: chrono::DateTime<chrono::Utc> =
-        row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let deleted_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get("deleted_at").map_err(|_| Denial::ServerError)?;
+    let created_at: chrono::DateTime<chrono::Utc> = row
+        .try_get("", "created_at")
+        .map_err(|_| Denial::ServerError)?;
+    let updated_at: chrono::DateTime<chrono::Utc> = row
+        .try_get("", "updated_at")
+        .map_err(|_| Denial::ServerError)?;
+    let deleted_at: Option<chrono::DateTime<chrono::Utc>> = row
+        .try_get("", "deleted_at")
+        .map_err(|_| Denial::ServerError)?;
     let archived_at: Option<chrono::DateTime<chrono::Utc>> = row
-        .try_get("archived_at")
+        .try_get("", "archived_at")
         .map_err(|_| Denial::ServerError)?;
     put(
         &mut map,
@@ -979,7 +1123,7 @@ pub async fn render_project(
         "agent_review_default_interval_seconds",
         "agent_test_default_interval_seconds",
     ] {
-        let v: i32 = row.try_get(key).map_err(|_| Denial::ServerError)?;
+        let v: i32 = row.try_get("", key).map_err(|_| Denial::ServerError)?;
         put(&mut map, key, Value::from(v));
     }
     put(
@@ -1003,7 +1147,7 @@ pub async fn render_project(
         render_uuid_opt(&row_uuid_opt(row, "updated_by_id")?),
     );
     let workspace_id: uuid::Uuid = row
-        .try_get("workspace_id")
+        .try_get("", "workspace_id")
         .map_err(|_| Denial::ServerError)?;
     put(&mut map, "workspace", render_uuid(&workspace_id));
     put(
@@ -1064,7 +1208,7 @@ pub async fn render_project(
                 }
                 _ => {
                     let attname = format!("{key}_id");
-                    match row.try_get::<Option<uuid::Uuid>, _>(attname.as_str()) {
+                    match row.try_get::<Option<uuid::Uuid>>("", attname.as_str()) {
                         Ok(v) => render_uuid_opt(&v),
                         // `getattr(instance, f"{expand}_id", None)`:
                         // plain columns have no `<key>_id` attribute, so
@@ -1083,12 +1227,14 @@ pub async fn render_project(
 /// `expand=workspace`: `WorkspaceLiteSerializer` (`workspace.py:10-21`):
 /// `{"name", "slug", "id"}` in field order.
 async fn expand_workspace(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<(String, String)> =
-        sqlx::query_as(r#"SELECT "name", "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let row: Option<(String, String)> = workspaces::Entity::find()
+        .select_only()
+        .columns([workspaces::Column::Name, workspaces::Column::Slug])
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(match row {
         Some((name, slug)) => {
             let mut map = serde_json::Map::with_capacity(3);
@@ -1106,14 +1252,30 @@ async fn expand_workspace(pool: &PgPool, workspace_id: &uuid::Uuid) -> Result<Va
 /// row renders null like `getattr` on a dead FK. `email` is nullable
 /// (`CharField(null=True)`, `db/models/user.py:61`); `None` renders null.
 async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denial> {
-    let row: Option<ExpandUserLookup> = sqlx::query_as(
-        r#"SELECT "first_name", "last_name", "email", COALESCE("avatar", ''), "avatar_asset_id" FROM "users" WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((first_name, last_name, email, avatar, avatar_asset)) = row else {
+    let row = users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Email,
+            users::Column::Avatar,
+            users::Column::AvatarAssetId,
+            users::Column::DisplayName,
+        ])
+        .filter(users::Column::Id.eq(*user_id))
+        .into_model::<ExpandUserLookup>()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(ExpandUserLookup {
+        first_name,
+        last_name,
+        email,
+        avatar,
+        avatar_asset_id: avatar_asset,
+        display_name,
+    }) = row
+    else {
         return Ok(Value::Null);
     };
     let avatar_url = match avatar_asset {
@@ -1134,14 +1296,6 @@ async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denia
         avatar_url.as_deref(),
         &avatar,
     );
-    // `display_name`: the model property (`user.py`); fetched raw.
-    let display_name: Option<String> =
-        sqlx::query_scalar(r#"SELECT "display_name" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
     let id = user_id.to_string();
     let lite_row = pidash_services::v1_projects::ser_collab::UserLiteRow {
         id: &id,
@@ -1150,7 +1304,7 @@ async fn expand_user(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Value, Denia
         email: email.as_deref(),
         avatar: &avatar,
         avatar_url,
-        display_name: display_name.as_deref().unwrap_or(""),
+        display_name: &display_name,
     };
     let view = pidash_services::v1_projects::ser_collab::user_lite_to_representation(&lite_row);
     serde_json::to_value(&view).map_err(|_| Denial::ServerError)
@@ -1540,31 +1694,50 @@ async fn coerce_fk_user(
     // `default_state` goes through the default `StateManager` (triage
     // excluded, `db/models/state.py:82-83`); estimates use their plain
     // soft-delete manager.
+    let db = orm(pool);
     let exists: bool = match field {
-        "default_state" => sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "states" WHERE "id" = $1 AND "group" != 'triage' AND "deleted_at" IS NULL)"#,
-        )
-        .bind(parsed)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| CoerceFail::Msg("Invalid pk.".to_owned()))?,
-        "estimate" => sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "estimates" WHERE "id" = $1 AND "deleted_at" IS NULL)"#,
-        )
-        .bind(parsed)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| CoerceFail::Msg("Invalid pk.".to_owned()))?,
+        "default_state" => {
+            let hit: Option<uuid::Uuid> = states::Entity::find()
+                .select_only()
+                .column(states::Column::Id)
+                .filter(states::Column::Id.eq(parsed))
+                .filter(states::Column::Group.ne("triage"))
+                .filter(states::Column::DeletedAt.is_null())
+                .limit(1)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|_| CoerceFail::Msg("Invalid pk.".to_owned()))?;
+            hit.is_some()
+        }
+        "estimate" => {
+            let hit: Option<uuid::Uuid> = estimates::Entity::find()
+                .select_only()
+                .column(estimates::Column::Id)
+                .filter(estimates::Column::Id.eq(parsed))
+                .filter(estimates::Column::DeletedAt.is_null())
+                .limit(1)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|_| CoerceFail::Msg("Invalid pk.".to_owned()))?;
+            hit.is_some()
+        }
         // No `is_active` predicate: the lead/assignee `PrimaryKeyRelatedField`s
         // read through the stock `UserManager` (`db/models/user.py:131`), and
         // deactivation leaves the member assignable (PIDASHCONV-1394).
-        _ => sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "users" WHERE "id" = $1)"#,
-        )
-        .bind(parsed)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| CoerceFail::Msg("Invalid pk.".to_owned()))?,
+        _ => {
+            let hit: Option<uuid::Uuid> = users::Entity::find()
+                .select_only()
+                .column(users::Column::Id)
+                .filter(users::Column::Id.eq(parsed))
+                .limit(1)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|_| CoerceFail::Msg("Invalid pk.".to_owned()))?;
+            hit.is_some()
+        }
     };
     if !exists {
         return Err(CoerceFail::Msg(format!(
@@ -1802,13 +1975,9 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
+    let workspace_id = workspace_id_by_slug(&orm(&pool), slug)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(Preamble {
         pool,
         actor,
@@ -1888,15 +2057,16 @@ pub async fn archive_project_inner(
     // `UserFavorite` cleanup (`views/project.py:537`): every favorite of
     // the project in this workspace soft-deletes (no `entity_type`
     // predicate on this path, exactly as written).
-    sqlx::query(
-        r#"UPDATE "user_favorites" SET "deleted_at" = $1 WHERE "workspace_id" = $2 AND "project_id" = $3 AND "deleted_at" IS NULL"#,
-    )
-    .bind(now)
-    .bind(workspace_id)
-    .bind(project_id)
-    .execute(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `user_favorites` is not a write-guard covered table, so the write
+    // goes directly through SeaORM.
+    user_favorites::Entity::update_many()
+        .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
+        .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
+        .filter(user_favorites::Column::ProjectId.eq(project_id))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .exec(&orm(&pre.pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(no_content())
 }
 
@@ -2003,14 +2173,20 @@ pub async fn summary_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<(uuid::Uuid, String, String)> = sqlx::query_as(
-        r#"SELECT "id", "name", "identifier" FROM "projects" WHERE "id" = $1 AND "workspace_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(workspace_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<(uuid::Uuid, String, String)> = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Name,
+            projects::Column::Identifier,
+        ])
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pre.pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let Some((id, name, identifier)) = row else {
         return Err(Denial::NotFoundError("Project not found".to_owned()));
     };
@@ -2040,6 +2216,101 @@ pub async fn summary_inner(
     Ok(json_ok(text))
 }
 
+/// One `COUNT(*)` scalar subquery for [`summary_counts`]: the table
+/// predicate is `project_id = <pid> AND deleted_at IS NULL` (the
+/// default-manager scope); `members` adds `is_active` and `issues` joins
+/// `states` for the triage-group exclusion. Values stay on the builder
+/// (no [`Expr::cust`] placeholders).
+fn summary_count_subquery(field: &str, pid: uuid::Uuid) -> SimpleExpr {
+    fn col(table: &str, column: &str) -> Expr {
+        Expr::col((Alias::new(table), Alias::new(column)))
+    }
+    fn count_for(table: &str, pid: uuid::Uuid, extra: Option<Condition>) -> SelectStatement {
+        let mut sub = sea_orm::sea_query::Query::select();
+        sub.expr(Func::count(col(table, "id")));
+        sub.from(Alias::new(table));
+        let mut cond = Condition::all()
+            .add(col(table, "project_id").eq(pid))
+            .add(col(table, "deleted_at").is_null());
+        if let Some(extra) = extra {
+            cond = cond.add(extra);
+        }
+        sub.cond_where(cond);
+        sub
+    }
+    let sub = match field {
+        "members" => count_for(
+            "project_members",
+            pid,
+            Some(Condition::all().add(col("project_members", "is_active").eq(true))),
+        ),
+        "states" => count_for("states", pid, None),
+        "labels" => count_for("labels", pid, None),
+        "cycles" => count_for("cycles", pid, None),
+        "modules" => count_for("modules", pid, None),
+        "issues" => {
+            let mut sub = sea_orm::sea_query::Query::select();
+            sub.expr(Func::count(col("i", "id")));
+            sub.from_as(Alias::new("issues"), Alias::new("i"));
+            sub.join_as(
+                JoinType::InnerJoin,
+                Alias::new("states"),
+                Alias::new("s"),
+                col("s", "id").equals((Alias::new("i"), Alias::new("state_id"))),
+            );
+            sub.cond_where(
+                Condition::all()
+                    .add(col("i", "project_id").eq(pid))
+                    .add(col("i", "deleted_at").is_null())
+                    .add(col("s", "group").ne("triage")),
+            );
+            sub
+        }
+        "intakes" => count_for("intake_issues", pid, None),
+        "pages" => count_for("project_pages", pid, None),
+        _ => {
+            // Unreachable: callers iterate `ALLOWED_SUMMARY_FIELDS`.
+            // Fall back to a constant zero subquery `(SELECT 0)`.
+            let mut sub = sea_orm::sea_query::Query::select();
+            sub.expr(Expr::value(0));
+            sub
+        }
+    };
+    SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
+}
+
+/// Annotation alias is `pages_count` for `pages` (the `Project.pages`
+/// M2M clash, `views/project.py:608-610`).
+fn summary_alias(field: &str) -> &str {
+    if field == "pages" {
+        "pages_count"
+    } else {
+        field
+    }
+}
+
+/// One statement with one `COUNT(*)` scalar subquery column per
+/// requested field, in sorted order. Empty in, `None` out (no query).
+fn summary_statement(project_id: uuid::Uuid, requested: &[&str]) -> Option<SelectStatement> {
+    let mut ordered: Vec<&str> = ALLOWED_SUMMARY_FIELDS
+        .iter()
+        .filter(|f| requested.contains(f))
+        .copied()
+        .collect();
+    ordered.sort();
+    if ordered.is_empty() {
+        return None;
+    }
+    let mut stmt = sea_orm::sea_query::Query::select();
+    for field in &ordered {
+        stmt.expr_as(
+            summary_count_subquery(field, project_id),
+            Alias::new(summary_alias(field).to_owned()),
+        );
+    }
+    Some(stmt)
+}
+
 /// One-round-trip summary counts (`_get_all_summary_counts`): a
 /// `COALESCE(subquery, 0)` column per requested field. Soft-deleted rows
 /// never count (the default managers); issues exclude the triage
@@ -2049,66 +2320,25 @@ pub async fn summary_counts(
     project_id: &uuid::Uuid,
     requested: &[&str],
 ) -> Result<HashMap<String, i64>, Denial> {
-    fn subquery(field: &str) -> &'static str {
-        match field {
-            "members" => {
-                r#"(SELECT COUNT(*) FROM "project_members" WHERE "project_id" = $1 AND "is_active" AND "deleted_at" IS NULL)"#
-            }
-            "states" => {
-                r#"(SELECT COUNT(*) FROM "states" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
-            }
-            "labels" => {
-                r#"(SELECT COUNT(*) FROM "labels" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
-            }
-            "cycles" => {
-                r#"(SELECT COUNT(*) FROM "cycles" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
-            }
-            "modules" => {
-                r#"(SELECT COUNT(*) FROM "modules" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
-            }
-            "issues" => {
-                r#"(SELECT COUNT(*) FROM "issues" i JOIN "states" s ON s."id" = i."state_id" WHERE i."project_id" = $1 AND i."deleted_at" IS NULL AND s."group" != 'triage')"#
-            }
-            "intakes" => {
-                r#"(SELECT COUNT(*) FROM "intake_issues" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
-            }
-            "pages" => {
-                r#"(SELECT COUNT(*) FROM "project_pages" WHERE "project_id" = $1 AND "deleted_at" IS NULL)"#
-            }
-            _ => "(SELECT 0)",
-        }
-    }
-    // Annotation alias is `pages_count` for `pages` (the `Project.pages`
-    // M2M clash, `views/project.py:608-610`).
-    fn alias(field: &str) -> &str {
-        if field == "pages" {
-            "pages_count"
-        } else {
-            field
-        }
-    }
+    let Some(stmt) = summary_statement(*project_id, requested) else {
+        return Ok(HashMap::new());
+    };
     let mut ordered: Vec<&str> = ALLOWED_SUMMARY_FIELDS
         .iter()
         .filter(|f| requested.contains(f))
         .copied()
         .collect();
     ordered.sort();
-    let select: Vec<String> = ordered
-        .iter()
-        .map(|f| format!("COALESCE({}, 0) AS \"{}\"", subquery(f), alias(f)))
-        .collect();
-    if select.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let sql = format!("SELECT {}", select.join(", "));
-    let row: sqlx::postgres::PgRow = sqlx::query(&sql)
-        .bind(project_id)
-        .fetch_one(pool)
+    let row = orm(pool)
+        .query_one(DbBackend::Postgres.build(&stmt))
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     let mut out = HashMap::with_capacity(ordered.len());
     for field in ordered {
-        let value: i64 = row.try_get(alias(field)).map_err(|_| Denial::ServerError)?;
+        let value: i64 = row
+            .try_get("", summary_alias(field))
+            .map_err(|_| Denial::ServerError)?;
         out.insert(field.to_owned(), value);
     }
     Ok(out)
@@ -2297,10 +2527,11 @@ pub fn envelope(
     Ok(json_ok(body))
 }
 
-/// Validate the list-GET `order_by` key. Django resolves it against the
-/// queryset (annotations included); unknown keys raise `FieldError` into
-/// the generic 500. The eight queryset arms render through the queries
-/// kernel; any other concrete project column orders directly.
+/// Validate the list-GET `order_by` key and return its `ORDER BY`
+/// fragment. Django resolves it against the queryset (annotations
+/// included); unknown keys raise `FieldError` into the generic 500. The
+/// eight queryset arms render through the queries kernel; any other
+/// concrete project column orders directly.
 pub fn resolve_list_order(key: &str) -> Result<String, Denial> {
     use pidash_db::v1_projects::queries_projmem as q;
     const ANNOTATIONS: &[&str] = &[
@@ -2323,7 +2554,7 @@ pub fn resolve_list_order(key: &str) -> Result<String, Denial> {
         "-name",
     ];
     if KNOWN.contains(&key) {
-        return Ok(q::project_list_get_sql(key));
+        return Ok(q::order_by_sql(key).to_owned());
     }
     let (desc, name) = match key.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -2332,13 +2563,8 @@ pub fn resolve_list_order(key: &str) -> Result<String, Denial> {
     if ANNOTATIONS.contains(&name)
         || pidash_db::v1_projects::models::project::COLUMNS.contains(&name)
     {
-        // The base statement already selects `p.*` plus every annotation;
-        // Django's `.order_by(key)` only appends the clause.
         let direction = if desc { "DESC" } else { "ASC" };
-        return Ok(format!(
-            "{}\nORDER BY \"{name}\" {direction}",
-            q::PROJECT_LIST_BASE_SQL
-        ));
+        return Ok(format!("ORDER BY \"{name}\" {direction}"));
     }
     Err(Denial::ServerError)
 }
@@ -2350,32 +2576,21 @@ pub async fn fetch_detail_row(
     slug: &str,
     actor_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
+) -> Result<Option<Row>, Denial> {
     use pidash_db::v1_projects::queries_projmem as q;
-    // NB: the detail base ends with `GROUP BY p.id, w.id` (and
-    // `project_detail_sql()` appends `ORDER BY`), so the pk predicate must
-    // be spliced into the WHERE clause — appending AND after GROUP BY is a
-    // boolean-type error (`w.id AND ...`).
-    let sql = format!(
-        "{}\n{}",
-        q::PROJECT_DETAIL_BASE_SQL.replacen(
-            "GROUP BY p.id, w.id",
-            "AND p.id = $3 GROUP BY p.id, w.id",
-            1
-        ),
-        q::ORDER_BASE
+    let scope = q::TenantScope::new(slug, *actor_id);
+    let mut stmt = q::project_detail(&scope);
+    stmt.cond_where(
+        Condition::all().add(Expr::col((Alias::new("p"), Alias::new("id"))).eq(*project_id)),
     );
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(actor_id)
-        .bind(project_id)
-        .fetch_optional(pool)
+    let row = orm(pool)
+        .query_one(DbBackend::Postgres.build(&stmt))
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row)
 }
 
-pub fn detail_annotations(row: &sqlx::postgres::PgRow) -> Result<ReadAnnotations, Denial> {
+pub fn detail_annotations(row: &Row) -> Result<ReadAnnotations, Denial> {
     use pidash_db::v1_projects::queries_projmem as q;
     let mapped =
         q::map_project_annotations(row).map_err(|error| db_error(error, "map-annotations"))?;
@@ -2418,7 +2633,7 @@ pub async fn list_projects_inner(
     let cursor_raw = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
     let cursor = crate::paginator::Cursor::from_string(&cursor_raw).map_err(page_denial)?;
     let order_key = query_last(query, "order_by").unwrap_or_else(|| "sort_order".to_owned());
-    let sql = resolve_list_order(&order_key)?;
+    resolve_list_order(&order_key)?;
     let window = crate::paginator::offset_window(
         per_page,
         cursor.offset,
@@ -2427,10 +2642,39 @@ pub async fn list_projects_inner(
         None,
     )
     .map_err(page_denial)?;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .bind(pre.actor.id)
-        .fetch_all(&pre.pool)
+    let scope = pidash_db::v1_projects::queries_projmem::TenantScope::new(slug, pre.actor.id);
+    const KNOWN_ORDER: &[&str] = &[
+        "sort_order",
+        "-sort_order",
+        "created_at",
+        "-created_at",
+        "updated_at",
+        "-updated_at",
+        "name",
+        "-name",
+    ];
+    // The eight queryset arms use the list-GET builder (with the
+    // `sort_order` annotation); any other validated key uses the plain
+    // list base (no `sort_order`, like the old
+    // `PROJECT_LIST_BASE_SQL` + `ORDER BY`).
+    let stmt = if KNOWN_ORDER.contains(&order_key.as_str()) {
+        pidash_db::v1_projects::queries_projmem::project_list_get(&scope, &order_key)
+    } else {
+        let (desc, name) = match order_key.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, order_key.as_str()),
+        };
+        let direction = if desc {
+            sea_query::Order::Desc
+        } else {
+            sea_query::Order::Asc
+        };
+        let mut stmt = pidash_db::v1_projects::queries_projmem::project_list(&scope);
+        stmt.order_by(Alias::new(name), direction);
+        stmt
+    };
+    let rows: Vec<Row> = orm(&pre.pool)
+        .query_all(DbBackend::Postgres.build(&stmt))
         .await
         .map_err(|_| Denial::ServerError)?;
     let total_count = rows.len() as i64;
@@ -2504,15 +2748,18 @@ pub async fn workspace_has_member(
     workspace_id: &uuid::Uuid,
     member_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let exists: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(member_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(exists)
+    let hit: Option<uuid::Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(*workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(*member_id))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 fn field_str(data: &WriteData, field: &str) -> Option<String> {
@@ -2638,12 +2885,18 @@ pub async fn create_project_inner(
     let render_tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // `Workspace.objects.get(slug=slug)` — unreachable after a passing
     // permission (membership implies the row), still ported.
-    let ws_exists: bool =
-        sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "workspaces" WHERE "id" = $1)"#)
-            .bind(workspace_id)
-            .fetch_one(&pre.pool)
+    let ws_exists = {
+        let hit: Option<uuid::Uuid> = workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Id)
+            .filter(workspaces::Column::Id.eq(workspace_id))
+            .limit(1)
+            .into_tuple()
+            .one(&orm(&pre.pool))
             .await
             .map_err(|_| Denial::ServerError)?;
+        hit.is_some()
+    };
     if !ws_exists {
         return Err(Denial::NotFoundError("Workspace does not exist".to_owned()));
     }
@@ -2676,24 +2929,31 @@ pub async fn create_project_inner(
     // `create()` (`serializers/project.py:168-194`).
     let identifier = ser::normalize_identifier(identifier_raw.as_deref().unwrap_or(""));
     ser::require_identifier(&identifier).map_err(ser_denial)?;
-    let ident_taken: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "project_identifiers" WHERE "name" = $1 AND "workspace_id" = $2 AND "deleted_at" IS NULL)"#,
-    )
-    .bind(&identifier)
-    .bind(workspace_id)
-    .fetch_one(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let ident_taken = {
+        let hit: Option<i64> = project_identifiers::Entity::find()
+            .select_only()
+            .column(project_identifiers::Column::Id)
+            .filter(project_identifiers::Column::Name.eq(identifier.clone()))
+            .filter(project_identifiers::Column::WorkspaceId.eq(workspace_id))
+            .filter(project_identifiers::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(&orm(&pre.pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        hit.is_some()
+    };
     ser::check_identifier_taken(ident_taken).map_err(ser_denial)?;
     let logo_props = field_json(&data, "logo_props").unwrap_or_else(random_logo_props);
     let requested_default = field_bool(&data, "is_default").unwrap_or(false);
-    let ws_tz: Option<String> =
-        sqlx::query_scalar(r#"SELECT "timezone" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten();
+    let ws_tz: Option<String> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Timezone)
+        .filter(workspaces::Column::Id.eq(workspace_id))
+        .into_tuple()
+        .one(&orm(&pre.pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let timezone = field_str(&data, "timezone")
         .or(ws_tz)
         .unwrap_or_else(|| "UTC".to_owned());
@@ -2708,13 +2968,20 @@ pub async fn create_project_inner(
     };
     // `save()` auto-default (`db/models/project.py:261-270`): the first
     // project of a workspace becomes default.
-    let has_default: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "projects" WHERE "workspace_id" = $1 AND "is_default" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .fetch_one(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let has_default = {
+        let hit: Option<uuid::Uuid> = projects::Entity::find()
+            .select_only()
+            .column(projects::Column::Id)
+            .filter(projects::Column::WorkspaceId.eq(workspace_id))
+            .filter(projects::Column::IsDefault.eq(true))
+            .filter(projects::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(&orm(&pre.pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        hit.is_some()
+    };
     let is_default = requested_default || !has_default;
     let now = chrono::Utc::now();
     let description = field_str(&data, "description").unwrap_or_default();
@@ -2904,15 +3171,19 @@ pub async fn add_project_admin(
     )
     .await
     .map_err(|_| Denial::ServerError)?;
-    let min_sort: Option<f64> = sqlx::query_scalar(
-        r#"SELECT MIN("sort_order") FROM "project_user_properties" WHERE "workspace_id" = $1 AND "user_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(member_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?
-    .flatten();
+    let min_sort: Option<f64> = {
+        let hit: Option<Option<f64>> = project_user_properties::Entity::find()
+            .select_only()
+            .column_as(project_user_properties::Column::SortOrder.min(), "min")
+            .filter(project_user_properties::Column::WorkspaceId.eq(*workspace_id))
+            .filter(project_user_properties::Column::UserId.eq(*member_id))
+            .filter(project_user_properties::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&orm(pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        hit.flatten()
+    };
     let sort_order = min_sort.map(|m| m - 10000.0).unwrap_or(65535.0);
     let (filters, display_filters, display_properties) = user_property_defaults();
     let rich = serde_json::json!({});
@@ -3008,23 +3279,29 @@ pub async fn patch_project_inner(
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
     // `Workspace.objects.get` then `Project.objects.get(pk=pk)` — either
     // miss answers `{"error":"Project does not exist"}`.
-    let ws_exists: bool =
-        sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM "workspaces" WHERE "id" = $1)"#)
-            .bind(workspace_id)
-            .fetch_one(&pre.pool)
+    let ws_exists = {
+        let hit: Option<uuid::Uuid> = workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Id)
+            .filter(workspaces::Column::Id.eq(workspace_id))
+            .limit(1)
+            .into_tuple()
+            .one(&orm(&pre.pool))
             .await
             .map_err(|_| Denial::ServerError)?;
-    use pidash_services::read;
-    let mut rows = read::fetch_project_rows(&pre.pool, &[project_id])
-        .await
-        .map_err(|error| match error {
-            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
-            read::Error::Db(err) => {
-                let (site, source) = err.split();
-                db_error(source, site)
-            }
-        })?;
-    let plain = rows.pop();
+        hit.is_some()
+    };
+    // Plain-instance before-image (`Project.objects.get` shape): the full
+    // project row, soft-delete-guarded, rendered without annotations.
+    let plain: Option<Row> = ConnectionTrait::query_one(
+        &orm(&pre.pool),
+        projects::Entity::find()
+            .filter(projects::Column::Id.eq(project_id))
+            .filter(projects::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres),
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     let Some(plain) = plain else {
         return Err(Denial::NotFoundError("Project does not exist".to_owned()));
     };
@@ -3034,12 +3311,12 @@ pub async fn patch_project_inner(
     // Before-image for the activity call (`views/project.py:412`): a plain
     // instance, so the annotation keys are absent (`SkipField`).
     let snapshot = render_project(&pre.pool, &plain, None, false, &timezone, None, None).await?;
-    let project_name: String = plain.try_get("name").map_err(|_| Denial::ServerError)?;
+    let project_name: String = plain.try_get("", "name").map_err(|_| Denial::ServerError)?;
     let was_default: bool = plain
-        .try_get("is_default")
+        .try_get("", "is_default")
         .map_err(|_| Denial::ServerError)?;
     let was_archived: Option<chrono::DateTime<chrono::Utc>> = plain
-        .try_get("archived_at")
+        .try_get("", "archived_at")
         .map_err(|_| Denial::ServerError)?;
     // `intake_view` defaults to the stored value (`views/project.py:414`).
     // The merge only feeds the serializer: `requested_data` below stays the
@@ -3059,7 +3336,7 @@ pub async fn patch_project_inner(
     }
     if !merged.contains_key("intake_view") {
         let current: bool = plain
-            .try_get("intake_view")
+            .try_get("", "intake_view")
             .map_err(|_| Denial::ServerError)?;
         merged.insert("intake_view".to_owned(), Value::Bool(current));
     }
@@ -3136,40 +3413,55 @@ pub async fn patch_project_inner(
     .await?;
     // `intake_view` newly truthy + no default `Intake` → create it
     // (`views/project.py:431-438`, pre-save name in the title).
-    let intake_view_now: bool =
-        sqlx::query_scalar(r#"SELECT "intake_view" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .flatten()
-            .unwrap_or(false);
-    if intake_view_now {
-        let has_default_intake: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "intakes" WHERE "project_id" = $1 AND "is_default" AND "deleted_at" IS NULL)"#,
-        )
-        .bind(project_id)
-        .fetch_one(&pre.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if !has_default_intake {
-            let now = chrono::Utc::now();
-            sqlx::query(
-                r#"INSERT INTO "intakes" ("id", "created_at", "updated_at", "created_by_id",
-                    "project_id", "workspace_id",
-                    "name", "description", "is_default", "view_props", "logo_props")
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,'',TRUE,'{}','{}')"#,
-            )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(now)
-            .bind(pre.actor.id)
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(format!("{project_name} Intake"))
-            .execute(&pre.pool)
+    let intake_view_now: bool = {
+        let hit: Option<bool> = projects::Entity::find()
+            .select_only()
+            .column(projects::Column::IntakeView)
+            .filter(projects::Column::Id.eq(project_id))
+            .into_tuple()
+            .one(&orm(&pre.pool))
             .await
             .map_err(|_| Denial::ServerError)?;
+        hit.unwrap_or(false)
+    };
+    if intake_view_now {
+        let has_default_intake = {
+            let hit: Option<uuid::Uuid> = intakes::Entity::find()
+                .select_only()
+                .column(intakes::Column::Id)
+                .filter(intakes::Column::ProjectId.eq(project_id))
+                .filter(intakes::Column::IsDefault.eq(true))
+                .filter(intakes::Column::DeletedAt.is_null())
+                .limit(1)
+                .into_tuple()
+                .one(&orm(&pre.pool))
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            hit.is_some()
+        };
+        if !has_default_intake {
+            let now = chrono::Utc::now();
+            // `intakes` is not a write-guard covered table, so the write
+            // goes directly through SeaORM.
+            let model = intakes::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                name: Set(format!("{project_name} Intake")),
+                description: Set(String::new()),
+                is_default: Set(true),
+                view_props: Set(serde_json::json!({})),
+                created_by_id: Set(Some(pre.actor.id)),
+                project_id: Set(project_id),
+                updated_by_id: Set(None),
+                workspace_id: Set(workspace_id),
+                logo_props: Set(serde_json::json!({})),
+                deleted_at: Set(None),
+            };
+            intakes::Entity::insert(model)
+                .exec_without_returning(&orm(&pre.pool))
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
     }
     let row = fetch_detail_row(&pre.pool, slug, &pre.actor.id, &project_id)
@@ -3201,15 +3493,18 @@ pub async fn estimate_in_project(
     project_id: &uuid::Uuid,
     estimate_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let exists: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "estimates" WHERE "id" = $1 AND "project_id" = $2 AND "deleted_at" IS NULL)"#,
-    )
-    .bind(estimate_id)
-    .bind(project_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(exists)
+    let hit: Option<uuid::Uuid> = estimates::Entity::find()
+        .select_only()
+        .column(estimates::Column::Id)
+        .filter(estimates::Column::Id.eq(*estimate_id))
+        .filter(estimates::Column::ProjectId.eq(*project_id))
+        .filter(estimates::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// Apply the PATCH writes (`ProjectUpdateSerializer.update` +
@@ -3343,14 +3638,21 @@ pub async fn apply_project_update(
     // Model backstop (`db/models/project.py:274-290`): unsetting the last
     // default raises Django's `ValidationError` → the base-handler 400.
     if !new_default && was_default {
-        let replacement: bool = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "projects" WHERE "workspace_id" = $1 AND "is_default" AND "id" != $2 AND "deleted_at" IS NULL)"#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let replacement = {
+            let hit: Option<uuid::Uuid> = projects::Entity::find()
+                .select_only()
+                .column(projects::Column::Id)
+                .filter(projects::Column::WorkspaceId.eq(*workspace_id))
+                .filter(projects::Column::IsDefault.eq(true))
+                .filter(projects::Column::Id.ne(*project_id))
+                .filter(projects::Column::DeletedAt.is_null())
+                .limit(1)
+                .into_tuple()
+                .one(&orm(pool))
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            hit.is_some()
+        };
         if !replacement {
             return Err(Denial::BadError("Please provide valid detail".to_owned()));
         }
@@ -3411,15 +3713,17 @@ pub async fn delete_project_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<(bool,)> = sqlx::query_as(
-        r#"SELECT "is_default" FROM "projects" WHERE "id" = $1 AND "workspace_id" = $2 AND "deleted_at" IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(workspace_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((is_default,)) = row else {
+    let row: Option<bool> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::IsDefault)
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::WorkspaceId.eq(workspace_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pre.pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(is_default) = row else {
         return Err(Denial::NotFound);
     };
     if is_default {
@@ -3430,15 +3734,17 @@ pub async fn delete_project_inner(
     let now = chrono::Utc::now();
     // `UserFavorite` cascade (`views/project.py:493`): queryset
     // soft-delete over the triple filter.
-    sqlx::query(
-        r#"UPDATE "user_favorites" SET "deleted_at" = $1 WHERE "entity_type" = 'project' AND "entity_identifier" = $2 AND "project_id" = $3 AND "deleted_at" IS NULL"#,
-    )
-    .bind(now)
-    .bind(project_id)
-    .bind(project_id)
-    .execute(&pre.pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `user_favorites` is not a write-guard covered table, so the write
+    // goes directly through SeaORM.
+    user_favorites::Entity::update_many()
+        .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
+        .filter(user_favorites::Column::EntityType.eq("project"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(project_id))
+        .filter(user_favorites::Column::ProjectId.eq(project_id))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .exec(&orm(&pre.pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // Instance `delete()` → `save()`: `deleted_at` + `updated_*`.
     pidash_services::domain::projects::soft_delete_v1_project(
         &pre.pool,
@@ -3505,6 +3811,61 @@ pub async fn insert_default_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+
+    #[test]
+    fn summary_statement_is_one_statement_with_count_columns() {
+        // `summary_counts` stays one round-trip: one `COUNT(*)` scalar
+        // subquery column per field, sorted, `pages` aliased `pages_count`.
+        // Empty in, `None` out (no query).
+        let pid = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        assert!(summary_statement(pid, &[]).is_none());
+        assert!(summary_statement(pid, &["bogus"]).is_none());
+        let sql = summary_statement(pid, ALLOWED_SUMMARY_FIELDS)
+            .expect("full statement")
+            .to_string(PostgresQueryBuilder);
+        // One outer SELECT (subqueries are nested, not extra statements).
+        assert_eq!(sql.matches("SELECT").count(), 9, "{sql}");
+        assert!(!sql.contains(';'), "{sql}");
+        for alias in [
+            r#"AS "members""#,
+            r#"AS "states""#,
+            r#"AS "labels""#,
+            r#"AS "cycles""#,
+            r#"AS "modules""#,
+            r#"AS "issues""#,
+            r#"AS "intakes""#,
+            r#"AS "pages_count""#,
+        ] {
+            assert!(sql.contains(alias), "{sql}");
+        }
+        // Sorted column order (old `ordered.sort()`).
+        let members_at = sql.find(r#"AS "members""#).unwrap();
+        let pages_at = sql.find(r#"AS "pages_count""#).unwrap();
+        assert!(members_at < pages_at, "{sql}");
+        // Subquery predicates: soft-delete scope on every table,
+        // `is_active` only on members, triage-group only on issues.
+        assert!(
+            sql.contains(
+                r#"FROM "project_members" WHERE "project_members"."project_id" = '11111111-1111-1111-1111-111111111111' AND "project_members"."deleted_at" IS NULL AND "project_members"."is_active" = TRUE"#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"FROM "states" WHERE "states"."project_id" = '11111111-1111-1111-1111-111111111111' AND "states"."deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.contains(r#"INNER JOIN "states" AS "s" ON "s"."id" = "i"."state_id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""s"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#"FROM "intake_issues""#), "{sql}");
+        assert!(sql.contains(r#"FROM "project_pages""#), "{sql}");
+        // Narrow request renders only that column.
+        let narrow = summary_statement(pid, &["states"])
+            .expect("narrow statement")
+            .to_string(PostgresQueryBuilder);
+        assert!(narrow.contains(r#"AS "states""#), "{narrow}");
+        assert!(!narrow.contains(r#"AS "members""#), "{narrow}");
+    }
 
     #[test]
     fn soft_delete_message_shape() {
@@ -3928,12 +4289,13 @@ mod tests {
 /// Live scratch-DB render (env-gated, the `handlers_members::live_tests`
 /// precedent): without `DATABASE_URL` (plain `cargo test`) this skips; the
 /// runbook sets `export DATABASE_URL=postgresql://…` for the real check.
-/// The row is a synthetic single-row `SELECT` (no seeding, no teardown);
+/// The row is a synthetic single-row projection (no seeding, no teardown);
 /// with no cover asset and no `expand`, the pool is never touched.
 #[cfg(test)]
 mod live_tests {
     use super::*;
     use chrono_tz::Tz;
+    use sea_query::{Alias, Expr, Query};
 
     async fn live_pool() -> Option<sqlx::PgPool> {
         match std::env::var("DATABASE_URL") {
@@ -3960,58 +4322,89 @@ mod live_tests {
         let Some(pool) = live_pool().await else {
             return;
         };
-        let row: sqlx::postgres::PgRow = sqlx::query(
-            r#"SELECT
-                '11111111-1111-1111-1111-111111111111'::uuid AS id,
-                NULL::uuid AS cover_image_asset_id,
-                NULL::text AS cover_image,
-                '2026-01-02T03:04:05Z'::timestamptz AS created_at,
-                '2026-01-03T04:05:06Z'::timestamptz AS updated_at,
-                NULL::timestamptz AS deleted_at,
-                'CT Project'::text AS name,
-                NULL::text AS description,
-                NULL::jsonb AS description_text,
-                NULL::jsonb AS description_html,
-                2::smallint AS network,
-                'CT'::text AS identifier,
-                NULL::text AS emoji,
-                NULL::jsonb AS icon_prop,
-                false AS module_view,
-                false AS cycle_view,
-                false AS issue_views_view,
-                false AS page_view,
-                false AS intake_view,
-                true AS is_time_tracking_enabled,
-                true AS is_issue_type_enabled,
-                false AS is_default,
-                false AS guest_view_all_features,
-                true AS members_can_edit_states,
-                1 AS archive_in,
-                2 AS close_in,
-                NULL::jsonb AS logo_props,
-                NULL::timestamptz AS archived_at,
-                'UTC'::text AS timezone,
-                NULL::text AS external_source,
-                NULL::text AS external_id,
-                NULL::text AS repo_url,
-                NULL::text AS base_branch,
-                300 AS agent_default_interval_seconds,
-                10 AS agent_default_max_ticks,
-                300 AS agent_review_default_interval_seconds,
-                300 AS agent_test_default_interval_seconds,
-                true AS agent_ticking_enabled,
-                'codex'::text AS default_agent_executor,
-                NULL::uuid AS created_by_id,
-                NULL::uuid AS updated_by_id,
-                '22222222-2222-2222-2222-222222222222'::uuid AS workspace_id,
-                NULL::uuid AS default_assignee_id,
-                NULL::uuid AS project_lead_id,
-                NULL::uuid AS estimate_id,
-                NULL::uuid AS default_state_id"#,
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("synthetic row");
+        let row_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let ws_id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z").unwrap();
+        let at2 = chrono::DateTime::parse_from_rfc3339("2026-01-03T04:05:06Z").unwrap();
+        let mut sel = Query::select();
+        sel.expr_as(Expr::value(row_id), Alias::new("id"));
+        sel.expr_as(
+            Expr::value(None::<uuid::Uuid>),
+            Alias::new("cover_image_asset_id"),
+        );
+        sel.expr_as(Expr::value(None::<String>), Alias::new("cover_image"));
+        sel.expr_as(Expr::value(at), Alias::new("created_at"));
+        sel.expr_as(Expr::value(at2), Alias::new("updated_at"));
+        sel.expr_as(
+            Expr::value(None::<chrono::DateTime<chrono::FixedOffset>>),
+            Alias::new("deleted_at"),
+        );
+        sel.expr_as(Expr::value("CT Project"), Alias::new("name"));
+        sel.expr_as(Expr::value(None::<String>), Alias::new("description"));
+        sel.expr_as(Expr::value(None::<Value>), Alias::new("description_text"));
+        sel.expr_as(Expr::value(None::<Value>), Alias::new("description_html"));
+        sel.expr_as(Expr::value(2_i16), Alias::new("network"));
+        sel.expr_as(Expr::value("CT"), Alias::new("identifier"));
+        sel.expr_as(Expr::value(None::<String>), Alias::new("emoji"));
+        sel.expr_as(Expr::value(None::<Value>), Alias::new("icon_prop"));
+        sel.expr_as(Expr::value(false), Alias::new("module_view"));
+        sel.expr_as(Expr::value(false), Alias::new("cycle_view"));
+        sel.expr_as(Expr::value(false), Alias::new("issue_views_view"));
+        sel.expr_as(Expr::value(false), Alias::new("page_view"));
+        sel.expr_as(Expr::value(false), Alias::new("intake_view"));
+        sel.expr_as(Expr::value(true), Alias::new("is_time_tracking_enabled"));
+        sel.expr_as(Expr::value(true), Alias::new("is_issue_type_enabled"));
+        sel.expr_as(Expr::value(false), Alias::new("is_default"));
+        sel.expr_as(Expr::value(false), Alias::new("guest_view_all_features"));
+        sel.expr_as(Expr::value(true), Alias::new("members_can_edit_states"));
+        sel.expr_as(Expr::value(1_i32), Alias::new("archive_in"));
+        sel.expr_as(Expr::value(2_i32), Alias::new("close_in"));
+        sel.expr_as(Expr::value(None::<Value>), Alias::new("logo_props"));
+        sel.expr_as(
+            Expr::value(None::<chrono::DateTime<chrono::FixedOffset>>),
+            Alias::new("archived_at"),
+        );
+        sel.expr_as(Expr::value("UTC"), Alias::new("timezone"));
+        sel.expr_as(Expr::value(None::<String>), Alias::new("external_source"));
+        sel.expr_as(Expr::value(None::<String>), Alias::new("external_id"));
+        sel.expr_as(Expr::value(None::<String>), Alias::new("repo_url"));
+        sel.expr_as(Expr::value(None::<String>), Alias::new("base_branch"));
+        sel.expr_as(
+            Expr::value(300_i32),
+            Alias::new("agent_default_interval_seconds"),
+        );
+        sel.expr_as(Expr::value(10_i32), Alias::new("agent_default_max_ticks"));
+        sel.expr_as(
+            Expr::value(300_i32),
+            Alias::new("agent_review_default_interval_seconds"),
+        );
+        sel.expr_as(
+            Expr::value(300_i32),
+            Alias::new("agent_test_default_interval_seconds"),
+        );
+        sel.expr_as(Expr::value(true), Alias::new("agent_ticking_enabled"));
+        sel.expr_as(Expr::value("codex"), Alias::new("default_agent_executor"));
+        sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("created_by_id"));
+        sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("updated_by_id"));
+        sel.expr_as(Expr::value(ws_id), Alias::new("workspace_id"));
+        sel.expr_as(
+            Expr::value(None::<uuid::Uuid>),
+            Alias::new("default_assignee_id"),
+        );
+        sel.expr_as(
+            Expr::value(None::<uuid::Uuid>),
+            Alias::new("project_lead_id"),
+        );
+        sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("estimate_id"));
+        sel.expr_as(
+            Expr::value(None::<uuid::Uuid>),
+            Alias::new("default_state_id"),
+        );
+        let row: Row =
+            sea_orm::ConnectionTrait::query_one(&orm(&pool), DbBackend::Postgres.build(&sel))
+                .await
+                .expect("synthetic row")
+                .expect("synthetic row present");
         let ann = ReadAnnotations {
             total_members: 7,
             total_cycles: 3,

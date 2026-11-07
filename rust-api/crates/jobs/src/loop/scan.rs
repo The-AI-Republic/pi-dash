@@ -364,8 +364,9 @@ pub async fn reconcile_targets(pool: &PgPool, now: &DateTime<Utc>) -> Result<usi
     if !should_reconcile(now.minute(), every) {
         return Ok(0);
     }
+    let db = pidash_db::sea_orm_connection(pool);
     let mut created = 0usize;
-    for job in queries::fetch_enabled_jobs(pool).await? {
+    for job in queries::fetch_enabled_jobs(&db).await? {
         let Some(next) = next_fire_for_job(&job, now) else {
             // Bad RRULE — admin API validation should make this unreachable.
             tracing::warn!(job_slug = %job.slug, rrule = %job.rrule, "loop.reconcile: unusable rrule");
@@ -434,21 +435,18 @@ pub async fn advance_ineligible_due(
     now: &DateTime<Utc>,
     eligible_ids: &HashSet<Uuid>,
 ) -> Result<usize, Error> {
-    let rows = sqlx::query(&queries::due_targets_sql())
-        .bind(*now)
-        .fetch_all(pool)
-        .await?;
+    let db = pidash_db::sea_orm_connection(pool);
+    let targets = queries::fetch_due_targets(&db, *now).await?;
     // Per-job next-fire cache (`bgtasks/loop.py:125,129-131`), warmed
     // from the enabled-job read the scanner already trusts.
     let mut jobs: HashMap<Uuid, LoopJob> = HashMap::new();
-    for job in queries::fetch_enabled_jobs(pool).await? {
+    for job in queries::fetch_enabled_jobs(&db).await? {
         jobs.insert(job.id, job);
     }
     let mut next_by_job: HashMap<Uuid, Option<DateTime<Utc>>> = HashMap::new();
     let mut advanced = 0usize;
     let mut tx = pool.begin().await?;
-    for row in &rows {
-        let target = queries::map_loop_target_row(row)?;
+    for target in &targets {
         if eligible_ids.contains(&target.id) {
             continue;
         }
@@ -472,14 +470,22 @@ pub async fn advance_ineligible_due(
         };
         // Fixed precedence, same reads as the fire-time re-check
         // (`eligibility.py:122-154`): master pause → job opt-out →
-        // membership/role → LLM credentials.
-        let master_paused = !queries::fetch_master_enabled(&mut *tx, target.user_id).await?;
-        let off_ids = queries::fetch_off_job_ids(&mut *tx, target.user_id).await?;
-        let job_opted_out = off_ids.contains(&target.job_id);
+        // membership/role → LLM credentials. The `queries` reads run
+        // on the same transaction through `TxConn`; `fetch_member_role`
+        // stays on the sqlx executor between them.
+        let (master_paused, job_opted_out) = {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            let master_paused = !queries::fetch_master_enabled(&conn, target.user_id).await?;
+            let off_ids = queries::fetch_off_job_ids(&conn, target.user_id).await?;
+            (master_paused, off_ids.contains(&target.job_id))
+        };
         let role = fetch_member_role(&mut *tx, &target.workspace_id, &target.user_id)
             .await?
             .map(|r| r as i32);
-        let has_llm = queries::fetch_user_has_llm(&mut *tx, target.user_id).await?;
+        let has_llm = {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            queries::fetch_user_has_llm(&conn, target.user_id).await?
+        };
         let reason = pidash_services::r#loop::eligibility::check(
             master_paused,
             job_opted_out,
@@ -526,10 +532,8 @@ pub async fn scan_due_targets(pool: &PgPool, now: &DateTime<Utc>) -> Result<usiz
     let cap = dispatch_cap();
     // Evaluate the eligible set once; cap the dispatch slice in Rust and
     // reuse the full set to exclude eligibles from the ineligible pass.
-    let eligible_ids: Vec<Uuid> = sqlx::query_scalar(&queries::eligible_due_target_ids_sql())
-        .bind(*now)
-        .fetch_all(pool)
-        .await?;
+    let db = pidash_db::sea_orm_connection(pool);
+    let eligible_ids: Vec<Uuid> = queries::fetch_eligible_due_target_ids(&db, *now).await?;
     let ids = cap_ids(eligible_ids.clone(), cap);
     for target_id in &ids {
         enqueue(pool, &fire_job(target_id)).await?;

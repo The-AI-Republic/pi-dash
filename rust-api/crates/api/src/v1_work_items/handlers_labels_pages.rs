@@ -657,10 +657,12 @@ pub async fn rewrite_project_id(
     };
     match classify_lookup(raw) {
         ProjectLookup::Pk(id) => Ok(id),
-        ProjectLookup::Identifier(_) => q::fetch_project_id(pool, &scope, raw)
-            .await
-            .map_err(|error| db_error(error, "rewrite-project"))?
-            .ok_or(Denial::ProjectNotFound),
+        ProjectLookup::Identifier(_) => {
+            q::fetch_project_id(&pidash_db::pool::sea_orm_connection(pool), &scope, raw)
+                .await
+                .map_err(|error| db_error(error, "rewrite-project"))?
+                .ok_or(Denial::ProjectNotFound)
+        }
     }
 }
 

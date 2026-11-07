@@ -84,19 +84,24 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_enroll::columns::enums::{RUNNER_STATUS_OFFLINE, RUNNER_STATUS_ONLINE};
-use pidash_db::runner_runs::{agent_run, approval};
 use pidash_services::runner_runs::finalization::{
-    error_details_patch, finalize_error_code, finalize_update_sql, lock_run_for_finalize_sql,
-    plan_finalize_values, plan_terminal_event, terminal_event_exists_sql,
-    terminal_event_insert_sql, terminal_event_max_seq_sql, TERMINAL_EFFECTS_TASK,
+    self, finalize_error_code, plan_finalize_values, TERMINAL_EFFECTS_TASK,
 };
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus, TERMINAL_RUN_STATUSES};
+use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus};
 
 use crate::queue::{self, JobRow, NewJob};
 use crate::task_message::TaskMessage;
@@ -213,67 +218,101 @@ pub fn idle_cutoff(now: &DateTime<Utc>, poll_secs: i64) -> DateTime<Utc> {
 }
 
 // ---------------------------------------------------------------------------
-// SQL builders (Django 4.2.30 text, `%s` → `$N`)
+// Statements (SeaORM builders; same predicates, order and locks as the
+// Django 4.2.30 text they replace)
 // ---------------------------------------------------------------------------
 
-/// Expired-pending approval ids (`tasks.py:47-49`).
-/// Binds: `$1` now, `$2` `pending`.
-pub fn pending_expired_approvals_select() -> String {
-    "SELECT \"agent_run_approval\".\"id\" FROM \"agent_run_approval\" WHERE \
-     (\"agent_run_approval\".\"expires_at\" < $1 AND \"agent_run_approval\".\"status\" = $2) \
-     ORDER BY \"agent_run_approval\".\"requested_at\" DESC"
-        .to_owned()
+/// Expired-pending approval ids (`tasks.py:47-49`), `ORDER BY
+/// requested_at DESC`.
+pub fn pending_expired_approvals_select(
+    now: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::agent_run_approval::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::ExpiresAt.lt(now))
+        .filter(Column::Status.eq(ApprovalStatus::Pending.value()))
+        .order_by_desc(Column::RequestedAt)
+        .into_tuple::<Uuid>()
+}
+
+/// The locked approval's run facts ([`lock_approval_for_expiry_select`]).
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct ApprovalLockRow {
+    pub run_id: Uuid,
+    pub run_status: String,
+    pub run_runner_id: Option<Uuid>,
 }
 
 /// Approval lock + run fetch (`tasks.py:54-59`): `select_for_update()`
 /// (no `OF`, so the joined `agent_run` row locks too) with
 /// `select_related("agent_run")`, `filter(pk, status=pending).first()`.
-/// Binds: `$1` approval id, `$2` `pending`.
-pub fn lock_approval_for_expiry_select() -> String {
-    let approval_cols = approval::COLUMNS
-        .iter()
-        .map(|c| format!("\"agent_run_approval\".\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let run_cols = agent_run::COLUMNS
-        .iter()
-        .map(|c| format!("\"agent_run\".\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT {approval_cols}, {run_cols} FROM \"agent_run_approval\" INNER JOIN \"agent_run\" ON \
-         (\"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\") WHERE \
-         (\"agent_run_approval\".\"id\" = $1 AND \"agent_run_approval\".\"status\" = $2) \
-         ORDER BY \"agent_run_approval\".\"requested_at\" DESC LIMIT 1 FOR UPDATE"
-    )
+/// Reads the run's id, status and runner.
+pub fn lock_approval_for_expiry_select(
+    approval_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<ApprovalLockRow>> {
+    use orm::agent_run_approval::{Column, Entity, Relation};
+    Entity::find()
+        .select_only()
+        .column_as(orm::agent_run::Column::Id, "run_id")
+        .column_as(orm::agent_run::Column::Status, "run_status")
+        .column_as(orm::agent_run::Column::RunnerId, "run_runner_id")
+        .join(JoinType::InnerJoin, Relation::AgentRun.def())
+        .filter(Column::Id.eq(approval_id))
+        .filter(Column::Status.eq(ApprovalStatus::Pending.value()))
+        .order_by_desc(Column::RequestedAt)
+        .limit(1)
+        .lock_exclusive()
+        .into_model::<ApprovalLockRow>()
 }
 
-/// `EXPIRED` stamp (`tasks.py:62-65`): `SET` in `update()` call order.
-/// Binds: `$1` `expired`, `$2` now, `$3` approval id.
-pub fn stamp_approval_expired_sql() -> String {
-    "UPDATE \"agent_run_approval\" SET \"status\" = $1, \"decided_at\" = $2 WHERE \
-     \"agent_run_approval\".\"id\" = $3"
-        .to_owned()
+/// `EXPIRED` stamp (`tasks.py:62-65`): `status`, `decided_at`.
+pub fn stamp_approval_expired_statement(
+    approval_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<orm::agent_run_approval::Entity> {
+    use orm::agent_run_approval::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(ApprovalStatus::Expired.value()))
+        .col_expr(Column::DecidedAt, Expr::value(now))
+        .filter(Column::Id.eq(approval_id))
 }
 
 /// Shared offline flip (`tasks.py:104-108`, `:145-149`): `UPDATE` runners
 /// `ONLINE` and `NOT (last_heartbeat_at >= $ AND NOT NULL)` to `OFFLINE`.
 /// Both tasks share this shape; only the threshold differs (the ported
-/// overlap). Binds: `$1` `offline`, `$2` `online`, `$3` threshold.
-pub fn mark_online_runners_offline_sql() -> String {
-    "UPDATE \"runner\" SET \"status\" = $1 WHERE (\"runner\".\"status\" = $2 AND NOT \
-     (\"runner\".\"last_heartbeat_at\" >= $3 AND \"runner\".\"last_heartbeat_at\" IS NOT NULL))"
-        .to_owned()
+/// overlap). The `IS NOT NULL` inside the `NOT` is what flips `NULL`
+/// heartbeats offline.
+pub fn mark_online_runners_offline_statement(
+    threshold: DateTime<Utc>,
+) -> sea_orm::UpdateMany<orm::runner::Entity> {
+    use orm::runner::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(RUNNER_STATUS_OFFLINE))
+        .filter(Column::Status.eq(RUNNER_STATUS_ONLINE))
+        .filter(
+            Condition::all()
+                .add(Column::LastHeartbeatAt.gte(threshold))
+                .add(Column::LastHeartbeatAt.is_not_null())
+                .not(),
+        )
 }
 
 /// Idle-session candidates (`tasks.py:127-129`): unrevoked rows with
 /// `last_seen_at` past the cutoff, `(id, runner_id)` in `values_list`
-/// order. Binds: `$1` threshold.
-pub fn idle_sessions_select() -> String {
-    "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\" FROM \"runner_session\" WHERE \
-     (\"runner_session\".\"last_seen_at\" < $1 AND \"runner_session\".\"revoked_at\" IS NULL) \
-     ORDER BY \"runner_session\".\"created_at\" DESC"
-        .to_owned()
+/// order, `ORDER BY created_at DESC`.
+pub fn idle_sessions_select(
+    threshold: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, Uuid)>> {
+    use orm::runner_session::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([Column::Id, Column::RunnerId])
+        .filter(Column::LastSeenAt.lt(threshold))
+        .filter(Column::RevokedAt.is_null())
+        .order_by_desc(Column::CreatedAt)
+        .into_tuple::<(Uuid, Uuid)>()
 }
 
 // NOTE: the idle-session revoke builder lived here; the statement moved
@@ -282,22 +321,32 @@ pub fn idle_sessions_select() -> String {
 // empty-set early return).
 
 /// Active `(runner_id, session_id)` pairs (`tasks.py:171`), in
-/// `values_list` order. No binds.
-pub fn active_session_pairs_select() -> String {
-    "SELECT \"runner_session\".\"runner_id\", \"runner_session\".\"id\" FROM \"runner_session\" WHERE \
-     \"runner_session\".\"revoked_at\" IS NULL ORDER BY \"runner_session\".\"created_at\" DESC"
-        .to_owned()
+/// `values_list` order, `ORDER BY created_at DESC`.
+pub fn active_session_pairs_select() -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, Uuid)>>
+{
+    use orm::runner_session::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([Column::RunnerId, Column::Id])
+        .filter(Column::RevokedAt.is_null())
+        .order_by_desc(Column::CreatedAt)
+        .into_tuple::<(Uuid, Uuid)>()
 }
 
 /// Runner ids with sessions (`tasks.py:175`): `values_list("runner_id",
 /// flat=True).distinct()`. Django adds `created_at` to the `DISTINCT`
 /// list so the `ORDER BY` survives — the pair can repeat a runner id,
 /// and the driver dedupes through a set exactly like the source. The
-/// live layer reads column 0 only. No binds.
-pub fn runner_ids_with_sessions_select() -> String {
-    "SELECT DISTINCT \"runner_session\".\"runner_id\", \"runner_session\".\"created_at\" FROM \
-     \"runner_session\" ORDER BY \"runner_session\".\"created_at\" DESC"
-        .to_owned()
+/// live layer reads the runner id only.
+pub fn runner_ids_with_sessions_select(
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, DateTime<Utc>)>> {
+    use orm::runner_session::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .distinct()
+        .columns([Column::RunnerId, Column::CreatedAt])
+        .order_by_desc(Column::CreatedAt)
+        .into_tuple::<(Uuid, DateTime<Utc>)>()
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +435,12 @@ impl std::error::Error for SweepsError {}
 impl From<sqlx::Error> for SweepsError {
     fn from(error: sqlx::Error) -> Self {
         Self(error.to_string())
+    }
+}
+
+impl From<sea_orm::DbErr> for SweepsError {
+    fn from(error: sea_orm::DbErr) -> Self {
+        Self(pidash_db::orm_tx::into_sqlx(error).to_string())
     }
 }
 
@@ -792,28 +847,13 @@ impl LiveSweepsRunsStore {
     }
 }
 
-/// Expected `SET` column order for the expiry finalize: the four L4 base
-/// clauses plus the three extras in `tasks.py:76-80` order. The live
-/// bind below is positional; a mismatch fails loudly instead of binding
-/// wrong. No `done_payload` clause, so the merge step is a no-op here.
-const EXPIRY_FINALIZE_COLUMNS: [&str; 6] = [
-    "status",
-    "ended_at",
-    "terminal_hooks_applied_at",
-    "terminal_capacity_released_at",
-    "cancel_reason",
-    "error_details",
-];
-
 impl SweepsRunsStore for LiveSweepsRunsStore {
     async fn pending_expired_approval_ids(
         &self,
         now: DateTime<Utc>,
     ) -> Result<Vec<Uuid>, SweepsError> {
-        sqlx::query_scalar::<_, Uuid>(&pending_expired_approvals_select())
-            .bind(now)
-            .bind(ApprovalStatus::Pending.value())
-            .fetch_all(&self.pool)
+        pending_expired_approvals_select(now)
+            .all(&sea_orm_connection(&self.pool))
             .await
             .map_err(SweepsError::from)
     }
@@ -824,139 +864,21 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         now: DateTime<Utc>,
     ) -> Result<ExpireOutcome, SweepsError> {
         let mut tx = self.pool.begin().await?;
-        let locked = sqlx::query(&lock_approval_for_expiry_select())
-            .bind(approval_id)
-            .bind(ApprovalStatus::Pending.value())
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(row) = locked else {
-            tx.rollback().await?;
-            return Ok(ExpireOutcome::skipped());
+        let outcome = {
+            let conn = TxConn::new(&mut tx);
+            expire_approval_locked(&conn, approval_id, now).await
         };
-        // Positional decode: both tables carry `id` and `status`, so a
-        // by-name lookup would read the approval's columns.
-        let run_col = |name: &str| {
-            agent_run::COLUMNS
-                .iter()
-                .position(|c| *c == name)
-                .map(|i| approval::COLUMNS.len() + i)
-                .ok_or_else(|| SweepsError::internal(format!("agent_run has no column {name}")))
-        };
-        let run_id: Uuid = row.try_get(run_col("id")?)?;
-        let run_status: String = row.try_get(run_col("status")?)?;
-        let run_runner_id: Option<Uuid> = row.try_get(run_col("runner_id")?)?;
-        sqlx::query(&stamp_approval_expired_sql())
-            .bind(ApprovalStatus::Expired.value())
-            .bind(now)
-            .bind(approval_id)
-            .execute(&mut *tx)
-            .await?;
-        let cancellable = matches!(
-            AgentRunStatus::from_value(&run_status),
-            Some(AgentRunStatus::AwaitingApproval | AgentRunStatus::Running)
-        );
-        if !cancellable {
-            tx.commit().await?;
-            return Ok(ExpireOutcome {
-                stamped: true,
-                finalized_run: None,
-                cancel_send: None,
-            });
-        }
-        // `finalize_agent_run(run, CANCELLED, updates, expected_runner_id)`
-        // (`finalization.py:48-86`) via the L4 planners. The nested
-        // `atomic()` is a savepoint elided into this transaction (see the
-        // module docs); the lock's miss arm is kept for shape although
-        // the joined approval lock above already holds this row.
-        let values = plan_finalize_values(
-            AgentRunStatus::Cancelled,
-            &[
-                (
-                    "error_code",
-                    pidash_services::runner_runs::SetValue::Text(
-                        CANCEL_REASON_APPROVAL_TIMEOUT.to_owned(),
-                    ),
-                ),
-                (
-                    "error",
-                    pidash_services::runner_runs::SetValue::Text(APPROVAL_TIMEOUT_ERROR.to_owned()),
-                ),
-                (
-                    "cancel_reason",
-                    pidash_services::runner_runs::SetValue::Text(
-                        CANCEL_REASON_APPROVAL_TIMEOUT.to_owned(),
-                    ),
-                ),
-            ],
-        )
-        .map_err(|error| SweepsError::internal(error.to_string()))?;
-        let columns: Vec<&str> = values.clauses.iter().map(|c| c.column).collect();
-        if columns.as_slice() != EXPIRY_FINALIZE_COLUMNS {
-            return Err(SweepsError::internal(format!(
-                "expiry finalize SET order drifted: {columns:?}"
-            )));
-        }
-        let with_runner = run_runner_id.is_some();
-        let lock_sql = lock_run_for_finalize_sql(with_runner, false);
-        let mut lock = sqlx::query(&lock_sql).bind(run_id);
-        for status in TERMINAL_RUN_STATUSES {
-            lock = lock.bind(status.value());
-        }
-        if let Some(runner_id) = run_runner_id {
-            lock = lock.bind(runner_id);
-        }
-        let finalized_row = lock.fetch_optional(&mut *tx).await?;
-        let Some(finalized_row) = finalized_row else {
-            tx.commit().await?;
-            return Ok(ExpireOutcome {
-                stamped: true,
-                finalized_run: None,
-                cancel_send: None,
-            });
-        };
-        sqlx::query(&finalize_update_sql(&values))
-            .bind(AgentRunStatus::Cancelled.value())
-            .bind(now)
-            .bind(None::<DateTime<Utc>>)
-            .bind(None::<DateTime<Utc>>)
-            .bind(CANCEL_REASON_APPROVAL_TIMEOUT)
-            .bind(error_details_patch(&values))
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
-        let executor_kind: String = finalized_row.try_get("executor_kind")?;
-        if AgentExecutorKind::from_value(&executor_kind) == Some(AgentExecutorKind::CloudAgent) {
-            let exists = sqlx::query_scalar::<_, i32>(terminal_event_exists_sql())
-                .bind(run_id)
-                .bind(TERMINAL_EVENT_KIND)
-                .fetch_optional(&mut *tx)
-                .await?;
-            if exists.is_none() {
-                let max_seq = sqlx::query_scalar::<_, i32>(terminal_event_max_seq_sql())
-                    .bind(run_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-                let plan = plan_terminal_event(
-                    max_seq,
-                    AgentRunStatus::Cancelled,
-                    &finalize_error_code(&values),
-                );
-                sqlx::query(&terminal_event_insert_sql())
-                    .bind(run_id)
-                    .bind(plan.seq)
-                    .bind(TERMINAL_EVENT_KIND)
-                    .bind(plan.payload)
-                    .bind(now)
-                    .execute(&mut *tx)
-                    .await?;
+        match outcome {
+            Ok(None) => {
+                tx.rollback().await?;
+                Ok(ExpireOutcome::skipped())
             }
+            Ok(Some(outcome)) => {
+                tx.commit().await?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
         }
-        tx.commit().await?;
-        Ok(ExpireOutcome {
-            stamped: true,
-            finalized_run: Some(run_id),
-            cancel_send: run_runner_id.map(|runner_id| (runner_id, run_id)),
-        })
     }
 
     async fn emit_terminal_effects(&self, run_id: Uuid) -> Result<(), SweepsError> {
@@ -968,22 +890,18 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
         &self,
         threshold: DateTime<Utc>,
     ) -> Result<u64, SweepsError> {
-        let result = sqlx::query(&mark_online_runners_offline_sql())
-            .bind(RUNNER_STATUS_OFFLINE)
-            .bind(RUNNER_STATUS_ONLINE)
-            .bind(threshold)
-            .execute(&self.pool)
+        let result = mark_online_runners_offline_statement(threshold)
+            .exec(&sea_orm_connection(&self.pool))
             .await?;
-        Ok(result.rows_affected())
+        Ok(result.rows_affected)
     }
 
     async fn idle_sessions(
         &self,
         threshold: DateTime<Utc>,
     ) -> Result<Vec<(Uuid, Uuid)>, SweepsError> {
-        sqlx::query_as::<_, (Uuid, Uuid)>(&idle_sessions_select())
-            .bind(threshold)
-            .fetch_all(&self.pool)
+        idle_sessions_select(threshold)
+            .all(&sea_orm_connection(&self.pool))
             .await
             .map_err(SweepsError::from)
     }
@@ -1004,18 +922,104 @@ impl SweepsRunsStore for LiveSweepsRunsStore {
     }
 
     async fn active_session_pairs(&self) -> Result<Vec<(Uuid, Uuid)>, SweepsError> {
-        sqlx::query_as::<_, (Uuid, Uuid)>(&active_session_pairs_select())
-            .fetch_all(&self.pool)
+        active_session_pairs_select()
+            .all(&sea_orm_connection(&self.pool))
             .await
             .map_err(SweepsError::from)
     }
 
     async fn runner_ids_with_sessions(&self) -> Result<Vec<Uuid>, SweepsError> {
-        let rows = sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(&runner_ids_with_sessions_select())
-            .fetch_all(&self.pool)
+        let rows = runner_ids_with_sessions_select()
+            .all(&sea_orm_connection(&self.pool))
             .await?;
         Ok(rows.into_iter().map(|(rid, _)| rid).collect())
     }
+}
+
+/// The approval expiry block under its transaction (`tasks.py:53-84`):
+/// lock the still-pending row (joined run fetch), stamp `EXPIRED`, and
+/// when the run is awaiting-approval/running finalize it to `CANCELLED`
+/// through the L4 SeaORM kernel (cloud-only terminal event). `None` is
+/// a lock miss (the caller rolls back); `Some` commits.
+async fn expire_approval_locked(
+    conn: &impl sea_orm::ConnectionTrait,
+    approval_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<Option<ExpireOutcome>, SweepsError> {
+    let Some(row) = lock_approval_for_expiry_select(approval_id)
+        .one(conn)
+        .await?
+    else {
+        return Ok(None);
+    };
+    stamp_approval_expired_statement(approval_id, now)
+        .exec(conn)
+        .await?;
+    let cancellable = matches!(
+        AgentRunStatus::from_value(&row.run_status),
+        Some(AgentRunStatus::AwaitingApproval | AgentRunStatus::Running)
+    );
+    if !cancellable {
+        return Ok(Some(ExpireOutcome {
+            stamped: true,
+            finalized_run: None,
+            cancel_send: None,
+        }));
+    }
+    // `finalize_agent_run(run, CANCELLED, updates, expected_runner_id)`
+    // (`finalization.py:48-86`) via the L4 planners. The nested
+    // `atomic()` is a savepoint elided into this transaction (see the
+    // module docs); the lock's miss arm is kept for shape although
+    // the joined approval lock above already holds this row.
+    let values = plan_finalize_values(
+        AgentRunStatus::Cancelled,
+        &[
+            (
+                "error_code",
+                pidash_services::runner_runs::SetValue::Text(
+                    CANCEL_REASON_APPROVAL_TIMEOUT.to_owned(),
+                ),
+            ),
+            (
+                "error",
+                pidash_services::runner_runs::SetValue::Text(APPROVAL_TIMEOUT_ERROR.to_owned()),
+            ),
+            (
+                "cancel_reason",
+                pidash_services::runner_runs::SetValue::Text(
+                    CANCEL_REASON_APPROVAL_TIMEOUT.to_owned(),
+                ),
+            ),
+        ],
+    )
+    .map_err(|error| SweepsError::internal(error.to_string()))?;
+    let Some(finalized) =
+        finalization::lock_run_for_finalize(conn, row.run_id, row.run_runner_id, None).await?
+    else {
+        return Ok(Some(ExpireOutcome {
+            stamped: true,
+            finalized_run: None,
+            cancel_send: None,
+        }));
+    };
+    finalization::finalize_update(conn, &values, row.run_id, now).await?;
+    if AgentExecutorKind::from_value(&finalized.executor_kind)
+        == Some(AgentExecutorKind::CloudAgent)
+    {
+        finalization::append_terminal_event_once(
+            conn,
+            row.run_id,
+            AgentRunStatus::Cancelled,
+            &finalize_error_code(&values),
+            now,
+        )
+        .await?;
+    }
+    Ok(Some(ExpireOutcome {
+        stamped: true,
+        finalized_run: Some(row.run_id),
+        cancel_send: row.run_runner_id.map(|runner_id| (runner_id, row.run_id)),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,47 +1445,65 @@ mod tests {
         }
     }
 
+    fn pg_selector<S: sea_orm::SelectorTrait>(selector: sea_orm::Selector<S>) -> String {
+        selector
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string()
+    }
+
+    fn pg_update<E: sea_orm::EntityTrait>(update: sea_orm::UpdateMany<E>) -> String {
+        sea_orm::QueryTrait::build(&update, sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn at() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()
+    }
+
     #[test]
-    fn pending_expired_sql_byte_exact() {
+    fn pending_expired_statement_shape() {
         assert_eq!(
-            pending_expired_approvals_select(),
+            pg_selector(pending_expired_approvals_select(at())),
             "SELECT \"agent_run_approval\".\"id\" FROM \"agent_run_approval\" WHERE \
-             (\"agent_run_approval\".\"expires_at\" < $1 AND \"agent_run_approval\".\"status\" = $2) \
+             \"agent_run_approval\".\"expires_at\" < '2026-01-02 03:04:05.000000 +00:00' AND \
+             \"agent_run_approval\".\"status\" = 'pending' \
              ORDER BY \"agent_run_approval\".\"requested_at\" DESC"
         );
-        // Cross-check against the fixture capture (modulo the timestamp
-        // literal and the pending bind).
+        // Cross-check against the fixture capture: same table, same
+        // predicate columns, same ordering.
         let fx = fixture()["expire_stale_approvals"]["first_sql"][0]
             .as_str()
             .expect("first_sql")
             .to_owned();
-        let head = fx.split(" < '").next().expect("head");
-        let tail = fx.split("::timestamptz AND ").nth(1).expect("tail");
-        let mine = pending_expired_approvals_select();
-        assert!(mine.starts_with(head), "{mine}");
-        assert!(mine.ends_with(&tail.replace("'pending'", "$2")), "{mine}");
-        assert!(mine.contains(" < $1 AND "), "{mine}");
+        assert!(fx.starts_with(
+            "SELECT \"agent_run_approval\".\"id\" FROM \"agent_run_approval\" WHERE \
+             (\"agent_run_approval\".\"expires_at\" < '"
+        ));
+        assert!(fx.contains("AND \"agent_run_approval\".\"status\" = 'pending')"));
+        assert!(fx.ends_with("ORDER BY \"agent_run_approval\".\"requested_at\" DESC"));
     }
 
     #[test]
-    fn stamp_sql_byte_exact() {
+    fn stamp_statement_shape() {
         assert_eq!(
-            stamp_approval_expired_sql(),
-            "UPDATE \"agent_run_approval\" SET \"status\" = $1, \"decided_at\" = $2 WHERE \
-             \"agent_run_approval\".\"id\" = $3"
+            pg_update(stamp_approval_expired_statement(Uuid::nil(), at())),
+            "UPDATE \"agent_run_approval\" SET \"status\" = 'expired', \
+             \"decided_at\" = '2026-01-02 03:04:05.000000 +00:00' WHERE \
+             \"agent_run_approval\".\"id\" = '00000000-0000-0000-0000-000000000000'"
         );
     }
 
     #[test]
-    fn offline_flip_sql_byte_exact() {
+    fn offline_flip_statement_shape() {
+        let sql = pg_update(mark_online_runners_offline_statement(at()));
         assert_eq!(
-            mark_online_runners_offline_sql(),
-            "UPDATE \"runner\" SET \"status\" = $1 WHERE (\"runner\".\"status\" = $2 AND NOT \
-             (\"runner\".\"last_heartbeat_at\" >= $3 AND \"runner\".\"last_heartbeat_at\" IS NOT NULL))"
+            sql,
+            "UPDATE \"runner\" SET \"status\" = 'offline' WHERE \"runner\".\"status\" = 'online' \
+             AND (NOT (\"runner\".\"last_heartbeat_at\" >= '2026-01-02 03:04:05.000000 +00:00' AND \
+             \"runner\".\"last_heartbeat_at\" IS NOT NULL))"
         );
         // The `IS NOT NULL` inside the `NOT` is what flips `NULL`
         // heartbeats offline (fixture `mark_offline_rule`).
-        assert!(mark_online_runners_offline_sql().contains("IS NOT NULL"));
+        assert!(sql.contains("IS NOT NULL"));
         // Cross-check against the fixture capture (modulo literals).
         let fx = fixture()["mark_offline_runners"]["sql"][0]
             .as_str()
@@ -1493,11 +1515,12 @@ mod tests {
     }
 
     #[test]
-    fn idle_sql_byte_exact() {
+    fn idle_statement_shape() {
         assert_eq!(
-            idle_sessions_select(),
-            "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\" FROM \"runner_session\" WHERE \
-             (\"runner_session\".\"last_seen_at\" < $1 AND \"runner_session\".\"revoked_at\" IS NULL) \
+            pg_selector(idle_sessions_select(at())),
+            "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\" FROM \
+             \"runner_session\" WHERE \"runner_session\".\"last_seen_at\" < \
+             '2026-01-02 03:04:05.000000 +00:00' AND \"runner_session\".\"revoked_at\" IS NULL \
              ORDER BY \"runner_session\".\"created_at\" DESC"
         );
         // (The revoke-update pins moved with the statement to
@@ -1505,52 +1528,36 @@ mod tests {
     }
 
     #[test]
-    fn old_streams_sql_byte_exact() {
+    fn old_streams_statement_shapes() {
         assert_eq!(
-            active_session_pairs_select(),
-            "SELECT \"runner_session\".\"runner_id\", \"runner_session\".\"id\" FROM \"runner_session\" WHERE \
-             \"runner_session\".\"revoked_at\" IS NULL ORDER BY \"runner_session\".\"created_at\" DESC"
+            pg_selector(active_session_pairs_select()),
+            "SELECT \"runner_session\".\"runner_id\", \"runner_session\".\"id\" FROM \
+             \"runner_session\" WHERE \"runner_session\".\"revoked_at\" IS NULL \
+             ORDER BY \"runner_session\".\"created_at\" DESC"
         );
         // The `DISTINCT` pair quirk: `created_at` rides along for the
-        // `ORDER BY`; the driver reads column 0 and dedupes.
+        // `ORDER BY`; the driver reads the runner id and dedupes.
         assert_eq!(
-            runner_ids_with_sessions_select(),
-            "SELECT DISTINCT \"runner_session\".\"runner_id\", \"runner_session\".\"created_at\" FROM \
-             \"runner_session\" ORDER BY \"runner_session\".\"created_at\" DESC"
+            pg_selector(runner_ids_with_sessions_select()),
+            "SELECT DISTINCT \"runner_session\".\"runner_id\", \"runner_session\".\"created_at\" \
+             FROM \"runner_session\" ORDER BY \"runner_session\".\"created_at\" DESC"
         );
     }
 
     #[test]
-    fn approval_lock_sql_byte_exact() {
-        // All 52 columns spelled out: the 11 approval columns in L2
-        // order, then the 40 agent_run columns in L2 order.
-        let expected = "SELECT \"agent_run_approval\".\"id\", \"agent_run_approval\".\"agent_run_id\", \
-             \"agent_run_approval\".\"kind\", \"agent_run_approval\".\"payload\", \
-             \"agent_run_approval\".\"reason\", \"agent_run_approval\".\"status\", \
-             \"agent_run_approval\".\"decision_source\", \"agent_run_approval\".\"decided_by_id\", \
-             \"agent_run_approval\".\"requested_at\", \"agent_run_approval\".\"expires_at\", \
-             \"agent_run_approval\".\"decided_at\", \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \
-             \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \
-             \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \
-             \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \
-             \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \
-             \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \
-             \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \
-             \"agent_run\".\"terminal_hooks_applied_at\", \
-             \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \
-             \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \
-             \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \
-             \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \
-             \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \
-             \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \
-             \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \
-             \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \
-             \"agent_run\".\"assigned_at\", \
-             \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run_approval\" INNER JOIN \
-             \"agent_run\" ON (\"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\") WHERE \
-             (\"agent_run_approval\".\"id\" = $1 AND \"agent_run_approval\".\"status\" = $2) ORDER BY \
-             \"agent_run_approval\".\"requested_at\" DESC LIMIT 1 FOR UPDATE";
-        assert_eq!(lock_approval_for_expiry_select(), expected);
+    fn approval_lock_statement_shape() {
+        // The joined `FOR UPDATE` carries no `OF`, so the `agent_run` row
+        // locks with the approval; only the run facts the block reads
+        // are projected.
+        assert_eq!(
+            pg_selector(lock_approval_for_expiry_select(Uuid::nil())),
+            "SELECT \"agent_run\".\"id\" AS \"run_id\", \"agent_run\".\"status\" AS \"run_status\", \
+             \"agent_run\".\"runner_id\" AS \"run_runner_id\" FROM \"agent_run_approval\" \
+             INNER JOIN \"agent_run\" ON \"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\" \
+             WHERE \"agent_run_approval\".\"id\" = '00000000-0000-0000-0000-000000000000' AND \
+             \"agent_run_approval\".\"status\" = 'pending' \
+             ORDER BY \"agent_run_approval\".\"requested_at\" DESC LIMIT 1 FOR UPDATE"
+        );
     }
 
     // ------------------------------------------------------------------

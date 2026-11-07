@@ -1589,7 +1589,7 @@ pub async fn process_invitations(
         let issue_props = default_issue_props_json();
         for invite in &workspace_invites {
             members::add(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 &members::NewMember {
                     workspace_id: invite.workspace_id,
                     user_id: Some(user_id),
@@ -1645,7 +1645,7 @@ pub async fn process_invitations(
                 15
             };
             members::add(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 &members::NewMember {
                     workspace_id: invite.workspace_id,
                     user_id: Some(user_id),

@@ -579,7 +579,7 @@ pub fn auth_failed(code: &str) -> Response {
 
 /// One `machine_token` row plus its dev-machine revocation bit (`mt_`
 /// path, `authentication.py:120-162`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 struct MachineTokenRow {
     id: uuid::Uuid,
     user_id: uuid::Uuid,
@@ -587,12 +587,11 @@ struct MachineTokenRow {
     dev_machine_id: Option<uuid::Uuid>,
     host_label: String,
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
     dev_revoked: Option<bool>,
 }
 
 /// One `runner` row plus its dev-machine columns (both auth paths).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 struct RunnerAuthRow {
     id: uuid::Uuid,
     owner_id: uuid::Uuid,
@@ -608,23 +607,51 @@ struct RunnerAuthRow {
     dev_host_label: Option<String>,
 }
 
+/// `runner.dev_machine_id -> dev_machine.id` / `machine_token.dev_machine_id
+/// -> dev_machine.id` (trimmed from the entities).
+fn dev_machine_rel<E>(from: E::Column) -> sea_orm::RelationDef
+where
+    E: sea_orm::EntityTrait,
+{
+    use pidash_db::entity::dev_machine;
+    E::belongs_to(dev_machine::Entity)
+        .from(from)
+        .to(dev_machine::Column::Id)
+        .into()
+}
+
 /// `MachineToken.objects.select_related(...).get(token_hash=...)`
-/// (`authentication.py:122-123`): hash match by lookup, one row.
+/// (`authentication.py:122-123`): hash match by lookup, one row, plus
+/// the dev-machine revocation bit off the `LEFT JOIN`.
 async fn fetch_machine_token(
     pool: &PgPool,
     token_hash: &str,
-) -> Result<Option<MachineTokenRow>, sqlx::Error> {
-    sqlx::query_as::<_, MachineTokenRow>(
-        r#"SELECT mt."id", mt."user_id", mt."workspace_id", mt."dev_machine_id",
-                  mt."host_label", mt."revoked_at", mt."expires_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt
-           LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
-    )
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await
+) -> Result<Option<MachineTokenRow>, sea_orm::DbErr> {
+    use pidash_db::entity::{dev_machine, machine_token};
+    use sea_orm::sea_query::{Expr, JoinType};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::DevMachineId,
+            machine_token::Column::HostLabel,
+            machine_token::Column::RevokedAt,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
+            "dev_revoked",
+        )
+        .join(
+            JoinType::LeftJoin,
+            dev_machine_rel::<machine_token::Entity>(machine_token::Column::DevMachineId),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
 }
 
 /// `Runner.objects.select_related("workspace", "pod", "dev_machine").get(id=...)`
@@ -633,20 +660,34 @@ async fn fetch_machine_token(
 async fn fetch_runner_for_auth(
     pool: &PgPool,
     runner_id: uuid::Uuid,
-) -> Result<Option<RunnerAuthRow>, sqlx::Error> {
-    sqlx::query_as::<_, RunnerAuthRow>(
-        r#"SELECT r."id", r."owner_id", r."workspace_id", r."dev_machine_id",
-                  r."name", r."host_label", r."refresh_token_generation",
-                  r."capabilities", r."revoked_at",
-                  dm."revoked_at" AS "dev_revoked_at",
-                  dm."label" AS "dev_label", dm."host_label" AS "dev_host_label"
-           FROM "runner" r
-           LEFT OUTER JOIN "dev_machine" dm ON dm."id" = r."dev_machine_id"
-           WHERE r."id" = $1"#,
-    )
-    .bind(runner_id)
-    .fetch_optional(pool)
-    .await
+) -> Result<Option<RunnerAuthRow>, sea_orm::DbErr> {
+    use pidash_db::entity::{dev_machine, runner};
+    use sea_orm::sea_query::JoinType;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    runner::Entity::find()
+        .select_only()
+        .columns([
+            runner::Column::Id,
+            runner::Column::OwnerId,
+            runner::Column::WorkspaceId,
+            runner::Column::DevMachineId,
+            runner::Column::Name,
+            runner::Column::HostLabel,
+            runner::Column::RefreshTokenGeneration,
+            runner::Column::Capabilities,
+            runner::Column::RevokedAt,
+        ])
+        .column_as(dev_machine::Column::RevokedAt, "dev_revoked_at")
+        .column_as(dev_machine::Column::Label, "dev_label")
+        .column_as(dev_machine::Column::HostLabel, "dev_host_label")
+        .join(
+            JoinType::LeftJoin,
+            dev_machine_rel::<runner::Entity>(runner::Column::DevMachineId),
+        )
+        .filter(runner::Column::Id.eq(runner_id))
+        .into_model::<RunnerAuthRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
 }
 
 impl From<&RunnerAuthRow> for DaemonRunner {
@@ -671,17 +712,21 @@ async fn workspace_member_exists(
     pool: &PgPool,
     workspace_id: uuid::Uuid,
     user_id: uuid::Uuid,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, bool>(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members"
-           WHERE "workspace_id" = $1 AND "member_id" = $2
-             AND "is_active" AND "deleted_at" IS NULL)"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map(|row| row.unwrap_or(false))
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::workspace_members::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    Ok(Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::WorkspaceId.eq(workspace_id))
+        .filter(Column::MemberId.eq(user_id))
+        .filter(Column::IsActive.eq(true))
+        .filter(Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await?
+        .is_some())
 }
 
 /// `RunnerAccessTokenAuthentication.authenticate`
@@ -753,13 +798,18 @@ async fn authenticate_legacy_jwt(
     if payload.rtg < i64::from(row.refresh_token_generation) - 1 {
         return Err(auth_failed("access_token_stale_rtg"));
     }
-    let min_rtg: Option<i32> = sqlx::query_scalar(
-        r#"SELECT "min_rtg" FROM "runner_force_refresh" WHERE "runner_id" = $1"#,
-    )
-    .bind(row.id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
+    let min_rtg: Option<i32> = {
+        use pidash_db::entity::runner_force_refresh::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+        Entity::find()
+            .select_only()
+            .column(Column::MinRtg)
+            .filter(Column::RunnerId.eq(row.id))
+            .into_tuple::<i32>()
+            .one(&pidash_db::pool::sea_orm_connection(pool))
+            .await
+            .map_err(|_| server_error())?
+    };
     if let Some(floor) = min_rtg {
         if payload.rtg < i64::from(floor) {
             return Err(auth_failed("force_refresh_required"));
@@ -768,9 +818,7 @@ async fn authenticate_legacy_jwt(
     Ok(Some(DaemonRunner::from(&row)))
 }
 
-/// Shared MachineToken path (`authentication.py:120-162`): hash → row →
-/// revoked → expired → machine-revoked → membership-or-revoke →
-/// runner-id required → runner load → binding → touch.
+/// Shared MachineToken path (`authentication.py:120-162`).
 async fn authenticate_machine_token(
     pool: &PgPool,
     secret_key: &[u8],
@@ -786,13 +834,6 @@ async fn authenticate_machine_token(
     };
     if token.revoked_at.is_some() {
         return Err(auth_failed("machine_token_revoked"));
-    }
-    // `MachineToken.is_expired()`: at-or-past expiry refuses (`:129`).
-    if token
-        .expires_at
-        .is_some_and(|expires| expires <= chrono::Utc::now())
-    {
-        return Err(auth_failed("machine_token_expired"));
     }
     if token.dev_machine_id.is_some() && token.dev_revoked.unwrap_or(false) {
         return Err(auth_failed("dev_machine_revoked"));
@@ -1161,16 +1202,20 @@ pub fn outbox_fields(message: &Value) -> (String, String, String) {
 pub async fn active_session_exists(
     pool: &PgPool,
     runner_id: uuid::Uuid,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, uuid::Uuid>(
-        r#"SELECT "id" FROM "runner_session"
-           WHERE "runner_id" = $1 AND "revoked_at" IS NULL
-           ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(runner_id)
-    .fetch_optional(pool)
-    .await
-    .map(|row| row.is_some())
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::runner_session::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    Ok(Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::RunnerId.eq(runner_id))
+        .filter(Column::RevokedAt.is_null())
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await?
+        .is_some())
 }
 
 /// The production ports: real outbox enqueue, real system-user lookup,
