@@ -585,7 +585,10 @@ pub fn completion_lookup_query(sync_id: Uuid) -> Select<github_issue_syncs::Enti
     github_issue_syncs::Entity::find()
         .select_only()
         .column_as(github_issue_syncs::Column::Id, "sync_id")
-        .column_as(github_issue_syncs::Column::RepoIssueId, "sync_repo_issue_id")
+        .column_as(
+            github_issue_syncs::Column::RepoIssueId,
+            "sync_repo_issue_id",
+        )
         .column_as(github_issue_syncs::Column::Metadata, "sync_metadata")
         .column_as(github_repository_syncs::Column::Id, "repo_sync_id")
         .column_as(
@@ -2854,12 +2857,21 @@ mod tests {
         }
         assert_eq!(completion.matches("\"deleted_at\" IS NULL").count(), 1);
         assert!(completion.contains("AS \"sync_id\""), "{completion}");
-        assert!(completion.contains("AS \"sync_repo_issue_id\""), "{completion}");
+        assert!(
+            completion.contains("AS \"sync_repo_issue_id\""),
+            "{completion}"
+        );
         assert!(completion.contains("AS \"sync_metadata\""), "{completion}");
         assert!(completion.contains("AS \"repo_sync_id\""), "{completion}");
-        assert!(completion.contains("AS \"repo_sync_integration_id\""), "{completion}");
+        assert!(
+            completion.contains("AS \"repo_sync_integration_id\""),
+            "{completion}"
+        );
         assert!(completion.contains("AS \"issue_id\""), "{completion}");
-        assert!(completion.contains("AS \"issue_project_id\""), "{completion}");
+        assert!(
+            completion.contains("AS \"issue_project_id\""),
+            "{completion}"
+        );
         assert!(completion.contains("AS \"workspace_slug\""), "{completion}");
 
         // The prior-state snapshot is deliberately UNSCOPED

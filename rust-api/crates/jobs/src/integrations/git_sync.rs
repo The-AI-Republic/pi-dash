@@ -921,7 +921,10 @@ pub fn completion_lookup_query(sync_id: Uuid) -> Select<git_issue_syncs::Entity>
         )
         .column_as(issues::Column::Id, "issue_id")
         .column_as(issues::Column::ProjectId, "issue_project_id")
-        .column_as(pidash_db::entity::workspaces::Column::Slug, "workspace_slug")
+        .column_as(
+            pidash_db::entity::workspaces::Column::Slug,
+            "workspace_slug",
+        )
         .join(
             JoinType::InnerJoin,
             git_issue_syncs::Relation::GitRepositoryBindings.def(),
@@ -4063,14 +4066,23 @@ mod tests {
         assert_eq!(completion.matches("INNER JOIN").count(), 5);
         assert!(completion.contains("workspaces"), "{completion}");
         assert!(completion.contains("AS \"sync_id\""), "{completion}");
-        assert!(completion.contains("AS \"sync_external_iid\""), "{completion}");
+        assert!(
+            completion.contains("AS \"sync_external_iid\""),
+            "{completion}"
+        );
         assert!(completion.contains("AS \"sync_metadata\""), "{completion}");
         assert!(completion.contains("AS \"binding_id\""), "{completion}");
         assert!(completion.contains("AS \"issue_id\""), "{completion}");
-        assert!(completion.contains("AS \"issue_project_id\""), "{completion}");
+        assert!(
+            completion.contains("AS \"issue_project_id\""),
+            "{completion}"
+        );
         assert!(completion.contains("AS \"workspace_slug\""), "{completion}");
         // No duplicate bare `id` aliases: every `id` output is aliased.
-        assert!(!completion.contains("\"git_issue_syncs\".\"id\", \"git_repository_bindings\".\"id\""), "{completion}");
+        assert!(
+            !completion.contains("\"git_issue_syncs\".\"id\", \"git_repository_bindings\".\"id\""),
+            "{completion}"
+        );
         // Max sort: IS NOT DISTINCT FROM semantics.
         let none_sql = max_sort_query(proj, None)
             .build(DbBackend::Postgres)
@@ -4081,7 +4093,10 @@ mod tests {
             .build(DbBackend::Postgres)
             .to_string();
         assert!(some_sql.contains("\"state_id\" ="), "{some_sql}");
-        assert!(!some_sql.contains("IS NULL\"") || some_sql.contains("\"state_id\" ="), "{some_sql}");
+        assert!(
+            !some_sql.contains("IS NULL\"") || some_sql.contains("\"state_id\" ="),
+            "{some_sql}"
+        );
     }
 
     // Write shapes: full-row creates with application defaults; updates
