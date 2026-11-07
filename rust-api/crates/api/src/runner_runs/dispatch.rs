@@ -33,10 +33,17 @@
 use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_runs::pod::Pod;
 use pidash_db::runner_runs::AgentRun;
@@ -51,9 +58,7 @@ use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::policy::{resolve_executor_kind, UserFlags};
 use pidash_services::dispatch::{consume_admission_token, DeferredConsume, LlmProfile};
 use pidash_services::orchestration::clock::{self, ClockIssue, ClockWrite};
-use pidash_services::orchestration::creation::{
-    parent_done_payload, tick_value, CreationSeam, PROMPT_UPDATE_SQL,
-};
+use pidash_services::orchestration::creation::{parent_done_payload, tick_value, CreationSeam};
 use pidash_services::orchestration::dispatch::DispatchSeam;
 use pidash_services::prompting::context as prompting_context;
 use pidash_services::runner_enroll::validation::{
@@ -64,11 +69,12 @@ use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
     is_ticking_state, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
 };
+use pidash_types::runner_runs::AgentRunStatus;
 
 use super::runs::{
-    binding_detail_for, decode_run, fetch_guarded_run, is_workspace_member, issue_lookup_sql,
-    parse_py_uuid, pod_mini_for, py_truthy_json, render_detail, run_detail_sql, tool_calls_for,
-    workspace_role, ISSUE_NOT_FOUND_BODY,
+    binding_detail_for, fetch_guarded_run, is_workspace_member, issue_lookup, parse_py_uuid,
+    pod_mini_for, py_truthy_json, render_detail, run_from_model, tool_calls_for, workspace_role,
+    ISSUE_NOT_FOUND_BODY,
 };
 use super::{json_response, server_error};
 use crate::project_move_handoff::RedisAdmissionCache;
@@ -185,18 +191,6 @@ pub fn coerce_filter_uuid(value: Option<&Value>) -> UuidCoerce {
     }
 }
 
-/// True for Postgres integrity-constraint violations (SQLSTATE class
-/// 23): Django's `except IntegrityError` (`runs.py:335`), which answers
-/// 409 `active_run_exists` for *any* of them — including a mid-flight FK
-/// break the message mislabels.
-fn is_integrity_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .map(|code| code.starts_with("23"))
-        .unwrap_or(false)
-}
-
 /// Truncate to microseconds: Postgres `timestamptz` and Python datetimes
 /// both stop there, and `Utc::now()` carries nanos.
 fn now_micros() -> DateTime<Utc> {
@@ -208,8 +202,9 @@ fn now_micros() -> DateTime<Utc> {
 // `RunCreationStore` over the pool (D-15 consumer, PIDASHCONV-1041)
 // ---------------------------------------------------------------------------
 
-/// The §6.5 reads over a pool handle: executes the validation `*_SQL`
-/// consts verbatim, in the order [`validate_run_creation`] issues them.
+/// The §6.5 reads over a pool handle: the validation `*_SQL` consts'
+/// statements as SeaORM selects, in the order [`validate_run_creation`]
+/// issues them (same scopes, ordering and `LIMIT`s).
 pub struct PoolRunCreationStore<'a> {
     pool: &'a PgPool,
 }
@@ -219,9 +214,38 @@ impl<'a> PoolRunCreationStore<'a> {
         PoolRunCreationStore { pool }
     }
 
-    fn db(error: sqlx::Error) -> StoreError {
-        StoreError::Db(error.to_string())
+    fn db(error: sea_orm::DbErr) -> StoreError {
+        StoreError::Db(pidash_db::orm_tx::into_sqlx(error).to_string())
     }
+}
+
+/// The L2 [`Pod`] off a SeaORM model.
+fn pod_from_model(model: orm::pod::Model) -> Pod {
+    Pod {
+        id: model.id,
+        workspace_id: model.workspace_id,
+        project_id: model.project_id,
+        name: model.name,
+        description: model.description,
+        created_by_id: model.created_by_id,
+        is_default: model.is_default,
+        deleted_at: model.deleted_at.map(|at| at.with_timezone(&Utc)),
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+    }
+}
+
+/// `Pod.objects` (the `PodManager` scope: soft-deleted pods read as
+/// missing) with the model ordering (`-is_default`, `created_at`),
+/// first row ([`validation::POD_BY_ID_SQL`] /
+/// [`validation::DEFAULT_POD_FOR_PROJECT_SQL`]).
+fn pod_scope() -> sea_orm::Select<orm::pod::Entity> {
+    use orm::pod::{Column, Entity};
+    Entity::find()
+        .filter(Column::DeletedAt.is_null())
+        .order_by_desc(Column::IsDefault)
+        .order_by_asc(Column::CreatedAt)
+        .limit(1)
 }
 
 impl RunCreationStore for PoolRunCreationStore<'_> {
@@ -230,60 +254,87 @@ impl RunCreationStore for PoolRunCreationStore<'_> {
         user_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<Option<i32>, StoreError> {
+        use orm::workspace_members::{Column, Entity};
         // `role` is a `smallint`: decode `i16`, widen to the trait's `i32`.
-        let role: Option<i16> = sqlx::query_scalar(validation::WORKSPACE_ROLE_SQL)
-            .bind(user_id)
-            .bind(workspace_id)
-            .fetch_optional(self.pool)
+        // [`validation::WORKSPACE_ROLE_SQL`]: live + active, `-created_at`.
+        let role = Entity::find()
+            .select_only()
+            .column(Column::Role)
+            .filter(Column::DeletedAt.is_null())
+            .filter(Column::IsActive.eq(true))
+            .filter(Column::MemberId.eq(user_id))
+            .filter(Column::WorkspaceId.eq(workspace_id))
+            .order_by_desc(Column::CreatedAt)
+            .limit(1)
+            .into_tuple::<i16>()
+            .one(&sea_orm_connection(self.pool))
             .await
             .map_err(Self::db)?;
         Ok(role.map(i32::from))
     }
 
     async fn issue_probe(&self, work_item_id: Uuid) -> Result<Option<IssueProbe>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(validation::ISSUE_PROBE_SQL)
-            .bind(work_item_id)
-            .fetch_optional(self.pool)
+        use orm::issues::{Column, Entity};
+        // [`validation::ISSUE_PROBE_SQL`]: the plain soft-delete scope,
+        // `-created_at`, first row.
+        let row = Entity::find()
+            .select_only()
+            .columns([
+                Column::WorkspaceId,
+                Column::AssignedPodId,
+                Column::ProjectId,
+            ])
+            .filter(Column::DeletedAt.is_null())
+            .filter(Column::Id.eq(work_item_id))
+            .order_by_desc(Column::CreatedAt)
+            .limit(1)
+            .into_tuple::<(Uuid, Option<Uuid>, Uuid)>()
+            .one(&sea_orm_connection(self.pool))
             .await
             .map_err(Self::db)?;
-        row.map(|row| {
-            Ok(IssueProbe {
-                workspace_id: row.try_get("workspace_id").map_err(Self::db)?,
-                assigned_pod_id: row.try_get("assigned_pod_id").map_err(Self::db)?,
-                project_id: row.try_get("project_id").map_err(Self::db)?,
-            })
-        })
-        .transpose()
+        Ok(
+            row.map(|(workspace_id, assigned_pod_id, project_id)| IssueProbe {
+                workspace_id,
+                assigned_pod_id,
+                project_id: Some(project_id),
+            }),
+        )
     }
 
     async fn pod_by_id(&self, pod_id: Uuid) -> Result<Option<Pod>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(validation::POD_BY_ID_SQL)
-            .bind(pod_id)
-            .fetch_optional(self.pool)
+        Ok(pod_scope()
+            .filter(orm::pod::Column::Id.eq(pod_id))
+            .one(&sea_orm_connection(self.pool))
             .await
-            .map_err(Self::db)?;
-        row.map(|row| pidash_db::runner_runs::pod::pod_from_row(&row).map_err(Self::db))
-            .transpose()
+            .map_err(Self::db)?
+            .map(pod_from_model))
     }
 
     async fn default_pod_for_project(&self, project_id: Uuid) -> Result<Option<Pod>, StoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(validation::DEFAULT_POD_FOR_PROJECT_SQL)
-                .bind(project_id)
-                .fetch_optional(self.pool)
-                .await
-                .map_err(Self::db)?;
-        row.map(|row| pidash_db::runner_runs::pod::pod_from_row(&row).map_err(Self::db))
-            .transpose()
+        Ok(pod_scope()
+            .filter(orm::pod::Column::IsDefault.eq(true))
+            .filter(orm::pod::Column::ProjectId.eq(project_id))
+            .one(&sea_orm_connection(self.pool))
+            .await
+            .map_err(Self::db)?
+            .map(pod_from_model))
     }
 
     async fn project_ids_for_workspace(&self, workspace_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
-        let ids: Vec<Uuid> = sqlx::query_scalar(validation::PROJECT_IDS_FOR_WORKSPACE_SQL)
-            .bind(workspace_id)
-            .fetch_all(self.pool)
+        use orm::projects::{Column, Entity};
+        // [`validation::PROJECT_IDS_FOR_WORKSPACE_SQL`]: soft-delete scope,
+        // `-created_at`, the first two.
+        Entity::find()
+            .select_only()
+            .column(Column::Id)
+            .filter(Column::DeletedAt.is_null())
+            .filter(Column::WorkspaceId.eq(workspace_id))
+            .order_by_desc(Column::CreatedAt)
+            .limit(2)
+            .into_tuple::<Uuid>()
+            .all(&sea_orm_connection(self.pool))
             .await
-            .map_err(Self::db)?;
-        Ok(ids)
+            .map_err(Self::db)
     }
 }
 
@@ -291,57 +342,245 @@ impl RunCreationStore for PoolRunCreationStore<'_> {
 // Direct create (`runs.py:238-345`)
 // ---------------------------------------------------------------------------
 
-/// The direct-create INSERT: Django's `AgentRun.objects.create` at
+/// The direct-create `INSERT`: Django's `AgentRun.objects.create` at
 /// `runs.py:281-292` inserts every concrete column (model order, the
 /// three generated `usage` columns and the generated `refusal_category`
-/// excluded), so this lists them all
-/// with model defaults as literals. `$1..$12` carry the caller-supplied
-/// fields; `trigger` is the `'direct'` model default and `phase_kind`
-/// stays `''` (the view passes neither — the `phase_kind` stamp is an
+/// excluded), so the active model sets them all with the model defaults;
+/// `trigger` is the `'direct'` model default and `phase_kind` stays `''`
+/// (the view passes neither — the `phase_kind` stamp is an
 /// orchestration-creation behavior, not a direct one).
-const DIRECT_RUN_INSERT_SQL: &str =
-    "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
-    pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
-    status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
-    tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
-    assigned_at, started_at, ended_at) \
-    VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, NULL, 'queued', $7, 0, NULL, '', $9, \
-    NULL, NULL, '', 'direct', NULL, '', $10, $11, '', '{}', NULL, NULL, $8, '', '{}', $12, \
-    NULL, NULL, NULL)";
+struct DirectRunInsert<'a> {
+    run_id: Uuid,
+    workspace_id: Uuid,
+    created_by_id: Uuid,
+    pod_id: Uuid,
+    pinned_runner_id: Option<Uuid>,
+    work_item_id: Option<Uuid>,
+    executor_kind: &'a str,
+    error_details: &'a Value,
+    tool_plan: &'a Value,
+    run_config: &'a Value,
+    required_capabilities: &'a Value,
+    created_at: DateTime<Utc>,
+}
+
+impl DirectRunInsert<'_> {
+    fn active_model(&self) -> orm::agent_run::ActiveModel {
+        orm::agent_run::ActiveModel {
+            id: Set(self.run_id),
+            status: Set(AgentRunStatus::Queued.value().to_owned()),
+            prompt: Set(String::new()),
+            run_config: Set(self.run_config.clone()),
+            required_capabilities: Set(self.required_capabilities.clone()),
+            thread_id: Set(String::new()),
+            lease_expires_at: Set(None),
+            done_payload: Set(None),
+            created_at: Set(self.created_at.into()),
+            assigned_at: Set(None),
+            started_at: Set(None),
+            ended_at: Set(None),
+            owner_id: Set(None),
+            workspace_id: Set(self.workspace_id),
+            runner_id: Set(None),
+            work_item_id: Set(self.work_item_id),
+            parent_run_id: Set(None),
+            pod_id: Set(self.pod_id),
+            created_by_id: Set(self.created_by_id),
+            pinned_runner_id: Set(self.pinned_runner_id),
+            scheduler_binding_id: Set(None),
+            llm_model: Set(String::new()),
+            trigger: Set(TRIGGER_DIRECT.to_owned()),
+            prompt_manifest: Set(None),
+            executor_kind: Set(self.executor_kind.to_owned()),
+            dispatch_attempts: Set(0),
+            cancel_requested_at: Set(None),
+            cancel_reason: Set(String::new()),
+            tool_plan: Set(self.tool_plan.clone()),
+            terminal_hooks_applied_at: Set(None),
+            terminal_capacity_released_at: Set(None),
+            phase_kind: Set(String::new()),
+            agent_metadata: Set(Value::Object(Default::default())),
+            usage: Set(Value::Object(Default::default())),
+            error_details: Set(self.error_details.clone()),
+            // Generated columns take their defaults.
+            input_tokens: sea_orm::NotSet,
+            output_tokens: sea_orm::NotSet,
+            total_tokens: sea_orm::NotSet,
+            refusal_category: sea_orm::NotSet,
+        }
+    }
+}
 
 /// The `requested` override read (`runs.py:273-279`):
 /// `Issue.objects.filter(pk).values_list("agent_executor").first()` —
 /// the default manager, so a soft-deleted issue reads as `None`.
-const DIRECT_REQUESTED_SQL: &str =
-    "SELECT agent_executor FROM issues WHERE deleted_at IS NULL AND id = $1 LIMIT 1";
+fn direct_requested_select(
+    work_item_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<String>>> {
+    use orm::issues::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::AgentExecutor)
+        .filter(Column::DeletedAt.is_null())
+        .filter(Column::Id.eq(work_item_id))
+        .limit(1)
+        .into_tuple::<Option<String>>()
+}
 
-/// The execution-scope project row (`ctx.pod.project`, `runs.py:265`).
-const DIRECT_PROJECT_SQL: &str =
-    "SELECT id, workspace_id, default_agent_executor FROM projects WHERE id = $1 LIMIT 1";
+/// The execution-scope project row (`ctx.pod.project`, `runs.py:265`):
+/// `(id, workspace_id, default_agent_executor)`.
+fn direct_project_select(
+    project_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, Uuid, String)>> {
+    use orm::projects::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::WorkspaceId,
+            Column::DefaultAgentExecutor,
+        ])
+        .filter(Column::Id.eq(project_id))
+        .limit(1)
+        .into_tuple::<(Uuid, Uuid, String)>()
+}
 
-/// The creator flags (`actor`, `runs.py:269/271`).
-const DIRECT_ACTOR_SQL: &str = "SELECT is_active, is_bot FROM users WHERE id = $1 LIMIT 1";
+/// The creator flags (`actor`, `runs.py:269/271`): `(is_active, is_bot)`.
+fn direct_actor_select(
+    user_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(bool, bool)>> {
+    use orm::users::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([Column::IsActive, Column::IsBot])
+        .filter(Column::Id.eq(user_id))
+        .limit(1)
+        .into_tuple::<(bool, bool)>()
+}
 
 /// The creator's BYOK key presence (`user_has_llm_config`,
 /// `agent_execution.py:69-80`, via the assistant gate's read).
-const DIRECT_LLM_CONFIG_SQL: &str =
-    "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1";
+fn direct_llm_config_select(
+    user_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<Vec<u8>>>> {
+    use orm::assistant_user_llm_config::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::ApiKeyEncrypted)
+        .filter(Column::UserId.eq(user_id))
+        .limit(1)
+        .into_tuple::<Option<Vec<u8>>>()
+}
 
-/// The free-form cloud-context workspace row (`composer.py:477`).
-const DIRECT_WORKSPACE_SQL: &str = "SELECT slug, name FROM workspaces WHERE id = $1 LIMIT 1";
+/// The free-form cloud-context workspace row (`composer.py:477`):
+/// `(slug, name)`.
+fn direct_workspace_select(
+    workspace_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(String, String)>> {
+    use orm::workspaces::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([Column::Slug, Column::Name])
+        .filter(Column::Id.eq(workspace_id))
+        .limit(1)
+        .into_tuple::<(String, String)>()
+}
+
+/// One free-form cloud-context project row: `(id, identifier, name,
+/// description)`.
+type ContextProjectRow = (Uuid, String, String, Option<String>);
 
 /// The free-form cloud-context project row (`composer.py:476`).
-const DIRECT_CONTEXT_PROJECT_SQL: &str =
-    "SELECT id, identifier, name, description FROM projects WHERE id = $1 LIMIT 1";
+fn direct_context_project_select(
+    project_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<ContextProjectRow>> {
+    use orm::projects::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::Identifier,
+            Column::Name,
+            Column::Description,
+        ])
+        .filter(Column::Id.eq(project_id))
+        .limit(1)
+        .into_tuple::<ContextProjectRow>()
+}
+
+/// The v1 `IssueRow` columns ([`dispatch_issue_select`]).
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+struct DispatchIssueRow {
+    id: Uuid,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    created_by_id: Option<Uuid>,
+    agent_executor: Option<String>,
+    state_id: Option<Uuid>,
+    state_name: Option<String>,
+    state_group: Option<String>,
+}
+
+impl DispatchIssueRow {
+    fn into_issue_row(self) -> IssueRow {
+        IssueRow {
+            id: self.id,
+            project_id: Some(self.project_id),
+            workspace_id: self.workspace_id,
+            created_by_id: self.created_by_id,
+            agent_executor: self.agent_executor,
+            state_id: self.state_id,
+            state_name: self.state_name,
+            state_group: self.state_group,
+        }
+    }
+}
 
 /// The v1 `IssueRow` for the web dispatch tails: the issue plus its
-/// state names, `all_objects` scope (no deleted guard —
-/// `runs.py:365/437`), by id.
-const DISPATCH_ISSUE_SQL: &str = "SELECT i.id, i.project_id, i.workspace_id, i.created_by_id, \
-    i.agent_executor, i.state_id, s.name AS state_name, s.group AS state_group \
-    FROM issues i LEFT JOIN states s ON s.id = i.state_id WHERE i.id = $1 LIMIT 1";
+/// state names (`LEFT JOIN states`), `all_objects` scope (no deleted
+/// guard — `runs.py:365/437`), by id.
+fn dispatch_issue_select(
+    issue_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<DispatchIssueRow>> {
+    use orm::issues::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::ProjectId,
+            Column::WorkspaceId,
+            Column::CreatedById,
+            Column::AgentExecutor,
+            Column::StateId,
+        ])
+        .column_as(orm::states::Column::Name, "state_name")
+        .column_as(orm::states::Column::Group, "state_group")
+        .join(
+            JoinType::LeftJoin,
+            Entity::belongs_to(orm::states::Entity)
+                .from(Column::StateId)
+                .to(orm::states::Column::Id)
+                .into(),
+        )
+        .filter(Column::Id.eq(issue_id))
+        .limit(1)
+        .into_model::<DispatchIssueRow>()
+}
+
+/// `run.save(update_fields=["prompt", "prompt_manifest"])`
+/// (`orchestration::creation::PROMPT_UPDATE_SQL`): the rendered prompt
+/// and its manifest stamp (`NULL` without one).
+fn prompt_update_statement(
+    run_id: Uuid,
+    prompt: &str,
+    manifest: Option<&Value>,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::Prompt, Expr::value(prompt.to_owned()))
+        .col_expr(Column::PromptManifest, Expr::value(manifest.cloned()))
+        .filter(Column::Id.eq(run_id))
+}
 
 /// Ordered `{"error","code"}` (struct order, not `json!` — maps sort keys).
 #[derive(serde::Serialize)]
@@ -598,15 +837,14 @@ async fn render_created_snapshot(pool: &PgPool, run: &AgentRun) -> Response {
 /// a read error is a 500 — the caller rolls the transaction back, as
 /// Django's `atomic` block would on the same failure.
 async fn fetch_created_run(tx: &mut DbTransaction<'_>, run_id: Uuid) -> Result<AgentRun, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&run_detail_sql())
-        .bind(run_id)
-        .fetch_optional(&mut **tx.inner())
+    let row = orm::agent_run::Entity::find_by_id(run_id)
+        .one(&TxConn::new(tx.inner()))
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
         return Err(server_error());
     };
-    decode_run(&row, 0).map_err(|_| server_error())
+    run_from_model(row).map_err(|_| server_error())
 }
 
 /// The direct-create reads `execution_fields` needs beyond the §6.5
@@ -629,34 +867,29 @@ async fn load_direct_scope(
     pool: &PgPool,
     ctx: &ValidatedRunContext,
 ) -> Result<DirectScope, Response> {
-    let project: Option<(Uuid, Uuid, String)> = sqlx::query_as(DIRECT_PROJECT_SQL)
-        .bind(ctx.pod.project_id)
-        .fetch_optional(pool)
+    let db = sea_orm_connection(pool);
+    let project = direct_project_select(ctx.pod.project_id)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
     let Some((project_id, project_workspace_id, default_agent_executor)) = project else {
         return Err(server_error());
     };
-    let flags: Option<(bool, bool)> = sqlx::query_as(DIRECT_ACTOR_SQL)
-        .bind(ctx.created_by)
-        .fetch_optional(pool)
+    let flags = direct_actor_select(ctx.created_by)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
     let Some((is_active, is_bot)) = flags else {
         return Err(server_error());
     };
-    let key: Option<(Option<Vec<u8>>,)> = sqlx::query_as(DIRECT_LLM_CONFIG_SQL)
-        .bind(ctx.created_by)
-        .fetch_optional(pool)
+    let key = direct_llm_config_select(ctx.created_by)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
-    let has_llm_key = key
-        .and_then(|(key,)| key)
-        .is_some_and(|key| !key.is_empty());
-    let requested: Option<(Option<String>,)> = match ctx.work_item_id {
-        Some(work_item_id) => sqlx::query_as(DIRECT_REQUESTED_SQL)
-            .bind(work_item_id)
-            .fetch_optional(pool)
+    let has_llm_key = key.flatten().is_some_and(|key| !key.is_empty());
+    let requested: Option<Option<String>> = match ctx.work_item_id {
+        Some(work_item_id) => direct_requested_select(work_item_id)
+            .one(&db)
             .await
             .map_err(|_| server_error())?,
         None => None,
@@ -667,7 +900,7 @@ async fn load_direct_scope(
         default_agent_executor,
         actor_flags: UserFlags { is_active, is_bot },
         has_llm_key,
-        requested: requested.and_then(|(requested,)| requested),
+        requested: requested.flatten(),
     })
 }
 
@@ -882,25 +1115,15 @@ async fn render_cloud_issue_prompt<'a>(
     use pidash_services::orchestration::creation::RenderBundle;
     use pidash_services::prompting::recipes;
 
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(DISPATCH_ISSUE_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    let row = dispatch_issue_select(issue_id)
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
         let _ = tx.rollback().await;
         return Err(server_error());
     };
-    let issue_row = IssueRow {
-        id: row.try_get("id").map_err(|_| server_error())?,
-        project_id: row.try_get("project_id").map_err(|_| server_error())?,
-        workspace_id: row.try_get("workspace_id").map_err(|_| server_error())?,
-        created_by_id: row.try_get("created_by_id").map_err(|_| server_error())?,
-        agent_executor: row.try_get("agent_executor").map_err(|_| server_error())?,
-        state_id: row.try_get("state_id").map_err(|_| server_error())?,
-        state_name: row.try_get("state_name").map_err(|_| server_error())?,
-        state_group: row.try_get("state_group").map_err(|_| server_error())?,
-    };
+    let issue_row = row.into_issue_row();
     let Some(project_id) = issue_row.project_id else {
         let _ = tx.rollback().await;
         return Err(server_error());
@@ -1080,20 +1303,18 @@ async fn render_cloud_free_prompt(
     raw_prompt: &str,
     tool_plan: &Value,
 ) -> Result<(String, Value), Response> {
-    let workspace: Option<(String, String)> = sqlx::query_as(DIRECT_WORKSPACE_SQL)
-        .bind(workspace_id)
-        .fetch_optional(pool)
+    let db = sea_orm_connection(pool);
+    let workspace = direct_workspace_select(workspace_id)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
     let Some((workspace_slug, workspace_name)) = workspace else {
         return Err(server_error());
     };
-    let project: Option<(Uuid, String, String, Option<String>)> =
-        sqlx::query_as(DIRECT_CONTEXT_PROJECT_SQL)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+    let project = direct_context_project_select(project_id)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?;
     let Some((project_id, project_identifier, project_name, project_description)) = project else {
         return Err(server_error());
     };
@@ -1353,24 +1574,28 @@ pub async fn post_direct(
     let error_details = pidash_services::orchestration::initial_error_details(
         fields.error_code.as_deref().unwrap_or_default(),
     );
-    let insert = sqlx::query(DIRECT_RUN_INSERT_SQL)
-        .bind(run_id)
-        .bind(ctx.workspace_id)
-        .bind(ctx.created_by)
-        .bind(ctx.pod.id)
-        .bind(fields.pinned_runner_id)
-        .bind(ctx.work_item_id)
-        .bind(executor_kind.as_str())
-        .bind(&error_details)
-        .bind(&fields.tool_plan)
-        .bind(&run_config)
-        .bind(&required_raw)
-        .bind(now)
-        .execute(&mut **tx.inner())
-        .await;
+    let insert = orm::agent_run::Entity::insert(
+        DirectRunInsert {
+            run_id,
+            workspace_id: ctx.workspace_id,
+            created_by_id: ctx.created_by,
+            pod_id: ctx.pod.id,
+            pinned_runner_id: fields.pinned_runner_id,
+            work_item_id: ctx.work_item_id,
+            executor_kind: executor_kind.as_str(),
+            error_details: &error_details,
+            tool_plan: &fields.tool_plan,
+            run_config: &run_config,
+            required_capabilities: &required_raw,
+            created_at: now,
+        }
+        .active_model(),
+    )
+    .exec(&TxConn::new(tx.inner()))
+    .await;
     if let Err(error) = insert {
         // `except IntegrityError` → 409, whatever the constraint.
-        let denial = if is_integrity_violation(&error) {
+        let denial = if pidash_db::orm_tx::is_integrity_violation(&error) {
             json_response(StatusCode::CONFLICT, ACTIVE_RUN_EXISTS_BODY.to_owned())
         } else {
             server_error()
@@ -1437,14 +1662,11 @@ pub async fn post_direct(
     } else {
         Some(&manifest)
     };
-    if let Err(error) = sqlx::query(PROMPT_UPDATE_SQL)
-        .bind(prompt.as_str())
-        .bind(manifest_bind)
-        .bind(run_id)
-        .execute(&mut **tx.inner())
+    if let Err(error) = prompt_update_statement(run_id, &prompt, manifest_bind)
+        .exec(&TxConn::new(tx.inner()))
         .await
     {
-        let denial = if is_integrity_violation(&error) {
+        let denial = if pidash_db::orm_tx::is_integrity_violation(&error) {
             json_response(StatusCode::CONFLICT, ACTIVE_RUN_EXISTS_BODY.to_owned())
         } else {
             server_error()
@@ -1501,26 +1723,13 @@ impl IssueDispatchMode {
     }
 }
 
-/// Fetch the v1 `IssueRow` for the dispatch tails ([`DISPATCH_ISSUE_SQL`]).
+/// Fetch the v1 `IssueRow` for the dispatch tails ([`dispatch_issue_select`]).
 async fn fetch_dispatch_issue(pool: &PgPool, issue_id: Uuid) -> Result<Option<IssueRow>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(DISPATCH_ISSUE_SQL)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    Ok(dispatch_issue_select(issue_id)
+        .one(&sea_orm_connection(pool))
         .await
-        .map_err(|_| server_error())?;
-    row.map(|row| {
-        Ok(IssueRow {
-            id: row.try_get("id").map_err(|_| server_error())?,
-            project_id: row.try_get("project_id").map_err(|_| server_error())?,
-            workspace_id: row.try_get("workspace_id").map_err(|_| server_error())?,
-            created_by_id: row.try_get("created_by_id").map_err(|_| server_error())?,
-            agent_executor: row.try_get("agent_executor").map_err(|_| server_error())?,
-            state_id: row.try_get("state_id").map_err(|_| server_error())?,
-            state_name: row.try_get("state_name").map_err(|_| server_error())?,
-            state_group: row.try_get("state_group").map_err(|_| server_error())?,
-        })
-    })
-    .transpose()
+        .map_err(|_| server_error())?
+        .map(DispatchIssueRow::into_issue_row))
 }
 
 /// Shared body of `_post_run_ai` and `_post_comment_and_run`: the
@@ -1553,13 +1762,9 @@ async fn post_issue_dispatch(
         UuidCoerce::Id { id, .. } => id,
         UuidCoerce::Absent | UuidCoerce::Invalid => return server_error(),
     };
-    let row: Option<(Uuid, Uuid)> = match sqlx::query_as(&issue_lookup_sql())
-        .bind(work_item_id)
-        .fetch_optional(pool)
-        .await
-    {
+    let row = match issue_lookup(pool, work_item_id).await {
         Ok(row) => row,
-        Err(_) => return server_error(),
+        Err(response) => return response,
     };
     let Some((_, workspace_id)) = row else {
         return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());

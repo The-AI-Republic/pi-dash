@@ -92,6 +92,24 @@ pub const FORCE_CLOSE_REASON: &str = "force_close";
 /// [`pidash_db::runner_sessions::models::runner_session::runner_session_from_row`].
 pub const CLOSE_ACTIVE_SESSIONS_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $1) ORDER BY \"runner_session\".\"created_at\" DESC";
 
+/// [`CLOSE_ACTIVE_SESSIONS_SQL`] on SeaORM: the runner's active
+/// sessions, full rows, newest first, no `LIMIT`
+/// ([`pidash_db::runner_sessions::models::runner_session::active_select`]).
+/// The pool and transaction [`PubsubStore`] implementations call this
+/// for [`PubsubStore::active_runner_sessions`].
+pub async fn active_runner_sessions(
+    db: &impl sea_orm::ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<Vec<RunnerSession>, sea_orm::DbErr> {
+    use pidash_db::runner_sessions::models::runner_session;
+    Ok(runner_session::active_select(runner_id)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(runner_session::runner_session_from_model)
+        .collect())
+}
+
 /// What a swallowing verb did with its failures.
 ///
 /// Every swallowed failure appends one line in the Python `logger`

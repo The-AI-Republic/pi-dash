@@ -210,7 +210,6 @@ pub struct RunnerSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedRunnerSettings {
     pub enabled: bool,
-    pub max_per_user_project: i64,
     pub queued_max_age_secs: i64,
     pub graceful_stop_secs: i64,
     pub sweep_interval_secs: i64,
@@ -1104,8 +1103,6 @@ impl Settings {
             },
             managed_runner: ManagedRunnerSettings {
                 enabled: ctx.flag_tri("MANAGED_RUNNER_ENABLED", "false")?,
-                max_per_user_project: ctx
-                    .req_int("MANAGED_RUNNER_MAX_PER_USER_PROJECT", ConfigValue::from(1))?,
                 queued_max_age_secs: ctx.req_int(
                     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
                     ConfigValue::from(43200),
@@ -1330,7 +1327,6 @@ impl Settings {
             "RUNNER_AGENT_STALL_THRESHOLD_SECS",
             "RUNNER_AGENT_OBSERVABILITY_STALE_SECS",
             "MANAGED_RUNNER_ENABLED",
-            "MANAGED_RUNNER_MAX_PER_USER_PROJECT",
             "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
             "MANAGED_RUNNER_GRACEFUL_STOP_SECS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",

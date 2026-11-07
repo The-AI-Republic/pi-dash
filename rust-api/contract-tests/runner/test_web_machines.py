@@ -20,10 +20,13 @@ WEB = "/api/runners"
 pytestmark = pytest.mark.contract
 
 MACHINE_KEYS = {
-    "id", "host_label", "label", "visibility", "runner_count",
-    "online_runner_count", "control_online", "engine_paused_by_owner",
-    "engine_auto_pause_reason", "engine_team_runs", "last_seen_at",
-    "last_heartbeat_at", "revoked_at", "created_at", "updated_at",
+    "id", "host_label", "label", "visibility", "provisioning",
+    "runner_count", "online_runner_count", "control_online",
+    "engine_paused_by_owner", "engine_auto_pause_reason", "engine_paused",
+    "engine_team_runs", "engine_sign_in_state", "engine_credential_expires_at",
+    "engine_state", "engine_state_reported_at", "merged_into",
+    "last_seen_at", "last_heartbeat_at", "revoked_at",
+    "created_at", "updated_at",
 }
 
 
@@ -245,14 +248,15 @@ def test_web_machine_token_ticket_denies_foreign_workspace(user_client, seeder):
 def test_web_machine_patch_owner_only_engine_fields(user_client, daemon_world, machine_flow, seeder):
     machine_id = _machine_id(user_client, daemon_world, machine_flow)
     ws = daemon_world["workspace"]["id"]
-    # Unknown key 400 with the exact #2903 message.
+    # Unknown key 400 with the exact merged-main message (#2903 + #2910
+    # label, owned by NEWPIDASH-52; Django main's FIELDS).
     unknown = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "bogus": 1})
     assert unknown.status_code == 400
-    assert unknown.json() == {"error": "only engine controls can be changed here: engine_paused_by_owner, engine_team_runs"}
+    assert unknown.json() == {"error": "only these fields can be changed here: engine_paused_by_owner, engine_team_runs, label"}
     # Server-set field refused as unknown key.
     server_set = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_auto_pause_reason": ""})
     assert server_set.status_code == 400
-    assert server_set.json() == {"error": "only engine controls can be changed here: engine_paused_by_owner, engine_team_runs"}
+    assert server_set.json() == {"error": "only these fields can be changed here: engine_paused_by_owner, engine_team_runs, label"}
     # Non-bool 400.
     non_bool = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": "yes"})
     assert non_bool.status_code == 400
@@ -272,7 +276,10 @@ def test_web_machine_patch_owner_only_engine_fields(user_client, daemon_world, m
     assert listing.status_code == 200
     row = [m for m in listing.json() if m["id"] == machine_id][0]
     assert body == row
-    # Teammate (member, not owner) gets 403.
+    # Teammate (member, not owner) is outside _machine_is_in_workspace_scope
+    # (which includes can_view_dev_machine) and reads 404, like Django
+    # test_machine_patch_is_owner_only_and_engine_fields_only; the locked
+    # owner 403 is Django's second gate for a probe-passing non-owner.
     teammate = seeder.create_user()
     seeder.create_member(ws, teammate["id"])
     from _harness.auth import login_session
@@ -280,8 +287,8 @@ def test_web_machine_patch_owner_only_engine_fields(user_client, daemon_world, m
     with api_client(user_client.base_url) as other:
         login_session(other, email=teammate["email"], password=teammate["password"])
         denied = web_patch(other, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": False})
-    assert denied.status_code == 403
-    assert denied.json() == {"error": "forbidden"}
+    assert denied.status_code == 404
+    assert denied.json() == {"error": "not found"}
 
 
 def test_web_machine_patch_other_workspace_is_404(user_client, seeder, daemon_world, machine_flow):

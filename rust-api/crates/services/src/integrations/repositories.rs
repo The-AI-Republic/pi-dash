@@ -451,10 +451,9 @@ pub async fn bind_repository<S: GitStore>(
     Ok((binding, clone_url))
 }
 
-// NOTE: the repo-fields builder moved to
-// `domain::projects::project_repo_update_sql` (PIDASHCONV-1630) —
-// `projects` is a covered table, so the builder lives in domain/.
-// No alias: nothing outside this crate's tests used the old path.
+// NOTE: the repo-fields write is `domain::projects::save_bind_project_update`
+// (PIDASHCONV-1630) — `projects` is a covered table, so the writer lives in
+// domain/. No alias: nothing outside this crate's tests used the old path.
 
 /// `get_binding` (`services.py:353-358`).
 pub async fn get_binding<S: GitStore>(
@@ -1189,7 +1188,6 @@ mod tests {
     use super::super::accounts::fakes::*;
     use super::super::accounts::{GitIntegrationError, GitStore, ServiceError, StoreError};
     use super::*;
-    use crate::domain::projects::project_repo_update_sql;
     use chrono::TimeZone;
     use pidash_db::integrations::git_models::{
         git_provider_account::{self, GitProviderAccount},
@@ -1790,22 +1788,6 @@ mod tests {
         assert!(BINDING_SET_SYNC_SQL.contains("is_sync_enabled = $2"));
         assert!(GITHUB_SYNC_SET_ENABLED_SQL
             .contains("workspace_id = (SELECT id FROM workspaces WHERE slug = $3)"));
-    }
-
-    #[test]
-    fn project_repo_update_sql_skips_empty_field_lists() {
-        assert_eq!(project_repo_update_sql(None, None), None);
-        assert_eq!(
-            project_repo_update_sql(Some("u"), None),
-            Some("UPDATE projects SET repo_url = $2, updated_at = $3 WHERE id = $1".to_owned())
-        );
-        assert_eq!(
-            project_repo_update_sql(Some("u"), Some("b")),
-            Some(
-                "UPDATE projects SET repo_url = $2, base_branch = $3, updated_at = $4 WHERE id = $1"
-                    .to_owned()
-            )
-        );
     }
 
     #[test]

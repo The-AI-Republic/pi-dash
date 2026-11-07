@@ -35,8 +35,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter};
+use sea_query::{Alias, Expr, LockType, Query, SelectStatement};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::rrule::next_fire_with_error;
@@ -344,6 +346,30 @@ impl From<sqlx::Error> for FireError {
     }
 }
 
+impl From<sea_orm::DbErr> for FireError {
+    fn from(error: sea_orm::DbErr) -> Self {
+        FireError::Db(orm_sqlx(error))
+    }
+}
+
+/// A SeaORM failure as the sqlx error the old read raised: the wrapped
+/// sqlx error when there is one (so Postgres codes still classify),
+/// otherwise its message (cf. `tools_exec::orm_error`).
+fn orm_sqlx(error: sea_orm::DbErr) -> sqlx::Error {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner,
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            sqlx::Error::PoolTimedOut
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            sqlx::Error::PoolClosed
+        }
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Phase SQL (mirrors the Django ORM statements arm for arm)
 // ---------------------------------------------------------------------------
@@ -437,9 +463,80 @@ pub fn rollback_update_sql() -> &'static str {
      updated_at = $3 WHERE id = $4"
 }
 
+// SeaORM builders for the phase statements above. The `*_sql` strings stay
+// as the recorded shapes (pinned by the tests below); execution runs the
+// builders, so the two cannot silently diverge (the scan.rs precedent).
+
+/// Phase 1 claim statement: the exact statement [`claim_select_sql`] records
+/// — inner scheduler join, left run join, `deleted_at IS NULL`, pk bind,
+/// `FOR UPDATE OF scheduler_bindings` (binding row only).
+pub fn claim_select_stmt(binding_id: Uuid) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .column(("scheduler_bindings", "id"))
+        .column(("scheduler_bindings", "enabled"))
+        .column(("scheduler_bindings", "dtstart"))
+        .column(("scheduler_bindings", "tzid"))
+        .column(("scheduler_bindings", "rrule"))
+        .column(("scheduler_bindings", "rdates"))
+        .column(("scheduler_bindings", "exdates"))
+        .column(("scheduler_bindings", "next_run_at"))
+        .column(("scheduler_bindings", "last_run_id"))
+        .column(("scheduler_bindings", "last_error"))
+        .expr_as(
+            Expr::col(("schedulers", "is_enabled")),
+            Alias::new("scheduler_is_enabled"),
+        )
+        .expr_as(
+            Expr::col(("agent_run", "status")),
+            Alias::new("last_run_status"),
+        )
+        .from("scheduler_bindings")
+        .inner_join(
+            "schedulers",
+            Expr::col(("scheduler_bindings", "scheduler_id")).equals(("schedulers", "id")),
+        )
+        .left_join(
+            "agent_run",
+            Expr::col(("scheduler_bindings", "last_run_id")).equals(("agent_run", "id")),
+        )
+        .and_where(Expr::col(("scheduler_bindings", "id")).eq(binding_id))
+        .and_where(Expr::col(("scheduler_bindings", "deleted_at")).is_null())
+        .lock_with_tables(LockType::Update, ["scheduler_bindings"]);
+    query.to_owned()
+}
+
+/// Phase 2 re-fetch statement: [`dispatch_select_sql`]'s six FK columns,
+/// no lock, no `deleted_at` filter.
+pub fn dispatch_select_stmt(binding_id: Uuid) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .column(("scheduler_bindings", "id"))
+        .column(("scheduler_bindings", "scheduler_id"))
+        .column(("scheduler_bindings", "project_id"))
+        .column(("scheduler_bindings", "workspace_id"))
+        .column(("scheduler_bindings", "actor_id"))
+        .column(("scheduler_bindings", "pod_id"))
+        .from("scheduler_bindings")
+        .and_where(Expr::col(("scheduler_bindings", "id")).eq(binding_id));
+    query.to_owned()
+}
+
+/// Phase 3 re-acquire statement: [`reacquire_select_sql`]'s pk existence
+/// under `FOR UPDATE OF scheduler_bindings`, no `deleted_at` filter.
+pub fn reacquire_select_stmt(binding_id: Uuid) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .column(("scheduler_bindings", "id"))
+        .from("scheduler_bindings")
+        .and_where(Expr::col(("scheduler_bindings", "id")).eq(binding_id))
+        .lock_with_tables(LockType::Update, ["scheduler_bindings"]);
+    query.to_owned()
+}
+
 /// One phase-1 claim row: the binding's RRULE bundle and runtime state plus
 /// the joined `scheduler.is_enabled` and `last_run.status`.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct ClaimRow {
     pub id: Uuid,
     pub enabled: bool,
@@ -457,7 +554,7 @@ pub struct ClaimRow {
 
 /// The re-fetched binding for dispatch: exactly the FK values the dispatcher
 /// copies onto the `AgentRun` (`scheduler.py:213-214`).
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct DispatchRow {
     pub id: Uuid,
     pub scheduler_id: Uuid,
@@ -496,6 +593,34 @@ impl From<DispatchRow> for BindingForDispatch {
             pod_id: row.pod_id,
         }
     }
+}
+
+fn claim_row_from(row: &sea_orm::QueryResult) -> Result<ClaimRow, sea_orm::DbErr> {
+    Ok(ClaimRow {
+        id: row.try_get::<Uuid>("", "id")?,
+        enabled: row.try_get::<bool>("", "enabled")?,
+        dtstart: row.try_get::<DateTime<Utc>>("", "dtstart")?,
+        tzid: row.try_get::<String>("", "tzid")?,
+        rrule: row.try_get::<String>("", "rrule")?,
+        rdates: row.try_get::<Value>("", "rdates")?,
+        exdates: row.try_get::<Value>("", "exdates")?,
+        next_run_at: row.try_get::<Option<DateTime<Utc>>>("", "next_run_at")?,
+        last_run_id: row.try_get::<Option<Uuid>>("", "last_run_id")?,
+        last_error: row.try_get::<String>("", "last_error")?,
+        scheduler_is_enabled: row.try_get::<bool>("", "scheduler_is_enabled")?,
+        last_run_status: row.try_get::<Option<String>>("", "last_run_status")?,
+    })
+}
+
+fn dispatch_row_from(row: &sea_orm::QueryResult) -> Result<DispatchRow, sea_orm::DbErr> {
+    Ok(DispatchRow {
+        id: row.try_get::<Uuid>("", "id")?,
+        scheduler_id: row.try_get::<Uuid>("", "scheduler_id")?,
+        project_id: row.try_get::<Option<Uuid>>("", "project_id")?,
+        workspace_id: row.try_get::<Uuid>("", "workspace_id")?,
+        actor_id: row.try_get::<Option<Uuid>>("", "actor_id")?,
+        pod_id: row.try_get::<Option<Uuid>>("", "pod_id")?,
+    })
 }
 
 /// A run the dispatcher produced: the id, terminal-or-not status, and the
@@ -601,11 +726,15 @@ pub async fn phase1_claim(
     binding_id: &Uuid,
     now: &DateTime<Utc>,
 ) -> Result<Phase1, FireError> {
+    use pidash_db::entity::scheduler_bindings;
     let mut tx = pool.begin().await?;
-    let claim: Option<ClaimRow> = sqlx::query_as(claim_select_sql())
-        .bind(binding_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let claim: Option<ClaimRow> = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let found = conn
+            .query_one(DbBackend::Postgres.build(&claim_select_stmt(*binding_id)))
+            .await?;
+        found.as_ref().map(claim_row_from).transpose()?
+    };
     let Some(row) = claim else {
         return Ok(Phase1::Skipped);
     };
@@ -658,12 +787,23 @@ pub async fn phase1_claim(
             // API edit endpoint, which validates the RRULE on PATCH
             // (`scheduler.py:183-196`).
             let message = bad_rrule_error(&row.dtstart, &row.rrule);
-            sqlx::query(bad_rrule_update_sql())
-                .bind(&message)
-                .bind(Utc::now())
-                .bind(row.id)
-                .execute(&mut *tx)
-                .await?;
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                scheduler_bindings::Entity::update_many()
+                    .col_expr(scheduler_bindings::Column::LastError, Expr::value(message))
+                    .col_expr(scheduler_bindings::Column::Enabled, Expr::value(false))
+                    .col_expr(
+                        scheduler_bindings::Column::NextRunAt,
+                        Expr::value(Option::<DateTime<Utc>>::None),
+                    )
+                    .col_expr(
+                        scheduler_bindings::Column::UpdatedAt,
+                        Expr::value(Utc::now()),
+                    )
+                    .filter(scheduler_bindings::Column::Id.eq(row.id))
+                    .exec(&conn)
+                    .await?;
+            }
             tx.commit().await?;
             Ok(Phase1::Skipped)
         }
@@ -671,12 +811,22 @@ pub async fn phase1_claim(
             // A clean parse with nothing left is a finished series, not an
             // error: disable without a `last_error` so the UI can badge
             // "Completed" rather than implying a misconfiguration.
-            sqlx::query(complete_quietly_update_sql())
-                .bind("")
-                .bind(Utc::now())
-                .bind(row.id)
-                .execute(&mut *tx)
-                .await?;
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                scheduler_bindings::Entity::update_many()
+                    .col_expr(
+                        scheduler_bindings::Column::LastError,
+                        Expr::value(String::new()),
+                    )
+                    .col_expr(scheduler_bindings::Column::Enabled, Expr::value(false))
+                    .col_expr(
+                        scheduler_bindings::Column::UpdatedAt,
+                        Expr::value(Utc::now()),
+                    )
+                    .filter(scheduler_bindings::Column::Id.eq(row.id))
+                    .exec(&conn)
+                    .await?;
+            }
             tx.commit().await?;
             tracing::info!(
                 binding = %row.id,
@@ -689,13 +839,19 @@ pub async fn phase1_claim(
             series_completed,
         } => {
             let cleared = advanced_last_error(&row.last_error);
-            sqlx::query(advance_update_sql())
-                .bind(advanced)
-                .bind(&cleared)
-                .bind(Utc::now())
-                .bind(row.id)
-                .execute(&mut *tx)
-                .await?;
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                scheduler_bindings::Entity::update_many()
+                    .col_expr(scheduler_bindings::Column::NextRunAt, Expr::value(advanced))
+                    .col_expr(scheduler_bindings::Column::LastError, Expr::value(cleared))
+                    .col_expr(
+                        scheduler_bindings::Column::UpdatedAt,
+                        Expr::value(Utc::now()),
+                    )
+                    .filter(scheduler_bindings::Column::Id.eq(row.id))
+                    .exec(&conn)
+                    .await?;
+            }
             tx.commit().await?;
             Ok(Phase1::Claimed {
                 binding: row.id,
@@ -721,30 +877,33 @@ pub async fn phase3a_record_run(
     run: &DispatchRun,
     series_completed: bool,
 ) -> Result<(), FireError> {
+    use pidash_db::entity::scheduler_bindings;
     let failed = run.status == FAILED_RUN_STATUS;
     let mut tx = pool.begin().await?;
-    let target: Option<(Uuid,)> = sqlx::query_as(reacquire_select_sql())
-        .bind(binding_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let target = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        conn.query_one(DbBackend::Postgres.build(&reacquire_select_stmt(*binding_id)))
+            .await?
+    };
     if target.is_some() {
         let message = if failed {
             prompt_build_error(&run.error)
         } else {
             String::new()
         };
-        let sql = if series_completed {
-            pointer_complete_update_sql()
-        } else {
-            pointer_update_sql()
-        };
-        sqlx::query(sql)
-            .bind(run.id)
-            .bind(&message)
-            .bind(Utc::now())
-            .bind(binding_id)
-            .execute(&mut *tx)
-            .await?;
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let mut update = scheduler_bindings::Entity::update_many()
+            .col_expr(scheduler_bindings::Column::LastRunId, Expr::value(run.id))
+            .col_expr(scheduler_bindings::Column::LastError, Expr::value(message))
+            .col_expr(
+                scheduler_bindings::Column::UpdatedAt,
+                Expr::value(Utc::now()),
+            )
+            .filter(scheduler_bindings::Column::Id.eq(*binding_id));
+        if series_completed {
+            update = update.col_expr(scheduler_bindings::Column::Enabled, Expr::value(false));
+        }
+        update.exec(&conn).await?;
     }
     tx.commit().await?;
     tracing::info!(
@@ -766,19 +925,28 @@ pub async fn phase3b_rollback(
     prev_next_run_at: Option<DateTime<Utc>>,
     fail_reason: Option<&str>,
 ) -> Result<(), FireError> {
+    use pidash_db::entity::scheduler_bindings;
     let mut tx = pool.begin().await?;
-    let target: Option<(Uuid,)> = sqlx::query_as(reacquire_select_sql())
-        .bind(binding_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let target = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        conn.query_one(DbBackend::Postgres.build(&reacquire_select_stmt(*binding_id)))
+            .await?
+    };
     if target.is_some() {
         let message = rollback_error(fail_reason);
-        sqlx::query(rollback_update_sql())
-            .bind(prev_next_run_at)
-            .bind(&message)
-            .bind(Utc::now())
-            .bind(binding_id)
-            .execute(&mut *tx)
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        scheduler_bindings::Entity::update_many()
+            .col_expr(
+                scheduler_bindings::Column::NextRunAt,
+                Expr::value(prev_next_run_at),
+            )
+            .col_expr(scheduler_bindings::Column::LastError, Expr::value(message))
+            .col_expr(
+                scheduler_bindings::Column::UpdatedAt,
+                Expr::value(Utc::now()),
+            )
+            .filter(scheduler_bindings::Column::Id.eq(*binding_id))
+            .exec(&conn)
             .await?;
     }
     tx.commit().await?;
@@ -816,10 +984,13 @@ pub async fn fire_scheduler_binding(
     // Phase 2 runs outside the claim transaction: holding the row lock across
     // the dispatcher (which registers `transaction.on_commit(drain_pod_by_id)`)
     // would break pod drain (`scheduler.py:207-211`).
-    let target: Option<DispatchRow> = sqlx::query_as(dispatch_select_sql())
-        .bind(binding)
-        .fetch_optional(pool)
-        .await?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let target = db
+        .query_one(DbBackend::Postgres.build(&dispatch_select_stmt(binding)))
+        .await?
+        .as_ref()
+        .map(dispatch_row_from)
+        .transpose()?;
     let Some(target) = target else {
         // Deleted between phases — nothing to roll back to.
         return Ok(false);
@@ -1380,6 +1551,67 @@ mod tests {
             );
         }
         assert!(!pointer.contains("next_run_at"));
+    }
+
+    // SeaORM builders pin the recorded shapes: same joins, guards, lock
+    // and bind positions as the `*_sql` goldens they replace at execution.
+    #[test]
+    fn stmt_builders_pin_claim_dispatch_and_reacquire() {
+        use sea_orm::DbBackend;
+        use sea_query::PostgresQueryBuilder;
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let claim = claim_select_stmt(id).to_string(PostgresQueryBuilder);
+        let lower = claim.to_ascii_lowercase();
+        for fragment in [
+            "from \"scheduler_bindings\"",
+            "inner join \"schedulers\"",
+            "left join \"agent_run\"",
+            "is null",
+            "for update of",
+            "scheduler_bindings",
+        ] {
+            assert!(
+                lower.contains(fragment),
+                "claim missing {fragment}:\n{claim}"
+            );
+        }
+        assert!(claim.contains("scheduler_is_enabled"), "alias:\n{claim}");
+        assert!(claim.contains("last_run_status"), "alias:\n{claim}");
+        assert!(!lower.contains("skip locked"), "no queue lock:\n{claim}");
+        let built = DbBackend::Postgres.build(&claim_select_stmt(id));
+        assert!(built.sql.contains("$1"), "bind:\n{}", built.sql);
+
+        let dispatch = dispatch_select_stmt(id).to_string(PostgresQueryBuilder);
+        let lower = dispatch.to_ascii_lowercase();
+        for column in [
+            "scheduler_bindings",
+            "scheduler_id",
+            "project_id",
+            "workspace_id",
+            "actor_id",
+            "pod_id",
+        ] {
+            assert!(lower.contains(column), "dispatch {column}:\n{dispatch}");
+        }
+        assert!(
+            !lower.contains("for update"),
+            "dispatch unlocked:\n{dispatch}"
+        );
+        assert!(
+            !lower.contains("deleted_at"),
+            "dispatch unscoped:\n{dispatch}"
+        );
+
+        let reacquire = reacquire_select_stmt(id).to_string(PostgresQueryBuilder);
+        let lower = reacquire.to_ascii_lowercase();
+        assert!(
+            lower.contains("for update of"),
+            "reacquire lock:\n{reacquire}"
+        );
+        assert!(
+            !lower.contains("deleted_at"),
+            "reacquire unscoped:\n{reacquire}"
+        );
     }
 
     // The registered task name is the exact Python task name, carried by the

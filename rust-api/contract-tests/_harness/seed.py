@@ -117,6 +117,10 @@ class Seed:
                     (users, workspaces),
                 )
                 cur.execute(
+                    "DELETE FROM engine_credential WHERE user_id = ANY(%s)",
+                    (users,),
+                )
+                cur.execute(
                     "DELETE FROM dev_machine WHERE owner_id = ANY(%s)",
                     (users,),
                 )
@@ -308,8 +312,13 @@ class Seed:
         return {cookie_name: key}
 
     def machine_token(self, user_id, workspace_id, dev_machine_id,
-                      secret, *, host_label="ct80-host", raw=None):
+                      secret, *, host_label="ct80-host", raw=None,
+                      expires_in_days=60, revoked_at=None):
         raw = raw or ("mt_" + secrets.token_urlsafe(32))
+        if expires_in_days is None:
+            expires_at = None
+        else:
+            expires_at = _now() + timedelta(days=expires_in_days)
         self._insert(
             "machine_token",
             user_id=user_id,
@@ -321,13 +330,39 @@ class Seed:
             label=f"machine: {host_label[:96]}",
             is_service=True,
             created_at=_now(),
+            expires_at=expires_at,
+            revoked_at=revoked_at,
+            last_used_at=None,
+        )
+        return raw
+
+    def engine_credential(self, user_id, dev_machine_id, secret,
+                          *, expires_in_days=14, revoked_at=None,
+                          revoked_reason=""):
+        """Seed an engine credential row (hash via stdlib HMAC)."""
+        raw = "ec_" + secrets.token_urlsafe(32)
+        token_hash = hash_token(raw, secret)
+        expires_at = _now() + timedelta(days=expires_in_days)
+        self._insert(
+            "engine_credential",
+            user_id=user_id,
+            dev_machine_id=dev_machine_id,
+            token_hash=token_hash,
+            fingerprint=token_fingerprint(raw),
+            created_at=_now(),
+            expires_at=expires_at,
+            last_used_at=None,
+            revoked_at=revoked_at,
+            revoked_reason=revoked_reason,
         )
         return raw
 
     # -- device codes ----------------------------------------------------
     def device_code(self, *, device_code=None, user_code=None, user_id=None,
                     workspace_id=None, approved=False, denied=False,
-                    consumed=False, expires_in_seconds=600):
+                    consumed=False, expires_in_seconds=600,
+                    scope="cli", dev_machine_id=None,
+                    interactive_approval=False, api_token_id=None):
         device_code = device_code or secrets.token_urlsafe(32)[:48]
         user_code = user_code or (
             "".join(secrets.choice("BCDFGHJKLMNPQRSTVWXZ23456789")
@@ -351,6 +386,10 @@ class Seed:
             expires_at=expire,
             created_at=_now(),
             updated_at=_now(),
+            scope=scope,
+            dev_machine_id=dev_machine_id,
+            interactive_approval=interactive_approval,
+            api_token_id=api_token_id,
         )
         return {"device_code": device_code, "user_code": user_code}
 
@@ -402,7 +441,10 @@ class Seed:
             updated_at=_now(),
         )
 
-    def dev_machine(self, owner_id, *, host_label="ct80-host"):
+    def dev_machine(self, owner_id, *, host_label="ct80-host",
+                    engine_sign_in_state="never",
+                    engine_credential_expires_at=None,
+                    engine_auto_pause_reason="", revoked_at=None):
         return self._insert(
             "dev_machine",
             host_label=host_label,
@@ -412,6 +454,17 @@ class Seed:
             provisioning="manual",
             created_at=_now(),
             updated_at=_now(),
+            engine_paused_by_owner=False,
+            engine_auto_pause_reason=engine_auto_pause_reason,
+            engine_team_runs=False,
+            engine_sign_in_state=engine_sign_in_state,
+            engine_credential_expires_at=engine_credential_expires_at,
+            engine_state="{}",
+            engine_state_reported_at=None,
+            merged_into_id=None,
+            merge_result="{}",
+            revoked_at=revoked_at,
+            last_seen_at=None,
         )
 
     def runner(self, owner_id, workspace_id, pod_id, *, name=None,
