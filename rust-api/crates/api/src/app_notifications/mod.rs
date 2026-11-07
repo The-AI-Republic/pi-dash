@@ -2470,10 +2470,16 @@ async fn save_preference(
             (column, mapped)
         })
         .collect();
-    pidash_services::domain::identity::save_preference_columns(pool, *id, *now, *user_id, &mapped)
-        .await
-        .map(|_| ())
-        .map_err(|_| Denial::ServerError.into_response())
+    pidash_services::domain::identity::save_preference_columns(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *id,
+        *now,
+        *user_id,
+        &mapped,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| Denial::ServerError.into_response())
 }
 
 /// `preference_patch` (`base.py:302-308`): the owner lookup runs first

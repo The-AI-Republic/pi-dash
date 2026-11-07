@@ -3455,7 +3455,7 @@ async fn join_post(
     // `user.last_workspace_id = ...; user.save()` (`:204-205`): `User`
     // has no such column, so Django drops the pointer and the save only
     // stamps `updated_at` ([`queries::user_touch_sql`]).
-    if identity::touch_user_updated_at(pool, user_id, now)
+    if identity::touch_user_updated_at(&pidash_db::pool::sea_orm_connection(pool), user_id, now)
         .await
         .is_err()
     {
@@ -4436,7 +4436,7 @@ async fn join_request_approve(
             )
             .await?;
         }
-        identity::set_last_workspace(&mut *tx, requester_id, workspace_id).await?;
+        identity::set_last_workspace(&pidash_db::orm_tx::TxConn::new(&mut tx), requester_id, workspace_id).await?;
         // The status `.save()` stamps `updated_by` with the approver
         // (`db/models/base.py:42`).
         {

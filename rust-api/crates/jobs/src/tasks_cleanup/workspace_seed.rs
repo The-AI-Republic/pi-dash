@@ -1479,7 +1479,7 @@ impl SeedStore for PgSeedStore {
         // normalization; every other column at its model default.
         use pidash_services::domain::identity::{create_bot_user, NewBotUser};
         create_bot_user(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &NewBotUser {
                 id: None,
                 username,

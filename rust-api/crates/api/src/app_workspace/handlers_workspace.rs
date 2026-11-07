@@ -4084,7 +4084,7 @@ pub async fn destroy_workspace(
         Err(response) => return Ok(response),
     };
     // `remove_last_workspace_ids_from_user_settings` (`:187`).
-    identity::clear_last_workspace(&pool, data.id)
+    identity::clear_last_workspace(&pidash_db::pool::sea_orm_connection(&pool), data.id)
         .await
         .map_err(|_| Denial::ServerError)?;
     // `str(timezone.now().isoformat())`: micros-truncated UTC, `+00:00`.

@@ -331,7 +331,10 @@ pub async fn run_activate_user(
         &kernel::new_user_token(),
         chrono::Utc::now(),
     );
-    if let Err(error) = identity::save_user_activation(pool, user.id, &write).await {
+    if let Err(error) =
+        identity::save_user_activation(&pidash_db::pool::sea_orm_connection(pool), user.id, &write)
+            .await
+    {
         emit_db_skeleton(io, &error);
         return Ok(1);
     }
@@ -432,7 +435,14 @@ pub async fn run_reset_password(
         &kernel::new_user_token(),
         chrono::Utc::now(),
     );
-    if let Err(error) = identity::save_user_password(pool, user.id, &encoded, &write).await {
+    if let Err(error) = identity::save_user_password(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user.id,
+        &encoded,
+        &write,
+    )
+    .await
+    {
         emit_db_skeleton(io, &error);
         return Ok(1);
     }

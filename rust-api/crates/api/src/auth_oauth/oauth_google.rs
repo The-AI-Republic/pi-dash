@@ -1030,9 +1030,14 @@ pub async fn get_or_create_profile(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ProfileState, CallbackError> {
     use pidash_services::domain::identity;
-    let path = identity::get_or_create_profile(pool, user_id, now, &random_color())
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+    let path = identity::get_or_create_profile(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user_id,
+        now,
+        &random_color(),
+    )
+    .await
+    .map_err(|_| CallbackError::Internal)?;
     Ok(ProfileState {
         is_onboarded: path.is_onboarded,
         last_workspace_id: path.last_workspace_id,
@@ -1087,7 +1092,7 @@ pub async fn sync_user_data(
 ) -> Result<(), CallbackError> {
     use pidash_services::domain::identity;
     identity::sync_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &identity::SyncUpdate {
             first_name,
@@ -1119,14 +1124,22 @@ pub async fn sync_user_data(
     .await
     {
         Some(asset_id) => {
-            identity::stamp_avatar_asset(pool, user.id, asset_id)
-                .await
-                .map_err(|_| CallbackError::Internal)?;
+            identity::stamp_avatar_asset(
+                &pidash_db::pool::sea_orm_connection(pool),
+                user.id,
+                asset_id,
+            )
+            .await
+            .map_err(|_| CallbackError::Internal)?;
         }
         None => {
-            identity::stamp_avatar_url(pool, user.id, avatar_url)
-                .await
-                .map_err(|_| CallbackError::Internal)?;
+            identity::stamp_avatar_url(
+                &pidash_db::pool::sea_orm_connection(pool),
+                user.id,
+                avatar_url,
+            )
+            .await
+            .map_err(|_| CallbackError::Internal)?;
         }
     }
     Ok(())
@@ -1540,7 +1553,7 @@ pub async fn save_user_data(
     let token = format!("{}{}", new_state(), new_state());
     use pidash_services::domain::identity;
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &identity::LoginStamps {
             medium: Some(PROVIDER),
@@ -1906,7 +1919,7 @@ pub async fn upsert_account(
         metadata,
     });
     create_update_account(
-        &mut conn,
+        &pidash_db::orm_tx::TxConn::new(&mut conn),
         user_id,
         PROVIDER,
         user_data,
@@ -2127,9 +2140,13 @@ pub async fn authenticate_google(
                 avatar_asset_id: None,
             };
             if !avatar_url.is_empty() {
-                identity::stamp_avatar_url(&ctx.pool, row.id, avatar_url)
-                    .await
-                    .map_err(|_| CallbackError::Internal)?;
+                identity::stamp_avatar_url(
+                    &pidash_db::pool::sea_orm_connection(&ctx.pool),
+                    row.id,
+                    avatar_url,
+                )
+                .await
+                .map_err(|_| CallbackError::Internal)?;
                 row.avatar = avatar_url.to_owned();
                 // `avatar_asset = download_and_upload_avatar(...)`;
                 // success sets the FK too, failure keeps the provider URL
@@ -2147,9 +2164,13 @@ pub async fn authenticate_google(
                 )
                 .await
                 {
-                    identity::stamp_avatar_asset(&ctx.pool, row.id, asset_id)
-                        .await
-                        .map_err(|_| CallbackError::Internal)?;
+                    identity::stamp_avatar_asset(
+                        &pidash_db::pool::sea_orm_connection(&ctx.pool),
+                        row.id,
+                        asset_id,
+                    )
+                    .await
+                    .map_err(|_| CallbackError::Internal)?;
                     row.avatar_asset_id = Some(asset_id);
                 }
             }

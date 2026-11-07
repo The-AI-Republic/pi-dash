@@ -2684,7 +2684,8 @@ pub async fn me_partial_update(
         is_staff: derived.is_staff,
         updated_at: now,
     };
-    let update = identity::save_me_profile(pool, row.id, &save).await;
+    let update =
+        identity::save_me_profile(&pidash_db::pool::sea_orm_connection(pool), row.id, &save).await;
     if let Err(error) = update {
         return write_denial(error).into_response();
     }
