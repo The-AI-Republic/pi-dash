@@ -2668,11 +2668,9 @@ async fn route_delivery(
             return Ok(delivery_status::SKIPPED.to_owned());
         };
         if event == "installation" && (action == "deleted" || action == "suspend") {
-            let now = Utc::now();
             let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
-            account.suspended_at = Some(now);
-            account.last_check_error =
-                "GitHub App installation removed or suspended".to_owned();
+            account.suspended_at = Some(bumped);
+            account.last_check_error = "GitHub App installation removed or suspended".to_owned();
             account.status = "degraded".to_owned();
             {
                 use pidash_db::entity::git_provider_accounts;
@@ -2681,9 +2679,7 @@ async fn route_delivery(
                 git_provider_accounts::Entity::update_many()
                     .col_expr(
                         git_provider_accounts::Column::SuspendedAt,
-                        sea_orm::sea_query::Expr::value(account.suspended_at.map(|at| {
-                            at.with_timezone(&chrono::FixedOffset::east_opt(0).expect("zero"))
-                        })),
+                        sea_orm::sea_query::Expr::value(account.suspended_at),
                     )
                     .col_expr(
                         git_provider_accounts::Column::LastCheckError,
@@ -2883,6 +2879,7 @@ async fn route_delivery(
 /// One `git_provider_accounts` row by `installation_id`
 /// (`github.py:930-931`). The (`provider`, `host_url`,
 /// `external_account_id`) index keeps webhook lookups indexed.
+#[allow(dead_code)]
 async fn installation_by_installation_id(
     pool: &PgPool,
     installation_id: i64,
