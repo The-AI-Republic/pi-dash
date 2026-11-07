@@ -54,21 +54,12 @@ def trigger_completion_comment(sender, instance: Issue, created: bool, **kwargs)
     # Lazy-import to avoid loading models at app-config time and to dodge a
     # circular-import risk through the bgtasks -> db -> bgtasks chain.
     from pi_dash.db.models.integration.git import GitIssueSync
-    from pi_dash.db.models.integration.github import GithubIssueSync
-    from pi_dash.bgtasks.git_sync_task import post_completion_comment as post_git_completion_comment
-    from pi_dash.bgtasks.github_sync_task import post_completion_comment
+    from pi_dash.bgtasks.git_sync_task import post_completion_comment
 
     git_issue_sync = GitIssueSync.objects.filter(issue=instance).first()
-    if git_issue_sync is not None:
-        if git_issue_sync.metadata.get("completion_comment_id"):
-            return
-        post_git_completion_comment.delay(str(git_issue_sync.id))
+    if git_issue_sync is None:
+        return
+    if git_issue_sync.metadata.get("completion_comment_id"):
         return
 
-    github_issue_sync = GithubIssueSync.objects.filter(issue=instance).first()
-    if github_issue_sync is None:
-        return
-    if github_issue_sync.metadata.get("completion_comment_id"):
-        return
-
-    post_completion_comment.delay(str(github_issue_sync.id))
+    post_completion_comment.delay(str(git_issue_sync.id))

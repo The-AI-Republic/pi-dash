@@ -138,7 +138,7 @@ class Scheduler(BaseModel):
         ordering = ("-created_at",)
         # BaseModel inherits SoftDeleteModel (deleted_at), so a plain
         # unique_together would collide with tombstones on uninstall/reinstall.
-        # Match GithubRepositorySync (db/models/integration/github.py).
+        # Match GitRepositoryBinding (db/models/integration/git.py).
         constraints = [
             models.UniqueConstraint(
                 fields=["workspace", "slug"],

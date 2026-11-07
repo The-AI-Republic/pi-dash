@@ -5,9 +5,11 @@
 """Tests for the Issue → completion-comment-back signal.
 
 Verifies the pre/post_save pair fires `post_completion_comment` exactly once
-when an issue moves into a `completed`-group state and is mirrored from
-GitHub. Doesn't fire for non-synced issues, doesn't fire on already-completed
-issues being re-saved, doesn't fire when `completion_comment_id` is set.
+when an issue moves into a `completed`-group state and is mirrored from a
+Git provider (generic GitIssueSync). Doesn't fire for non-synced issues,
+doesn't fire on already-completed issues being re-saved, doesn't fire when
+`completion_comment_id` is set. Legacy GithubIssueSync rows are ignored
+(PDASHOSS01-359, backfilled by 0152).
 """
 
 from unittest.mock import patch
@@ -16,6 +18,10 @@ import pytest
 
 from pi_dash.db.models import (
     APIToken,
+    GitIssueSync,
+    GitProviderAccount,
+    GitRepository,
+    GitRepositoryBinding,
     GithubIssueSync,
     GithubRepository,
     GithubRepositorySync,
@@ -97,7 +103,40 @@ def github_repo_sync(db, workspace, create_user, project):
 
 
 @pytest.fixture
-def synced_issue(db, project, workspace, started_state, github_repo_sync):
+def git_binding(db, workspace, create_user, project):
+    account = GitProviderAccount.objects.create(
+        workspace=workspace,
+        provider="gitlab",
+        host_url="https://gitlab.com",
+        auth_type="pat",
+        external_account_id="u1",
+        external_account_login="alice",
+        display_name="alice",
+        capabilities={},
+        credential_config={},
+        status=GitProviderAccount.Status.CONNECTED,
+    )
+    repo = GitRepository.objects.create(
+        provider="gitlab",
+        host_url="https://gitlab.com",
+        external_id="99",
+        namespace="acme",
+        name="web",
+        full_name="acme/web",
+        web_url="https://gitlab.com/acme/web",
+    )
+    return GitRepositoryBinding.objects.create(
+        project=project,
+        workspace=workspace,
+        repository=repo,
+        provider_account=account,
+        actor=create_user,
+        is_sync_enabled=True,
+    )
+
+
+@pytest.fixture
+def synced_issue(db, project, workspace, started_state, git_binding):
     issue = Issue.objects.create(
         project=project,
         workspace=workspace,
@@ -106,15 +145,14 @@ def synced_issue(db, project, workspace, started_state, github_repo_sync):
         external_source="github",
         external_id="1",
     )
-    GithubIssueSync.objects.create(
+    GitIssueSync.objects.create(
         project=project,
         workspace=workspace,
-        repository_sync=github_repo_sync,
+        binding=git_binding,
         issue=issue,
-        repo_issue_id=1,
-        github_issue_id=1,
-        issue_url="https://github.com/acme/repo/issues/1",
-        metadata={},
+        provider="gitlab",
+        external_id="1001",
+        external_iid="7",
     )
     return issue
 
@@ -132,26 +170,26 @@ def native_issue(db, project, workspace, started_state):
 @pytest.mark.unit
 @pytest.mark.django_db
 class TestCompletionCommentSignal:
-    @patch("pi_dash.bgtasks.github_sync_task.post_completion_comment.delay")
+    @patch("pi_dash.bgtasks.git_sync_task.post_completion_comment.delay")
     def test_fires_on_synced_issue_completion(self, mock_delay, synced_issue, completed_state):
         synced_issue.state = completed_state
         synced_issue.save()
         mock_delay.assert_called_once()
 
-    @patch("pi_dash.bgtasks.github_sync_task.post_completion_comment.delay")
+    @patch("pi_dash.bgtasks.git_sync_task.post_completion_comment.delay")
     def test_does_not_fire_on_native_issue_completion(self, mock_delay, native_issue, completed_state):
         native_issue.state = completed_state
         native_issue.save()
         mock_delay.assert_not_called()
 
-    @patch("pi_dash.bgtasks.github_sync_task.post_completion_comment.delay")
+    @patch("pi_dash.bgtasks.git_sync_task.post_completion_comment.delay")
     def test_does_not_fire_when_state_unchanged(self, mock_delay, synced_issue):
         # Save without changing state — no transition, no fire.
         synced_issue.name = "[github_1] Edited title"
         synced_issue.save()
         mock_delay.assert_not_called()
 
-    @patch("pi_dash.bgtasks.github_sync_task.post_completion_comment.delay")
+    @patch("pi_dash.bgtasks.git_sync_task.post_completion_comment.delay")
     def test_does_not_fire_twice_for_same_completion(
         self, mock_delay, synced_issue, completed_state, started_state
     ):
@@ -169,7 +207,7 @@ class TestCompletionCommentSignal:
         # sees an unset metadata key and fires again. To assert
         # "fires exactly once per completion transition," we set the flag
         # manually after the first fire.
-        sync = GithubIssueSync.objects.get(issue=synced_issue)
+        sync = GitIssueSync.objects.get(issue=synced_issue)
         sync.metadata["completion_comment_id"] = 123
         sync.save(update_fields=["metadata"])
         mock_delay.reset_mock()
@@ -180,3 +218,33 @@ class TestCompletionCommentSignal:
         synced_issue.state = completed_state
         synced_issue.save()
         mock_delay.assert_not_called()
+
+    @patch("pi_dash.bgtasks.git_sync_task.post_completion_comment.delay")
+    @patch("pi_dash.bgtasks.github_sync_task.post_completion_comment.delay")
+    def test_legacy_github_sync_row_does_not_fire(
+        self, mock_legacy_delay, mock_git_delay, db, project, workspace, started_state, completed_state,
+        github_repo_sync,
+    ):
+        # PDASHOSS01-359: legacy-only rows are ignored.
+        issue = Issue.objects.create(
+            project=project,
+            workspace=workspace,
+            name="[github_2] Legacy only",
+            state=started_state,
+            external_source="github",
+            external_id="2",
+        )
+        GithubIssueSync.objects.create(
+            project=project,
+            workspace=workspace,
+            repository_sync=github_repo_sync,
+            issue=issue,
+            repo_issue_id=2,
+            github_issue_id=2,
+            issue_url="https://github.com/acme/repo/issues/2",
+            metadata={},
+        )
+        issue.state = completed_state
+        issue.save()
+        mock_git_delay.assert_not_called()
+        mock_legacy_delay.assert_not_called()
