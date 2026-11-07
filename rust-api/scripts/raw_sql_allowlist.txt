@@ -79,7 +79,6 @@ crates/api/src/loop/admin.rs 12
 crates/api/src/loop/user.rs 2
 crates/api/src/middleware/session.rs 5
 crates/api/src/orchestration.rs 5
-crates/api/src/prompting/mod.rs 35
 crates/api/src/runner_enroll/delete_cmds.rs 1
 crates/api/src/runner_enroll/teardown.rs 10
 crates/api/src/runner_runs/approvals.rs 1
@@ -135,7 +134,6 @@ crates/db/src/filterset.rs 6
 crates/db/src/license/queries.rs 13
 crates/db/src/loop/queries.rs 9
 crates/db/src/ops/instance.rs 5
-crates/db/src/ops/prompting.rs 5
 crates/db/src/ops/repair.rs 7
 crates/db/src/ops/users.rs 12
 crates/db/src/orchestration/querysets.rs 8
@@ -232,8 +230,6 @@ crates/services/src/scheduler/builtins.rs 5
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
 crates/api/src/app_intake/issues.rs | 03711dfaa7dd
-crates/api/src/prompting/mod.rs | 5eb6f5df0734
-crates/api/src/prompting/mod.rs | ca7bbdefd9fe
 crates/api/src/v1_assets/intake.rs | e6dc5d83f1e3
 crates/api/src/v1_assets/sticky.rs | e6dc5d83f1e3
 crates/api/src/v1_cli_auth/runner.rs | e6dc5d83f1e3
