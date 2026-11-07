@@ -47,8 +47,13 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Router;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 use serde_json::{Map, Value};
 
+use pidash_db::entity::{modules, user_favorites, workspaces};
 use pidash_services::app_modules::queries;
 
 use super::gates;
@@ -114,6 +119,35 @@ fn gate_for(method: &str, path: &str) -> &'static gates::Gate {
     &gates::gate_for(method, path)
         .unwrap_or_else(|| panic!("D-28 gate for {method} {path}"))
         .gate
+}
+
+#[derive(Debug, FromQueryResult)]
+#[allow(dead_code)]
+struct ArchiveModuleRow {
+    id: uuid::Uuid,
+    status: String,
+    archived_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    workspace_id: uuid::Uuid,
+}
+
+fn archive_module_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    module_id: &uuid::Uuid,
+) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .columns([
+            modules::Column::Id,
+            modules::Column::Status,
+            modules::Column::ArchivedAt,
+            modules::Column::WorkspaceId,
+        ])
+        .join(JoinType::InnerJoin, modules::Relation::Workspaces.def())
+        .filter(modules::Column::Id.eq(*module_id))
+        .filter(modules::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(modules::Column::DeletedAt.is_null())
 }
 
 // ---------------------------------------------------------------------------
@@ -321,30 +355,14 @@ async fn fetch_archive_module(
     slug: &str,
     project_id: &uuid::Uuid,
     module_id: &uuid::Uuid,
-) -> Result<Map<String, Value>, Denial> {
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT row_to_json(__r)::text AS __row FROM (
-             SELECT m.id, m.status, m.archived_at
-             FROM modules m JOIN workspaces w ON w.id = m.workspace_id
-             WHERE m.id = $1 AND m.project_id = $2 AND w.slug = $3
-             AND m.deleted_at IS NULL) AS __r"#,
-    )
-    .bind(module_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Err(Denial::NotFound);
-    };
-    let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-    let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-    match value {
-        Value::Object(map) => Ok(map),
-        _ => Err(Denial::ServerError),
-    }
+) -> Result<ArchiveModuleRow, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    archive_module_select(slug, project_id, module_id)
+        .into_model::<ArchiveModuleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::NotFound)
 }
 
 /// `str(timezone.now())` for the archive response (`archive.py:559`):
@@ -387,9 +405,8 @@ async fn archive_post(
         ..
     } = context;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
-    let row = fetch_archive_module(&pool, &slug, &project_id, &module_id).await?;
-    let status = row.get("status").and_then(|value| value.as_str());
-    if !matches!(status, Some("completed" | "cancelled")) {
+    let module = fetch_archive_module(&pool, &slug, &project_id, &module_id).await?;
+    if !matches!(module.status.as_str(), "completed" | "cancelled") {
         return Err(Denial::BadError(
             "Only completed or cancelled modules can be archived".to_owned(),
         ));
@@ -399,30 +416,30 @@ async fn archive_post(
     // favorites cleanup is the queryset `delete()` default: soft
     // (`deleted_at` only, no `updated_at` bump), across users.
     let now = chrono::Utc::now();
-    sqlx::query(
-        r#"UPDATE modules SET archived_at = $2, updated_at = $2, updated_by_id = $3
-           WHERE id = $1"#,
-    )
-    .bind(module_id)
-    .bind(now)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    sqlx::query(
-        r#"UPDATE user_favorites uf SET deleted_at = $4
-           FROM workspaces w
-           WHERE uf.workspace_id = w.id AND w.slug = $1 AND uf.project_id = $2
-           AND uf.entity_type = 'module' AND uf.entity_identifier = $3
-           AND uf.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(module_id)
-    .bind(now)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    // SeaORM stores timestamptz; pass UTC explicitly to avoid naive drift.
+    let now_sea = now.fixed_offset();
+    modules::Entity::update_many()
+        .col_expr(modules::Column::ArchivedAt, Expr::value(Some(now_sea)))
+        .col_expr(modules::Column::UpdatedAt, Expr::value(now_sea))
+        .col_expr(modules::Column::UpdatedById, Expr::value(Some(user_id)))
+        .filter(modules::Column::Id.eq(module_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    user_favorites::Entity::update_many()
+        .col_expr(
+            user_favorites::Column::DeletedAt,
+            Expr::value(Some(now_sea)),
+        )
+        .filter(user_favorites::Column::WorkspaceId.eq(module.workspace_id))
+        .filter(user_favorites::Column::ProjectId.eq(Some(project_id)))
+        .filter(user_favorites::Column::EntityType.eq("module"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(Some(module_id)))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let mut out = String::from("{\"archived_at\":");
     out.push_str(&super::handlers_modules::json_string(&python_str_utc(&now)));
     out.push('}');
@@ -460,16 +477,19 @@ async fn archive_delete(
     let module_id = parse_uuid_or_invalid(&module_raw)?;
     fetch_archive_module(&pool, &slug, &project_id, &module_id).await?;
     let now = chrono::Utc::now();
-    sqlx::query(
-        r#"UPDATE modules SET archived_at = NULL, updated_at = $2, updated_by_id = $3
-           WHERE id = $1"#,
-    )
-    .bind(module_id)
-    .bind(now)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let now_sea = now.fixed_offset();
+    modules::Entity::update_many()
+        .col_expr(
+            modules::Column::ArchivedAt,
+            Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+        )
+        .col_expr(modules::Column::UpdatedAt, Expr::value(now_sea))
+        .col_expr(modules::Column::UpdatedById, Expr::value(Some(user_id)))
+        .filter(modules::Column::Id.eq(module_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 

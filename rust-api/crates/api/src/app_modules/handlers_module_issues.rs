@@ -181,12 +181,17 @@ pub(crate) fn actor_user_id(
 /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
 /// `str.strip` against `char::is_whitespace` over all code points —
 /// those four are the only differences).
+/// Delegated resolve lives in `handlers_modules`; kept here with the
+/// exhaustive property test below (same-batch duplicate).
+#[allow(dead_code)]
 fn is_py_strip_ws(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
 }
 
 /// Normalize a non-UUID identifier for the equality lookup
 /// (`db/models/project.py:210`): `str(value).strip().upper()`.
+/// Delegated resolve lives in `handlers_modules`; kept for the unit test.
+#[allow(dead_code)]
 fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
@@ -194,26 +199,14 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
 /// callers only (anonymous already 401'd); UUIDs pass through unchecked;
 /// other identifiers resolve `UPPER(identifier)` in the workspace, else
-/// `Http404` (detail 404).
+/// `Http404` (detail 404). Delegates to the SeaORM implementation in
+/// `handlers_modules` (same batch, identical predicates).
 pub(crate) async fn resolve_project_id(
     pool: &sqlx::PgPool,
     slug: &str,
     raw: &str,
 ) -> Result<uuid::Uuid, Denial> {
-    if let Ok(id) = raw.parse::<uuid::Uuid>() {
-        return Ok(id);
-    }
-    let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    super::handlers_modules::resolve_project_id(pool, slug, raw).await
 }
 
 /// Badly-formed UUIDs in paths render the `ValidationError` branch
@@ -229,8 +222,8 @@ pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
 /// Membership facts for one `(user, slug, project)` over the same rows the
 /// decorator reads (`app/permissions/base.py:19-86`): active project and
 /// workspace memberships scoped by slug/project, soft-deleted rows excluded,
-/// with the allowed-role flags computed against the calling gate's roles
-/// (`handlers_modules::fetch_allow_facts`, same shape).
+/// with the allowed-role flags computed against the calling gate's roles.
+/// Delegates to the SeaORM implementation in `handlers_modules` (same batch).
 pub(crate) async fn fetch_allow_facts(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -238,46 +231,7 @@ pub(crate) async fn fetch_allow_facts(
     user_id: &uuid::Uuid,
     allowed: &[i32],
 ) -> Result<AllowFacts, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use pidash_auth::permissions::ROLE_ADMIN;
-    Ok(AllowFacts {
-        workspace: pidash_types::WorkspaceId::from(slug),
-        authenticated: true,
-        is_workspace_member: workspace_role.is_some(),
-        has_allowed_workspace_role: workspace_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
-            .unwrap_or(false),
-        is_creator: false,
-        has_allowed_project_role: project_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
-            .unwrap_or(false),
-        is_project_member: project_role.is_some(),
-        is_workspace_admin: workspace_role
-            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
-            .unwrap_or(false),
-    })
+    super::handlers_modules::fetch_allow_facts(pool, slug, project_id, user_id, allowed).await
 }
 
 /// Run one `super::gates` row: anonymous already 401'd; `Allow` runs the

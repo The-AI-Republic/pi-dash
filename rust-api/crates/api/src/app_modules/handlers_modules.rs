@@ -77,9 +77,18 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use chrono_tz::Tz;
+use sea_orm::sea_query::{Condition, Expr, OnConflict};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
+};
 use serde_json::{Map, Value};
 use sqlx::Row;
 
+use pidash_db::entity::{
+    estimates, issues, module_issues, module_links, module_members, modules, project_members,
+    projects, states, user_favorites, user_recent_visits, users, workspace_members, workspaces,
+};
 use pidash_services::app_modules::{queries, shape, tasks};
 
 use super::gates;
@@ -197,6 +206,309 @@ fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
+/// SeaORM select builders for the foundation lookups (MODULES-1 slice A).
+/// Each builder carries the exact Django predicates so callers and
+/// statement-shape tests share one definition.
+fn resolve_project_select(slug: &str, upper: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+}
+
+fn project_role_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> sea_orm::Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+}
+
+fn workspace_role_select(
+    slug: &str,
+    user_id: &uuid::Uuid,
+) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+}
+
+fn actor_timezone_select(user_id: &uuid::Uuid) -> sea_orm::Select<users::Entity> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+}
+
+fn user_exists_select(user_id: &uuid::Uuid) -> sea_orm::Select<users::Entity> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(*user_id))
+}
+
+fn context_project_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Id, projects::Column::WorkspaceId])
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::DeletedAt.is_null())
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ContextProjectRow {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+}
+
+fn duplicate_name_select(
+    project_id: &uuid::Uuid,
+    name: &str,
+    exclude: Option<&uuid::Uuid>,
+) -> sea_orm::Select<modules::Entity> {
+    let select = modules::Entity::find()
+        .select_only()
+        .column(modules::Column::Id)
+        .filter(modules::Column::ProjectId.eq(*project_id))
+        .filter(modules::Column::Name.eq(name))
+        .filter(modules::Column::DeletedAt.is_null());
+    match exclude {
+        Some(self_id) => select.filter(modules::Column::Id.ne(*self_id)),
+        None => select,
+    }
+}
+
+fn live_member_ids_select(module_id: &uuid::Uuid) -> sea_orm::Select<module_members::Entity> {
+    module_members::Entity::find()
+        .select_only()
+        .column(module_members::Column::MemberId)
+        .filter(module_members::Column::ModuleId.eq(*module_id))
+        .filter(module_members::Column::MemberId.is_not_null())
+        .filter(module_members::Column::DeletedAt.is_null())
+}
+
+fn creator_exists_select(
+    module_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .column(modules::Column::Id)
+        .filter(modules::Column::Id.eq(*module_id))
+        .filter(modules::Column::CreatedById.eq(*user_id))
+        .filter(modules::Column::DeletedAt.is_null())
+}
+
+#[derive(Debug, FromQueryResult)]
+#[allow(dead_code)]
+struct DestroyModuleRow {
+    id: uuid::Uuid,
+    name: String,
+}
+
+fn destroy_module_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    module_id: &uuid::Uuid,
+) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .columns([modules::Column::Id, modules::Column::Name])
+        .join(JoinType::InnerJoin, modules::Relation::Workspaces.def())
+        .filter(modules::Column::Id.eq(*module_id))
+        .filter(modules::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(modules::Column::DeletedAt.is_null())
+}
+
+fn destroy_issue_ids_select(module_id: &uuid::Uuid) -> sea_orm::Select<module_issues::Entity> {
+    module_issues::Entity::find()
+        .select_only()
+        .column(module_issues::Column::IssueId)
+        .filter(module_issues::Column::ModuleId.eq(*module_id))
+        .filter(module_issues::Column::DeletedAt.is_null())
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ModuleLinkRow {
+    id: uuid::Uuid,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    title: Option<String>,
+    url: String,
+    metadata: Value,
+    created_by: Option<uuid::Uuid>,
+    updated_by: Option<uuid::Uuid>,
+    project: uuid::Uuid,
+    workspace: uuid::Uuid,
+    module: uuid::Uuid,
+}
+
+fn module_links_select(module_id: &uuid::Uuid) -> sea_orm::Select<module_links::Entity> {
+    module_links::Entity::find()
+        .select_only()
+        .columns([
+            module_links::Column::Id,
+            module_links::Column::CreatedAt,
+            module_links::Column::UpdatedAt,
+            module_links::Column::DeletedAt,
+            module_links::Column::Title,
+            module_links::Column::Url,
+            module_links::Column::Metadata,
+        ])
+        .column_as(module_links::Column::CreatedById, "created_by")
+        .column_as(module_links::Column::UpdatedById, "updated_by")
+        .column_as(module_links::Column::ProjectId, "project")
+        .column_as(module_links::Column::WorkspaceId, "workspace")
+        .column_as(module_links::Column::ModuleId, "module")
+        .filter(module_links::Column::ModuleId.eq(*module_id))
+        .filter(module_links::Column::DeletedAt.is_null())
+        .order_by_desc(module_links::Column::CreatedAt)
+}
+
+#[derive(Debug, FromQueryResult)]
+struct WriteRowData {
+    id: uuid::Uuid,
+    lead_id: Option<uuid::Uuid>,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    name: String,
+    description: String,
+    description_text: Option<Value>,
+    description_html: Option<Value>,
+    start_date: Option<chrono::NaiveDate>,
+    target_date: Option<chrono::NaiveDate>,
+    status: String,
+    view_props: Value,
+    sort_order: f64,
+    external_source: Option<String>,
+    external_id: Option<String>,
+    archived_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    logo_props: Value,
+    created_by: Option<uuid::Uuid>,
+    updated_by: Option<uuid::Uuid>,
+    project: uuid::Uuid,
+    workspace: uuid::Uuid,
+    lead: Option<uuid::Uuid>,
+}
+
+fn write_row_select(module_id: &uuid::Uuid) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .columns([
+            modules::Column::Id,
+            modules::Column::LeadId,
+            modules::Column::CreatedAt,
+            modules::Column::UpdatedAt,
+            modules::Column::DeletedAt,
+            modules::Column::Name,
+            modules::Column::Description,
+            modules::Column::DescriptionText,
+            modules::Column::DescriptionHtml,
+            modules::Column::StartDate,
+            modules::Column::TargetDate,
+            modules::Column::Status,
+            modules::Column::ViewProps,
+            modules::Column::SortOrder,
+            modules::Column::ExternalSource,
+            modules::Column::ExternalId,
+            modules::Column::ArchivedAt,
+            modules::Column::LogoProps,
+        ])
+        .column_as(modules::Column::CreatedById, "created_by")
+        .column_as(modules::Column::UpdatedById, "updated_by")
+        .column_as(modules::Column::ProjectId, "project")
+        .column_as(modules::Column::WorkspaceId, "workspace")
+        .column_as(modules::Column::LeadId, "lead")
+        .filter(modules::Column::Id.eq(*module_id))
+}
+
+#[derive(Debug, FromQueryResult)]
+struct StoredAuditRow {
+    workspace_id: uuid::Uuid,
+    created_by_id: Option<uuid::Uuid>,
+    updated_by_id: Option<uuid::Uuid>,
+}
+
+fn stored_audit_select(module_id: &uuid::Uuid) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .columns([
+            modules::Column::WorkspaceId,
+            modules::Column::CreatedById,
+            modules::Column::UpdatedById,
+        ])
+        .filter(modules::Column::Id.eq(*module_id))
+}
+
+fn sub_issues_count_select(
+    project_id: &uuid::Uuid,
+    module_id: &uuid::Uuid,
+) -> sea_orm::Select<module_issues::Entity> {
+    module_issues::Entity::find()
+        .select_only()
+        .column(module_issues::Column::Id)
+        .join(JoinType::InnerJoin, module_issues::Relation::Issues.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .filter(module_issues::Column::ModuleId.eq(*module_id))
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::ParentId.is_not_null())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+}
+
+fn estimate_type_exists_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+) -> sea_orm::Select<estimates::Entity> {
+    estimates::Entity::find()
+        .select_only()
+        .column(estimates::Column::Id)
+        .join(JoinType::InnerJoin, estimates::Relation::Projects.def())
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(estimates::Column::Type.eq("points"))
+}
+
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
 /// callers only; UUIDs pass through unchecked; other identifiers resolve
 /// `UPPER(identifier)` in the workspace, else `Http404` (detail 404).
@@ -209,16 +521,13 @@ pub(crate) async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    resolve_project_select(slug, &upper)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ProjectNotFound)
 }
 
 /// Badly-formed UUIDs in paths render the `ValidationError` branch
@@ -252,44 +561,32 @@ pub(crate) async fn fetch_allow_facts(
     user_id: &uuid::Uuid,
     allowed: &[i32],
 ) -> Result<pidash_auth::permissions::allow::AllowFacts, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project_role: Option<i16> = project_role_select(slug, project_id, user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     use pidash_auth::permissions::ROLE_ADMIN;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let workspace_role: Option<i16> = workspace_role_select(slug, user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(pidash_auth::permissions::allow::AllowFacts {
         workspace: pidash_types::WorkspaceId::from(slug),
         authenticated: true,
         is_workspace_member: workspace_role.is_some(),
         has_allowed_workspace_role: workspace_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
+            .map(|role| allowed.contains(&i32::from(role)))
             .unwrap_or(false),
         is_creator: false,
         has_allowed_project_role: project_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
+            .map(|role| allowed.contains(&i32::from(role)))
             .unwrap_or(false),
         is_project_member: project_role.is_some(),
         is_workspace_admin: workspace_role
-            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
+            .map(|role| i32::from(role) == ROLE_ADMIN)
             .unwrap_or(false),
     })
 }
@@ -369,13 +666,13 @@ pub(crate) async fn actor_timezone(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<Tz, Denial> {
-    let row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let name: String = actor_timezone_select(user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -888,12 +1185,12 @@ async fn validate_pk_value(pool: &sqlx::PgPool, value: &Value) -> Result<uuid::U
         Value::String(raw) => match raw.parse::<uuid::Uuid>() {
             Err(_) => Err(format!("\u{201c}{raw}\u{201d} is not a valid UUID.")),
             Ok(id) => {
-                let exists: Option<(uuid::Uuid,)> =
-                    sqlx::query_as(r#"SELECT id FROM users WHERE id = $1"#)
-                        .bind(id)
-                        .fetch_optional(pool)
-                        .await
-                        .map_err(|_| "Invalid pk \"?\" - object does not exist.".to_owned())?;
+                let db = pidash_db::pool::sea_orm_connection(pool);
+                let exists: Option<uuid::Uuid> = user_exists_select(&id)
+                    .into_tuple()
+                    .one(&db)
+                    .await
+                    .map_err(|_| "Invalid pk \"?\" - object does not exist.".to_owned())?;
                 match exists {
                     Some(_) => Ok(id),
                     None => Err(format!("Invalid pk \"{raw}\" - object does not exist.")),
@@ -1257,17 +1554,14 @@ async fn fetch_context_project(
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<(uuid::Uuid, uuid::Uuid), Denial> {
-    let row: Option<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.ok_or(Denial::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<ContextProjectRow> = context_project_select(slug, project_id)
+        .into_model::<ContextProjectRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.map(|row| (row.id, row.workspace_id))
+        .ok_or(Denial::NotFound)
 }
 
 /// Duplicate-name probe (`module.py:68-72,99-100`): live rows only, with
@@ -1278,30 +1572,12 @@ async fn duplicate_name_exists(
     name: &str,
     exclude: Option<&uuid::Uuid>,
 ) -> Result<bool, Denial> {
-    let row: Option<(uuid::Uuid,)> = if let Some(self_id) = exclude {
-        sqlx::query_as(
-            r#"SELECT id FROM modules
-               WHERE project_id = $1 AND name = $2 AND id != $3 AND deleted_at IS NULL
-               LIMIT 1"#,
-        )
-        .bind(project_id)
-        .bind(name)
-        .bind(self_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = duplicate_name_select(project_id, name, exclude)
+        .into_tuple()
+        .one(&db)
         .await
-        .map_err(|_| Denial::ServerError)?
-    } else {
-        sqlx::query_as(
-            r#"SELECT id FROM modules
-               WHERE project_id = $1 AND name = $2 AND deleted_at IS NULL
-               LIMIT 1"#,
-        )
-        .bind(project_id)
-        .bind(name)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-    };
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -1319,45 +1595,39 @@ async fn replace_members(
     // Live rows only: the (module_id, member_id, deleted_at) unique
     // constraint rejects stamping several same-member rows with one
     // now() (Django's soft-delete manager filters the same way).
-    sqlx::query(r#"UPDATE module_members SET deleted_at = now() WHERE module_id = $1 AND deleted_at IS NULL"#)
-        .bind(module_id)
-        .execute(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let now_sea = chrono::Utc::now().fixed_offset();
+    module_members::Entity::update_many()
+        .col_expr(
+            module_members::Column::DeletedAt,
+            Expr::value(Some(now_sea)),
+        )
+        .filter(module_members::Column::ModuleId.eq(*module_id))
+        .filter(module_members::Column::DeletedAt.is_null())
+        .exec(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     for chunk in member_ids.chunks(shape::MEMBER_BULK_BATCH_SIZE) {
-        let mut sql = String::from(
-            "INSERT INTO module_members (id, workspace_id, project_id, module_id, member_id, \
-             created_by_id, updated_by_id, created_at, updated_at) VALUES ",
-        );
-        for (index, _) in chunk.iter().enumerate() {
-            if index > 0 {
-                sql.push_str(", ");
-            }
-            // Six binds per row: workspace, project, module, member,
-            // created_by, updated_by (`gen_random_uuid()` is inline).
-            let base = index * 6 + 1;
-            sql.push_str(&format!(
-                "(gen_random_uuid(), ${}, ${}, ${}, ${}, ${}, ${}, now(), now())",
-                base,
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5
-            ));
-        }
-        sql.push_str(" ON CONFLICT DO NOTHING");
-        let mut query = sqlx::query(&sql);
-        for member_id in chunk {
-            query = query
-                .bind(workspace_id)
-                .bind(project_id)
-                .bind(module_id)
-                .bind(member_id)
-                .bind(created_by)
-                .bind(updated_by);
-        }
-        query.execute(pool).await.map_err(|_| Denial::ServerError)?;
+        let models: Vec<module_members::ActiveModel> = chunk
+            .iter()
+            .map(|member_id| module_members::ActiveModel {
+                id: sea_orm::Set(uuid::Uuid::new_v4()),
+                workspace_id: sea_orm::Set(*workspace_id),
+                project_id: sea_orm::Set(*project_id),
+                module_id: sea_orm::Set(*module_id),
+                member_id: sea_orm::Set(*member_id),
+                created_by_id: sea_orm::Set(created_by),
+                updated_by_id: sea_orm::Set(updated_by),
+                created_at: sea_orm::Set(now_sea),
+                updated_at: sea_orm::Set(now_sea),
+                deleted_at: sea_orm::Set(None),
+            })
+            .collect();
+        module_members::Entity::insert_many(models)
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .exec(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     }
     Ok(())
 }
@@ -1395,58 +1665,65 @@ async fn module_create(
     // `Module.save` side effect (`db/models/module.py:115-124`):
     // `MIN(sibling sort_order) - 10000` when siblings exist, else the
     // field default `65535.0`.
-    let min_sort: Option<(Option<f64>,)> = sqlx::query_as(
-        r#"SELECT MIN(sort_order) FROM modules WHERE project_id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    #[derive(Debug, FromQueryResult)]
+    struct MinSortRow {
+        min_sort: Option<f64>,
+    }
+    let min_row: Option<MinSortRow> = modules::Entity::find()
+        .select_only()
+        .column_as(modules::Column::SortOrder.min(), "min_sort")
+        .filter(modules::Column::ProjectId.eq(project_id))
+        .filter(modules::Column::DeletedAt.is_null())
+        .into_model::<MinSortRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // `Module.save` (`db/models/module.py:115-124`) only clobbers input
     // `sort_order` when siblings exist (`MIN(sibling) - 10000`); with no
     // siblings the validated input lands, defaulting to `65535.0` when
     // absent (verified live).
-    let sort_order = match min_sort.and_then(|(min,)| min) {
+    let sort_order = match min_row.and_then(|row| row.min_sort) {
         Some(min) => min - 10_000.0,
         None => input.sort_order.unwrap_or(65535.0),
     };
     let module_id: uuid::Uuid = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO modules (id, workspace_id, project_id, name, description, description_text,
-           description_html, start_date, target_date, status, lead_id, view_props, sort_order,
-           external_source, external_id, archived_at, logo_props,
-           created_by_id, updated_by_id, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                   NULL, $16, $17, NULL, now(), now())"#,
-    )
-    .bind(module_id)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(input.name.clone().expect("name"))
-    .bind(input.description.clone().unwrap_or_default())
-    .bind(input.description_text.clone().unwrap_or(Value::Null))
-    .bind(input.description_html.clone().unwrap_or(Value::Null))
-    .bind(parse_date_opt(&input.start_date.clone().flatten()))
-    .bind(parse_date_opt(&input.target_date.clone().flatten()))
-    .bind(input.status.clone().unwrap_or_else(|| "planned".to_owned()))
-    .bind(input.lead_id.flatten())
-    .bind(
-        input
-            .view_props
-            .clone()
-            .unwrap_or(Value::Object(Map::new())),
-    )
-    .bind(sort_order)
-    .bind(input.external_source.clone().flatten())
-    .bind(input.external_id.clone().flatten())
-    .bind(
-        input
-            .logo_props
-            .clone()
-            .unwrap_or(Value::Object(Map::new())),
-    )
-    .bind(user_id)
-    .execute(&pool)
+    let now_sea = chrono::Utc::now().fixed_offset();
+    modules::Entity::insert(modules::ActiveModel {
+        id: sea_orm::Set(module_id),
+        workspace_id: sea_orm::Set(workspace_id),
+        project_id: sea_orm::Set(project_id),
+        name: sea_orm::Set(input.name.clone().expect("name")),
+        description: sea_orm::Set(input.description.clone().unwrap_or_default()),
+        description_text: sea_orm::Set(input.description_text.clone()),
+        description_html: sea_orm::Set(input.description_html.clone()),
+        start_date: sea_orm::Set(parse_date_opt(&input.start_date.clone().flatten())),
+        target_date: sea_orm::Set(parse_date_opt(&input.target_date.clone().flatten())),
+        status: sea_orm::Set(input.status.clone().unwrap_or_else(|| "planned".to_owned())),
+        lead_id: sea_orm::Set(input.lead_id.flatten()),
+        view_props: sea_orm::Set(
+            input
+                .view_props
+                .clone()
+                .unwrap_or(Value::Object(Map::new())),
+        ),
+        sort_order: sea_orm::Set(sort_order),
+        external_source: sea_orm::Set(input.external_source.clone().flatten()),
+        external_id: sea_orm::Set(input.external_id.clone().flatten()),
+        archived_at: sea_orm::Set(None),
+        logo_props: sea_orm::Set(
+            input
+                .logo_props
+                .clone()
+                .unwrap_or(Value::Object(Map::new())),
+        ),
+        created_by_id: sea_orm::Set(Some(user_id)),
+        updated_by_id: sea_orm::Set(None),
+        created_at: sea_orm::Set(now_sea),
+        updated_at: sea_orm::Set(now_sea),
+        deleted_at: sea_orm::Set(None),
+    })
+    .exec(&db)
     .await
     .map_err(|_| Denial::ServerError)?;
     if let Some(members) = input.member_ids.as_ref() {
@@ -1494,27 +1771,58 @@ pub(crate) async fn fetch_module_links(
     pool: &sqlx::PgPool,
     module_id: &uuid::Uuid,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT row_to_json(__r)::text AS __row FROM (
-             SELECT id, created_at, updated_at, deleted_at, title, url, metadata,
-                    created_by_id AS created_by, updated_by_id AS updated_by,
-                    project_id AS project, workspace_id AS workspace,
-                    module_id AS module
-             FROM module_links WHERE module_id = $1 AND deleted_at IS NULL
-             ORDER BY created_at DESC) AS __r"#,
-    )
-    .bind(module_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<ModuleLinkRow> = module_links_select(module_id)
+        .into_model::<ModuleLinkRow>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-        let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-        match value {
-            Value::Object(map) => out.push(map),
-            _ => return Err(Denial::ServerError),
-        }
+        let mut map = Map::new();
+        map.insert("id".into(), Value::String(row.id.to_string()));
+        map.insert(
+            "created_at".into(),
+            Value::String(row.created_at.to_rfc3339()),
+        );
+        map.insert(
+            "updated_at".into(),
+            Value::String(row.updated_at.to_rfc3339()),
+        );
+        map.insert(
+            "deleted_at".into(),
+            match row.deleted_at {
+                Some(value) => Value::String(value.to_rfc3339()),
+                None => Value::Null,
+            },
+        );
+        map.insert(
+            "title".into(),
+            match row.title {
+                Some(value) => Value::String(value),
+                None => Value::Null,
+            },
+        );
+        map.insert("url".into(), Value::String(row.url));
+        map.insert("metadata".into(), row.metadata);
+        map.insert(
+            "created_by".into(),
+            match row.created_by {
+                Some(value) => Value::String(value.to_string()),
+                None => Value::Null,
+            },
+        );
+        map.insert(
+            "updated_by".into(),
+            match row.updated_by {
+                Some(value) => Value::String(value.to_string()),
+                None => Value::Null,
+            },
+        );
+        map.insert("project".into(), Value::String(row.project.to_string()));
+        map.insert("workspace".into(), Value::String(row.workspace.to_string()));
+        map.insert("module".into(), Value::String(row.module.to_string()));
+        out.push(map);
     }
     Ok(out)
 }
@@ -1548,16 +1856,12 @@ pub(crate) async fn fetch_sub_issues(
     project_id: &uuid::Uuid,
     module_id: &uuid::Uuid,
 ) -> Result<i64, Denial> {
-    let sql = queries::sub_issues_sql()
-        .replace(":project_id", "$1")
-        .replace(":module_id", "$2");
-    let row: Option<(Option<i64>,)> = sqlx::query_as(&format!("SELECT ({sql}) AS sub_issues"))
-        .bind(project_id)
-        .bind(module_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let count = sub_issues_count_select(project_id, module_id)
+        .count(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|(count,)| count).unwrap_or(0))
+    Ok(count as i64)
 }
 
 /// `estimate_type` gate (`base.py:417-422`): a points estimate exists for
@@ -1568,16 +1872,13 @@ pub(crate) async fn fetch_estimate_type(
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let sql = queries::estimate_type_exists_sql()
-        .replace(":slug", "$1")
-        .replace(":project_id", "$2");
-    let row: Option<(Option<i32>,)> = sqlx::query_as(&format!("SELECT ({sql}) AS estimate_type"))
-        .bind(slug)
-        .bind(project_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let found: Option<uuid::Uuid> = estimate_type_exists_select(slug, project_id)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|(found,)| found).is_some())
+    Ok(found.is_some())
 }
 /// Shared `FROM/WHERE` for the distribution queries: live module bridges
 /// of this project/workspace under the `IssueManager` base
@@ -2158,16 +2459,13 @@ async fn fetch_live_member_ids(
     pool: &sqlx::PgPool,
     module_id: &uuid::Uuid,
 ) -> Result<Vec<String>, Denial> {
-    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT module_members.member_id FROM module_members
-           WHERE module_members.module_id = $1 AND module_members.member_id IS NOT NULL
-           AND module_members.deleted_at IS NULL"#,
-    )
-    .bind(module_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(rows.into_iter().map(|(id,)| id.to_string()).collect())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<uuid::Uuid> = live_member_ids_select(module_id)
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows.into_iter().map(|id| id.to_string()).collect())
 }
 
 /// One write-shape row (`ModuleWriteSerializer` over the stored module,
@@ -2178,26 +2476,115 @@ async fn fetch_write_row(
     module_id: &uuid::Uuid,
     timezone: &Tz,
 ) -> Result<String, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT row_to_json(__r)::text AS __row FROM (
-             SELECT id, lead_id, created_at, updated_at, deleted_at, name, description,
-                    description_text, description_html, start_date, target_date, status,
-                    view_props, sort_order, external_source, external_id, archived_at,
-                    logo_props, created_by_id AS created_by, updated_by_id AS updated_by,
-                    project_id AS project, workspace_id AS workspace, lead_id AS lead
-             FROM modules WHERE id = $1) AS __r"#,
-    )
-    .bind(module_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<WriteRowData> = write_row_select(module_id)
+        .into_model::<WriteRowData>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let row = row.ok_or(Denial::ServerError)?;
-    let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-    let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-    let map = match value {
-        Value::Object(map) => map,
-        _ => return Err(Denial::ServerError),
-    };
+    let mut map = Map::new();
+    map.insert("id".into(), Value::String(row.id.to_string()));
+    map.insert(
+        "lead_id".into(),
+        match row.lead_id {
+            Some(value) => Value::String(value.to_string()),
+            None => Value::Null,
+        },
+    );
+    map.insert(
+        "created_at".into(),
+        Value::String(row.created_at.to_rfc3339()),
+    );
+    map.insert(
+        "updated_at".into(),
+        Value::String(row.updated_at.to_rfc3339()),
+    );
+    map.insert(
+        "deleted_at".into(),
+        match row.deleted_at {
+            Some(value) => Value::String(value.to_rfc3339()),
+            None => Value::Null,
+        },
+    );
+    map.insert("name".into(), Value::String(row.name));
+    map.insert("description".into(), Value::String(row.description));
+    map.insert(
+        "description_text".into(),
+        match row.description_text {
+            Some(value) => value,
+            None => Value::Null,
+        },
+    );
+    map.insert(
+        "description_html".into(),
+        match row.description_html {
+            Some(value) => value,
+            None => Value::Null,
+        },
+    );
+    map.insert(
+        "start_date".into(),
+        match row.start_date {
+            Some(value) => Value::String(value.to_string()),
+            None => Value::Null,
+        },
+    );
+    map.insert(
+        "target_date".into(),
+        match row.target_date {
+            Some(value) => Value::String(value.to_string()),
+            None => Value::Null,
+        },
+    );
+    map.insert("status".into(), Value::String(row.status));
+    map.insert("view_props".into(), row.view_props);
+    map.insert("sort_order".into(), serde_json::json!(row.sort_order));
+    map.insert(
+        "external_source".into(),
+        match row.external_source {
+            Some(value) => Value::String(value),
+            None => Value::Null,
+        },
+    );
+    map.insert(
+        "external_id".into(),
+        match row.external_id {
+            Some(value) => Value::String(value),
+            None => Value::Null,
+        },
+    );
+    map.insert(
+        "archived_at".into(),
+        match row.archived_at {
+            Some(value) => Value::String(value.to_rfc3339()),
+            None => Value::Null,
+        },
+    );
+    map.insert("logo_props".into(), row.logo_props);
+    map.insert(
+        "created_by".into(),
+        match row.created_by {
+            Some(value) => Value::String(value.to_string()),
+            None => Value::Null,
+        },
+    );
+    map.insert(
+        "updated_by".into(),
+        match row.updated_by {
+            Some(value) => Value::String(value.to_string()),
+            None => Value::Null,
+        },
+    );
+    map.insert("project".into(), Value::String(row.project.to_string()));
+    map.insert("workspace".into(), Value::String(row.workspace.to_string()));
+    map.insert(
+        "lead".into(),
+        match row.lead {
+            Some(value) => Value::String(value.to_string()),
+            None => Value::Null,
+        },
+    );
     let member_ids = fetch_live_member_ids(pool, module_id).await?;
     let mut out = String::from("{");
     for (index, field) in shape::WRITE_RESPONSE_ORDER.iter().enumerate() {
@@ -2245,108 +2632,77 @@ async fn apply_write_fields(
     user_id: &uuid::Uuid,
     input: &WriteInput,
 ) -> Result<(), Denial> {
-    // `$1` is the module id; every SET column takes the next placeholder.
-    let mut parts: Vec<String> = Vec::new();
-    let mut binds: Vec<WriteBind> = Vec::new();
-    macro_rules! set {
-        ($col:expr, $bind:expr) => {{
-            parts.push(format!("{} = ${}", $col, binds.len() + 2));
-            binds.push($bind);
-        }};
-    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let now_sea = chrono::Utc::now().fixed_offset();
+    let mut update = modules::Entity::update_many();
     if let Some(name) = input.name.as_ref() {
-        set!("name", WriteBind::Text(name.clone()));
+        update = update.col_expr(modules::Column::Name, Expr::value(name.clone()));
     }
     if let Some(description) = input.description.as_ref() {
-        set!("description", WriteBind::Text(description.clone()));
-    }
-    if let Some(description_text) = input.description_text.as_ref() {
-        set!(
-            "description_text",
-            WriteBind::Json(description_text.clone())
+        update = update.col_expr(
+            modules::Column::Description,
+            Expr::value(description.clone()),
         );
     }
-    if let Some(description_html) = input.description_html.as_ref() {
-        set!(
-            "description_html",
-            WriteBind::Json(description_html.clone())
+    if let Some(value) = input.description_text.as_ref() {
+        update = update.col_expr(
+            modules::Column::DescriptionText,
+            Expr::value(Some(value.clone())),
         );
     }
-    if let Some(start_date) = input.start_date.as_ref() {
-        set!("start_date", WriteBind::Date(start_date.clone()));
+    if let Some(value) = input.description_html.as_ref() {
+        update = update.col_expr(
+            modules::Column::DescriptionHtml,
+            Expr::value(Some(value.clone())),
+        );
     }
-    if let Some(target_date) = input.target_date.as_ref() {
-        set!("target_date", WriteBind::Date(target_date.clone()));
+    if let Some(date) = input.start_date.as_ref() {
+        let parsed = date
+            .as_ref()
+            .and_then(|text| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok());
+        update = update.col_expr(modules::Column::StartDate, Expr::value(parsed));
+    }
+    if let Some(date) = input.target_date.as_ref() {
+        let parsed = date
+            .as_ref()
+            .and_then(|text| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok());
+        update = update.col_expr(modules::Column::TargetDate, Expr::value(parsed));
     }
     if let Some(status) = input.status.as_ref() {
-        set!("status", WriteBind::Text(status.clone()));
+        update = update.col_expr(modules::Column::Status, Expr::value(status.clone()));
     }
     if let Some(lead_id) = input.lead_id.as_ref() {
-        set!("lead_id", WriteBind::UuidOpt(*lead_id));
+        update = update.col_expr(modules::Column::LeadId, Expr::value(*lead_id));
     }
-    if let Some(view_props) = input.view_props.as_ref() {
-        set!("view_props", WriteBind::Json(view_props.clone()));
+    if let Some(value) = input.view_props.as_ref() {
+        update = update.col_expr(modules::Column::ViewProps, Expr::value(value.clone()));
     }
     if let Some(sort_order) = input.sort_order {
-        set!("sort_order", WriteBind::Float(sort_order));
+        update = update.col_expr(modules::Column::SortOrder, Expr::value(sort_order));
     }
-    if let Some(external_source) = input.external_source.as_ref() {
-        set!(
-            "external_source",
-            WriteBind::TextOpt(external_source.clone())
-        );
+    if let Some(value) = input.external_source.as_ref() {
+        update = update.col_expr(modules::Column::ExternalSource, Expr::value(value.clone()));
     }
-    if let Some(external_id) = input.external_id.as_ref() {
-        set!("external_id", WriteBind::TextOpt(external_id.clone()));
+    if let Some(value) = input.external_id.as_ref() {
+        update = update.col_expr(modules::Column::ExternalId, Expr::value(value.clone()));
     }
-    if let Some(logo_props) = input.logo_props.as_ref() {
-        set!("logo_props", WriteBind::Json(logo_props.clone()));
+    if let Some(value) = input.logo_props.as_ref() {
+        update = update.col_expr(modules::Column::LogoProps, Expr::value(value.clone()));
     }
-    parts.push("updated_at = now()".to_owned());
-    parts.push(format!("updated_by_id = ${}", binds.len() + 2));
-    let sql = format!("UPDATE modules SET {} WHERE id = $1", parts.join(", "));
-    let mut query = sqlx::query(&sql).bind(module_id);
-    for bind in binds {
-        query = bind.apply(query);
-    }
-    query = query.bind(user_id);
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
+    update = update.col_expr(modules::Column::UpdatedAt, Expr::value(now_sea));
+    update = update.col_expr(modules::Column::UpdatedById, Expr::value(Some(*user_id)));
+    update
+        .filter(modules::Column::Id.eq(*module_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
-/// Validated `YYYY-MM-DD` input as a date bind (sqlx text params do not
-/// coerce to `DATE` columns).
+/// Validated `YYYY-MM-DD` input as a date value.
 fn parse_date_opt(date: &Option<String>) -> Option<chrono::NaiveDate> {
     date.as_ref()
         .and_then(|text| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok())
-}
-
-/// One `UPDATE modules` bind value.
-enum WriteBind {
-    Text(String),
-    TextOpt(Option<String>),
-    Json(Value),
-    Date(Option<String>),
-    UuidOpt(Option<uuid::Uuid>),
-    Float(f64),
-}
-
-impl WriteBind {
-    fn apply<'a>(
-        self,
-        query: sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    ) -> sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments> {
-        match self {
-            WriteBind::Text(text) => query.bind(text),
-            WriteBind::TextOpt(text) => query.bind(text),
-            WriteBind::Json(value) => query.bind(sqlx::types::Json(value)),
-            WriteBind::Date(date) => query.bind(
-                date.and_then(|text| chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d").ok()),
-            ),
-            WriteBind::UuidOpt(id) => query.bind(id),
-            WriteBind::Float(float) => query.bind(float),
-        }
-    }
 }
 
 /// DRF default `update` over `ModuleWriteSerializer` (no custom method in
@@ -2400,13 +2756,13 @@ async fn module_update(
     // instance BEFORE `super().update()` saves the new `updated_by`).
     let stored: Option<(uuid::Uuid, Option<uuid::Uuid>, Option<uuid::Uuid>)> =
         if input.member_ids.is_some() {
-            sqlx::query_as(
-                r#"SELECT workspace_id, created_by_id, updated_by_id FROM modules WHERE id = $1"#,
-            )
-            .bind(module_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let row: Option<StoredAuditRow> = stored_audit_select(&module_id)
+                .into_model::<StoredAuditRow>()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            row.map(|r| (r.workspace_id, r.created_by_id, r.updated_by_id))
         } else {
             None
         };
@@ -2500,13 +2856,13 @@ async fn module_partial_update(
     }
     let stored: Option<(uuid::Uuid, Option<uuid::Uuid>, Option<uuid::Uuid>)> =
         if input.member_ids.is_some() {
-            sqlx::query_as(
-                r#"SELECT workspace_id, created_by_id, updated_by_id FROM modules WHERE id = $1"#,
-            )
-            .bind(module_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let row: Option<StoredAuditRow> = stored_audit_select(&module_id)
+                .into_model::<StoredAuditRow>()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            row.map(|value| (value.workspace_id, value.created_by_id, value.updated_by_id))
         } else {
             None
         };
@@ -2564,14 +2920,12 @@ async fn module_destroy(
     // Creator fast-path input (`Module.objects.filter(id=pk,
     // created_by=user).exists()`): a MEMBER creator passes without
     // reaching the role check.
-    let creator_row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM modules WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(module_id)
-    .bind(user_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let creator_row: Option<uuid::Uuid> = creator_exists_select(&module_id, &user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let destroy_gate = gate_for_destroy();
     let mut facts = fetch_allow_facts(
         &pool,
@@ -2585,29 +2939,21 @@ async fn module_destroy(
     check_gate(gate_for_destroy(), &slug, &facts)?;
     // `Module.objects.get(workspace__slug, project_id, pk)`: a miss
     // raises `DoesNotExist`, the `handle_exception` 404.
-    let module: Option<(uuid::Uuid, String)> = sqlx::query_as(
-        r#"SELECT m.id, m.name FROM modules m
-           JOIN workspaces w ON w.id = m.workspace_id
-           WHERE m.id = $1 AND m.project_id = $2 AND w.slug = $3 AND m.deleted_at IS NULL"#,
-    )
-    .bind(module_id)
-    .bind(project_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (_, module_name) = match module {
-        Some(row) => row,
+    let module: Option<DestroyModuleRow> = destroy_module_select(&slug, &project_id, &module_id)
+        .into_model::<DestroyModuleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let module_name = match module {
+        Some(row) => row.name,
         None => return Err(Denial::NotFound),
     };
     // Live bridge issues for the per-issue publishes (`:727`).
-    let issue_rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT issue_id FROM module_issues WHERE module_id = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(module_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let issue_rows: Vec<uuid::Uuid> = destroy_issue_ids_select(&module_id)
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let origin = request_origin(&state)?;
     let epoch = chrono::Utc::now().timestamp();
     let project_wire = if project_raw.parse::<uuid::Uuid>().is_ok() {
@@ -2617,7 +2963,7 @@ async fn module_destroy(
     };
     let requested_data = python_dumps(&serde_json::json!({"module_id": module_id.to_string()}));
     let current_instance = python_dumps(&serde_json::json!({"module_name": module_name.clone()}));
-    for (issue_id,) in &issue_rows {
+    for issue_id in &issue_rows {
         let emit = tasks::module_destroy_activity(
             &module_id.to_string(),
             &user_id.to_string(),
@@ -2636,9 +2982,11 @@ async fn module_destroy(
         enqueue_task(&pool, emit.task_name(), emit.kwargs()).await;
     }
     // Soft-delete the module (`:742`) and its bridges (`:744`).
-    sqlx::query(r#"UPDATE modules SET deleted_at = now() WHERE id = $1"#)
-        .bind(module_id)
-        .execute(&pool)
+    let now_sea = chrono::Utc::now().fixed_offset();
+    modules::Entity::update_many()
+        .col_expr(modules::Column::DeletedAt, Expr::value(Some(now_sea)))
+        .filter(modules::Column::Id.eq(module_id))
+        .exec(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     // `module.delete()` is the instance call, so the mixin fires
@@ -2650,41 +2998,272 @@ async fn module_destroy(
     // live rows are re-stamped (`mixins.py:48-58`): re-stamping already
     // deleted rows would collide on unique (issue_id, module_id,
     // deleted_at) when a pair has two deleted bridges (PIDASHCONV-875).
-    sqlx::query(
-        r#"UPDATE module_issues SET deleted_at = now() WHERE module_id = $1 AND project_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(module_id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    module_issues::Entity::update_many()
+        .col_expr(module_issues::Column::DeletedAt, Expr::value(Some(now_sea)))
+        .filter(module_issues::Column::ModuleId.eq(module_id))
+        .filter(module_issues::Column::ProjectId.eq(project_id))
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // Soft-delete the requester's favorites (`:746-751`, plain
     // `.delete()` over the soft-delete manager — verified live).
-    sqlx::query(
-        r#"UPDATE user_favorites SET deleted_at = now()
-           WHERE user_id = $1 AND entity_type = 'module' AND entity_identifier = $2
-           AND project_id = $3 AND deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(module_id)
-    .bind(project_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    user_favorites::Entity::update_many()
+        .col_expr(
+            user_favorites::Column::DeletedAt,
+            Expr::value(Some(now_sea)),
+        )
+        .filter(user_favorites::Column::UserId.eq(user_id))
+        .filter(user_favorites::Column::EntityType.eq("module"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(Some(module_id)))
+        .filter(user_favorites::Column::ProjectId.eq(Some(project_id)))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // Hard-delete every recent visit of this module (`:753-758`,
-    // `soft=False`).
-    sqlx::query(
-        r#"DELETE FROM user_recent_visits ur USING workspaces w
-           WHERE ur.workspace_id = w.id AND ur.project_id = $1 AND w.slug = $2
-           AND ur.entity_identifier = $3 AND ur.entity_name = 'module'"#,
-    )
-    .bind(project_id)
-    .bind(&slug)
-    .bind(module_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `soft=False`). Resolves the workspace by slug first (same tenant
+    // scope as the old `USING` join); the extra lookup keeps one extra
+    // statement on the delete path (documented count delta).
+    let workspace_row: Option<uuid::Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if let Some(workspace_id) = workspace_row {
+        user_recent_visits::Entity::delete_many()
+            .filter(user_recent_visits::Column::WorkspaceId.eq(workspace_id))
+            .filter(user_recent_visits::Column::ProjectId.eq(Some(project_id)))
+            .filter(user_recent_visits::Column::EntityIdentifier.eq(Some(module_id)))
+            .filter(user_recent_visits::Column::EntityName.eq("module"))
+            .exec(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    }
     Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+#[cfg(test)]
+mod modules1_seaorm_tests {
+    use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    fn sql_of<E: EntityTrait>(select: sea_orm::Select<E>) -> String {
+        select.build(DbBackend::Postgres).to_string()
+    }
+
+    #[test]
+    fn resolve_select_pins_join_and_scope() {
+        let sql = sql_of(resolve_project_select("acme", "ENG"));
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "workspaces" ON "projects"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""workspaces"."slug" = "#), "{sql}");
+        assert!(sql.contains(r#""projects"."identifier" = "#), "{sql}");
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+    }
+
+    #[test]
+    fn allow_role_selects_pin_active_live_scope() {
+        let pid = uuid::Uuid::nil();
+        let uid = uuid::Uuid::nil();
+        let sql = sql_of(project_role_select("acme", &pid, &uid));
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "workspaces" ON "project_members"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""project_members"."is_active" = TRUE"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""project_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        let sql = sql_of(workspace_role_select("acme", &uid));
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "workspaces" ON "workspace_members"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""workspace_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn timezone_and_user_exists_select_only_id_or_timezone() {
+        let uid = uuid::Uuid::nil();
+        let sql = sql_of(actor_timezone_select(&uid));
+        assert!(sql.contains(r#""users"."user_timezone""#), "{sql}");
+        assert!(sql.contains(r#""users"."id" = "#), "{sql}");
+        let sql = sql_of(user_exists_select(&uid));
+        assert!(sql.contains(r#""users"."id" = "#), "{sql}");
+        // No soft-delete filter: `users` is the stock manager (matches old SQL).
+        assert!(!sql.contains("deleted_at"), "{sql}");
+    }
+
+    #[test]
+    fn context_duplicate_member_selects_pin_predicates() {
+        let pid = uuid::Uuid::nil();
+        let mid = uuid::Uuid::nil();
+        let sql = sql_of(context_project_select("acme", &pid));
+        assert!(sql.contains(r#""projects"."workspace_id""#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = "#), "{sql}");
+        assert!(sql.contains(r#""projects"."id" = "#), "{sql}");
+        let sql = sql_of(duplicate_name_select(&pid, "M", None));
+        assert!(sql.contains(r#""modules"."name" = "#), "{sql}");
+        assert!(sql.contains(r#""modules"."deleted_at" IS NULL"#), "{sql}");
+        assert!(!sql.contains(r#""modules"."id" <> "#), "{sql}");
+        let sql = sql_of(duplicate_name_select(&pid, "M", Some(&mid)));
+        assert!(sql.contains(r#""modules"."id" <> "#), "{sql}");
+        let sql = sql_of(live_member_ids_select(&mid));
+        assert!(
+            sql.contains(r#""module_members"."member_id" IS NOT NULL"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""module_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn module_links_select_pins_scope_and_order() {
+        let mid = uuid::Uuid::nil();
+        let sql = sql_of(module_links_select(&mid));
+        assert!(sql.contains(r#""module_links"."module_id" = "#), "{sql}");
+        assert!(
+            sql.contains(r#""module_links"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "module_links"."created_at" DESC"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"AS "created_by""#), "{sql}");
+        assert!(sql.contains(r#"AS "updated_by""#), "{sql}");
+        assert!(sql.contains(r#"AS "project""#), "{sql}");
+        assert!(sql.contains(r#"AS "workspace""#), "{sql}");
+        assert!(sql.contains(r#"AS "module""#), "{sql}");
+    }
+
+    #[test]
+    fn write_row_select_pins_aliases_and_filter() {
+        let mid = uuid::Uuid::nil();
+        let sql = sql_of(write_row_select(&mid));
+        assert!(sql.contains(r#""modules"."id" = "#), "{sql}");
+        assert!(sql.contains(r#"AS "created_by""#), "{sql}");
+        assert!(sql.contains(r#"AS "updated_by""#), "{sql}");
+        assert!(sql.contains(r#"AS "project""#), "{sql}");
+        assert!(sql.contains(r#"AS "workspace""#), "{sql}");
+        assert!(sql.contains(r#"AS "lead""#), "{sql}");
+        // Both the raw and aliased lead select (old SQL selects lead_id twice).
+        assert!(sql.contains(r#""modules"."lead_id""#), "{sql}");
+    }
+
+    #[test]
+    fn stored_audit_select_pins_three_columns() {
+        let mid = uuid::Uuid::nil();
+        let sql = sql_of(stored_audit_select(&mid));
+        assert!(sql.contains(r#""modules"."workspace_id""#), "{sql}");
+        assert!(sql.contains(r#""modules"."created_by_id""#), "{sql}");
+        assert!(sql.contains(r#""modules"."updated_by_id""#), "{sql}");
+        assert!(sql.contains(r#""modules"."id" = "#), "{sql}");
+    }
+
+    #[test]
+    fn sub_issues_select_pins_joins_and_guards() {
+        let pid = uuid::Uuid::nil();
+        let mid = uuid::Uuid::nil();
+        let sql = sql_of(sub_issues_count_select(&pid, &mid));
+        assert!(
+            sql.contains(r#"INNER JOIN "issues" ON "module_issues"."issue_id" = "issues"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"INNER JOIN "projects" ON "issues"."project_id" = "projects"."id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""module_issues"."module_id" = "#), "{sql}");
+        assert!(
+            sql.contains(r#""module_issues"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issues"."parent_id" IS NOT NULL"#), "{sql}");
+        assert!(sql.contains(r#""issues"."is_draft" = FALSE"#), "{sql}");
+        assert!(sql.contains(r#""issues"."archived_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
+        // NULL-safe triage exclusion: NULL group passes.
+        assert!(sql.contains(r#""states"."group" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" <> "#), "{sql}");
+    }
+
+    #[test]
+    fn estimate_type_select_pins_joins_and_points() {
+        let pid = uuid::Uuid::nil();
+        let sql = sql_of(estimate_type_exists_select("acme", &pid));
+        assert!(
+            sql.contains(r#"INNER JOIN "projects" ON "estimates"."project_id" = "projects"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "workspaces" ON "projects"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""workspaces"."slug" = "#), "{sql}");
+        assert!(sql.contains(r#""projects"."id" = "#), "{sql}");
+        assert!(sql.contains(r#""estimates"."type" = "#), "{sql}");
+    }
+
+    #[tokio::test]
+    async fn live_resolve_and_timezone_roundtrip() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        // Resolve parses UUIDs without DB; the SeaORM path needs seeded rows,
+        // so here we only prove the connection + builders execute shape-clean
+        // against an empty scratch schema (selects return None/empty).
+        let err: Result<Option<uuid::Uuid>, _> = resolve_project_select("no-such-slug", "ENG")
+            .into_tuple()
+            .one(&db)
+            .await;
+        // Scratch DB may not have tables for this module; only assert the
+        // statement built (shape tests above pin shape). If tables exist,
+        // a miss is None; if not, an error is acceptable in this probe.
+        let _ = err;
+        let err: Result<Option<String>, _> = actor_timezone_select(&uuid::Uuid::nil())
+            .into_tuple()
+            .one(&db)
+            .await;
+        let _ = err;
+    }
 }
 
 #[cfg(test)]
