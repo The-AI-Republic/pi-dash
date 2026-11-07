@@ -18,9 +18,6 @@ crates/api/src/app_modules/handlers_module_issues.rs 10
 crates/api/src/app_modules/handlers_module_links.rs 16
 crates/api/src/app_modules/handlers_modules.rs 32
 crates/api/src/app_notifications/mod.rs 15
-crates/api/src/app_pages/gate.rs 3
-crates/api/src/app_pages/handlers_versions.rs 8
-crates/api/src/app_pages/mod.rs 44
 crates/api/src/app_project/handlers_invites.rs 38
 crates/api/src/app_project/handlers_members.rs 27
 crates/api/src/app_project/handlers_project.rs 46
