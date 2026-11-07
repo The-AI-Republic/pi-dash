@@ -8,9 +8,6 @@ crates/api/src/app_analytics/render.rs 22
 crates/api/src/app_assets/handlers_v1.rs 7
 crates/api/src/app_assets/handlers_v2_project.rs 22
 crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
-crates/api/src/app_cycles/handlers_analytics.rs 12
-crates/api/src/app_cycles/handlers_favorites.rs 5
-crates/api/src/app_cycles/handlers_progress.rs 6
 crates/api/src/app_modules/handlers_archive.rs 5
 crates/api/src/app_modules/handlers_module_issues.rs 10
 crates/api/src/app_modules/handlers_module_links.rs 16
