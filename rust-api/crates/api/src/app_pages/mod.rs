@@ -154,6 +154,19 @@ use pidash_compat::py::{py_is_space, py_strip};
 use pidash_compat::response::json_response;
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
+use pidash_db::entity::{
+    pages, project_members, project_pages, projects, user_favorites, users, workspaces,
+};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QuerySelect,
+    RelationTrait, Set,
+};
+
+/// SeaORM connection over the request's sqlx pool (no I/O).
+fn orm(pool: &PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
 // ---------------------------------------------------------------------------
 // Exact bodies
 // ---------------------------------------------------------------------------
@@ -472,17 +485,18 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<uuid
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let row: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
 }
 
 /// `Project.objects.get(pk=project_id)` (`base.py:204,293,440`): the list,
@@ -495,12 +509,15 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<uuid
 /// this helper. The permission layer, the favorite route, versions and
 /// duplicate never read the row.
 async fn require_live_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<(), Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT p.id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let row: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     row.map(|_| ()).ok_or(Denial::ObjectNotFound)
 }
 
@@ -526,18 +543,22 @@ async fn favorite_gate(
     user_id: &uuid::Uuid,
 ) -> Result<FavoriteGate, Denial> {
     // `role` is a `PositiveSmallIntegerField` (SMALLINT): decode as `i16`.
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let role: Option<i16> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
     // The gate is the membership decision alone (`@allow_permission` never
     // reads the project): an unknown/cross-workspace UUID project 403s here
@@ -545,21 +566,25 @@ async fn favorite_gate(
     // passes is the project row consulted — for its workspace id, WITHOUT a
     // `deleted_at IS NULL` filter so a soft-deleted project with a live
     // membership still passes and the favorite row is created (204).
-    let allowed = match role.map(|row| i32::from(row.0)) {
+    let allowed = match role.map(i32::from) {
         Some(ROLE_ADMIN) | Some(ROLE_MEMBER) => true,
         Some(_) => {
-            let admin: Option<(i16,)> = sqlx::query_as(
-                r#"SELECT wm.role FROM workspace_members wm
-                   JOIN workspaces w ON w.id = wm.workspace_id
-                   WHERE wm.member_id = $1 AND w.slug = $2
-                   AND wm.is_active AND wm.deleted_at IS NULL"#,
-            )
-            .bind(user_id)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            admin.is_some_and(|row| i32::from(row.0) == ROLE_ADMIN)
+            let admin: Option<i16> = pidash_db::entity::workspace_members::Entity::find()
+                .select_only()
+                .column(pidash_db::entity::workspace_members::Column::Role)
+                .join(
+                    JoinType::InnerJoin,
+                    pidash_db::entity::workspace_members::Relation::Workspaces.def(),
+                )
+                .filter(pidash_db::entity::workspace_members::Column::MemberId.eq(*user_id))
+                .filter(workspaces::Column::Slug.eq(slug))
+                .filter(pidash_db::entity::workspace_members::Column::IsActive.eq(true))
+                .filter(pidash_db::entity::workspace_members::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&orm(pool))
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            admin.is_some_and(|value| i32::from(value) == ROLE_ADMIN)
         }
         None => false,
     };
@@ -568,17 +593,17 @@ async fn favorite_gate(
     }
     // A passing membership implies the project row exists (FK); a miss here
     // is an impossible state, so it fails closed as a server error.
-    let workspace_id: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.workspace_id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_id = workspace_id.map(|row| row.0).ok_or(Denial::ServerError)?;
+    let workspace_id: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let workspace_id = workspace_id.ok_or(Denial::ServerError)?;
     Ok(FavoriteGate {
         user_id: *user_id,
         project_id: *project_id,
@@ -1112,13 +1137,15 @@ fn issue_ids_sql() -> &'static str {
 /// unknown zones 500 through the same branch Django's `zoneinfo` activation
 /// raises into (the `app_modules` precedent).
 async fn read_timezone(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> =
-        sqlx::query_as(r#"SELECT u.user_timezone FROM users u WHERE u.id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+    let row: Option<String> = users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let name = row.ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -1497,39 +1524,49 @@ pub async fn favorite_create(
     // workspace comes from the project row (already resolved above).
     // `UserFavorite.save` (`db/models/favorite.py:40-47`): `sequence` is
     // the workspace max plus 10000 over live rows, else the 65535 default.
-    let max: Option<(Option<f64>,)> = match sqlx::query_as(
-        r#"SELECT MAX(uf.sequence) FROM user_favorites uf WHERE uf.workspace_id = $1 AND uf.deleted_at IS NULL"#,
-    )
-    .bind(gate.workspace_id)
-    .fetch_optional(pool)
-    .await
+    let db = orm(pool);
+    let max: Option<Option<f64>> = match user_favorites::Entity::find()
+        .select_only()
+        .column_as(
+            sea_orm::sea_query::Expr::col(user_favorites::Column::Sequence).max(),
+            "top_seq",
+        )
+        .filter(user_favorites::Column::WorkspaceId.eq(gate.workspace_id))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
     {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let sequence = max
-        .and_then(|row| row.0)
+        .flatten()
         .map(|top| top + FAVORITE_SEQUENCE_STEP)
         .unwrap_or(FAVORITE_DEFAULT_SEQUENCE);
     // Full-column INSERT in audit-then-definition order
     // (`db/mixins.py`, `db/models/favorite.py:14-38`): `created_by` is the
     // request user (`BaseModel.save` via crum), `updated_by` stays null on
     // create, `name`/`parent` stay null, `is_folder` false.
-    let insert = sqlx::query(
-        r#"INSERT INTO user_favorites
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, project_id, user_id, entity_type, entity_identifier,
-            name, is_folder, sequence, parent_id)
-           VALUES ($1, now(), now(), $2, NULL, NULL, $3, $4, $5, 'page', $6, NULL, false, $7, NULL)"#,
-    )
-    .bind(uuid::Uuid::new_v4())
-    .bind(gate.user_id)
-    .bind(gate.workspace_id)
-    .bind(gate.project_id)
-    .bind(gate.user_id)
-    .bind(page_id)
-    .bind(sequence)
-    .execute(pool)
+    let now = chrono::Utc::now();
+    let insert = user_favorites::Entity::insert(user_favorites::ActiveModel {
+        id: Set(uuid::Uuid::new_v4()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(gate.user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(gate.workspace_id),
+        project_id: Set(Some(gate.project_id)),
+        user_id: Set(gate.user_id),
+        entity_type: Set(FAVORITE_ENTITY_TYPE.to_owned()),
+        entity_identifier: Set(Some(page_id)),
+        name: Set(None),
+        is_folder: Set(false),
+        sequence: Set(sequence),
+        parent_id: Set(None),
+    })
+    .exec_without_returning(&db)
     .await;
     match insert {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
@@ -1537,11 +1574,7 @@ pub async fn favorite_create(
             // `handle_exception`'s `IntegrityError` branch (`app/views/base.py`):
             // duplicate (entity_type, entity_identifier, user) rows — and
             // impossible FK writes — answer 400, never 409.
-            let integrity = error
-                .as_database_error()
-                .and_then(|db| db.code())
-                .is_some_and(|code| code.starts_with("23"));
-            if integrity {
+            if pidash_db::orm_tx::is_integrity_violation(&error) {
                 Denial::BadError("The payload is not valid".to_owned()).into_response()
             } else {
                 Denial::ServerError.into_response()
@@ -1579,29 +1612,33 @@ pub async fn favorite_destroy(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
-    let row: Option<(uuid::Uuid,)> = match sqlx::query_as(
-        r#"SELECT uf.id FROM user_favorites uf
-           JOIN workspaces w ON w.id = uf.workspace_id
-           WHERE uf.project_id = $1 AND uf.user_id = $2 AND w.slug = $3
-           AND uf.entity_identifier = $4 AND uf.entity_type = 'page'
-           AND uf.deleted_at IS NULL"#,
-    )
-    .bind(gate.project_id)
-    .bind(gate.user_id)
-    .bind(slug.as_str())
-    .bind(page_id)
-    .fetch_optional(pool)
-    .await
+    let row: Option<uuid::Uuid> = match user_favorites::Entity::find()
+        .select_only()
+        .column(user_favorites::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            user_favorites::Relation::Workspaces.def(),
+        )
+        .filter(user_favorites::Column::ProjectId.eq(gate.project_id))
+        .filter(user_favorites::Column::UserId.eq(gate.user_id))
+        .filter(workspaces::Column::Slug.eq(slug.as_str()))
+        .filter(user_favorites::Column::EntityIdentifier.eq(Some(page_id)))
+        .filter(user_favorites::Column::EntityType.eq(FAVORITE_ENTITY_TYPE))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
     {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let Some((favorite_id,)) = row else {
+    let Some(favorite_id) = row else {
         return Denial::ObjectNotFound.into_response();
     };
-    if sqlx::query(r#"DELETE FROM user_favorites WHERE id = $1"#)
-        .bind(favorite_id)
-        .execute(pool)
+    // Hard delete (`delete(soft=False)`): the row is gone, no `deleted_at`
+    // stamp.
+    if user_favorites::Entity::delete_by_id(favorite_id)
+        .exec(&orm(pool))
         .await
         .is_err()
     {
@@ -1620,7 +1657,7 @@ pub async fn favorite_destroy(
 /// project_pages__deleted_at__isnull=True)` — the default manager drops
 /// soft-deleted pages. A miss is `DoesNotExist` → 404
 /// ([`OBJECT_NOT_FOUND_BODY`]).
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sea_orm::FromQueryResult)]
 struct StatePage {
     owned_by_id: uuid::Uuid,
     access: i16,
@@ -1634,20 +1671,23 @@ async fn fetch_state_page(
     project_id: &uuid::Uuid,
     page_id: &uuid::Uuid,
 ) -> Result<Option<StatePage>, Denial> {
-    sqlx::query_as(
-        r#"SELECT p.owned_by_id, p.access, p.parent_id, p.description_html
-           FROM pages p
-           JOIN workspaces w ON w.id = p.workspace_id
-           JOIN project_pages pp ON pp.page_id = p.id
-               AND pp.project_id = $2 AND pp.deleted_at IS NULL
-           WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL"#,
-    )
-    .bind(page_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)
+    pages::Entity::find()
+        .select_only()
+        .column(pages::Column::OwnedById)
+        .column(pages::Column::Access)
+        .column(pages::Column::ParentId)
+        .column(pages::Column::DescriptionHtml)
+        .join(JoinType::InnerJoin, pages::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, pages::Relation::ProjectPages.def())
+        .filter(pages::Column::Id.eq(*page_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_pages::Column::ProjectId.eq(*project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .filter(pages::Column::DeletedAt.is_null())
+        .into_model()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// The archive/unarchive owner-or-admin-15 probe (`base.py:318-320`,
@@ -1660,19 +1700,23 @@ async fn member_lte15_exists(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    // `role` is a `PositiveSmallIntegerField` (SMALLINT); the comparison
-    // stays in SQL so no decode is needed.
-    let row: (bool,) = sqlx::query_as(
-        r#"SELECT EXISTS(SELECT 1 FROM project_members pm
-           WHERE pm.project_id = $1 AND pm.member_id = $2
-           AND pm.is_active AND pm.role <= 15 AND pm.deleted_at IS NULL)"#,
-    )
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.0)
+    // `role` is a `PositiveSmallIntegerField` (SMALLINT); the `role <= 15`
+    // comparison stays in SQL so no decode is needed. One statement, same
+    // shape as the `EXISTS` probe (a `LIMIT 1` hit stands in for it).
+    let hit: Option<uuid::Uuid> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::Role.lte(15))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// `str(datetime.now())` (`base.py:337`): naive local time rendered with
