@@ -90,6 +90,12 @@ use uuid::Uuid;
 use super::mail_send::{escape_context, plain_text_from_html, py_str, render_template, send_mail};
 use crate::queue::JobRow;
 use crate::worker::{Handler, Verdict};
+use pidash_db::entity::{
+    project_member_invites as project_invites_entity,
+    project_members as project_members_entity, projects as projects_entity,
+    users as users_entity, workspace_member_invites as workspace_invites_entity,
+    workspaces as workspaces_entity,
+};
 
 /// `pi_dash.bgtasks.user_activation_email_task.user_activation_email`.
 pub const USER_ACTIVATION_EMAIL_TASK: &str =
@@ -245,29 +251,36 @@ struct MailUser {
     email: Option<String>,
 }
 
-async fn load_user_by_id(pool: &PgPool, user_id: &Uuid) -> Result<Option<MailUser>, sqlx::Error> {
-    let row: Option<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT first_name, display_name, email FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|(first_name, display_name, email)| MailUser {
-        first_name,
-        display_name,
-        email,
+async fn load_user_by_id(
+    pool: &PgPool,
+    user_id: &Uuid,
+) -> Result<Option<MailUser>, sea_orm::DbErr> {
+    use sea_orm::EntityTrait;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = users_entity::Entity::find_by_id(*user_id)
+        .one(&db)
+        .await?;
+    Ok(model.map(|m| MailUser {
+        first_name: m.first_name,
+        display_name: m.display_name,
+        email: m.email,
     }))
 }
 
-async fn load_user_by_email(pool: &PgPool, email: &str) -> Result<Option<MailUser>, sqlx::Error> {
-    let row: Option<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT first_name, display_name, email FROM users WHERE email = $1")
-            .bind(email)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|(first_name, display_name, email)| MailUser {
-        first_name,
-        display_name,
-        email,
+async fn load_user_by_email(
+    pool: &PgPool,
+    email: &str,
+) -> Result<Option<MailUser>, sea_orm::DbErr> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = users_entity::Entity::find()
+        .filter(users_entity::Column::Email.eq(Some(email.to_owned())))
+        .one(&db)
+        .await?;
+    Ok(model.map(|m| MailUser {
+        first_name: m.first_name,
+        display_name: m.display_name,
+        email: m.email,
     }))
 }
 
@@ -397,72 +410,79 @@ pub fn project_add_user_email_handler(pool: PgPool) -> Handler {
                             .map_err(|e| e.to_string())?;
                         // `User.objects.get(pk=invitor_id)` first, like
                         // Python `:29-30` (bare `first_name`, no fallback).
-                        let inviter: (String,) = sqlx::query_as(
-                            "SELECT first_name FROM users WHERE id = $1",
-                        )
-                        .bind(invitor_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| "User.DoesNotExist".to_owned())?;
+                        let db = pidash_db::pool::sea_orm_connection(&pool);
+                        let inviter_model = {
+                            use sea_orm::EntityTrait;
+                            users_entity::Entity::find_by_id(invitor_id)
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| "User.DoesNotExist".to_owned())?
+                        };
+                        let inviter_first = inviter_model.first_name.clone();
                         // `ProjectMember.objects.get(pk=...)` (default
                         // manager: soft-deleted rows are invisible).
-                        let member_row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
-                            "SELECT project_id, workspace_id, member_id FROM project_members WHERE id = $1 AND deleted_at IS NULL",
-                        )
-                        .bind(member_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let (project_id, workspace_id, member_id) =
-                            member_row.ok_or_else(|| "ProjectMember.DoesNotExist".to_owned())?;
+                        let member_model = {
+                            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                            project_members_entity::Entity::find_by_id(member_id)
+                                .filter(project_members_entity::Column::DeletedAt.is_null())
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| "ProjectMember.DoesNotExist".to_owned())?
+                        };
+                        let project_id = member_model.project_id;
+                        let workspace_id = member_model.workspace_id;
+                        let member_id_opt = member_model.member_id;
                         // Lazy `project_member.project.name` hop: the FK
                         // descriptor reads through `_base_manager`
                         // (unfiltered — no `base_manager_name` is set), so
                         // no `deleted_at` scope, unlike the direct gets.
-                        let project_row: Option<(String,)> =
-                            sqlx::query_as("SELECT name FROM projects WHERE id = $1")
-                                .bind(project_id)
-                                .fetch_optional(&pool)
+                        let project_model = {
+                            use sea_orm::EntityTrait;
+                            projects_entity::Entity::find_by_id(project_id)
+                                .one(&db)
                                 .await
-                                .map_err(|e| e.to_string())?;
-                        let (project_name,) =
-                            project_row.ok_or_else(|| "Project.DoesNotExist".to_owned())?;
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| "Project.DoesNotExist".to_owned())?
+                        };
+                        let project_name = project_model.name.clone();
                         // Lazy `project_member.workspace.name`/`slug` hop
                         // (same unfiltered descriptor read, keyed off the
                         // member's own `workspace_id` column, which
                         // `ProjectBaseModel.save()` keeps in sync with the
                         // project).
-                        let workspace_row: Option<(String, String)> = sqlx::query_as(
-                            "SELECT name, slug FROM workspaces WHERE id = $1",
-                        )
-                        .bind(workspace_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let (workspace_name, workspace_slug) =
-                            workspace_row.ok_or_else(|| "Workspace.DoesNotExist".to_owned())?;
+                        let workspace_model = {
+                            use sea_orm::EntityTrait;
+                            workspaces_entity::Entity::find_by_id(workspace_id)
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| "Workspace.DoesNotExist".to_owned())?
+                        };
+                        let workspace_name = workspace_model.name.clone();
+                        let workspace_slug = workspace_model.slug.clone();
                         // Lazy `project_member.member.email` hop (nullable
                         // FK; NULL email renders `"None"` like `str()`).
                         let member_id =
-                            member_id.ok_or_else(|| "ProjectMember.member is None".to_owned())?;
-                        let email_row: Option<(Option<String>,)> = sqlx::query_as(
-                            "SELECT email FROM users WHERE id = $1",
-                        )
-                        .bind(member_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let member_email = email_row
-                            .ok_or_else(|| "User.DoesNotExist".to_owned())?
-                            .0
+                            member_id_opt.ok_or_else(|| "ProjectMember.member is None".to_owned())?;
+                        let member_user = {
+                            use sea_orm::EntityTrait;
+                            users_entity::Entity::find_by_id(member_id)
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| "User.DoesNotExist".to_owned())?
+                        };
+                        let member_email = member_user
+                            .email
                             .unwrap_or_else(|| py_str(&serde_json::Value::Null));
                         let url = project_url(&current_site, &workspace_slug, &project_id);
                         let context = escape_context(&[
                             ("project_name", project_name),
                             ("workspace_name", workspace_name),
                             ("email", member_email.clone()),
-                            ("inviter_first_name", inviter.0),
+                            ("inviter_first_name", inviter_first),
                             ("project_url", url),
                         ]);
                         send_mail(
@@ -518,29 +538,36 @@ pub fn workspace_invitation_handler(pool: PgPool) -> Handler {
                             .map_err(|e| e.to_string())?
                             .ok_or_else(|| "User.DoesNotExist".to_owned())?;
                         // `Workspace.objects.get(pk=...)`: silent miss.
-                        let workspace_row: Option<(String, String)> = sqlx::query_as(
-                            "SELECT name, slug FROM workspaces WHERE id = $1 AND deleted_at IS NULL",
-                        )
-                        .bind(workspace_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let Some((workspace_name, workspace_slug)) = workspace_row else {
+                        let db = pidash_db::pool::sea_orm_connection(&pool);
+                        let workspace_model = {
+                            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                            workspaces_entity::Entity::find_by_id(workspace_id)
+                                .filter(workspaces_entity::Column::DeletedAt.is_null())
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        };
+                        let Some(ws) = workspace_model else {
                             return Ok(None);
                         };
+                        let workspace_name = ws.name.clone();
+                        let workspace_slug = ws.slug.clone();
                         // `WorkspaceMemberInvite.objects.get(token, email)`:
                         // silent miss.
-                        let invite_row: Option<(Uuid,)> = sqlx::query_as(
-                            "SELECT id FROM workspace_member_invites WHERE token = $1 AND email = $2 AND deleted_at IS NULL",
-                        )
-                        .bind(&token)
-                        .bind(&email)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let Some((invite_id,)) = invite_row else {
+                        let invite_model = {
+                            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                            workspace_invites_entity::Entity::find()
+                                .filter(workspace_invites_entity::Column::Token.eq(token.clone()))
+                                .filter(workspace_invites_entity::Column::Email.eq(email.clone()))
+                                .filter(workspace_invites_entity::Column::DeletedAt.is_null())
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        };
+                        let Some(inv) = invite_model else {
                             return Ok(None);
                         };
+                        let invite_id = inv.id;
                         let email_str = user.email.as_deref().map_or_else(
                             || py_str(&serde_json::Value::Null),
                             str::to_owned,
@@ -565,14 +592,33 @@ pub fn workspace_invitation_handler(pool: PgPool) -> Handler {
                         // replay invite tests, which seed `created_by`).
                         let html = render_template(WORKSPACE_INVITATION_TEMPLATE, &context)?;
                         let text = plain_text_from_html(&html);
-                        sqlx::query(
-                            "UPDATE workspace_member_invites SET message = $1, updated_at = NOW(), created_by_id = NULL, updated_by_id = NULL WHERE id = $2",
-                        )
-                        .bind(&text)
-                        .bind(invite_id)
-                        .execute(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                        {
+                            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                            let now = chrono::Utc::now();
+                            let now_tz =
+                                sea_orm::prelude::DateTimeWithTimeZone::from(now);
+                            workspace_invites_entity::Entity::update_many()
+                                .col_expr(
+                                    workspace_invites_entity::Column::Message,
+                                    sea_orm::sea_query::Expr::value(Some(text.clone())),
+                                )
+                                .col_expr(
+                                    workspace_invites_entity::Column::UpdatedAt,
+                                    sea_orm::sea_query::Expr::value(now_tz),
+                                )
+                                .col_expr(
+                                    workspace_invites_entity::Column::CreatedById,
+                                    sea_orm::sea_query::Expr::value(None::<Uuid>),
+                                )
+                                .col_expr(
+                                    workspace_invites_entity::Column::UpdatedById,
+                                    sea_orm::sea_query::Expr::value(None::<Uuid>),
+                                )
+                                .filter(workspace_invites_entity::Column::Id.eq(invite_id))
+                                .exec(&db)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
                         send_mail(
                             &pool,
                             WORKSPACE_INVITATION_TEMPLATE,
@@ -635,45 +681,53 @@ pub fn project_invitation_handler(pool: PgPool) -> Handler {
                             .ok_or_else(|| "User.DoesNotExist".to_owned())?;
                         // `Project.objects.get(pk=...)`: silent miss
                         // (default manager: soft-deleted rows invisible).
-                        let project_row: Option<(String, Uuid)> = sqlx::query_as(
-                            "SELECT name, workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
-                        )
-                        .bind(project_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let Some((project_name, workspace_id)) = project_row else {
+                        let db = pidash_db::pool::sea_orm_connection(&pool);
+                        let project_model = {
+                            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                            projects_entity::Entity::find_by_id(project_id)
+                                .filter(projects_entity::Column::DeletedAt.is_null())
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        };
+                        let Some(proj) = project_model else {
                             return Ok(None);
                         };
+                        let project_name = proj.name.clone();
+                        let workspace_id = proj.workspace_id;
                         // `ProjectMemberInvite.objects.get(token, email)`
                         // (`:28`): silent miss. Read BEFORE the workspace
                         // hop below — Python only touches
                         // `project.workspace.slug` while building the link
                         // (`:30`), after the invite lookup.
-                        let invite_row: Option<(Uuid,)> = sqlx::query_as(
-                            "SELECT id FROM project_member_invites WHERE token = $1 AND email = $2 AND deleted_at IS NULL",
-                        )
-                        .bind(&token)
-                        .bind(&email)
-                        .fetch_optional(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        let Some((invite_id,)) = invite_row else {
+                        let invite_model = {
+                            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                            project_invites_entity::Entity::find()
+                                .filter(project_invites_entity::Column::Token.eq(token.clone()))
+                                .filter(project_invites_entity::Column::Email.eq(email.clone()))
+                                .filter(project_invites_entity::Column::DeletedAt.is_null())
+                                .one(&db)
+                                .await
+                                .map_err(|e| e.to_string())?
+                        };
+                        let Some(inv) = invite_model else {
                             return Ok(None);
                         };
+                        let invite_id = inv.id;
                         // Lazy `project.workspace.slug` hop (`:30`): the FK
                         // descriptor reads through `_base_manager`
                         // (unfiltered — no `base_manager_name` is set), and
                         // a miss is NOT silent (only `Project` /
                         // `ProjectMemberInvite` misses are).
-                        let workspace_row: Option<(String,)> =
-                            sqlx::query_as("SELECT slug FROM workspaces WHERE id = $1")
-                                .bind(workspace_id)
-                                .fetch_optional(&pool)
+                        let workspace_model = {
+                            use sea_orm::EntityTrait;
+                            workspaces_entity::Entity::find_by_id(workspace_id)
+                                .one(&db)
                                 .await
-                                .map_err(|e| e.to_string())?;
-                        let (workspace_slug,) = workspace_row
-                            .ok_or_else(|| "Workspace.DoesNotExist".to_owned())?;
+                                .map_err(|e| e.to_string())?
+                                .ok_or_else(|| "Workspace.DoesNotExist".to_owned())?
+                        };
+                        let workspace_slug = workspace_model.slug.clone();
                         let email_str = user.email.as_deref().map_or_else(
                             || py_str(&serde_json::Value::Null),
                             str::to_owned,
@@ -700,14 +754,33 @@ pub fn project_invitation_handler(pool: PgPool) -> Handler {
                         // write BEFORE the send (`:43-48`).
                         let html = render_template(PROJECT_INVITATION_TEMPLATE, &context)?;
                         let text = plain_text_from_html(&html);
-                        sqlx::query(
-                            "UPDATE project_member_invites SET message = $1, updated_at = NOW(), created_by_id = NULL, updated_by_id = NULL WHERE id = $2",
-                        )
-                        .bind(&text)
-                        .bind(invite_id)
-                        .execute(&pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                        {
+                            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                            let now = chrono::Utc::now();
+                            let now_tz =
+                                sea_orm::prelude::DateTimeWithTimeZone::from(now);
+                            project_invites_entity::Entity::update_many()
+                                .col_expr(
+                                    project_invites_entity::Column::Message,
+                                    sea_orm::sea_query::Expr::value(Some(text.clone())),
+                                )
+                                .col_expr(
+                                    project_invites_entity::Column::UpdatedAt,
+                                    sea_orm::sea_query::Expr::value(now_tz),
+                                )
+                                .col_expr(
+                                    project_invites_entity::Column::CreatedById,
+                                    sea_orm::sea_query::Expr::value(None::<Uuid>),
+                                )
+                                .col_expr(
+                                    project_invites_entity::Column::UpdatedById,
+                                    sea_orm::sea_query::Expr::value(None::<Uuid>),
+                                )
+                                .filter(project_invites_entity::Column::Id.eq(invite_id))
+                                .exec(&db)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        }
                         send_mail(
                             &pool,
                             PROJECT_INVITATION_TEMPLATE,

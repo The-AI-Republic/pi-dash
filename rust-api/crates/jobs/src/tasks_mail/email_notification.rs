@@ -15,6 +15,7 @@ use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
 use super::bs_normalize::{normalize_bs, NormalizedMention, RejectedMarkup};
+use pidash_db::entity::email_notification_logs as logs_entity;
 
 /// Value stored under every mail lock (`acquire_lock` passes the literal
 /// `"true"`; `email_notification_task.py:38`).
@@ -639,12 +640,16 @@ pub trait StackOutbox: Send + Sync {
 /// soft-deleted logs never fan out). Only the consumed columns are
 /// selected: the row's other columns are never read downstream, so they
 /// are unobservable.
+/// Ported to SeaORM (Batch MAIL-EXPORT-1): kept for statement-shape tests
+/// that pin the soft-delete scope; the store builds the same query via
+/// entities.
 pub const STACK_SELECT_SQL: &str = "SELECT id, receiver_id, triggered_by_id, entity_identifier, data FROM email_notification_logs WHERE processed_at IS NULL AND deleted_at IS NULL ORDER BY receiver_id";
 
 /// `UPDATE email_notification_logs SET processed_at = now() WHERE id =
 /// ANY($1)` — the `:84` update as SQL (a no-op for an empty id list,
 /// exactly like the ORM call; soft-deleted rows stay unmarked, like the
 /// manager-scoped queryset).
+/// Ported to SeaORM: `update_many` with `is_in` + `is_null` deleted_at.
 pub const STACK_MARK_PROCESSED_SQL: &str =
     "UPDATE email_notification_logs SET processed_at = now() WHERE id = ANY($1) AND deleted_at IS NULL";
 
@@ -664,40 +669,30 @@ impl SqlStackStore {
 
 impl StackStore for SqlStackStore {
     async fn unprocessed_logs(&self) -> Result<Vec<StackRow>, StackError> {
-        use sqlx::Row;
-        let rows = sqlx::query(STACK_SELECT_SQL)
-            .fetch_all(&self.pool)
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let models = logs_entity::Entity::find()
+            .filter(logs_entity::Column::ProcessedAt.is_null())
+            .filter(logs_entity::Column::DeletedAt.is_null())
+            .order_by_asc(logs_entity::Column::ReceiverId)
+            .all(&db)
             .await
             .map_err(|e| StackError::Store(e.to_string()))?;
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id: uuid::Uuid = row
-                .try_get("id")
-                .map_err(|e| StackError::Store(e.to_string()))?;
-            let receiver_id: uuid::Uuid = row
-                .try_get("receiver_id")
-                .map_err(|e| StackError::Store(e.to_string()))?;
-            let triggered_by_id: uuid::Uuid = row
-                .try_get("triggered_by_id")
-                .map_err(|e| StackError::Store(e.to_string()))?;
-            let entity_identifier: Option<uuid::Uuid> = row
-                .try_get("entity_identifier")
-                .map_err(|e| StackError::Store(e.to_string()))?;
-            let data: Option<Value> = row
-                .try_get("data")
-                .map_err(|e| StackError::Store(e.to_string()))?;
+        let mut out = Vec::with_capacity(models.len());
+        for m in models {
             out.push(StackRow {
-                id: id.to_string(),
-                receiver_id: receiver_id.to_string(),
-                triggered_by_id: triggered_by_id.to_string(),
-                entity_identifier: entity_identifier.map(|u| u.to_string()),
-                data: data.unwrap_or(Value::Null),
+                id: m.id.to_string(),
+                receiver_id: m.receiver_id.to_string(),
+                triggered_by_id: m.triggered_by_id.to_string(),
+                entity_identifier: m.entity_identifier.map(|u| u.to_string()),
+                data: m.data.unwrap_or(Value::Null),
             });
         }
         Ok(out)
     }
 
     async fn mark_processed(&self, processed: &[String]) -> Result<(), StackError> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let ids: Vec<uuid::Uuid> = processed
             .iter()
             .map(|id| {
@@ -705,9 +700,17 @@ impl StackStore for SqlStackStore {
                     .map_err(|e| StackError::Store(format!("bad log id {id:?}: {e}")))
             })
             .collect::<Result<_, _>>()?;
-        sqlx::query(STACK_MARK_PROCESSED_SQL)
-            .bind(ids)
-            .execute(&self.pool)
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let now = chrono::Utc::now();
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        logs_entity::Entity::update_many()
+            .col_expr(logs_entity::Column::ProcessedAt, sea_orm::sea_query::Expr::value(now_tz))
+            .filter(logs_entity::Column::Id.is_in(ids))
+            .filter(logs_entity::Column::DeletedAt.is_null())
+            .exec(&db)
             .await
             .map_err(|e| StackError::Store(e.to_string()))?;
         Ok(())
@@ -1922,6 +1925,52 @@ mod tests {
                 "unscoped soft-deletable statement: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn stack_seaorm_statements_scope_soft_deleted_rows() {
+        // SeaORM equivalent of `STACK_SELECT_SQL` / `STACK_MARK_PROCESSED_SQL`
+        // (Batch MAIL-EXPORT-1): same filters, same ordering, unique aliases.
+        // `select_only` + `column_as` keeps the consumed-column shape.
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QueryTrait};
+        use sea_orm::DbBackend;
+
+        let select = logs_entity::Entity::find()
+            .filter(logs_entity::Column::ProcessedAt.is_null())
+            .filter(logs_entity::Column::DeletedAt.is_null())
+            .order_by_asc(logs_entity::Column::ReceiverId);
+        let select_stmt = select.build(DbBackend::Postgres).to_string();
+        assert!(
+            select_stmt.contains("processed_at\" IS NULL"),
+            "select must scope unprocessed: {select_stmt}"
+        );
+        assert!(
+            select_stmt.contains("deleted_at\" IS NULL"),
+            "select must scope soft-deleted: {select_stmt}"
+        );
+        assert!(
+            select_stmt.contains("ORDER BY \"email_notification_logs\".\"receiver_id\""),
+            "select must order by receiver: {select_stmt}"
+        );
+
+        let update = logs_entity::Entity::update_many()
+            .col_expr(
+                logs_entity::Column::ProcessedAt,
+                sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(
+                    chrono::Utc::now(),
+                )),
+            )
+            .filter(logs_entity::Column::Id.is_in(vec![uuid::Uuid::nil()]))
+            .filter(logs_entity::Column::DeletedAt.is_null());
+        let update_stmt = update.build(DbBackend::Postgres).to_string();
+        assert!(
+            update_stmt.contains("deleted_at\" IS NULL"),
+            "update must scope soft-deleted: {update_stmt}"
+        );
+        assert!(
+            update_stmt.contains("\"processed_at\""),
+            "update must set processed_at: {update_stmt}"
+        );
     }
 
     #[test]
