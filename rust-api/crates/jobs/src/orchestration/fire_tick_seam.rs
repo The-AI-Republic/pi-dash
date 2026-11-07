@@ -1474,6 +1474,31 @@ mod tests {
             .build(DbBackend::Postgres)
             .to_string();
         assert!(!prior.contains("\"status\" IN"), "{prior}");
+        // The role-facts trio: INNER JOIN workspaces, role IN (20,15,5),
+        // is_active, deleted_at scope, slug filter.
+        let role = project_members::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .column(project_members::Column::Id)
+            .filter(project_members::Column::DeletedAt.is_null())
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::MemberId.eq(issue_id))
+            .filter(project_members::Column::ProjectId.eq(issue_id))
+            .filter(project_members::Column::Role.is_in([20_i16, 15, 5]))
+            .filter(workspaces::Column::Slug.eq("ws".to_owned()))
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(role.contains("INNER JOIN"), "{role}");
+        assert!(role.contains("\"workspaces\""), "{role}");
+        assert!(role.contains("\"role\" IN"), "{role}");
+        assert!(role.contains("\"slug\""), "{role}");
+        assert!(role.contains("\"is_active\""), "{role}");
+        assert!(role.contains("\"deleted_at\" IS NULL"), "{role}");
+        assert!(role.contains("LIMIT"), "{role}");
     }
 
     #[test]
@@ -3463,6 +3488,21 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed assignee");
+        // A tombstoned (soft-deleted) assignment must stay excluded.
+        let tombstoned_user = seed_user(&pool, "migread-tomb").await;
+        sqlx::query(
+            "INSERT INTO issue_assignees (id, created_at, updated_at, assignee_id, issue_id, project_id, workspace_id, deleted_at) \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, $2)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now())
+        .bind(tombstoned_user)
+        .bind(graph.issue)
+        .bind(graph.project)
+        .bind(graph.ws)
+        .execute(&pool)
+        .await
+        .expect("seed tombstoned assignee");
         let candidates =
             pidash_services::orchestration::dispatch::DispatchSeam::live_assignee_candidates(
                 &mut store,
@@ -3483,6 +3523,60 @@ mod tests {
         assert!(!facts.has_allowed_role);
         assert!(!facts.is_project_member);
         assert!(!facts.is_workspace_admin);
+        // True branches: inactive membership stays false, active ADMIN
+        // membership and workspace ADMIN answer true.
+        sqlx::query(
+            "INSERT INTO project_members (id, created_at, updated_at, role, member_id, project_id, workspace_id, view_props, default_props, sort_order, preferences, is_active) \
+             VALUES ($1, $2, $2, 20, $3, $4, $5, '{}', '{}', 0, '{}', false)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now())
+        .bind(graph.user)
+        .bind(graph.project)
+        .bind(graph.ws)
+        .execute(&pool)
+        .await
+        .expect("seed inactive membership");
+        let inactive = pidash_services::orchestration::dispatch::DispatchSeam::project_role_facts(
+            &mut store,
+            graph.user,
+            &slug.clone(),
+            graph.project,
+        )
+        .await
+        .expect("inactive facts");
+        assert!(!inactive.has_allowed_role);
+        assert!(!inactive.is_project_member);
+        sqlx::query(
+            "UPDATE project_members SET is_active = true WHERE member_id = $1 AND project_id = $2",
+        )
+        .bind(graph.user)
+        .bind(graph.project)
+        .execute(&pool)
+        .await
+        .expect("activate membership");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, created_at, updated_at, role, member_id, workspace_id, view_props, default_props, issue_props, is_active, explored_features, getting_started_checklist, tips) \
+             VALUES ($1, $2, $2, 20, $3, $4, '{}', '{}', '{}', true, '{}', '{}', '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(now())
+        .bind(graph.user)
+        .bind(graph.ws)
+        .execute(&pool)
+        .await
+        .expect("seed workspace admin");
+        let active = pidash_services::orchestration::dispatch::DispatchSeam::project_role_facts(
+            &mut store,
+            graph.user,
+            &slug.clone(),
+            graph.project,
+        )
+        .await
+        .expect("active facts");
+        assert!(active.has_allowed_role);
+        assert!(active.is_project_member);
+        assert!(active.is_workspace_admin);
         let (tx, _, _, _, _, _) = store.into_parts();
         tx.rollback().await.expect("rollback");
     }

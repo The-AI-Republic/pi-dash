@@ -1140,4 +1140,121 @@ mod tests {
             .expect("missing");
         assert_eq!(missing, None);
     }
+
+    /// Positive disarm: a terminal run with `stop_ticking:true` on a
+    /// ticking issue stops the armed clock (`stop_signal`).
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_disarm_stop_ticking_is_true() {
+        let pool = pool().await;
+        let tag = Uuid::new_v4().to_string();
+        let user = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let ticker = Uuid::new_v4();
+        let state = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "users" ("password", "id", "username", "first_name", "last_name", "avatar", "date_joined", "created_at", "updated_at", "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired", "is_active", "is_staff", "is_email_verified", "is_password_autoset", "token", "user_timezone", "last_login_ip", "last_logout_ip", "last_login_medium", "last_login_uagent", "is_bot", "display_name", "is_email_valid", "is_password_reset_required") VALUES ('!', $1, $2, '', '', '', $3, $3, $3, '', '', false, false, false, true, false, false, false, $4, 'UTC', '', '', '', '', false, $2, false, false)"#,
+        )
+        .bind(user)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(now)
+        .bind(tag.clone())
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            r#"INSERT INTO "workspaces" ("created_at", "updated_at", "id", "name", "slug", "owner_id", "timezone", "background_color") VALUES ($1, $1, $2, $3, $4, $5, 'UTC', '#fff')"#,
+        )
+        .bind(now)
+        .bind(workspace)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(format!("disarmpos-{tag}"))
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            r#"INSERT INTO "projects" ("created_at", "updated_at", "id", "name", "description", "network", "identifier", "workspace_id", "cycle_view", "module_view", "issue_views_view", "page_view", "intake_view", "archive_in", "close_in", "logo_props", "is_time_tracking_enabled", "is_issue_type_enabled", "guest_view_all_features", "timezone", "members_can_edit_states", "repo_url", "base_branch", "agent_default_interval_seconds", "agent_default_max_ticks", "agent_ticking_enabled", "is_default", "agent_review_default_interval_seconds", "default_agent_executor", "agent_test_default_interval_seconds") VALUES ($1, $1, $2, $3, '', 0, 'DSP', $4, false, false, false, false, false, 0, 0, '{}', false, false, false, 'UTC', false, '', 'main', 60, 10, true, false, 60, '', 60)"#,
+        )
+        .bind(now)
+        .bind(project)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            r#"INSERT INTO "pod" ("id", "name", "description", "is_default", "created_at", "updated_at", "workspace_id", "project_id") VALUES ($1, $2, '', false, $3, $3, $4, $5)"#,
+        )
+        .bind(pod)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(now)
+        .bind(workspace)
+        .bind(project)
+        .execute(&pool)
+        .await
+        .expect("seed pod");
+        sqlx::query(
+            r#"INSERT INTO "states" ("id", "created_at", "updated_at", "name", "description", "color", "slug", "project_id", "workspace_id", "sequence", "group", "default", "is_triage") VALUES ($1, $2, $2, 'In Progress', '', '', $3, $4, $5, 100, 'started', false, false)"#,
+        )
+        .bind(state)
+        .bind(now)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(project)
+        .bind(workspace)
+        .execute(&pool)
+        .await
+        .expect("seed state");
+        sqlx::query(
+            r#"INSERT INTO "issues" ("created_at", "updated_at", "id", "name", "description_json", "priority", "sequence_id", "project_id", "workspace_id", "description_html", "sort_order", "is_draft", "git_work_branch", "workpad", "complexity_score", "state_id") VALUES ($1, $1, $2, $3, '{}', 'none', 1, $4, $5, '', 0, false, '', '', 0, $6)"#,
+        )
+        .bind(now)
+        .bind(issue)
+        .bind(format!("disarmpos-{tag}"))
+        .bind(project)
+        .bind(workspace)
+        .bind(state)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        sqlx::query(
+            r#"INSERT INTO "issue_agent_ticker" ("id", "created_at", "updated_at", "issue_id", "used", "granted", "waited", "user_disabled", "enabled", "disarm_reason", "pending_entry", "pending_entry_free", "pending_entry_trigger") VALUES ($1, $2, $2, $3, 0, 0, 0, false, true, '', false, false, '')"#,
+        )
+        .bind(ticker)
+        .bind(now)
+        .bind(issue)
+        .execute(&pool)
+        .await
+        .expect("seed ticker");
+        sqlx::query(
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "done_payload") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '{"stop_ticking": true}')"#,
+        )
+        .bind(run)
+        .bind(now)
+        .bind(workspace)
+        .bind(issue)
+        .bind(pod)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        let stopped = disarm_on_terminal_signal(&pool, run)
+            .await
+            .expect("disarm is Ok");
+        assert!(stopped);
+        let (enabled, disarm_reason): (bool, String) = sqlx::query_as(
+            r#"SELECT "enabled", "disarm_reason" FROM "issue_agent_ticker" WHERE "id" = $1"#,
+        )
+        .bind(ticker)
+        .fetch_one(&pool)
+        .await
+        .expect("read ticker");
+        assert!(!enabled);
+        assert_eq!(disarm_reason, "stop_signal");
+    }
 }
