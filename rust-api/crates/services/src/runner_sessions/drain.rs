@@ -177,6 +177,11 @@ pub struct DispatchFacts {
     pub pod_member: bool,
     pub paused: bool,
     pub team_runs: bool,
+    /// §10.2 strict 1:1 alternation: the runner's most recent
+    /// assigned run (by `assigned_at`) had `pin_kind = dedicated`
+    /// pinned to it. An idle runner's last run is terminal or
+    /// paused, so this never reorders an active lane.
+    pub last_dedicated: bool,
 }
 
 fn col(table: &'static str, column: &'static str) -> SimpleExpr {
@@ -319,6 +324,12 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
         let managed_arm = Condition::all()
             .add(col("agent_run", "executor_kind").eq(managed))
             .add(pinned.clone().eq(runner_id));
+        // §23.1: an engine, pinned_only or not, always takes its
+        // dedicated pins — pod_dispatch does not gate them.
+        let dedicated_arm = Condition::all()
+            .add(col("agent_run", "executor_kind").eq(local))
+            .add(pinned.clone().eq(runner_id))
+            .add(col("agent_run", "pin_kind").eq("dedicated"));
         if facts.pod_member && !facts.paused {
             let local_arm = Condition::all()
                 .add(col("agent_run", "executor_kind").eq(local))
@@ -327,9 +338,12 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
                         .add(pinned.clone().eq(runner_id))
                         .add(pinned.is_null()),
                 );
-            return Condition::any().add(managed_arm).add(local_arm);
+            return Condition::any()
+                .add(managed_arm)
+                .add(dedicated_arm)
+                .add(local_arm);
         }
-        return managed_arm;
+        return Condition::any().add(managed_arm).add(dedicated_arm);
     }
     let mine_or_pod = if facts.pod_member {
         Condition::any()
@@ -341,6 +355,32 @@ fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
     Condition::all()
         .add(col("agent_run", "executor_kind").eq(local))
         .add(mine_or_pod)
+}
+
+/// The `_is_mine` rank (`matcher.py:181-192`): today pinned-to-me is
+/// 0 and shared is 1. Under §10.2 strict 1:1 alternation — after a
+/// dedicated run — locality pins stay 0, dedicated pins demote to 2,
+/// shared stays 1. Locality pins and `pod_once` runs count as shared
+/// (a `pod_once` run has no pin, so it lands in the default arm).
+fn rank_expr(runner_id: Uuid, last_dedicated: bool) -> SimpleExpr {
+    let pinned = col("agent_run", "pinned_runner_id");
+    if !last_dedicated {
+        return Expr::case(pinned.eq(runner_id), 0).finally(1).into();
+    }
+    Expr::case(
+        Condition::all()
+            .add(pinned.clone().eq(runner_id))
+            .add(col("agent_run", "pin_kind").eq("locality")),
+        0,
+    )
+    .case(
+        Condition::all()
+            .add(pinned.eq(runner_id))
+            .add(col("agent_run", "pin_kind").eq("dedicated")),
+        2,
+    )
+    .finally(1)
+    .into()
 }
 
 /// `next_for_runner` (`:147-192`): the next `QUEUED` run this runner
@@ -386,7 +426,7 @@ pub fn next_for_runner_stmt(
             Alias::new("_runner_visible_scheduler"),
         )
         .expr_as(
-            Expr::case(col("agent_run", "pinned_runner_id").eq(runner_id), 0).finally(1),
+            rank_expr(runner_id, facts.last_dedicated),
             Alias::new("_is_mine"),
         )
         .from(Alias::new("agent_run"))
@@ -790,6 +830,7 @@ mod tests {
             pod_member: true,
             paused: false,
             team_runs: true,
+            last_dedicated: false,
         }
     }
 
@@ -799,6 +840,7 @@ mod tests {
             pod_member,
             paused,
             team_runs: false,
+            last_dedicated: false,
         }
     }
 
@@ -877,9 +919,12 @@ mod tests {
             fx07()["next_for_runner"]["engine_pinned_only"]["picked_prompt"].as_str(),
             Some("p-q-managed-pinned")
         );
-        // Managed pins only: no local arm.
+        // §23.1: managed pins plus dedicated pins (a pinned_only
+        // engine still takes its dedicated runs); the shared local
+        // arm stays out.
         assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
-        assert!(!sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        assert!(sql.contains("\"agent_run\".\"pin_kind\" = 'dedicated'"));
     }
 
     #[test]
@@ -898,8 +943,39 @@ mod tests {
             fx07()["next_for_runner"]["engine_paused"]["picked_prompt"].as_str(),
             None
         );
+        // §23.1: a paused engine still serves its dedicated pins;
+        // the shared local arm stays out.
         assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
-        assert!(!sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        assert!(sql.contains("\"agent_run\".\"pin_kind\" = 'dedicated'"));
+    }
+
+    #[test]
+    fn next_for_runner_alternation_rank() {
+        // §10.2 strict 1:1: after a dedicated run, dedicated pins
+        // demote to 2, locality stays 0, shared stays 1.
+        let mut facts = manual_facts();
+        facts.last_dedicated = true;
+        let sql = render(
+            &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &facts)
+                .expect("alternation"),
+        );
+        assert!(sql.contains("\"pin_kind\" = 'locality'"));
+        assert!(sql.contains("\"pin_kind\" = 'dedicated'"));
+        // and without the alternation the CASE is the today rank
+        // (no pin_kind arm — the column still projects).
+        let sql = render(
+            &next_for_runner_stmt(
+                VISIBILITY_PRIVATE,
+                pod(),
+                runner(),
+                owner(),
+                &manual_facts(),
+            )
+            .expect("today rank"),
+        );
+        assert!(!sql.contains("\"pin_kind\" = 'locality'"));
+        assert!(!sql.contains("\"pin_kind\" = 'dedicated'"));
     }
 
     #[test]
@@ -909,6 +985,7 @@ mod tests {
             pod_member: true,
             paused: false,
             team_runs: true,
+            last_dedicated: false,
         };
         let sql = render(
             &next_for_runner_stmt(VISIBILITY_PRIVATE, pod(), runner(), owner(), &team)

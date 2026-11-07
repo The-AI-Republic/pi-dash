@@ -3048,6 +3048,7 @@ mod tests {
                 id: uid(0x55),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(frozen_now()),
                 paused_at: None,
                 provisioning: "personal".to_owned(),

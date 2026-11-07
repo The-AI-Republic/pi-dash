@@ -567,6 +567,13 @@
         "error": "run not pinned"
       }
     },
+    "dedicated": {
+      "status": 409,
+      "body": {
+        "error": "This run is dedicated to runner gpu-box and cannot be released. Change the issue's runner, or cancel the run and use Run on any runner in Default once.",
+        "code": "dedicated_pin_not_releasable"
+      }
+    },
     "ok": {
       "status": 200,
       "pinned": null,

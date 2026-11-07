@@ -121,6 +121,20 @@ pub const RUN_NOT_QUEUED_BODY: &str = r#"{"error":"run not queued"}"#;
 /// Release-pin on an unpinned run (`runs.py:677-681`).
 pub const RUN_NOT_PINNED_BODY: &str = r#"{"error":"run not pinned"}"#;
 
+/// Release-pin on a dedicated run (H-13, `runs.py:682-700`): the
+/// exact refusal names runner and pod so the person can act.
+pub fn dedicated_release_body(runner_name: &str, pod_name: &str) -> String {
+    serde_json::json!({
+        "error": format!(
+            "This run is dedicated to runner {runner_name} and cannot be released. \
+             Change the issue's runner, or cancel the run and use Run on any \
+             runner in {pod_name} once."
+        ),
+        "code": "dedicated_pin_not_releasable",
+    })
+    .to_string()
+}
+
 /// Default cancel reason (`runs.py:560`).
 pub const DEFAULT_CANCEL_REASON: &str = "cancelled by user";
 /// `reason[:512]` counts code points (`runs.py:560`).
@@ -2108,6 +2122,33 @@ async fn release_pin_inner(
         let _ = tx.rollback().await;
         return json_response(StatusCode::CONFLICT, RUN_NOT_PINNED_BODY.to_owned());
     }
+    // H-13: a dedicated pin is owned by the issue, not the queue;
+    // only the assignment save or revoke can move it (§12.2). The
+    // check is made on the locked row, after the permission and
+    // still-QUEUED checks, before any unpin. Answered locally (a
+    // read-only refusal); the locality unpin below stays proxied.
+    if locked.pin_kind == "dedicated" {
+        let orm = pidash_db::pool::sea_orm_connection(pool);
+        let runner_name = match locked.pinned_runner_id {
+            Some(id) => pidash_db::entity::runner::Entity::find_by_id(id)
+                .one(&orm)
+                .await
+                .ok()
+                .flatten()
+                .map(|runner| runner.name),
+            None => None,
+        }
+        .unwrap_or_else(|| "the dedicated runner".to_owned());
+        let pod_name = match pod_mini_for(pool, locked.pod_id).await {
+            Ok(pod) => pod.name,
+            Err(_) => "the pod".to_owned(),
+        };
+        let _ = tx.rollback().await;
+        return json_response(
+            StatusCode::CONFLICT,
+            dedicated_release_body(&runner_name, &pod_name),
+        );
+    }
     // Queued + pinned: Django owns the unpin + parent-thread clear +
     // pod drain. Roll back and proxy before any write.
     let _ = tx.rollback().await;
@@ -2593,6 +2634,15 @@ mod tests {
                 "per_page"
             ]
         );
+    }
+
+    #[test]
+    fn dedicated_release_body_matches_fx08_golden() {
+        let fx = fx08();
+        let golden = fx.pointer("/release_pin/dedicated/body").expect("golden");
+        let rendered = dedicated_release_body("gpu-box", "Default");
+        let value: Value = serde_json::from_str(&rendered).expect("json");
+        assert_eq!(&value, golden);
     }
 
     // -- live scratch-DB tests (env-gated) -------------------------------

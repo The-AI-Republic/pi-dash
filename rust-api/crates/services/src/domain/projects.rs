@@ -2698,13 +2698,14 @@ mod tests {
             "\"default_agent_executor\"",
             "\"members_can_edit_states\"",
             "\"agent_test_default_interval_seconds\"",
+            "\"dedicated_runner_lost_action\"",
         ] {
             assert!(insert.contains(column), "{column} named in {insert}");
         }
         assert_eq!(
             insert.matches(", ").count(),
-            2 * 45,
-            "46 columns, 46 values"
+            2 * 46,
+            "47 columns, 47 values"
         );
     }
 

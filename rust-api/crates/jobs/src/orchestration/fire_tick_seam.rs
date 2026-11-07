@@ -878,6 +878,7 @@ dispatch_driver!(
 /// [`bounce_issue_no_eligible_runner`][pidash_services::orchestration::dispatch::bounce_issue_no_eligible_runner],
 /// commit. (Explicit rather than macro-generated: the bounce takes no
 /// matcher.)
+#[allow(clippy::too_many_arguments)]
 pub async fn bounce_issue_no_eligible_runner<C, H, P>(
     pool: &PgPool,
     deps: StoreDeps<C, H, P>,
@@ -886,6 +887,7 @@ pub async fn bounce_issue_no_eligible_runner<C, H, P>(
     issue_id: Uuid,
     triggered_by: &str,
     reason: &str,
+    reason_name: &str,
 ) -> Result<DispatchOutcome<BounceOutcome>, DispatchJobsError>
 where
     C: AdmissionCache,
@@ -900,6 +902,7 @@ where
         issue_id,
         triggered_by,
         reason,
+        reason_name,
         now,
         jitter_secs,
     )
@@ -2669,6 +2672,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");
@@ -2706,6 +2710,7 @@ mod tests {
             issue2,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");
@@ -2736,6 +2741,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .unwrap_err();
@@ -2779,6 +2785,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");
@@ -2967,6 +2974,7 @@ mod tests {
             graph.issue,
             "tick",
             "no-eligible-runner",
+            "",
         )
         .await
         .expect("bounce");

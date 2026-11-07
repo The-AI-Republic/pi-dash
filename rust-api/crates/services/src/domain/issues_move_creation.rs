@@ -213,6 +213,7 @@ impl CreationSeam for SeaHandoffStore<'_> {
             id: get(&row, "id")?,
             pod_id: get(&row, "pod_id")?,
             status: get(&row, "status")?,
+            name: get(&row, "name")?,
             last_heartbeat_at: get(&row, "last_heartbeat_at")?,
             paused_at: get(&row, "paused_at")?,
             provisioning: get(&row, "provisioning")?,
