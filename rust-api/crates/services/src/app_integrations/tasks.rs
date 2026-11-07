@@ -1,19 +1,18 @@
-//! D-33 task publishers: webhook dispatch + github/git sync enqueue boundary.
+//! D-33 task publishers: webhook dispatch + git sync enqueue boundary.
 //!
 //! Port of the dispatch side of `apps/api/pi_dash/bgtasks/webhook_task.py`
 //! (`webhook_activity` `:377-461`, `model_activity` `:463-506`,
 //! `get_model_data` contract `:143-187`, the send-task enqueue `:435-451`
-//! and the deactivation-email enqueue `:359-369`) plus the github/git sync
-//! enqueue boundary (`github_sync_task.py:264-389`,
-//! `git_sync_task.py:213-323`, `github_signals.py:31-74`, beat entry
-//! `celery.py:113-118`).
+//! and the deactivation-email enqueue `:359-369`) plus the git sync
+//! enqueue boundary (`git_sync_task.py:213-323`,
+//! `github_signals.py:31-74`, beat entry `celery.py:113-118`).
 //!
 //! Everything here is pure: Celery task names and the kwargs each
 //! `.delay()` publisher enqueues, in Celery wire format. Bodies stay where
 //! they are ported — the fan-out/send/log/email bodies in D-08
 //! (`pidash-jobs` `tasks_webhooks::webhook_fanout` / `webhook_send`) and
-//! the sync scan bodies in D-05 (`pidash-jobs` `integrations::github_sync`
-//! / `git_sync` / `github_signals`). This crate cannot depend on
+//! the sync scan bodies in D-05 (`pidash-jobs` `integrations::git_sync`
+//! / `github_signals`). This crate cannot depend on
 //! `pidash-jobs`, so task-name literals and payload shapes are pinned
 //! equal to those owners by the fixture replay tests below (the D-31
 //! `app_assets::tasks` precedent), never re-derived.
@@ -25,7 +24,7 @@
 //! No new queue tables: rows go to `rust_job_queue` on the default
 //! `celery` queue with `NewJob::new` defaults (immediately visible,
 //! `max_retries` 3 — which is exactly the `bind=True, max_retries=3`
-//! budget of `sync_one_repo` / `sync_one_binding`).
+//! budget of `sync_one_binding`).
 //!
 //! Fixture replayed by the unit tests beside this file:
 //! `rust-api/fixtures/app_integrations/fx-tsk-01-webhook-dispatch.json`
@@ -59,7 +58,6 @@
 //!   legacy schedule name `github-issue-sync-every-4h` but fires
 //!   `git_sync_task.sync_all_bindings`, so django-celery-beat updates
 //!   the existing rows instead of running both pollers in parallel.
-//!   `github_sync_task.sync_all_repos` has no beat entry.
 //! * Q6 (`webhook_task.py:441`): `webhook_id` is passed to
 //!   `webhook_send_task.delay` as a `UUID` object, not `str` — Celery
 //!   serializes it on the wire. Builders here take the string form.
@@ -72,9 +70,8 @@
 //! | `model_activity` updated | `webhook_task.py:486-504` | one [`webhook_activity_kwargs`] per changed key, verb `"updated"`, identifiers `None` |
 //! | `webhook_activity` fan-out | `webhook_task.py:436-450` | one [`send_task_kwargs`] per matching webhook, action verbatim |
 //! | send retry exhaustion | `webhook_task.py:359-369` | [`deactivation_email_kwargs`] |
-//! | `sync_all_repos` fan-out | `github_sync_task.py:264-271` | [`sync_positional_wire`] under [`GITHUB_SYNC_ONE_REPO_TASK`] |
 //! | `sync_all_bindings` fan-out | `git_sync_task.py:213-220` | [`sync_positional_wire`] under [`GIT_SYNC_ONE_BINDING_TASK`] |
-//! | completion comment-back | `github_signals.py:64-74` | [`sync_positional_wire`] under the provider's `POST_COMPLETION_COMMENT` task, guarded by [`should_skip_completion`] |
+//! | completion comment-back | `github_signals.py:64-74` | [`sync_positional_wire`] under the git `POST_COMPLETION_COMMENT` task, guarded by [`should_skip_completion`] |
 
 use serde_json::{Map, Value};
 
@@ -95,16 +92,6 @@ pub const WEBHOOK_SEND_TASK: &str = "pi_dash.bgtasks.webhook_task.webhook_send_t
 pub const DEACTIVATION_EMAIL_TASK: &str =
     "pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email";
 
-/// `sync_all_repos` (`github_sync_task.py:264`, plain `@shared_task`).
-/// Body in D-05 (`integrations::github_sync::SYNC_ALL_REPOS_TASK`, same string).
-pub const GITHUB_SYNC_ALL_REPOS_TASK: &str = "pi_dash.bgtasks.github_sync_task.sync_all_repos";
-/// `sync_one_repo` (`github_sync_task.py:274`, `bind=True, max_retries=3`).
-/// Body in D-05 (`SYNC_ONE_REPO_TASK`, same string).
-pub const GITHUB_SYNC_ONE_REPO_TASK: &str = "pi_dash.bgtasks.github_sync_task.sync_one_repo";
-/// `post_completion_comment` (`github_sync_task.py:338`, plain
-/// `@shared_task`). Body in D-05 (`POST_COMPLETION_COMMENT_TASK`, same string).
-pub const GITHUB_POST_COMPLETION_COMMENT_TASK: &str =
-    "pi_dash.bgtasks.github_sync_task.post_completion_comment";
 /// `sync_all_bindings` (`git_sync_task.py:213`, plain `@shared_task`).
 /// Body in D-05 (`integrations::git_sync::SYNC_ALL_BINDINGS_TASK`, same string).
 pub const GIT_SYNC_ALL_BINDINGS_TASK: &str = "pi_dash.bgtasks.git_sync_task.sync_all_bindings";
@@ -117,15 +104,12 @@ pub const GIT_POST_COMPLETION_COMMENT_TASK: &str =
     "pi_dash.bgtasks.git_sync_task.post_completion_comment";
 
 /// Every Celery task name this dispatch surface enqueues under, in Python
-/// definition order (webhook tasks, then github sync, then git sync).
-pub const TASK_NAMES: [&str; 10] = [
+/// definition order (webhook tasks, then git sync).
+pub const TASK_NAMES: [&str; 7] = [
     WEBHOOK_ACTIVITY_TASK,
     MODEL_ACTIVITY_TASK,
     WEBHOOK_SEND_TASK,
     DEACTIVATION_EMAIL_TASK,
-    GITHUB_SYNC_ALL_REPOS_TASK,
-    GITHUB_SYNC_ONE_REPO_TASK,
-    GITHUB_POST_COMPLETION_COMMENT_TASK,
     GIT_SYNC_ALL_BINDINGS_TASK,
     GIT_SYNC_ONE_BINDING_TASK,
     GIT_POST_COMPLETION_COMMENT_TASK,
@@ -347,13 +331,11 @@ pub fn plan_updated_dispatches(
 }
 
 /// Celery wire `(args, kwargs)` for the positional single-id sync
-/// enqueues: `sync_one_repo.delay(str(sync_id))`
-/// (`github_sync_task.py:271`), `sync_one_binding.delay(str(binding_id))`
-/// (`git_sync_task.py:219`) and both `post_completion_comment.delay(str(id))`
-/// (`github_sync_task.py:74`, `git_sync_task.py:74` via
-/// `github_signals.py:64-74`). Positional `.delay(id)` is
-/// `args=[str]`, `kwargs={}` on the wire — the same shape D-05's
-/// `fanout_job` / `completion_job` build; pinned equal by the wire test.
+/// enqueues: `sync_one_binding.delay(str(binding_id))`
+/// (`git_sync_task.py:219`) and `post_completion_comment.delay(str(id))`
+/// (`git_sync_task.py:74` via `github_signals.py:64-74`). Positional
+/// `.delay(id)` is `args=[str]`, `kwargs={}` on the wire — the same
+/// shape D-05's `fanout_job` builds; pinned equal by the wire test.
 pub fn sync_positional_wire(id: &str) -> (Value, Map<String, Value>) {
     (Value::Array(vec![Value::String(id.to_owned())]), Map::new())
 }
@@ -445,14 +427,6 @@ mod tests {
             "pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email"
         );
         assert_eq!(
-            GITHUB_SYNC_ONE_REPO_TASK,
-            "pi_dash.bgtasks.github_sync_task.sync_one_repo"
-        );
-        assert_eq!(
-            GITHUB_POST_COMPLETION_COMMENT_TASK,
-            "pi_dash.bgtasks.github_sync_task.post_completion_comment"
-        );
-        assert_eq!(
             GIT_SYNC_ONE_BINDING_TASK,
             "pi_dash.bgtasks.git_sync_task.sync_one_binding"
         );
@@ -460,7 +434,7 @@ mod tests {
             GIT_POST_COMPLETION_COMMENT_TASK,
             "pi_dash.bgtasks.git_sync_task.post_completion_comment"
         );
-        assert_eq!(TASK_NAMES.len(), 10);
+        assert_eq!(TASK_NAMES.len(), 7);
     }
 
     #[test]
@@ -657,9 +631,7 @@ mod tests {
         // .delay(str(id)) is args=[str], kwargs={} on the wire — the same
         // shape D-05's fanout_job/completion_job build.
         for (task, id) in [
-            (GITHUB_SYNC_ONE_REPO_TASK, "sync-1"),
             (GIT_SYNC_ONE_BINDING_TASK, "binding-1"),
-            (GITHUB_POST_COMPLETION_COMMENT_TASK, "gsync-1"),
             (GIT_POST_COMPLETION_COMMENT_TASK, "isync-1"),
         ] {
             let (args, kwargs) = sync_positional_wire(id);

@@ -15,8 +15,8 @@
 //!
 //! PIDASHCONV-1623 moved `iri_to_uri` (from
 //! `api::response_headers`, the `HttpResponseRedirect` encoder) and
-//! `percent_encode` (from the `jobs::integrations::{git_sync,
-//! github_sync}` twins, the strict segment/query encoder) here.
+//! `percent_encode` (from the `jobs::integrations::git_sync` twin, the
+//! strict segment/query encoder) here.
 //!
 //! OVL-11 residue (PIDASHCONV-1626): `split_authority` (the
 //! `services::auth_session::shapes` twin, re-shaped to the overlay's

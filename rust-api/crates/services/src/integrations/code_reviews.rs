@@ -2143,24 +2143,8 @@ mod tests {
             unimplemented!("code-review tests never flip sync")
         }
 
-        async fn set_github_syncs_enabled(
-            &self,
-            _project_id: Uuid,
-            _workspace_slug: &str,
-            _enabled: bool,
-        ) -> Result<u64, StoreError> {
-            unimplemented!("code-review tests never touch sync rows")
-        }
-
         async fn delete_binding(&self, _binding_id: Uuid) -> Result<(), StoreError> {
             unimplemented!("code-review tests never delete bindings")
-        }
-
-        async fn delete_github_syncs_for_project(
-            &self,
-            _project_id: Uuid,
-        ) -> Result<u64, StoreError> {
-            unimplemented!("code-review tests never delete sync rows")
         }
     }
 

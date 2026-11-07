@@ -417,10 +417,9 @@ pub trait GitStore {
     ) -> Result<Option<super::repositories::ProjectRef>, StoreError>;
 
     /// The binding section of `bind_repository` as one transaction:
-    /// delete the existing project binding (hard), delete the project's
-    /// `GithubRepositorySync` rows (hard), insert the new binding, apply
-    /// the project `repo_url`/`base_branch` updates. `BINDING_*_SQL`,
-    /// `GITHUB_SYNC_DELETE_SQL`, `PROJECT_REPO_UPDATE_SQL`.
+    /// delete the existing project binding (hard), insert the new
+    /// binding, apply the project `repo_url`/`base_branch` updates.
+    /// `BINDING_*_SQL`, `PROJECT_REPO_UPDATE_SQL`.
     async fn apply_bind(
         &self,
         plan: super::repositories::BindPlan,
@@ -448,21 +447,8 @@ pub trait GitStore {
         StoreError,
     >;
 
-    /// `set_binding_sync_enabled` Github mirror
-    /// (`GITHUB_SYNC_SET_ENABLED_SQL`); returns rows updated.
-    async fn set_github_syncs_enabled(
-        &self,
-        project_id: Uuid,
-        workspace_slug: &str,
-        enabled: bool,
-    ) -> Result<u64, StoreError>;
-
     /// Hard-delete one binding by id (`BINDING_DELETE_ONE_SQL`).
     async fn delete_binding(&self, binding_id: Uuid) -> Result<(), StoreError>;
-
-    /// Hard-delete a project's `GithubRepositorySync` rows
-    /// (`GITHUB_SYNC_DELETE_SQL`); returns rows deleted.
-    async fn delete_github_syncs_for_project(&self, project_id: Uuid) -> Result<u64, StoreError>;
 }
 
 /// Insert plan for `create_provider_account` (`services.py:95-114`).
@@ -1317,23 +1303,7 @@ pub(crate) mod fakes {
             unimplemented!("repositories tests provide the full fake")
         }
 
-        async fn set_github_syncs_enabled(
-            &self,
-            _project_id: Uuid,
-            _workspace_slug: &str,
-            _enabled: bool,
-        ) -> Result<u64, StoreError> {
-            unimplemented!("repositories tests provide the full fake")
-        }
-
         async fn delete_binding(&self, _binding_id: Uuid) -> Result<(), StoreError> {
-            unimplemented!("repositories tests provide the full fake")
-        }
-
-        async fn delete_github_syncs_for_project(
-            &self,
-            _project_id: Uuid,
-        ) -> Result<u64, StoreError> {
             unimplemented!("repositories tests provide the full fake")
         }
     }

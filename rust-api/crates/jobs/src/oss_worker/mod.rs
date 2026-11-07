@@ -337,12 +337,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         crate::integrations::git_sync::LiveProviders::from_env(),
         Some(transition_hook.clone()),
     );
-    crate::integrations::github_sync::register_github_sync_tasks(
-        registry,
-        ctx.pools.primary().clone(),
-        crate::integrations::github_sync::LiveTransports::from_env(),
-        Some(transition_hook.clone()),
-    );
     // D-07 send/stack (PIDASHCONV-865; kept in sync with
     // `inventory::tests::mirror_registry_matches_tasks_table`). The live
     // mail seams exist (`tasks_mail::live`), so the Rust worker owns both
@@ -589,7 +583,6 @@ mod tests {
         ]);
         expected.extend(crate::tasks_webhooks::link_crawl::TASK_NAMES);
         expected.extend(crate::integrations::git_sync::TASK_NAMES);
-        expected.extend(crate::integrations::github_sync::TASK_NAMES);
         expected.insert(crate::license::tasks::TASK_NAME);
         expected.extend([crate::assistant::SWEEP_TASK]);
         expected.extend(crate::loop_scan::TASK_NAMES);
@@ -628,7 +621,7 @@ mod tests {
             crate::tasks_export::ISSUE_EXPORT_TASK,
             crate::tasks_export::ANALYTIC_EXPORT_TASK,
         ]);
-        assert_eq!(expected.len(), 76, "worker-owned count drifted");
+        assert_eq!(expected.len(), 73, "worker-owned count drifted");
 
         for name in &expected {
             assert!(registry.owns(name), "{name} must be worker-owned");
