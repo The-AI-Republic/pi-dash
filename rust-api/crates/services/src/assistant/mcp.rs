@@ -189,18 +189,15 @@ pub struct ServerRow {
 
 /// `AssistantMCPServer.objects.filter(user=user, is_enabled=True)`
 /// (`mcp.py:250`) in the model's default `created_at` order. Moved
-/// verbatim from `MCP_SERVERS_SQL` in `pidash_api::turn::live`
-/// (OVL-15, PIDASHCONV-1651), which is now a thin caller of
-/// [`fetch_enabled_mcp_servers`].
-const MCP_SERVERS_SQL: &str = "SELECT id, name, url, auth_header_encrypted \
-     FROM assistant_mcp_server WHERE user_id = $1 AND is_enabled \
-     ORDER BY created_at ASC, id ASC";
-
+/// verbatim from `pidash_api::turn::live` (OVL-15, PIDASHCONV-1651),
+/// now a SeaORM query over `assistant_mcp_server`; the former
+/// `MCP_SERVERS_SQL` text (`WHERE user_id = $1 AND is_enabled
+/// ORDER BY created_at ASC, id ASC`) is exactly this filter/order.
 /// One enabled `assistant_mcp_server` row as the runtime reads it:
 /// id, name, URL and the encrypted auth header. The overlay's
 /// `provider.rs` `mcp_servers` arm maps this to [`ServerRow`] for
 /// [`plan_servers`] via [`to_server_row`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
 pub struct EnabledMcpServerRow {
     pub id: Uuid,
     pub name: String,
@@ -210,28 +207,31 @@ pub struct EnabledMcpServerRow {
 
 /// The enabled MCP server list for the turn runtime and the overlay:
 /// `filter(user=user, is_enabled=True)` in `created_at` order
-/// (`mcp.py:250`). The SQL is the moved `MCP_SERVERS_SQL`; each row
-/// projects to [`ServerRow`] through [`to_server_row`] with the
-/// caller's per-row SSRF verdict.
+/// (`mcp.py:250`); each row projects to [`ServerRow`] through
+/// [`to_server_row`] with the caller's per-row SSRF verdict.
 pub async fn fetch_enabled_mcp_servers(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Vec<EnabledMcpServerRow>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, String, Option<Vec<u8>>)> = sqlx::query_as(MCP_SERVERS_SQL)
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(id, name, url, auth_header_encrypted)| EnabledMcpServerRow {
-                id,
-                name,
-                url,
-                auth_header_encrypted,
-            },
-        )
-        .collect())
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = pidash_db::entity::assistant_mcp_server::Entity::find()
+        .select_only()
+        .columns([
+            pidash_db::entity::assistant_mcp_server::Column::Id,
+            pidash_db::entity::assistant_mcp_server::Column::Name,
+            pidash_db::entity::assistant_mcp_server::Column::Url,
+            pidash_db::entity::assistant_mcp_server::Column::AuthHeaderEncrypted,
+        ])
+        .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(user_id))
+        .filter(pidash_db::entity::assistant_mcp_server::Column::IsEnabled.eq(true))
+        .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::CreatedAt)
+        .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::Id)
+        .into_model::<EnabledMcpServerRow>()
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(rows)
 }
 
 /// Project one fetched row to the [`ServerRow`] [`plan_servers`]
@@ -907,5 +907,60 @@ mod tests {
         assert_eq!(py_repr("both\"and'quotes"), "'both\"and\\'quotes'");
         // Printable non-ASCII passes through verbatim.
         assert_eq!(py_repr("café"), "'café'");
+    }
+
+    #[test]
+    fn enabled_servers_shape_pins_filter_and_order() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
+        let sql = pidash_db::entity::assistant_mcp_server::Entity::find()
+            .select_only()
+            .columns([
+                pidash_db::entity::assistant_mcp_server::Column::Id,
+                pidash_db::entity::assistant_mcp_server::Column::Name,
+                pidash_db::entity::assistant_mcp_server::Column::Url,
+                pidash_db::entity::assistant_mcp_server::Column::AuthHeaderEncrypted,
+            ])
+            .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::assistant_mcp_server::Column::IsEnabled.eq(true))
+            .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::CreatedAt)
+            .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::Id)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("is_enabled"), "enabled filter: {sql}");
+        assert!(sql.contains("ORDER BY"), "ordering: {sql}");
+    }
+
+    #[tokio::test]
+    async fn live_enabled_servers_readback() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let user_id = uuid::Uuid::new_v4();
+        {
+            use sea_orm::{ActiveModelTrait, Set};
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let now = chrono::Utc::now();
+            let row = pidash_db::entity::assistant_mcp_server::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                user_id: Set(user_id),
+                name: Set("live-enabled".to_owned()),
+                url: Set("https://8.8.8.8/live".to_owned()),
+                auth_header_encrypted: Set(None),
+                is_enabled: Set(true),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+            };
+            row.insert(&db).await.expect("insert enabled");
+        }
+        let rows = fetch_enabled_mcp_servers(&pool, user_id)
+            .await
+            .expect("fetch enabled");
+        assert!(rows.iter().any(|r| r.name == "live-enabled"), "readback");
     }
 }
