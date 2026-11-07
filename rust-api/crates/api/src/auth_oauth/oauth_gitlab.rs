@@ -1239,7 +1239,7 @@ async fn sync_user_data(
 ) -> Result<(), Denial> {
     let is_staff = user.is_staff || user.is_superuser;
     pidash_services::domain::identity::sync_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &pidash_services::domain::identity::SyncUpdate {
             first_name,
@@ -1290,7 +1290,7 @@ async fn save_user_data(
     };
     let is_staff = user.is_staff || user.is_superuser;
     pidash_services::domain::identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &pidash_services::domain::identity::LoginStamps {
             medium: Some("gitlab"),
@@ -1656,9 +1656,15 @@ async fn bulk_insert_project_members(
             },
         )
         .collect();
-    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &view_props, &prefs, false)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk,
+        &view_props,
+        &prefs,
+        false,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1691,7 +1697,7 @@ async fn redirection_path(
 ) -> Result<String, Denial> {
     // `Profile.objects.get_or_create(user=user)`.
     let path = pidash_services::domain::identity::get_or_create_profile(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         now,
         &random_color(),
@@ -1922,9 +1928,13 @@ async fn callback_success(
                 )
                 .await
                 {
-                    pidash_services::domain::identity::stamp_avatar_asset(pool, id, asset_id)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
+                    pidash_services::domain::identity::stamp_avatar_asset(
+                        &pidash_db::pool::sea_orm_connection(pool),
+                        id,
+                        asset_id,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
                     signup_asset = Some(asset_id);
                 }
             }
@@ -2119,10 +2129,16 @@ async fn create_update_account(
             now,
             metadata: None,
         };
-        let _ = create_account(pool, &params).await;
+        let _ = create_account(&pidash_db::pool::sea_orm_connection(pool), &params).await;
         return;
     };
-    let account_id = find_account_id(pool, *user_id, PROVIDER, &provider_account_id).await;
+    let account_id = find_account_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *user_id,
+        PROVIDER,
+        &provider_account_id,
+    )
+    .await;
     match account_id {
         Ok(Some(id)) => {
             let loaded: Result<Option<(chrono::DateTime<Utc>, serde_json::Value)>, sqlx::Error> =
@@ -2134,7 +2150,7 @@ async fn create_update_account(
                 .await;
             if let Ok(Some((created_at, metadata))) = loaded {
                 let _ = rotate_account_tokens(
-                    pool,
+                    &pidash_db::pool::sea_orm_connection(pool),
                     id,
                     created_at,
                     *user_id,
@@ -2157,7 +2173,7 @@ async fn create_update_account(
                 now,
                 metadata: None,
             };
-            let _ = create_account(pool, &params).await;
+            let _ = create_account(&pidash_db::pool::sea_orm_connection(pool), &params).await;
         }
         // B6: the filter itself failing is swallowed too.
         Err(_) => {}

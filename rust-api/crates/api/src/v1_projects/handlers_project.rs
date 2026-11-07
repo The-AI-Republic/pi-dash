@@ -2052,7 +2052,7 @@ pub async fn archive_project_inner(
     activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
     let updated: u64 = pidash_services::domain::projects::archive_v1_project(
-        &pre.pool,
+        &pidash_db::pool::sea_orm_connection(&pre.pool),
         project_id,
         workspace_id,
         pre.actor.id,
@@ -2104,7 +2104,7 @@ pub async fn unarchive_project_inner(
     activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
     let updated: u64 = pidash_services::domain::projects::unarchive_v1_project(
-        &pre.pool,
+        &pidash_db::pool::sea_orm_connection(&pre.pool),
         project_id,
         workspace_id,
         pre.actor.id,
@@ -3052,7 +3052,6 @@ pub async fn create_project_inner(
             created_by: pre.actor.id,
             created_at: now,
             updated_at: now,
-            v1: true,
         },
     )
     .await;
@@ -3163,7 +3162,7 @@ pub async fn add_project_admin(
     let props = default_props_json();
     let prefs = default_preferences_json();
     pidash_services::domain::projects::members::add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &pidash_services::domain::projects::members::NewProjectMember {
             workspace_id: *workspace_id,
             project_id: Some(*project_id),
@@ -3197,7 +3196,7 @@ pub async fn add_project_admin(
     let (filters, display_filters, display_properties) = user_property_defaults();
     let rich = serde_json::json!({});
     pidash_services::domain::projects::members::add_property(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &pidash_services::domain::projects::members::NewMemberProperty {
             workspace_id: *workspace_id,
             project_id: *project_id,
@@ -3530,52 +3529,21 @@ pub async fn apply_project_update(
 ) -> Result<(), Denial> {
     use pidash_services::v1_projects::ser_project as ser;
     let now = chrono::Utc::now();
-    let mut sets: Vec<String> = vec![
-        "\"updated_at\" = $1".to_owned(),
-        "\"updated_by_id\" = $2".to_owned(),
-    ];
-    // (bind index, value) pairs appended in order.
-    use pidash_services::domain::projects::ProjectPatchBind;
-    let mut binds: Vec<ProjectPatchBind> = Vec::new();
-    let push_str =
-        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: String| {
-            sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-            binds.push(ProjectPatchBind::Str(v));
-        };
-    let push_opt_str = |sets: &mut Vec<String>,
-                        binds: &mut Vec<ProjectPatchBind>,
-                        col: &str,
-                        v: Option<String>| {
-        sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-        binds.push(ProjectPatchBind::OptStr(v));
+    // One assignment per provided field, in order; the domain stamps the
+    // audit pair (`updated_at`, `updated_by_id`) ahead of them.
+    use pidash_services::domain::projects::{ProjectPatchBind, ProjectPatchSet};
+    let mut sets: Vec<ProjectPatchSet> = Vec::new();
+    let push = |sets: &mut Vec<ProjectPatchSet>, col: &str, value: ProjectPatchBind| {
+        sets.push(ProjectPatchSet {
+            column: col.to_owned(),
+            value,
+        });
     };
-    let push_bool =
-        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: bool| {
-            sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-            binds.push(ProjectPatchBind::Bool(v));
-        };
-    let push_int =
-        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: i32| {
-            sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-            binds.push(ProjectPatchBind::Int(v));
-        };
-    let push_fk = |sets: &mut Vec<String>,
-                   binds: &mut Vec<ProjectPatchBind>,
-                   col: &str,
-                   v: Option<uuid::Uuid>| {
-        sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-        binds.push(ProjectPatchBind::OptUuid(v));
-    };
-    let push_json =
-        |sets: &mut Vec<String>, binds: &mut Vec<ProjectPatchBind>, col: &str, v: Value| {
-            sets.push(format!("\"{col}\" = ${}", binds.len() + 3));
-            binds.push(ProjectPatchBind::Json(v));
-        };
     if let Some(v) = field_str(data, "name") {
-        push_str(&mut sets, &mut binds, "name", v);
+        push(&mut sets, "name", ProjectPatchBind::Str(v));
     }
     if let Some(v) = field_str(data, "description") {
-        push_str(&mut sets, &mut binds, "description", v);
+        push(&mut sets, "description", ProjectPatchBind::Str(v));
     }
     for key in [
         "project_lead_id",
@@ -3590,23 +3558,22 @@ pub async fn apply_project_update(
             _ => "estimate",
         };
         if let Some(v) = field_fk(data, field) {
-            push_fk(&mut sets, &mut binds, key, v);
+            push(&mut sets, key, ProjectPatchBind::OptUuid(v));
         }
     }
     if let Some(v) = field_str(data, "identifier") {
-        push_str(
+        push(
             &mut sets,
-            &mut binds,
             "identifier",
-            ser::normalize_identifier(&v),
+            ProjectPatchBind::Str(ser::normalize_identifier(&v)),
         );
     }
     if let Some(v) = field_json(data, "icon_prop") {
-        push_json(&mut sets, &mut binds, "icon_prop", v);
+        push(&mut sets, "icon_prop", ProjectPatchBind::Json(v));
     }
     for key in ["emoji", "cover_image", "external_source", "external_id"] {
         if let Some(v) = field_opt_str(data, key) {
-            push_opt_str(&mut sets, &mut binds, key, v);
+            push(&mut sets, key, ProjectPatchBind::OptStr(v));
         }
     }
     for key in [
@@ -3622,25 +3589,29 @@ pub async fn apply_project_update(
         "is_default",
     ] {
         if let Some(v) = field_bool(data, key) {
-            push_bool(&mut sets, &mut binds, key, v);
+            push(&mut sets, key, ProjectPatchBind::Bool(v));
         }
     }
     for key in ["archive_in", "close_in"] {
         if let Some(v) = field_int(data, key) {
-            push_int(&mut sets, &mut binds, key, v);
+            push(&mut sets, key, ProjectPatchBind::Int(v));
         }
     }
     if let Some(v) = field_str(data, "timezone") {
-        push_str(&mut sets, &mut binds, "timezone", v);
+        push(&mut sets, "timezone", ProjectPatchBind::Str(v));
     }
     if let Some(v) = field_str(data, "repo_url") {
-        push_str(&mut sets, &mut binds, "repo_url", v);
+        push(&mut sets, "repo_url", ProjectPatchBind::Str(v));
     }
     if let Some(v) = field_str(data, "base_branch") {
-        push_str(&mut sets, &mut binds, "base_branch", v);
+        push(&mut sets, "base_branch", ProjectPatchBind::Str(v));
     }
     if let Some(v) = field_str(data, "default_agent_executor") {
-        push_str(&mut sets, &mut binds, "default_agent_executor", v);
+        push(
+            &mut sets,
+            "default_agent_executor",
+            ProjectPatchBind::Str(v),
+        );
     }
     // New `is_default` value (or the stored one when untouched).
     let new_default: bool = field_bool(data, "is_default").unwrap_or(was_default);
@@ -3669,7 +3640,7 @@ pub async fn apply_project_update(
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
     if ser::unsets_other_defaults(field_bool(data, "is_default")) {
         pidash_services::domain::projects::unset_other_project_defaults(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             *workspace_id,
             *project_id,
         )
@@ -3677,9 +3648,8 @@ pub async fn apply_project_update(
         .map_err(|_| Denial::ServerError)?;
     }
     match pidash_services::domain::projects::apply_project_patch(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &sets,
-        &binds,
         now,
         *actor_id,
         *project_id,
@@ -3756,7 +3726,7 @@ pub async fn delete_project_inner(
         .map_err(|_| Denial::ServerError)?;
     // Instance `delete()` → `save()`: `deleted_at` + `updated_*`.
     pidash_services::domain::projects::soft_delete_v1_project(
-        &pre.pool,
+        &pidash_db::pool::sea_orm_connection(&pre.pool),
         project_id,
         pre.actor.id,
         now,
@@ -3798,7 +3768,7 @@ pub async fn insert_default_state(
     now: &chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Denial> {
     pidash_services::domain::projects::states::add_default(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &pidash_services::domain::projects::states::NewDefaultState {
             project_id: *project_id,
             workspace_id: *workspace_id,
@@ -3809,7 +3779,6 @@ pub async fn insert_default_state(
             default,
             created_by: *actor_id,
             now: *now,
-            v1: true,
         },
     )
     .await

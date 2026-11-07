@@ -89,33 +89,70 @@ use crate::state::AppState;
 use super::gate;
 use super::{actor_user_id, enqueue_best_effort, json_response, pool_of, Denial};
 
+use pidash_db::entity::{page_versions, pages, project_pages, users, workspaces};
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, Select, Set,
+};
+
+/// SeaORM connection over the request's sqlx pool (no I/O).
+fn orm(pool: &PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
 // ---------------------------------------------------------------------------
-// SQL (factored so the unit tests pin the ported quirks statically)
+// Queries (factored so the unit tests pin the ported quirks statically)
 // ---------------------------------------------------------------------------
 
 /// Duplicate source fetch (`base.py:582-587`): Django merges the two spans
 /// into ONE `project_pages` join and trims the `projects` table entirely
 /// (QUIRK-merged-fetch) — a live link to the URL project, a live page, the
 /// URL workspace. Base `Page.objects` carries the soft-delete manager.
-fn source_fetch_sql() -> &'static str {
-    r#"SELECT p.workspace_id, p.name, p.description_json, p.description_html,
-       p.owned_by_id, p.access, p.color, p.parent_id, p.archived_at, p.is_locked,
-       p.view_props, p.logo_props, p.is_global, p.moved_to_page, p.moved_to_project,
-       p.sort_order, p.external_id, p.external_source
-       FROM pages p
-       JOIN workspaces w ON w.id = p.workspace_id
-       JOIN project_pages pp ON pp.page_id = p.id
-           AND pp.project_id = $2 AND pp.deleted_at IS NULL
-       WHERE p.id = $1 AND w.slug = $3 AND p.deleted_at IS NULL"#
+/// The link's `project_id`/`deleted_at` predicates ride as `WHERE`
+/// filters, which for an inner join is the same statement as the `ON`
+/// qualifiers (`pp.page_id = p.id` + `pp.project_id = ?` + `pp.deleted_at
+/// IS NULL`).
+fn source_fetch_query(page_id: &Uuid, project_id: &Uuid, slug: &str) -> Select<pages::Entity> {
+    pages::Entity::find()
+        .select_only()
+        .column(pages::Column::WorkspaceId)
+        .column(pages::Column::Name)
+        .column(pages::Column::DescriptionJson)
+        .column(pages::Column::DescriptionHtml)
+        .column(pages::Column::OwnedById)
+        .column(pages::Column::Access)
+        .column(pages::Column::Color)
+        .column(pages::Column::ParentId)
+        .column(pages::Column::ArchivedAt)
+        .column(pages::Column::IsLocked)
+        .column(pages::Column::ViewProps)
+        .column(pages::Column::LogoProps)
+        .column(pages::Column::IsGlobal)
+        .column(pages::Column::MovedToPage)
+        .column(pages::Column::MovedToProject)
+        .column(pages::Column::SortOrder)
+        .column(pages::Column::ExternalId)
+        .column(pages::Column::ExternalSource)
+        .join(JoinType::InnerJoin, pages::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, pages::Relation::ProjectPages.def())
+        .filter(pages::Column::Id.eq(*page_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_pages::Column::ProjectId.eq(*project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .filter(pages::Column::DeletedAt.is_null())
 }
 
 /// Duplicate re-link list (`base.py:594`): the default (live-only) manager
 /// in `Meta.ordering` (`-created_at`). The loop shadows `project_id`, so
 /// the LAST row wins (QUIRK-shadow-project).
-fn duplicate_links_sql() -> &'static str {
-    r#"SELECT pp.project_id FROM project_pages pp
-       WHERE pp.page_id = $1 AND pp.deleted_at IS NULL
-       ORDER BY pp.created_at DESC"#
+fn duplicate_links_query(page_id: &Uuid) -> Select<project_pages::Entity> {
+    project_pages::Entity::find()
+        .select_only()
+        .column(project_pages::Column::ProjectId)
+        .filter(project_pages::Column::PageId.eq(*page_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .order_by_desc(project_pages::Column::CreatedAt)
 }
 
 /// Duplicate re-fetch (`base.py:628-637`): the row plus the
@@ -136,64 +173,92 @@ fn duplicate_refetch_sql() -> &'static str {
 }
 
 /// Version rows (`version.py:23,28`): workspace slug + page, live only (the
-/// default manager), `Meta.ordering` (`-created_at`). The detail branch
-/// appends `AND pv.id = $3`.
-fn versions_list_sql() -> &'static str {
-    r#"SELECT pv.id, pv.workspace_id, pv.page_id, pv.last_saved_at, pv.owned_by_id,
-       pv.created_at, pv.updated_at, pv.created_by_id, pv.updated_by_id
-       FROM page_versions pv
-       JOIN workspaces w ON w.id = pv.workspace_id
-       WHERE w.slug = $1 AND pv.page_id = $2 AND pv.deleted_at IS NULL
-       ORDER BY pv.created_at DESC"#
+/// default manager), `Meta.ordering` (`-created_at`).
+fn versions_list_query(slug: &str, page_id: &Uuid) -> Select<page_versions::Entity> {
+    page_versions::Entity::find()
+        .select_only()
+        .column(page_versions::Column::Id)
+        .column(page_versions::Column::WorkspaceId)
+        .column(page_versions::Column::PageId)
+        .column(page_versions::Column::LastSavedAt)
+        .column(page_versions::Column::OwnedById)
+        .column(page_versions::Column::CreatedAt)
+        .column(page_versions::Column::UpdatedAt)
+        .column(page_versions::Column::CreatedById)
+        .column(page_versions::Column::UpdatedById)
+        .join(
+            JoinType::InnerJoin,
+            page_versions::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(page_versions::Column::PageId.eq(*page_id))
+        .filter(page_versions::Column::DeletedAt.is_null())
+        .order_by_desc(page_versions::Column::CreatedAt)
 }
 
-/// See [`versions_list_sql`].
-fn version_detail_columns_sql() -> &'static str {
-    r#"SELECT pv.id, pv.workspace_id, pv.page_id, pv.last_saved_at,
-       pv.description_binary, pv.description_html, pv.description_json,
-       pv.owned_by_id, pv.created_at, pv.updated_at, pv.created_by_id, pv.updated_by_id
-       FROM page_versions pv
-       JOIN workspaces w ON w.id = pv.workspace_id
-       WHERE w.slug = $1 AND pv.page_id = $2 AND pv.id = $3 AND pv.deleted_at IS NULL"#
+/// See [`versions_list_query`] with the detail columns plus `pv.id = pk`.
+fn version_detail_query(slug: &str, page_id: &Uuid, pk: &Uuid) -> Select<page_versions::Entity> {
+    page_versions::Entity::find()
+        .select_only()
+        .column(page_versions::Column::Id)
+        .column(page_versions::Column::WorkspaceId)
+        .column(page_versions::Column::PageId)
+        .column(page_versions::Column::LastSavedAt)
+        .column(page_versions::Column::DescriptionBinary)
+        .column(page_versions::Column::DescriptionHtml)
+        .column(page_versions::Column::DescriptionJson)
+        .column(page_versions::Column::OwnedById)
+        .column(page_versions::Column::CreatedAt)
+        .column(page_versions::Column::UpdatedAt)
+        .column(page_versions::Column::CreatedById)
+        .column(page_versions::Column::UpdatedById)
+        .join(
+            JoinType::InnerJoin,
+            page_versions::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(page_versions::Column::PageId.eq(*page_id))
+        .filter(page_versions::Column::Id.eq(*pk))
+        .filter(page_versions::Column::DeletedAt.is_null())
 }
 
 // ---------------------------------------------------------------------------
 // Rows
 // ---------------------------------------------------------------------------
 
-/// One `page_versions` list row ([`versions_list_sql`]).
-#[derive(Debug, sqlx::FromRow)]
+/// One `page_versions` list row ([`versions_list_query`]), decoded by name.
+#[derive(Debug, sea_orm::FromQueryResult)]
 struct VersionRow {
     id: Uuid,
     workspace_id: Uuid,
     page_id: Uuid,
-    last_saved_at: DateTime<Utc>,
+    last_saved_at: DateTimeWithTimeZone,
     owned_by_id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: DateTimeWithTimeZone,
+    updated_at: DateTimeWithTimeZone,
     created_by_id: Option<Uuid>,
     updated_by_id: Option<Uuid>,
 }
 
-/// One `page_versions` detail row ([`version_detail_columns_sql`]).
-#[derive(Debug, sqlx::FromRow)]
+/// One `page_versions` detail row ([`version_detail_query`]), decoded by name.
+#[derive(Debug, sea_orm::FromQueryResult)]
 struct VersionDetailRow {
     id: Uuid,
     workspace_id: Uuid,
     page_id: Uuid,
-    last_saved_at: DateTime<Utc>,
+    last_saved_at: DateTimeWithTimeZone,
     description_binary: Option<Vec<u8>>,
     description_html: String,
     description_json: Value,
     owned_by_id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: DateTimeWithTimeZone,
+    updated_at: DateTimeWithTimeZone,
     created_by_id: Option<Uuid>,
     updated_by_id: Option<Uuid>,
 }
 
-/// The duplicate source page ([`source_fetch_sql`]).
-#[derive(Debug, sqlx::FromRow)]
+/// The duplicate source page ([`source_fetch_query`]), decoded by name.
+#[derive(Debug, sea_orm::FromQueryResult)]
 struct SourcePage {
     workspace_id: Uuid,
     name: String,
@@ -308,10 +373,10 @@ fn render_row(row: &VersionRow, tz: &Tz) -> VersionRowBody {
         id: row.id,
         workspace: row.workspace_id,
         page: row.page_id,
-        last_saved_at: render(&row.last_saved_at, tz),
+        last_saved_at: render(&row.last_saved_at.with_timezone(&Utc), tz),
         owned_by: row.owned_by_id,
-        created_at: render(&row.created_at, tz),
-        updated_at: render(&row.updated_at, tz),
+        created_at: render(&row.created_at.with_timezone(&Utc), tz),
+        updated_at: render(&row.updated_at.with_timezone(&Utc), tz),
         created_by: row.created_by_id,
         updated_by: row.updated_by_id,
     }
@@ -323,13 +388,13 @@ fn render_detail(row: &VersionDetailRow, tz: &Tz) -> VersionDetailBody {
         id: row.id,
         workspace: row.workspace_id,
         page: row.page_id,
-        last_saved_at: render(&row.last_saved_at, tz),
+        last_saved_at: render(&row.last_saved_at.with_timezone(&Utc), tz),
         description_binary: row.description_binary.as_deref().map(render_binary),
         description_html: row.description_html.clone(),
         description_json: row.description_json.clone(),
         owned_by: row.owned_by_id,
-        created_at: render(&row.created_at, tz),
-        updated_at: render(&row.updated_at, tz),
+        created_at: render(&row.created_at.with_timezone(&Utc), tz),
+        updated_at: render(&row.updated_at.with_timezone(&Utc), tz),
         created_by: row.created_by_id,
         updated_by: row.updated_by_id,
     }
@@ -377,18 +442,27 @@ pub fn shadowed_project_id(links: &[Uuid], url_project_id: &Uuid) -> Uuid {
     links.last().copied().unwrap_or(*url_project_id)
 }
 
+/// `user_timezone` decoded by name; `None` is a NULL column (or a missing
+/// row — sessions FK to users, so the miss is unreachable).
+#[derive(Debug, sea_orm::FromQueryResult)]
+struct TimezoneRow {
+    user_timezone: Option<String>,
+}
+
 /// Activate the actor's rendering zone (`TimezoneMixin.initial` runs inside
 /// `initial()`, before the view body — an unknown zone 500s before any
 /// write). A missing row is unreachable (sessions FK to users) and falls
 /// back to UTC; an unknown zone name 500s (`ZoneInfo(...)` raises).
 async fn request_timezone(pool: &PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as(r#"SELECT user_timezone FROM users WHERE id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.and_then(|row| row.0)
+    let row: Option<TimezoneRow> = users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_model()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.and_then(|row| row.user_timezone)
         .as_deref()
         .unwrap_or("UTC")
         .parse()
@@ -464,11 +538,9 @@ async fn versions_response(
         Err(denial) => return denial.into_response(),
     };
     if let Some(pk) = pk {
-        let row: Option<VersionDetailRow> = match sqlx::query_as(version_detail_columns_sql())
-            .bind(slug)
-            .bind(page_id)
-            .bind(pk)
-            .fetch_optional(pool)
+        let row: Option<VersionDetailRow> = match version_detail_query(slug, page_id, &pk)
+            .into_model()
+            .one(&orm(pool))
             .await
         {
             Ok(row) => row,
@@ -480,10 +552,9 @@ async fn versions_response(
         let body = serde_json::to_string(&render_detail(&row, &tz)).expect("serializable row");
         return json_response(StatusCode::OK, body);
     }
-    let rows: Vec<VersionRow> = match sqlx::query_as(versions_list_sql())
-        .bind(slug)
-        .bind(page_id)
-        .fetch_all(pool)
+    let rows: Vec<VersionRow> = match versions_list_query(slug, page_id)
+        .into_model()
+        .all(&orm(pool))
         .await
     {
         Ok(rows) => rows,
@@ -540,11 +611,9 @@ pub async fn duplicate(
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
     };
-    let source: Option<SourcePage> = match sqlx::query_as(source_fetch_sql())
-        .bind(page_id)
-        .bind(project_id)
-        .bind(slug.as_str())
-        .fetch_optional(pool)
+    let source: Option<SourcePage> = match source_fetch_query(&page_id, &project_id, &slug)
+        .into_model()
+        .one(&orm(pool))
         .await
     {
         Ok(source) => source,
@@ -563,15 +632,14 @@ pub async fn duplicate(
         );
     }
     // All live source projects, `-created_at` (`base.py:594`).
-    let links: Vec<(Uuid,)> = match sqlx::query_as(duplicate_links_sql())
-        .bind(page_id)
-        .fetch_all(pool)
+    let link_ids: Vec<Uuid> = match duplicate_links_query(&page_id)
+        .into_tuple()
+        .all(&orm(pool))
         .await
     {
         Ok(links) => links,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let link_ids: Vec<Uuid> = links.into_iter().map(|row| row.0).collect();
     // The clone (`base.py:596-602`): new row, `"<name> (Copy)"`, binary
     // reset, requester ownership. `pk=None` keeps `_state.adding=False`, so
     // crum's non-adding branch sets `updated_by=request.user` too — both
@@ -582,51 +650,43 @@ pub async fn duplicate(
     let stripped = pidash_db::app_pages::strip::sync_description_stripped(Some(
         source.description_html.as_str(),
     ));
-    let json_text = serde_json::to_string(&source.description_json).expect("json serializes");
-    let view_text = serde_json::to_string(&source.view_props).expect("json serializes");
-    let logo_text = serde_json::to_string(&source.logo_props).expect("json serializes");
     let name = format!("{} (Copy)", source.name);
-    let insert = sqlx::query(
-        r#"INSERT INTO pages
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, name, description_json, description_binary, description_html,
-            description_stripped, owned_by_id, access, color, parent_id, archived_at,
-            is_locked, view_props, logo_props, is_global, moved_to_page, moved_to_project,
-            sort_order, external_id, external_source)
-           VALUES ($1, now(), now(), $2, $2, NULL, $3, $4, CAST($5 AS jsonb), NULL,
-                   $6, $7, $2, $8, $9, $10, $11, $12, CAST($13 AS jsonb),
-                   CAST($14 AS jsonb), $15, $16, $17, $18, $19, $20)"#,
-    )
-    .bind(new_id)
-    .bind(gate.user_id)
-    .bind(source.workspace_id)
-    .bind(name.as_str())
-    .bind(json_text.as_str())
-    .bind(source.description_html.as_str())
-    .bind(stripped)
-    .bind(source.access)
-    .bind(source.color.as_str())
-    .bind(source.parent_id)
-    .bind(source.archived_at)
-    .bind(source.is_locked)
-    .bind(view_text.as_str())
-    .bind(logo_text.as_str())
-    .bind(source.is_global)
-    .bind(source.moved_to_page)
-    .bind(source.moved_to_project)
-    .bind(source.sort_order)
-    .bind(source.external_id.as_deref())
-    .bind(source.external_source.as_deref())
-    .execute(pool)
+    let now = chrono::Utc::now();
+    let db = orm(pool);
+    let insert = pages::Entity::insert(pages::ActiveModel {
+        id: Set(new_id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(gate.user_id)),
+        updated_by_id: Set(Some(gate.user_id)),
+        deleted_at: Set(None),
+        workspace_id: Set(source.workspace_id),
+        name: Set(name),
+        description_json: Set(source.description_json.clone()),
+        description_binary: Set(None),
+        description_html: Set(source.description_html.clone()),
+        description_stripped: Set(stripped),
+        owned_by_id: Set(gate.user_id),
+        access: Set(source.access),
+        color: Set(source.color.clone()),
+        parent_id: Set(source.parent_id),
+        archived_at: Set(source.archived_at),
+        is_locked: Set(source.is_locked),
+        view_props: Set(source.view_props.clone()),
+        logo_props: Set(source.logo_props.clone()),
+        is_global: Set(source.is_global),
+        moved_to_page: Set(source.moved_to_page),
+        moved_to_project: Set(source.moved_to_project),
+        sort_order: Set(source.sort_order),
+        external_id: Set(source.external_id.clone()),
+        external_source: Set(source.external_source.clone()),
+    })
+    .exec_without_returning(&db)
     .await;
     if let Err(error) = insert {
         // `handle_exception`'s `IntegrityError` branch: practically
         // unreachable (fresh UUIDs), mirrored for completeness.
-        let integrity = error
-            .as_database_error()
-            .and_then(|db| db.code())
-            .is_some_and(|code| code.starts_with("23"));
-        return if integrity {
+        return if pidash_db::orm_tx::is_integrity_violation(&error) {
             super::Denial::BadError("The payload is not valid".to_owned()).into_response()
         } else {
             Denial::ServerError.into_response()
@@ -636,21 +696,20 @@ pub async fn duplicate(
     // instances (`adding=True`): crum overwrites the passed `updated_by_id`
     // with NULL — bridges store `updated_by=NULL` (QUIRK-bridge-null-updated).
     for link_id in &link_ids {
-        if sqlx::query(
-            r#"INSERT INTO project_pages
-               (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                workspace_id, project_id, page_id)
-               VALUES ($1, now(), now(), $2, NULL, NULL, $3, $4, $5)"#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(gate.user_id)
-        .bind(source.workspace_id)
-        .bind(link_id)
-        .bind(new_id)
-        .execute(pool)
-        .await
-        .is_err()
-        {
+        let bridge = project_pages::Entity::insert(project_pages::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(Some(gate.user_id)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            workspace_id: Set(source.workspace_id),
+            project_id: Set(*link_id),
+            page_id: Set(new_id),
+        })
+        .exec_without_returning(&db)
+        .await;
+        if bridge.is_err() {
             return Denial::ServerError.into_response();
         }
     }
@@ -680,7 +739,8 @@ pub async fn duplicate(
     // Re-fetch with the `project_ids` annotation + `PageDetailSerializer`
     // (`base.py:628-639`), 201. The row was just inserted; a miss means a
     // concurrent delete, i.e. the serializer's `None` dereference — 500.
-    let copy: Option<CopyRow> = match sqlx::query_as(duplicate_refetch_sql())
+    // raw-sql: correlated `ARRAY_AGG(DISTINCT ...) FILTER (WHERE NOT (...))` subquery coalesced to `'{}'::uuid[]` — sea-query has no aggregate FILTER/ARRAY_AGG construct.
+    let copy: Option<CopyRow> = match sqlx::query_as(duplicate_refetch_sql()) // raw-sql: correlated ARRAY_AGG(DISTINCT) FILTER subquery coalesced to '{}'::uuid[] — sea-query has no aggregate FILTER/ARRAY_AGG construct.
         .bind(new_id)
         .fetch_optional(pool)
         .await
@@ -729,6 +789,10 @@ mod tests {
             + chrono::Duration::microseconds(6_007)
     }
 
+    fn fixed_dtz() -> DateTimeWithTimeZone {
+        fixed_dt().into()
+    }
+
     fn fixed_date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 3, 4).expect("fixed date")
     }
@@ -738,10 +802,10 @@ mod tests {
             id: fixed_uuid(1),
             workspace_id: fixed_uuid(2),
             page_id: fixed_uuid(3),
-            last_saved_at: fixed_dt(),
+            last_saved_at: fixed_dtz(),
             owned_by_id: fixed_uuid(4),
-            created_at: fixed_dt(),
-            updated_at: fixed_dt(),
+            created_at: fixed_dtz(),
+            updated_at: fixed_dtz(),
             created_by_id: Some(fixed_uuid(4)),
             updated_by_id: None,
         }
@@ -807,13 +871,13 @@ mod tests {
             id: fixed_uuid(1),
             workspace_id: fixed_uuid(2),
             page_id: fixed_uuid(3),
-            last_saved_at: fixed_dt(),
+            last_saved_at: fixed_dtz(),
             description_binary: None,
             description_html: "<p>v1</p>".to_owned(),
             description_json: serde_json::json!({"a": 1}),
             owned_by_id: fixed_uuid(4),
-            created_at: fixed_dt(),
-            updated_at: fixed_dt(),
+            created_at: fixed_dtz(),
+            updated_at: fixed_dtz(),
             created_by_id: Some(fixed_uuid(4)),
             updated_by_id: None,
         };
@@ -914,24 +978,51 @@ mod tests {
         }
     }
 
-    /// The ported SQL quirks, pinned statically: the merged single-join
-    /// fetch (no `projects` table), the `-created_at` link order, the
-    /// verbatim `...0001` annotation filter over an unfiltered LEFT JOIN.
+    /// The ported quirks, pinned statically on the converted statements: the
+    /// merged single-`project_pages`-join fetch (no `projects` table), the
+    /// `-created_at` link order, the verbatim `...0001` annotation filter
+    /// over the kept re-fetch (raw-sql exception — see its note).
     #[test]
     fn ported_sql_quirks_pinned() {
-        let fetch = source_fetch_sql();
-        assert_eq!(fetch.matches("JOIN project_pages").count(), 1);
-        assert!(!fetch.contains("JOIN projects"));
-        assert!(fetch.contains("pp.project_id = $2 AND pp.deleted_at IS NULL"));
-        assert!(fetch.contains("p.deleted_at IS NULL"));
-        assert!(duplicate_links_sql().contains("ORDER BY pp.created_at DESC"));
-        assert!(duplicate_links_sql().contains("pp.deleted_at IS NULL"));
+        use sea_orm::{DbBackend, QueryTrait};
+        let page_id = fixed_uuid(3);
+        let project_id = fixed_uuid(6);
+        let fetch = source_fetch_query(&page_id, &project_id, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert_eq!(
+            fetch.matches("INNER JOIN \"project_pages\"").count(),
+            1,
+            "{fetch}"
+        );
+        assert!(!fetch.contains("JOIN \"projects\""), "{fetch}");
+        assert!(fetch.contains("INNER JOIN"), "{fetch}");
+        assert!(fetch.contains("IS NULL"), "{fetch}");
+
+        let links = duplicate_links_query(&page_id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(links.contains("ORDER BY"), "{links}");
+        assert!(links.contains("DESC"), "{links}");
+        assert!(links.contains("IS NULL"), "{links}");
+
         let refetch = duplicate_refetch_sql();
         assert!(refetch.contains("00000000-0000-0000-0000-000000000001"));
         assert!(refetch.contains("LEFT OUTER JOIN") || refetch.contains("pp WHERE pp.page_id"));
         assert!(!refetch.contains("pp.deleted_at"));
         assert!(refetch.contains("'{}'::uuid[]"));
-        assert!(versions_list_sql().contains("ORDER BY pv.created_at DESC"));
-        assert!(versions_list_sql().contains("pv.deleted_at IS NULL"));
+
+        let list = versions_list_query("acme", &page_id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(list.contains("ORDER BY"), "{list}");
+        assert!(list.contains("DESC"), "{list}");
+        assert!(list.contains("IS NULL"), "{list}");
+
+        let detail = version_detail_query("acme", &page_id, &fixed_uuid(1))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(detail.contains("description_binary"), "{detail}");
+        assert!(detail.contains("IS NULL"), "{detail}");
     }
 }

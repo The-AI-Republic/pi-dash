@@ -2016,7 +2016,7 @@ async fn create_state_inner(
     let external_source = input.external_source.clone().flatten();
     let external_id = input.external_id.clone().flatten();
     let insert = pidash_services::domain::projects::states::create(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::projects::states::NewState {
             project_id: gate.project_id,
             workspace_id,
@@ -2033,7 +2033,6 @@ async fn create_state_inner(
             created_by: gate.actor.id,
             updated_by: None,
             now,
-            v1: true,
         },
     )
     .await;
@@ -2096,9 +2095,12 @@ fn micros_now() -> chrono::DateTime<chrono::Utc> {
 /// on every sibling in the project (soft-deleted and triage rows keep theirs,
 /// via the default-manager scope in the domain twin).
 async fn run_default_flip(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), HandlerError> {
-    domain_projects::states::clear_project_defaults(pool, project_id)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    domain_projects::states::clear_project_defaults(
+        &pidash_db::pool::sea_orm_connection(pool),
+        project_id,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     Ok(())
 }
 
@@ -2457,7 +2459,7 @@ async fn patch_state_inner(
     row.updated_at = micros_now();
     row.updated_by_id = Some(gate.actor.id);
     match pidash_services::domain::projects::states::save(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::projects::states::SaveState {
             id: row.id,
             updated_at: row.updated_at,
@@ -2602,9 +2604,14 @@ async fn delete_state_inner(
         ));
     }
     let now = micros_now();
-    pidash_services::domain::projects::states::soft_delete(&pool, state_id, gate.actor.id, now)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    pidash_services::domain::projects::states::soft_delete(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        state_id,
+        gate.actor.id,
+        now,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     // Instance `delete()` → `.delay(...)` (`db/mixins.py:77-78`): stamp,
     // then enqueue — same order as the mixin, shared helper.
     super::handlers_project::enqueue_soft_delete(&pool, "state", &state_id).await;

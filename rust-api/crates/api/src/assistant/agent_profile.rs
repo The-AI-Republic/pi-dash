@@ -336,19 +336,17 @@ pub fn is_desktop_from_extension(
 /// (`runtime/llm.py:67-68` + `models.py:260-262`): the row for the user,
 /// whether its encrypted key is non-empty.
 async fn fetch_llm_has_key(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<bool, Denial> {
-    let row = sqlx::query(
-        "SELECT \"api_key_encrypted\" FROM \"assistant_user_llm_config\" WHERE \"user_id\" = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use sqlx::Row as _;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_user_llm_config::Entity::find()
+        .filter(pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(*user_id))
+        .select_only()
+        .column(pidash_db::entity::assistant_user_llm_config::Column::ApiKeyEncrypted)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row
-        .map(|row| {
-            let encrypted: Option<Vec<u8>> = row.try_get("api_key_encrypted").unwrap_or(None);
-            pidash_db::assistant::models::has_secret(&encrypted)
-        })
+        .map(|row| pidash_db::assistant::models::has_secret(&row.api_key_encrypted))
         .unwrap_or(false))
 }
 

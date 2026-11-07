@@ -1958,7 +1958,7 @@ async fn pm_create_inner(
     let prefs: Value =
         serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
     let membership_id = match pidash_services::domain::projects::members::add(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::projects::members::NewProjectMember {
             workspace_id,
             project_id: Some(project_id),
@@ -2057,7 +2057,7 @@ async fn create_project_user_property(
     let prefs: Value =
         serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
     let insert = pidash_services::domain::projects::members::add_property_db_now(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &pidash_services::domain::projects::members::NewMemberProperty {
             workspace_id,
             project_id,
@@ -2300,7 +2300,7 @@ async fn pm_detail_patch_inner(
         return Err(Denial::BadJson(errors.body()));
     }
     pidash_services::domain::projects::members::update_member_identity(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         membership.id,
         member_id,
         role,
@@ -2380,7 +2380,7 @@ async fn pm_detail_delete_inner(
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
     pidash_services::domain::projects::members::deactivate_actor_first(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         membership.id,
         actor.id,
     )

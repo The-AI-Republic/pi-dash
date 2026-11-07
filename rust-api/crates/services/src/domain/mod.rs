@@ -67,6 +67,7 @@ pub mod relations;
 pub mod tokens;
 pub mod transition;
 pub mod txn;
+pub mod user_saves;
 pub mod workspaces;
 
 pub use ctx::{WriteActor, WriteCtx, WriteOptions, WriteScope};

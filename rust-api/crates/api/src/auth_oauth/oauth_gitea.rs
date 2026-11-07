@@ -870,7 +870,7 @@ pub async fn save_user_data(
 ) -> Result<bool, sqlx::Error> {
     use pidash_services::domain::identity;
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         &identity::LoginStamps {
             medium: Some("gitea"),
@@ -940,7 +940,7 @@ pub async fn sync_user_data(
     let display_name = display_name_for(email, &mut rand::rng());
     use pidash_services::domain::identity;
     identity::sync_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         &identity::SyncUpdate {
             first_name,
@@ -1672,7 +1672,7 @@ pub async fn process_invitations(
             // `ProjectMember` row (Django main; PB-1008 retired), so the
             // join succeeds and the invite is consumed.
             pidash_services::domain::projects::members::add(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 &pidash_services::domain::projects::members::NewProjectMember {
                     workspace_id: invite.workspace_id,
                     project_id: Some(invite.project_id),
@@ -1759,7 +1759,13 @@ pub async fn redirection_path(
         let mut rng = rand::rng();
         random_color(&mut rng)
     };
-    let profile = identity::get_or_create_profile(pool, user_id, now, &background_color).await?;
+    let profile = identity::get_or_create_profile(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user_id,
+        now,
+        &background_color,
+    )
+    .await?;
     if !profile.is_onboarded {
         return Ok("onboarding".to_owned());
     }
@@ -2282,7 +2288,7 @@ async fn finish_authenticated(
         }
     });
     pidash_services::domain::identity::account::create_update_account(
-        &mut conn,
+        &pidash_db::orm_tx::TxConn::new(&mut conn),
         user_id,
         PROVIDER,
         user_json,

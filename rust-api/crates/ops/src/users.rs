@@ -331,7 +331,10 @@ pub async fn run_activate_user(
         &kernel::new_user_token(),
         chrono::Utc::now(),
     );
-    if let Err(error) = identity::save_user_activation(pool, user.id, &write).await {
+    if let Err(error) =
+        identity::save_user_activation(&pidash_db::pool::sea_orm_connection(pool), user.id, &write)
+            .await
+    {
         emit_db_skeleton(io, &error);
         return Ok(1);
     }
@@ -432,7 +435,14 @@ pub async fn run_reset_password(
         &kernel::new_user_token(),
         chrono::Utc::now(),
     );
-    if let Err(error) = identity::save_user_password(pool, user.id, &encoded, &write).await {
+    if let Err(error) = identity::save_user_password(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user.id,
+        &encoded,
+        &write,
+    )
+    .await
+    {
         emit_db_skeleton(io, &error);
         return Ok(1);
     }
@@ -639,8 +649,13 @@ pub async fn run_create_project_member(
     let preferences = queries::project_preferences_json();
     match queries::project_member_exists(pool, project.id, user.id).await {
         Ok(true) => {
-            if let Err(error) =
-                project_members::ops_update_role(pool, project.id, user.id, role).await
+            if let Err(error) = project_members::ops_update_role(
+                &pidash_db::pool::sea_orm_connection(pool),
+                project.id,
+                user.id,
+                role,
+            )
+            .await
             {
                 emit_db_skeleton(io, &error);
                 return Ok(1);
@@ -676,7 +691,7 @@ pub async fn run_create_project_member(
             let display_properties = queries::property_display_properties_json();
             let rich = serde_json::json!({});
             if let Err(error) = project_members::add_property(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 &project_members::NewMemberProperty {
                     workspace_id: project.workspace_id,
                     project_id: project.id,
@@ -740,7 +755,7 @@ async fn create_project_member_with_hook(
     let hook_sort = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
     let rich = serde_json::json!({});
     if let Err(error) = project_members::add_property(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &project_members::NewMemberProperty {
             workspace_id: project.workspace_id,
             project_id: project.id,
@@ -761,7 +776,7 @@ async fn create_project_member_with_hook(
         return Err(1);
     }
     if let Err(error) = project_members::ops_add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         project.workspace_id,
         project.id,
         user.id,
