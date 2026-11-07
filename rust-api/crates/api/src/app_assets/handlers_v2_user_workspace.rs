@@ -768,7 +768,7 @@ async fn workspace_entity_save(
                     .map_err(|_| server_error())?;
             }
             pidash_services::domain::workspaces::stamp_logo(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 workspace_id,
                 *asset_id,
                 now,
@@ -837,7 +837,7 @@ async fn workspace_entity_delete(
             .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
             pidash_services::domain::workspaces::clear_logo_asset(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 workspace_id,
                 now,
                 actor_id,

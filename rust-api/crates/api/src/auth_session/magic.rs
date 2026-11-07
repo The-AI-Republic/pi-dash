@@ -1092,9 +1092,15 @@ async fn process_workspace_project_invitations(
                 created_by: None,
             })
             .collect();
-        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
-            .await
-            .map_err(map_err)?;
+        members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        .map_err(map_err)?;
 
         for invite in &invites {
             // `invalidate_cache_directly(path, url_params=False, user=False,
@@ -1165,9 +1171,15 @@ async fn process_workspace_project_invitations(
                 created_by: invite.created_by_id,
             })
             .collect();
-        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
-            .await
-            .map_err(map_err)?;
+        members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        .map_err(map_err)?;
 
         // `workspace_project_join.py:76-87` sets `project_id` on every
         // `ProjectMember` row (Django main; PB-1008 retired), so the

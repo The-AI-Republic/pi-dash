@@ -883,7 +883,7 @@ async fn run_create_dummy_data_inner(
     let props = queries::workspace_member_props_json();
     let issue_props = queries::workspace_issue_props_json();
     members::add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &members::NewMember {
             workspace_id,
             user_id: Some(owner.id),
@@ -912,9 +912,15 @@ async fn run_create_dummy_data_inner(
             created_by: None,
         })
         .collect();
-    members::bulk_add(pool, &bulk_rows, &props, &issue_props, now)
-        .await
-        .map_err(|e| caught_db_error_text(&e))?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &props,
+        &issue_props,
+        now,
+    )
+    .await
+    .map_err(|e| caught_db_error_text(&e))?;
     let project_count_raw = ask_line(io, kernel::PROMPT_PROJECT_COUNT)?;
     let project_count = kernel::py_int(&project_count_raw)?;
     for (index, _) in (0..project_count).enumerate() {

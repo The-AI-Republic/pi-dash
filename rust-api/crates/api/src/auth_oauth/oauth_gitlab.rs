@@ -1615,9 +1615,15 @@ async fn bulk_insert_workspace_members(
             created_by: member.created_by_id,
         })
         .collect();
-    members::bulk_add(pool, &bulk_rows, &view_props, &issue_props, now)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &view_props,
+        &issue_props,
+        now,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 

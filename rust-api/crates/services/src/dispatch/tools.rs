@@ -1458,6 +1458,33 @@ pub const CREATE_SAVE_FALLBACK_STATE_SQL: &str = "SELECT id FROM states WHERE pr
      AND NOT is_triage AND deleted_at IS NULL AND NOT (states.group = 'triage') \
      ORDER BY sequence ASC LIMIT 1";
 
+/// SeaORM form of [`CREATE_SAVE_DEFAULT_STATE_SQL`] (`default = true`)
+/// and [`CREATE_SAVE_FALLBACK_STATE_SQL`] (`default = false`): the first
+/// live non-triage state of the project by `sequence`, projecting `id`.
+pub fn create_save_state_select(
+    project_id: Uuid,
+    default: bool,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::states;
+    use sea_orm::sea_query::{Expr, Order, Query};
+    let col = |column: states::Column| Expr::col((states::Entity, column));
+    let mut select = Query::select();
+    select
+        .column((states::Entity, states::Column::Id))
+        .from(states::Entity)
+        .and_where(col(states::Column::ProjectId).eq(project_id));
+    if default {
+        select.and_where(col(states::Column::Default).into());
+    }
+    select
+        .and_where(col(states::Column::IsTriage).not())
+        .and_where(col(states::Column::DeletedAt).is_null())
+        .and_where(col(states::Column::Group).eq("triage").not())
+        .order_by((states::Entity, states::Column::Sequence), Order::Asc)
+        .limit(1)
+        .to_owned()
+}
+
 /// `Issue.save()` per-project creation lock (`db/models/issue.py:315-320`):
 /// `SELECT pg_advisory_xact_lock(%s)` with
 /// [`advisory_lock_key`] of the project id. `$1` the lock key.
@@ -1476,6 +1503,26 @@ pub fn advisory_lock_key(project_id: &Uuid) -> i64 {
 /// `$1` project id.
 pub const CREATE_SEQ_SCAN_SQL: &str =
     "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL";
+
+/// SeaORM form of [`CREATE_SEQ_SCAN_SQL`]: the project's live
+/// `MAX(sequence)`, output name `max_sequence`.
+pub fn create_seq_scan_select(project_id: Uuid) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::issue_sequences;
+    use sea_orm::sea_query::{Alias, Expr, Query};
+    Query::select()
+        .expr_as(
+            Expr::col((issue_sequences::Entity, issue_sequences::Column::Sequence)).max(),
+            Alias::new("max_sequence"),
+        )
+        .from(issue_sequences::Entity)
+        .and_where(
+            Expr::col((issue_sequences::Entity, issue_sequences::Column::ProjectId)).eq(project_id),
+        )
+        .and_where(
+            Expr::col((issue_sequences::Entity, issue_sequences::Column::DeletedAt)).is_null(),
+        )
+        .to_owned()
+}
 
 /// The effective `sequence_id` (`issue.py:327`):
 /// `last_sequence + 1 if last_sequence else 1`.

@@ -858,9 +858,15 @@ async fn insert_project_arm_workspace_members(
             },
         )
         .collect();
-    members::bulk_add(pool, &bulk_rows, &default_props, &issue_props, now)
-        .await
-        .map_err(|_| server_error())?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &default_props,
+        &issue_props,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -937,7 +943,7 @@ async fn post_user_auth_workflow(
         .map_err(|_| server_error())?;
     for (workspace_id, role, _slug) in &workspace_invites {
         members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::NewMember {
                 workspace_id: *workspace_id,
                 user_id: Some(user_id),
