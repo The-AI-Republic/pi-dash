@@ -552,7 +552,7 @@ use pidash_services::integrations::accounts::{
 };
 use pidash_services::integrations::code_reviews::{
     AdapterSource, AttachRequest, CodeReviewError, CodeReviewStore, NewCodeReviewLink,
-    NewLegacyLink, ReviewAdapter, ReviewParser,
+    ReviewAdapter, ReviewParser,
 };
 use pidash_services::integrations::repositories::{NewRepository, RepositoryDefaults};
 
@@ -570,8 +570,7 @@ const REVIEW_RACE_MISS: &str = "link insert conflicted but the row vanished on r
 use pidash_db::integrations::git_models::git_code_review_link::GitCodeReviewLink;
 use pidash_db::integrations::git_models::git_provider_account::GitProviderAccount;
 use pidash_db::integrations::git_models::git_repository::GitRepository;
-use pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink;
-use pidash_services::integrations::code_reviews::{LegacyLinkUpdate, LinkWriteError};
+use pidash_services::integrations::code_reviews::LinkWriteError;
 
 /// Map a sqlx failure into the integrations store error.
 fn git_store_error(context: &str, error: sqlx::Error) -> GitStoreError {
@@ -637,38 +636,6 @@ fn review_link_from_row(row: &sqlx::postgres::PgRow) -> Result<GitCodeReviewLink
         draft: req!("draft", bool)?,
         remote_updated_at: req!("remote_updated_at", Option<chrono::DateTime<chrono::Utc>>)?,
         metadata: req!("metadata", Value)?,
-    })
-}
-
-fn legacy_link_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GithubPullRequestLink, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("legacy link map", error))
-        };
-    }
-    Ok(GithubPullRequestLink {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        project_id: req!("project_id", Uuid)?,
-        workspace_id: req!("workspace_id", Uuid)?,
-        issue_id: req!("issue_id", Uuid)?,
-        repo_owner: req!("repo_owner", String)?,
-        repo_name: req!("repo_name", String)?,
-        pr_number: req!("pr_number", i32)?,
-        url: req!("url", String)?,
-        title: req!("title", String)?,
-        state: req!("state", String)?,
-        merged: req!("merged", bool)?,
-        draft: req!("draft", bool)?,
-        pr_updated_at: req!("pr_updated_at", Option<chrono::DateTime<chrono::Utc>>)?,
     })
 }
 
@@ -752,23 +719,6 @@ impl CodeReviewStore for ReviewStore {
                 .await
                 .map_err(|error| git_store_error("review issue exists", error))?;
         Ok(row.is_some())
-    }
-
-    async fn find_legacy_link(
-        &self,
-        repo_owner_lower: &str,
-        repo_name_lower: &str,
-        pr_number: i32,
-    ) -> Result<Option<GithubPullRequestLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_FIND_SQL)
-                .bind(repo_owner_lower)
-                .bind(repo_name_lower)
-                .bind(pr_number)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("legacy link find", error))?;
-        row.map(|row| legacy_link_from_row(&row)).transpose()
     }
 
     async fn find_path_review_link(
@@ -1009,87 +959,6 @@ impl CodeReviewStore for ReviewStore {
         }
     }
 
-    async fn insert_legacy_link(
-        &self,
-        row: NewLegacyLink,
-    ) -> Result<GithubPullRequestLink, GitStoreError> {
-        sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_INSERT_SQL)
-            .bind(row.id)
-            .bind(row.created_at)
-            .bind(row.updated_at)
-            .bind(Some(self.actor))
-            .bind(None::<Uuid>)
-            .bind(row.project_id)
-            .bind(row.workspace_id)
-            .bind(row.issue_id)
-            .bind(&row.repo_owner)
-            .bind(&row.repo_name)
-            .bind(row.pr_number)
-            .bind(&row.url)
-            .bind(&row.title)
-            .bind(&row.state)
-            .bind(row.merged)
-            .bind(row.draft)
-            .bind(row.pr_updated_at)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| git_write_error("legacy link insert", error))?;
-        Ok(GithubPullRequestLink {
-            id: row.id,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            created_by_id: Some(self.actor),
-            updated_by_id: None,
-            deleted_at: None,
-            project_id: row.project_id,
-            workspace_id: row.workspace_id,
-            issue_id: row.issue_id,
-            repo_owner: row.repo_owner,
-            repo_name: row.repo_name,
-            pr_number: row.pr_number,
-            url: row.url,
-            title: row.title,
-            state: row.state,
-            merged: row.merged,
-            draft: row.draft,
-            pr_updated_at: row.pr_updated_at,
-        })
-    }
-
-    async fn update_legacy_link(
-        &self,
-        id: Uuid,
-        update: LegacyLinkUpdate,
-    ) -> Result<GithubPullRequestLink, GitStoreError> {
-        sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_UPDATE_SQL)
-            .bind(id)
-            .bind(&update.url)
-            .bind(&update.title)
-            .bind(&update.state)
-            .bind(update.merged)
-            .bind(update.draft)
-            .bind(update.pr_updated_at)
-            .bind(update.updated_at)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| git_write_error("legacy link update", error))?;
-        // `existing.save(update_fields=[...])` mutates in place; reread
-        // the row for the caller.
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    project_id, workspace_id, issue_id, repo_owner, repo_name, pr_number,
-                    url, title, state, merged, draft, pr_updated_at
-             FROM github_pull_request_links WHERE id = $1 LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("legacy link reread", error))?;
-        row.map(|row| legacy_link_from_row(&row))
-            .transpose()?
-            .ok_or(GitStoreError::NotFound("legacy link"))
-    }
-
     async fn delete_code_review_link(&self, id: Uuid) -> Result<(), GitStoreError> {
         // Instance `.delete()` (`mixins.py:71-78`): soft row, then the
         // fan-out — the port delegates the write mechanics here.
@@ -1105,22 +974,6 @@ impl CodeReviewStore for ReviewStore {
         .await
         .map_err(|error| git_store_error("review link delete", error))?;
         enqueue_soft_delete(&self.pool, "gitcodereviewlink", &id).await;
-        Ok(())
-    }
-
-    async fn delete_legacy_link(&self, id: Uuid) -> Result<(), GitStoreError> {
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "UPDATE github_pull_request_links
-             SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-        )
-        .bind(now)
-        .bind(self.actor)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| git_store_error("legacy link delete", error))?;
-        enqueue_soft_delete(&self.pool, "githubpullrequestlink", &id).await;
         Ok(())
     }
 }

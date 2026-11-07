@@ -1,4 +1,4 @@
-//! GitHub PR-link list/detail reads.
+//! GitHub PR-link list/detail reads (PDASHOSS01-355: generic git_code_review_links, GitHub-shaped via namespace mapping).
 //!
 //! Verbatim moves of the `pidash-api` handler SQL (OVL-05 pattern,
 //! PIDASHCONV-1661) plus the MCP tool querysets (Rule 5: queries on OSS
@@ -15,13 +15,13 @@ use super::{DbError, Error};
 /// scope on the link table only, `DISTINCT`, `-created_at`. `$1` slug,
 /// `$2` project id, `$3` issue id, `$4` member id. (Moved from the v1
 /// work-items handlers by PIDASHCONV-1661.)
-pub const PR_LIST_SQL: &str = r#"SELECT DISTINCT "github_pull_request_links"."created_at", "github_pull_request_links"."updated_at", "github_pull_request_links"."created_by_id", "github_pull_request_links"."updated_by_id", "github_pull_request_links"."deleted_at", "github_pull_request_links"."id", "github_pull_request_links"."project_id", "github_pull_request_links"."workspace_id", "github_pull_request_links"."issue_id", "github_pull_request_links"."repo_owner", "github_pull_request_links"."repo_name", "github_pull_request_links"."pr_number", "github_pull_request_links"."url", "github_pull_request_links"."title", "github_pull_request_links"."state", "github_pull_request_links"."merged", "github_pull_request_links"."draft", "github_pull_request_links"."pr_updated_at" FROM "github_pull_request_links" INNER JOIN "workspaces" ON ("github_pull_request_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("github_pull_request_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("github_pull_request_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "github_pull_request_links"."project_id" = $2 AND "github_pull_request_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "projects"."archived_at" IS NULL) ORDER BY "github_pull_request_links"."created_at" DESC"#;
+pub const PR_LIST_SQL: &str = r#"SELECT DISTINCT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."namespace" AS "repo_owner", "git_code_review_links"."repo_name" AS "repo_name", CAST("git_code_review_links"."external_iid" AS INTEGER) AS "pr_number", "git_code_review_links"."url", "git_code_review_links"."title", CASE WHEN "git_code_review_links"."state" = 'merged' THEN 'closed' ELSE "git_code_review_links"."state" END AS "state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at" AS "pr_updated_at" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "projects"."archived_at" IS NULL AND "git_code_review_links"."provider" = 'github' AND "git_code_review_links"."host_url" = 'https://github.com') ORDER BY "git_code_review_links"."created_at" DESC"#;
 
 /// PR-link detail scope + pk (`github_pr.py:86-98`, fixture
 /// `github_pr_detail_queryset`): no archived guard, no `DISTINCT`,
 /// `Meta.ordering` (`-created_at`). `$5` pk. (Moved from the v1
 /// work-items handlers by PIDASHCONV-1661.)
-pub const PR_DETAIL_SQL: &str = r#"SELECT "github_pull_request_links"."created_at", "github_pull_request_links"."updated_at", "github_pull_request_links"."created_by_id", "github_pull_request_links"."updated_by_id", "github_pull_request_links"."deleted_at", "github_pull_request_links"."id", "github_pull_request_links"."project_id", "github_pull_request_links"."workspace_id", "github_pull_request_links"."issue_id", "github_pull_request_links"."repo_owner", "github_pull_request_links"."repo_name", "github_pull_request_links"."pr_number", "github_pull_request_links"."url", "github_pull_request_links"."title", "github_pull_request_links"."state", "github_pull_request_links"."merged", "github_pull_request_links"."draft", "github_pull_request_links"."pr_updated_at" FROM "github_pull_request_links" INNER JOIN "workspaces" ON ("github_pull_request_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("github_pull_request_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("github_pull_request_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "github_pull_request_links"."project_id" = $2 AND "github_pull_request_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "github_pull_request_links"."id" = $5) ORDER BY "github_pull_request_links"."created_at" DESC LIMIT 1"#;
+pub const PR_DETAIL_SQL: &str = r#"SELECT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."namespace" AS "repo_owner", "git_code_review_links"."repo_name" AS "repo_name", CAST("git_code_review_links"."external_iid" AS INTEGER) AS "pr_number", "git_code_review_links"."url", "git_code_review_links"."title", CASE WHEN "git_code_review_links"."state" = 'merged' THEN 'closed' ELSE "git_code_review_links"."state" END AS "state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at" AS "pr_updated_at" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "git_code_review_links"."id" = $5 AND "git_code_review_links"."provider" = 'github' AND "git_code_review_links"."host_url" = 'https://github.com') ORDER BY "git_code_review_links"."created_at" DESC LIMIT 1"#;
 
 /// One PR link in the v1 detail scope, or `None` (the DELETE
 /// path's 404 branch).
@@ -52,24 +52,28 @@ pub async fn fetch_pr_detail_row(
 /// `$3` issue id, `$4` limit. The caller checked membership before
 /// calling. (Moved from the MCP read tools by PIDASHCONV-1661.)
 pub const PR_LINK_LIST_SQL: &str = "SELECT l.id, l.issue_id, l.project_id, l.workspace_id, \
-     l.repo_owner, l.repo_name, l.pr_number, l.url, l.title, l.state, l.merged, l.draft, \
-     l.pr_updated_at, l.created_at, l.updated_at, l.created_by_id \
-     FROM github_pull_request_links AS l \
+     l.namespace AS repo_owner, l.repo_name, CAST(l.external_iid AS INTEGER) AS pr_number, \
+     l.url, l.title, CASE WHEN l.state = 'merged' THEN 'closed' ELSE l.state END AS state, l.merged, l.draft, \
+     l.remote_updated_at AS pr_updated_at, l.created_at, l.updated_at, l.created_by_id \
+     FROM git_code_review_links AS l \
      INNER JOIN workspaces ON workspaces.id = l.workspace_id \
      WHERE l.deleted_at IS NULL \
        AND workspaces.slug = $1 \
        AND l.project_id = $2 \
        AND l.issue_id = $3 \
+       AND l.provider = 'github' \
+       AND l.host_url = 'https://github.com' \
      ORDER BY l.created_at DESC LIMIT $4";
 
 /// Full re-read of one link for serialization (attach's
 /// `_serialize_model(serializer, link)` over the model instance).
 /// (Moved from the MCP read tools by PIDASHCONV-1661.)
 pub const PR_LINK_BY_ID_SQL: &str = "SELECT l.id, l.issue_id, l.project_id, l.workspace_id, \
-     l.repo_owner, l.repo_name, l.pr_number, l.url, l.title, l.state, l.merged, l.draft, \
-     l.pr_updated_at, l.created_at, l.updated_at, l.created_by_id \
-     FROM github_pull_request_links AS l \
-     WHERE l.deleted_at IS NULL AND l.id = $1";
+     l.namespace AS repo_owner, l.repo_name, CAST(l.external_iid AS INTEGER) AS pr_number, \
+     l.url, l.title, CASE WHEN l.state = 'merged' THEN 'closed' ELSE l.state END AS state, l.merged, l.draft, \
+     l.remote_updated_at AS pr_updated_at, l.created_at, l.updated_at, l.created_by_id \
+     FROM git_code_review_links AS l \
+     WHERE l.deleted_at IS NULL AND l.id = $1 AND l.provider = 'github' AND l.host_url = 'https://github.com'";
 
 /// PR links of one issue in the MCP tool scope ([`PR_LINK_LIST_SQL`]).
 /// The `count` echoes the SLICED length, like Python's `len(links)`.
@@ -134,15 +138,17 @@ mod live {
     ) -> Uuid {
         let id = Uuid::new_v4();
         // Fresh repo identity per seed: live rows are unique per
-        // (`repo_owner`, `repo_name`, `pr_number`), and seeds persist
+        // (provider, host_url, namespace, repo_name, external_iid), and seeds persist
         // across runs.
         let owner = format!("o-{}", Uuid::new_v4().simple());
         sqlx::query(
-            "INSERT INTO github_pull_request_links \
-             (id, repo_owner, repo_name, pr_number, url, title, state, merged, draft, \
-             issue_id, project_id, workspace_id, created_at, updated_at) \
-             VALUES ($1, $2, 'r', $3, 'https://example.test/pr', 'T', 'open', false, false, \
-             $4, $5, $6, now() - make_interval(secs => $7), now())",
+            "INSERT INTO git_code_review_links \
+             (id, provider, host_url, namespace, repo_name, repo_external_id, external_id, external_iid, \
+             url, title, state, merged, draft, \
+             issue_id, project_id, workspace_id, created_at, updated_at, metadata) \
+             VALUES ($1, 'github', 'https://github.com', $2, 'r', '', '', $3::text, \
+             'https://example.test/pr', 'T', 'open', false, false, \
+             $4, $5, $6, now() - make_interval(secs => $7), now(), '{}')",
         )
         .bind(id)
         .bind(&owner)
