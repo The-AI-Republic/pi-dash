@@ -1638,10 +1638,15 @@ pub fn check_github_binding(binding: &GithubBindingVerdict) -> Result<Uuid, Tool
 /// `GithubAppInstallation.objects.filter(workspace_integration_id,
 /// suspended_at__isnull=True, verified_at__isnull=False).first()` under
 /// `Meta.ordering = ("-created_at",)` with the soft-delete default
-/// manager. `$1` workspace-integration id.
-pub const GITHUB_INSTALLATION_SQL: &str = "SELECT installation_id FROM github_app_installations \
-     WHERE workspace_integration_id = $1 AND suspended_at IS NULL AND verified_at IS NOT NULL \
-     AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1";
+/// manager, now read on `git_provider_accounts` (PDASHOSS01-356):
+/// `external_account_id` is cast back to BIGINT under the
+/// `installation_id` alias the reader expects. `$1` workspace-integration
+/// id.
+pub const GITHUB_INSTALLATION_SQL: &str = "SELECT CAST(external_account_id AS BIGINT) AS \
+     installation_id FROM git_provider_accounts \
+     WHERE workspace_integration_id = $1 AND provider = 'github' AND host_url = \
+     'https://github.com' AND auth_type = 'github_app' AND suspended_at IS NULL \
+     AND verified_at IS NOT NULL AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1";
 
 /// The installation verdict (`tools.py:548-549`): `None` is
 /// `ToolDenied("github_installation_unavailable")`, else the id feeds
@@ -3050,6 +3055,10 @@ mod tests {
         assert!(CREATE_SORT_ORDER_MAX_SQL.contains("state_id = $2"));
         assert!(GITHUB_BINDING_SQL.contains("git_repository_bindings AS b"));
         assert!(GITHUB_INSTALLATION_SQL.contains("ORDER BY created_at DESC LIMIT 1"));
+        // PDASHOSS01-356: the lookup reads the generic account table,
+        // never the sunset legacy tables.
+        assert!(GITHUB_INSTALLATION_SQL.contains("FROM git_provider_accounts"));
+        assert!(!GITHUB_INSTALLATION_SQL.contains("github_app_installations"));
         assert!(LINKED_PR_SQL.contains("namespace = $2 AND repo_name = $3"));
     }
 }
