@@ -13,6 +13,12 @@ use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    estimate_points, file_assets, issue_assignees, issue_labels, issues, projects, states, users,
+    workspaces,
+};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
 use super::{DbError, Error};
 use crate::v1_work_items::queries_core as core_queries;
 use crate::v1_work_items::shape_issue as shape;
@@ -131,6 +137,7 @@ type AssetUrlLookup = (Option<String>, Option<Uuid>, Option<Uuid>, Option<Uuid>)
 
 /// Decoded user row for [`expand_user`]: names, nullable `email`,
 /// `COALESCE`d avatar, optional avatar asset, display name.
+#[allow(dead_code)]
 type ExpandUserLookup = (
     String,
     String,
@@ -272,13 +279,19 @@ fn type_from_viewpoint(
 /// renders null like `getattr` on a dead FK (the `v1_projects`
 /// `file_asset_url` precedent, shared with `handlers_social`).
 async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, Error> {
-    let row: Option<AssetUrlLookup> = sqlx::query_as(
-        r#"SELECT fa."entity_type", fa."workspace_id", fa."project_id", fa."issue_id" FROM "file_assets" fa WHERE fa."id" = $1"#,
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("file-asset-url", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<AssetUrlLookup> = file_assets::Entity::find_by_id(*asset_id)
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .into_tuple::<AssetUrlLookup>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("file-asset-url", error))?;
     let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
         return Ok(None);
     };
@@ -359,26 +372,34 @@ pub fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue
 /// The `prefetch_related("assignees")` ids
 /// (`IssueAssignee.objects.filter(issue=...)`, `-created_at` order).
 pub async fn fetch_assignee_ids(pool: &PgPool, issue_id: &Uuid) -> Result<Vec<String>, Error> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        r#"SELECT "assignee_id" FROM "issue_assignees" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| DbError::new("issue-assignees", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let ids: Vec<Uuid> = issue_assignees::Entity::find()
+        .filter(issue_assignees::Column::IssueId.eq(*issue_id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .order_by_desc(issue_assignees::Column::CreatedAt)
+        .select_only()
+        .column(issue_assignees::Column::AssigneeId)
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|error| DbError::from_orm("issue-assignees", error))?;
     Ok(ids.iter().map(ToString::to_string).collect())
 }
 
 /// The `prefetch_related("labels")` ids (`IssueLabel.objects.filter(issue=...)`,
 /// `-created_at` order).
 pub async fn fetch_label_ids(pool: &PgPool, issue_id: &Uuid) -> Result<Vec<String>, Error> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        r#"SELECT "label_id" FROM "issue_labels" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| DbError::new("issue-labels", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let ids: Vec<Uuid> = issue_labels::Entity::find()
+        .filter(issue_labels::Column::IssueId.eq(*issue_id))
+        .filter(issue_labels::Column::DeletedAt.is_null())
+        .order_by_desc(issue_labels::Column::CreatedAt)
+        .select_only()
+        .column(issue_labels::Column::LabelId)
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|error| DbError::from_orm("issue-labels", error))?;
     Ok(ids.iter().map(ToString::to_string).collect())
 }
 
@@ -603,13 +624,19 @@ pub async fn fetch_grouped_rows(
 /// (null FKs never reach here — the caller maps them to `None`).
 pub async fn expand_state(pool: &PgPool, state_id: &Uuid) -> Result<Option<Value>, Error> {
     use crate::v1_projects::ser_workflow as workflow;
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        r#"SELECT "name", "color", "group" FROM "states" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(state_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("expand-state", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(String, String, String)> = states::Entity::find_by_id(*state_id)
+        .filter(states::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            states::Column::Name,
+            states::Column::Color,
+            states::Column::Group,
+        ])
+        .into_tuple::<(String, String, String)>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("expand-state", error))?;
     let Some((name, color, group)) = row else {
         return Ok(None);
     };
@@ -634,18 +661,16 @@ pub async fn expand_state(pool: &PgPool, state_id: &Uuid) -> Result<Option<Value
 /// hard-missing row renders `{}` via `None`. Mirrors the
 /// `handlers_social` fetch.
 pub async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Value>, Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "identifier", "name", "cover_image", "icon_prop", "emoji", "description", "is_default", "cover_image_asset_id" FROM "projects" WHERE "id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("expand-project", error))?;
-    let Some(row) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = projects::Entity::find_by_id(*project_id)
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("expand-project", error))?;
+    let Some(model) = model else {
         return Ok(None);
     };
-    let cover_asset: Option<Uuid> = row_uuid_opt(&row, "cover_image_asset_id")?;
-    let cover_text: Option<String> = row_string_opt(&row, "cover_image")?;
+    let cover_asset = model.cover_image_asset_id;
+    let cover_text = model.cover_image.clone();
     // `Project.cover_image_url` (`db/models/project.py:176-185`): the
     // asset URL wins, then the stored text, else null.
     let cover_url = match cover_asset {
@@ -653,41 +678,24 @@ pub async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<V
         None => None,
     };
     let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
-    let icon_prop: Option<Value> = row
-        .try_get("icon_prop")
-        .map_err(|_| Error::Failed("expand-project"))?;
     let mut map = Map::with_capacity(9);
-    map.insert(
-        "id".to_owned(),
-        Value::String(row_uuid(&row, "id")?.to_string()),
-    );
-    map.insert(
-        "identifier".to_owned(),
-        Value::String(row_string(&row, "identifier")?),
-    );
-    map.insert("name".to_owned(), Value::String(row_string(&row, "name")?));
+    map.insert("id".to_owned(), Value::String(model.id.to_string()));
+    map.insert("identifier".to_owned(), Value::String(model.identifier));
+    map.insert("name".to_owned(), Value::String(model.name));
     map.insert(
         "cover_image".to_owned(),
         cover_text.map(Value::String).unwrap_or(Value::Null),
     );
-    map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
+    map.insert(
+        "icon_prop".to_owned(),
+        model.icon_prop.unwrap_or(Value::Null),
+    );
     map.insert(
         "emoji".to_owned(),
-        row_string_opt(&row, "emoji")?
-            .map(Value::String)
-            .unwrap_or(Value::Null),
+        model.emoji.map(Value::String).unwrap_or(Value::Null),
     );
-    map.insert(
-        "description".to_owned(),
-        Value::String(row_string(&row, "description")?),
-    );
-    map.insert(
-        "is_default".to_owned(),
-        Value::Bool(
-            row.try_get("is_default")
-                .map_err(|_| Error::Failed("expand-project"))?,
-        ),
-    );
+    map.insert("description".to_owned(), Value::String(model.description));
+    map.insert("is_default".to_owned(), Value::Bool(model.is_default));
     map.insert(
         "cover_image_url".to_owned(),
         cover_url.map(Value::String).unwrap_or(Value::Null),
@@ -700,12 +708,14 @@ pub async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<V
 /// manager — no liveness scope. A hard-missing row renders `{}` via
 /// `None`. Mirrors the `handlers_social` fetch.
 pub async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Option<Value>, Error> {
-    let row: Option<(String, String)> =
-        sqlx::query_as(r#"SELECT "name", "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| DbError::new("expand-workspace", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(String, String)> = workspaces::Entity::find_by_id(*workspace_id)
+        .select_only()
+        .columns([workspaces::Column::Name, workspaces::Column::Slug])
+        .into_tuple::<(String, String)>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("expand-workspace", error))?;
     Ok(match row {
         Some((name, slug)) => {
             let mut map = Map::with_capacity(3);
@@ -724,16 +734,19 @@ pub async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Opti
 /// via `None`. Mirrors the `handlers_social` fetch.
 pub async fn expand_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<Value>, Error> {
     use crate::v1_projects::ser_collab as collab;
-    let row: Option<ExpandUserLookup> = sqlx::query_as(
-        r#"SELECT "first_name", "last_name", "email", COALESCE("avatar", ''), "avatar_asset_id", "display_name" FROM "users" WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("expand-user", error))?;
-    let Some((first_name, last_name, email, avatar, avatar_asset, display_name)) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = users::Entity::find_by_id(*user_id)
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("expand-user", error))?;
+    let Some(model) = model else {
         return Ok(None);
     };
+    let first_name = model.first_name;
+    let last_name = model.last_name;
+    let email = model.email;
+    let avatar = model.avatar;
+    let avatar_asset = model.avatar_asset_id;
     let asset_url = match avatar_asset {
         Some(id) => file_asset_url(pool, &id).await?,
         None => None,
@@ -741,7 +754,7 @@ pub async fn expand_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<Value>,
     let avatar_url =
         collab::resolve_avatar_url(avatar_asset.is_some(), asset_url.as_deref(), &avatar);
     let id = user_id.to_string();
-    let display_name = display_name.unwrap_or_default();
+    let display_name = model.display_name;
     let lite = collab::UserLiteRow {
         id: &id,
         first_name: &first_name,
@@ -764,12 +777,18 @@ pub async fn expand_user(pool: &PgPool, user_id: &Uuid) -> Result<Option<Value>,
 /// (`CASCADE`) and renders `{}` via `None`.
 pub async fn expand_parent(pool: &PgPool, parent_id: &Uuid) -> Result<Option<Value>, Error> {
     use crate::v1_work_items::shape_labels as labels;
-    let row: Option<(Uuid, i32, Uuid)> =
-        sqlx::query_as(r#"SELECT "id", "sequence_id", "project_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(parent_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| DbError::new("expand-parent", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(Uuid, i32, Uuid)> = issues::Entity::find_by_id(*parent_id)
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::SequenceId,
+            issues::Column::ProjectId,
+        ])
+        .into_tuple::<(Uuid, i32, Uuid)>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("expand-parent", error))?;
     let Some((id, sequence_id, project_id)) = row else {
         return Ok(None);
     };
@@ -793,30 +812,28 @@ pub async fn expand_estimate_point(
     tz: &Tz,
 ) -> Result<Option<Value>, Error> {
     use crate::v1_projects::ser_workflow as workflow;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "created_at", "updated_at", "created_by_id", "updated_by_id", "deleted_at", "project_id", "workspace_id", "estimate_id", "key", "description", "value" FROM "estimate_points" WHERE "id" = $1"#,
-    )
-    .bind(estimate_point_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("expand-estimate-point", error))?;
-    let Some(row) = row else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = estimate_points::Entity::find_by_id(*estimate_point_id)
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("expand-estimate-point", error))?;
+    let Some(model) = model else {
         return Ok(None);
     };
-    let id = row_uuid(&row, "id")?.to_string();
-    let created_at = render_dt(&row_datetime(&row, "created_at")?, tz);
-    let updated_at = render_dt(&row_datetime(&row, "updated_at")?, tz);
-    let created_by = row_uuid_opt(&row, "created_by_id")?.map(|id| id.to_string());
-    let updated_by = row_uuid_opt(&row, "updated_by_id")?.map(|id| id.to_string());
-    let deleted_at = render_dt_opt(row_datetime_opt(&row, "deleted_at")?, tz);
-    let project = row_uuid(&row, "project_id")?.to_string();
-    let workspace = row_uuid(&row, "workspace_id")?.to_string();
-    let estimate = row_uuid(&row, "estimate_id")?.to_string();
-    let key: i32 = row
-        .try_get("key")
-        .map_err(|_| Error::Failed("expand-estimate-point"))?;
-    let description = row_string(&row, "description")?;
-    let value = row_string(&row, "value")?;
+    let id = model.id.to_string();
+    let created_at = super::render_datetime_in(&model.created_at, tz);
+    let updated_at = super::render_datetime_in(&model.updated_at, tz);
+    let created_by = model.created_by_id.map(|id| id.to_string());
+    let updated_by = model.updated_by_id.map(|id| id.to_string());
+    let deleted_at = model
+        .deleted_at
+        .map(|dt| super::render_datetime_in(&dt, tz));
+    let project = model.project_id.to_string();
+    let workspace = model.workspace_id.to_string();
+    let estimate = model.estimate_id.to_string();
+    let key = model.key;
+    let description = model.description;
+    let value = model.value;
     let point_row = workflow::EstimatePointRow {
         id: &id,
         created_at: &created_at,
@@ -1234,12 +1251,18 @@ pub async fn fetch_project_for_write(
     pool: &PgPool,
     project_id: &Uuid,
 ) -> Result<WriteProject, Error> {
-    let row: Option<(Uuid, Option<Uuid>)> =
-        sqlx::query_as(r#"SELECT "workspace_id", "default_assignee_id" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| DbError::new("write-project", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(Uuid, Option<Uuid>)> = projects::Entity::find_by_id(*project_id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            projects::Column::WorkspaceId,
+            projects::Column::DefaultAssigneeId,
+        ])
+        .into_tuple::<(Uuid, Option<Uuid>)>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("write-project", error))?;
     match row {
         Some((workspace_id, default_assignee_id)) => Ok(WriteProject {
             workspace_id,
@@ -1456,6 +1479,67 @@ pub fn decode_comment(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedCom
         actor: row_uuid_opt(row, "actor_id")?.map(|id| id.to_string()),
         parent: row_uuid_opt(row, "parent_id")?.map(|id| id.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{
+        ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    };
+
+    use super::*;
+
+    #[test]
+    fn file_asset_and_id_queries_are_scoped() {
+        let sql = file_assets::Entity::find_by_id(Uuid::nil())
+            .select_only()
+            .columns([
+                file_assets::Column::EntityType,
+                file_assets::Column::WorkspaceId,
+                file_assets::Column::ProjectId,
+                file_assets::Column::IssueId,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""file_assets"."entity_type""#), "{sql}");
+        let sql = issue_assignees::Entity::find()
+            .filter(issue_assignees::Column::IssueId.eq(Uuid::nil()))
+            .filter(issue_assignees::Column::DeletedAt.is_null())
+            .order_by_desc(issue_assignees::Column::CreatedAt)
+            .select_only()
+            .column(issue_assignees::Column::AssigneeId)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#""issue_assignees"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "issue_assignees"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn expand_queries_preserve_scopes() {
+        let sql = states::Entity::find_by_id(Uuid::nil())
+            .filter(states::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([
+                states::Column::Name,
+                states::Column::Color,
+                states::Column::Group,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""states"."deleted_at" IS NULL"#), "{sql}");
+        let sql = workspaces::Entity::find_by_id(Uuid::nil())
+            .select_only()
+            .columns([workspaces::Column::Name, workspaces::Column::Slug])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!sql.contains("deleted_at"), "{sql}");
+    }
 }
 
 #[cfg(test)]
