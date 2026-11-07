@@ -5,7 +5,6 @@
 crates/api/src/app_notifications/mod.rs 15
 crates/api/src/auth_session/email.rs 19
 crates/api/src/auth_session/magic.rs 14
-crates/api/src/auth_session/password.rs 5
 
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
