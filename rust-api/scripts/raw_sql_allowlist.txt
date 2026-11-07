@@ -52,7 +52,6 @@ crates/api/src/space/project_meta.rs 3
 crates/api/src/space/social.rs 15
 crates/api/src/turn/tools_local_store.rs 2
 crates/api/src/v1_work_items/handlers_pr_links.rs 38
-crates/db/src/app_intake/queries.rs 14
 crates/db/src/config/accessor.rs 1
 crates/db/src/filterset.rs 6
 crates/db/src/license/queries.rs 13
