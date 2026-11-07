@@ -15,8 +15,11 @@ seeded world to users + workspace + project + pod.
 
 from __future__ import annotations
 
+import json
+import threading
 import time
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -123,6 +126,7 @@ def create_agent_run(
     started_ago_seconds=None,
     lease_in_seconds=None,
     cancel_reason=None,
+    work_item_id=None,
 ):
     """Seed one ``agent_run`` row. ``created_ago_seconds`` backdates
     ``created_at`` for expiry tests; ``started_ago_seconds`` backdates
@@ -148,7 +152,7 @@ def create_agent_run(
                    %s,
                    NULL,'{}',%s,NULL,
                    %s,
-                   NULL,NULL,%s,NULL,NULL,NULL,%s,%s,NULL,NULL,'',
+                   NULL,NULL,%s,NULL,%s,NULL,%s,%s,NULL,NULL,'',
                    'direct',NULL,%s,0,
                    %s,
                    %s,%s,
@@ -158,7 +162,7 @@ def create_agent_run(
             now + timedelta(seconds=lease_in_seconds) if lease_in_seconds is not None else None,
             now - timedelta(seconds=created_ago_seconds),
             now - timedelta(seconds=started_ago_seconds) if started_ago_seconds is not None else None,
-            workspace_id, pod_id, creator_id,
+            workspace_id, work_item_id, pod_id, creator_id,
             executor_kind,
             now if cancel_reason is not None else None,
             cancel_reason or "",
@@ -245,3 +249,359 @@ def wait_for_queue_drain(broker, *, queue="celery", baseline=0, timeout=WORKER_T
                 return
         time.sleep(poll)
     raise AssertionError(f"timed out waiting for queue {queue!r} to drain to {baseline}")
+
+
+# --- Multi-tenant validation harness (NEWPIDASH-54) -----------------------
+#
+# The tests in ``test_multi_tenant*.py`` validate the hand-rolled Rust
+# runtime (and the Django oracle) with several tenants sharing one worker:
+# separate workspaces/users/projects/pods, one OpenAI-compatible BYOK per
+# tenant pointing at its own recording stub, plus tenants with no config
+# and an Anthropic config. Everything below is additive: the single-tenant
+# helpers above are untouched.
+
+RUN_TASK = "cloud_agent.run_agent_run"
+STUB_MODEL = "oracle-stub"
+
+_channel = None
+
+
+def _live_channel():
+    """The live worker's delivery channel, detected once per process.
+
+    A Django worker answers Celery inspect and consumes the redis wire;
+    otherwise the Rust worker claims ``rust_job_queue`` rows. Exactly one
+    worker runs in any contract run, so exactly one channel delivers.
+    """
+    global _channel
+    from _harness import broker_probe, rust_queue
+
+    if _channel is None:
+        try:
+            live = bool(broker_probe.registered_tasks(timeout=5.0))
+        except Exception:
+            live = False
+        _channel = "celery" if live else "rust_queue"
+        if _channel == "rust_queue":
+            rust_queue.ensure_schema()
+    return _channel
+
+
+def publish_task(broker, task, args=()):
+    """Publish an arbitrary task through the live worker's channel."""
+    if _live_channel() == "celery":
+        broker.publish(task, list(args))
+    else:
+        from _harness import rust_queue
+
+        rust_queue.publish(task, list(args))
+
+
+def publish_run(broker, run_id):
+    """Publish one run through the live worker's channel (detected once)."""
+    publish_task(broker, RUN_TASK, [run_id])
+
+
+def create_member_world(seeder, *, role=20):
+    """Public wrapper over the membership world (one tenant's base)."""
+    return _membership_world(seeder, role=role)
+
+
+def seed_llm_config(
+    seeder,
+    user_id,
+    base_url,
+    api_key,
+    *,
+    provider_kind="openai_compatible",
+    model_name=STUB_MODEL,
+):
+    """Seed a decryptable BYOK config pointing at a stub endpoint.
+
+    The Fernet token is encrypted with the backend's
+    ``ASSISTANT_ENCRYPTION_KEY`` so both Django and Rust decrypt the same
+    ciphertext. For the ``anthropic`` kind the base URL is pinned to the
+    provider default on both stacks (``llm.py:103``) and ignored — those
+    configs are used for parity/non-contamination cases, never for
+    recording provider traffic.
+    """
+    import os
+
+    from cryptography.fernet import Fernet
+
+    key = os.environ["ASSISTANT_ENCRYPTION_KEY"].encode("utf-8")
+    token = Fernet(key).encrypt(api_key.encode("utf-8"))
+    seeder.db.execute(
+        """INSERT INTO assistant_user_llm_config
+           (provider_kind, base_url, model_name, api_key_encrypted,
+            last_verified_at, created_at, updated_at, user_id)
+           VALUES (%s,%s,%s,%s,NULL,now(),now(),%s)""",
+        (provider_kind, base_url, model_name, token, user_id),
+    )
+    row_id = seeder.db.fetchval(
+        """SELECT id FROM assistant_user_llm_config WHERE user_id = %s
+           ORDER BY created_at DESC LIMIT 1""",
+        (user_id,),
+    )
+    seeder.track.add("assistant_user_llm_config", row_id)
+    return {"id": row_id}
+
+
+def rotate_llm_key(seeder, config_id, new_api_key):
+    """Replace a config's key (new ciphertext) — the cache must miss."""
+    import os
+
+    from cryptography.fernet import Fernet
+
+    key = os.environ["ASSISTANT_ENCRYPTION_KEY"].encode("utf-8")
+    token = Fernet(key).encrypt(new_api_key.encode("utf-8"))
+    seeder.db.execute(
+        "UPDATE assistant_user_llm_config SET api_key_encrypted = %s WHERE id = %s",
+        (token, config_id),
+    )
+
+
+def delete_llm_config(seeder, config_id):
+    """Delete a config row: the user falls back to ``llm_config_missing``."""
+    seeder.db.execute(
+        "DELETE FROM assistant_user_llm_config WHERE id = %s", (config_id,)
+    )
+
+
+def tool_calls(db, run_id):
+    """The run's ``agent_run_tool_call`` ledger rows, oldest first."""
+    return db.fetchall(
+        """SELECT tool_name, risk, status, error_code, safe_replay_result
+           FROM agent_run_tool_call WHERE agent_run_id = %s ORDER BY prepared_at""",
+        (run_id,),
+    )
+
+
+def wait_for_terminal(db, run_id, *, timeout=WORKER_TIMEOUT_SECONDS, poll=0.2):
+    """Poll one ``agent_run`` row until it reaches a terminal status.
+
+    Terminal states here are COMPLETED / FAILED (CANCELLED / REFUSED
+    are terminal too, and this helper accepts any of them); returns the
+    row via :func:`get_run`.
+    """
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        row = db.fetchone("SELECT status FROM agent_run WHERE id = %s", (run_id,))
+        if row is not None and row["status"] in (COMPLETED, FAILED, CANCELLED, "refused"):
+            return get_run(db, run_id)
+        last = row
+        time.sleep(poll)
+    raise AssertionError(
+        f"timed out waiting for terminal state on run {run_id}; last: {last}"
+    )
+
+
+def _completion(message, *, finish_reason="stop", model_name=STUB_MODEL):
+    return {
+        "id": f"stub-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": model_name,
+        "choices": [
+            {"index": 0, "message": message, "finish_reason": finish_reason}
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+def final_response(summary="multi-tenant stub done", *, outcome="completed"):
+    """One chat-completion carrying a valid ``CloudAgentOutput`` JSON."""
+    return _completion(
+        {"role": "assistant", "content": json.dumps({"outcome": outcome, "summary": summary})}
+    )
+
+
+def tool_call_response(call_id, name, arguments, *, reasoning=None):
+    """One chat-completion carrying a single tool call."""
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        ],
+    }
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
+    return _completion(message, finish_reason="tool_calls")
+
+
+class ScriptedProvider:
+    """Recording OpenAI-compatible stub serving one scripted response per request.
+
+    ``script`` is a list of response payloads (dicts as returned by
+    :func:`final_response` / :func:`tool_call_response`); request ``n``
+    gets entry ``n`` (the last entry repeats so retry loops observe a
+    stable provider). Every request is recorded with its headers (the
+    ``Authorization`` header carries the per-tenant key proof) and body.
+    """
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.requests: list[dict] = []
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    payload = json.loads(raw or b"{}")
+                except ValueError:
+                    payload = {}
+                stub.requests.append(
+                    {
+                        "path": self.path,
+                        # Header names are case-insensitive on the wire and
+                        # the two stacks spell them differently; normalize
+                        # to lowercase for lookup.
+                        "headers": {
+                            key.lower(): value
+                            for key, value in self.headers.items()
+                        },
+                        "body": payload,
+                    }
+                )
+                index = min(len(stub.requests) - 1, len(stub.script) - 1)
+                content = json.dumps(stub.script[index]).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        port = self._server.server_address[1]
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True
+        )
+        self._thread.start()
+        return f"http://127.0.0.1:{port}/v1"
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+    def authorization_headers(self):
+        """The recorded ``Authorization`` values, in request order."""
+        return [req["headers"].get("authorization") for req in self.requests]
+
+    def assert_key_never_appears(self, key_fragment):
+        """No recorded request may carry this key fragment anywhere."""
+        for req in self.requests:
+            haystack = json.dumps(req["headers"]) + json.dumps(req["body"])
+            assert key_fragment not in haystack, (
+                f"key {key_fragment!r} leaked to this stub: {req}"
+            )
+
+
+class _MarkerStub:
+    """Recording OpenAI-compatible stub keyed by a marker in the request body.
+
+    ``script`` maps each marker to a list of response payloads (the last
+    entry repeats per marker, like ``ScriptedProvider``). Several runs of
+    one tenant hit the same stub, so per-index scripts would be
+    order-dependent; markers keep routing deterministic under any
+    interleaving. ``delay`` sleeps before each response is written
+    (recorded first, so slow-vs-instant is airtight).
+    """
+
+    def __init__(self, script, *, delay=0):
+        self.script = {k: list(v) for k, v in script.items()}
+        self._pos = {k: 0 for k in script}
+        self.delay = delay
+        self.requests: list[dict] = []
+        self._server = None
+        self._thread = None
+
+    def start(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    payload = json.loads(raw or b"{}")
+                except ValueError:
+                    payload = {}
+                body_text = raw.decode("utf-8", "replace")
+                marker = next((k for k in stub.script if k in body_text), None)
+                stub.requests.append(
+                    {
+                        "path": self.path,
+                        "headers": {
+                            k.lower(): v for k, v in self.headers.items()
+                        },
+                        "body": payload,
+                        "marker": marker,
+                    }
+                )
+                if marker is None:
+                    content = json.dumps(
+                        final_response(summary="unmarked request")
+                    ).encode()
+                else:
+                    pos = stub._pos[marker]
+                    script = stub.script[marker]
+                    content = json.dumps(script[min(pos, len(script) - 1)]).encode()
+                    stub._pos[marker] = pos + 1
+                if stub.delay:
+                    import time
+
+                    time.sleep(stub.delay)
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return f"http://127.0.0.1:{port}/v1"
+
+    def stop(self):
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+    def authorization_headers(self):
+        return [req["headers"].get("authorization") for req in self.requests]
+
+    def assert_key_never_appears(self, key_fragment):
+        """No recorded request may carry this key fragment anywhere."""
+        for req in self.requests:
+            assert key_fragment not in json.dumps(req), key_fragment
