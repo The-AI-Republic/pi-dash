@@ -247,6 +247,7 @@ pub mod read {
     pub use pidash_services::read::IssueSearchStatus;
     pub use pidash_services::read::OwnedAssigneeRow;
     pub use pidash_services::read::OwnedRelationItem;
+    pub use pidash_services::read::PrLinkDbRow;
     pub use pidash_services::read::ProfileRow;
     pub use pidash_services::read::ProjectLiteView;
     pub use pidash_services::read::RenderRequest;
@@ -259,10 +260,6 @@ pub mod read {
     pub use pidash_services::read::COMMENT_COLUMNS;
     pub use pidash_services::read::ISSUE_EXTRA_COLS;
     pub use pidash_services::read::ISSUE_SELECT_COLS;
-    pub use pidash_services::read::PR_DETAIL_SQL;
-    pub use pidash_services::read::PR_LINK_BY_ID_SQL;
-    pub use pidash_services::read::PR_LINK_LIST_SQL;
-    pub use pidash_services::read::PR_LIST_SQL;
     pub use pidash_services::v1_projects::ser_workflow::state_base_map;
     pub use pidash_services::v1_work_items::shape_issue;
     pub use pidash_services::v1_work_items::shape_issue::issue_url;

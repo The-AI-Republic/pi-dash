@@ -28,7 +28,6 @@ crates/jobs/src/tasks_cleanup/dummy_data.rs 34
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
 crates/services/src/dispatch/execution.rs 7
-crates/services/src/read/pr_links.rs 3
 crates/services/src/read/projects.rs 1
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1

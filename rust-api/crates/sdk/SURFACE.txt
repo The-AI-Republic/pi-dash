@@ -605,13 +605,10 @@ pidash_sdk::read::NewPrLink
 pidash_sdk::read::NewReviewLink
 pidash_sdk::read::OwnedAssigneeRow
 pidash_sdk::read::OwnedRelationItem
-pidash_sdk::read::PR_DETAIL_SQL
-pidash_sdk::read::PR_LINK_BY_ID_SQL
 pidash_sdk::read::PR_LINK_INSERT_SQL
-pidash_sdk::read::PR_LINK_LIST_SQL
 pidash_sdk::read::PR_LINK_LOOKUP_SQL
 pidash_sdk::read::PR_LINK_SOFT_DELETE_SQL
-pidash_sdk::read::PR_LIST_SQL
+pidash_sdk::read::PrLinkDbRow
 pidash_sdk::read::PrLinkRow
 pidash_sdk::read::PrLinksStore
 pidash_sdk::read::ProfileRow
