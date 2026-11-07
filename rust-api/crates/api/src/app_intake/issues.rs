@@ -5415,14 +5415,13 @@ async fn ensure_triage_state(
     // `save()`-filled columns (`description=""`, `slug="triage"`,
     // `is_triage=False`) and the crum `created_by`.
     match pidash_services::domain::projects::states::add_triage(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         gate.project_id,
         gate.workspace_id,
         sequence,
         gate.user_id,
         now,
         now,
-        pidash_services::domain::projects::states::TriageText::Quoted,
     )
     .await
     {

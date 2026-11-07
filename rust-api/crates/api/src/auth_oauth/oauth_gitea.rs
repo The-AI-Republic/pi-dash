@@ -1672,7 +1672,7 @@ pub async fn process_invitations(
             // `ProjectMember` row (Django main; PB-1008 retired), so the
             // join succeeds and the invite is consumed.
             pidash_services::domain::projects::members::add(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 &pidash_services::domain::projects::members::NewProjectMember {
                     workspace_id: invite.workspace_id,
                     project_id: Some(invite.project_id),

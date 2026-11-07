@@ -1211,9 +1211,15 @@ async fn process_workspace_project_invitations(
             .collect();
         // The project bulk runs after every workspace row committed above
         // (no transaction).
-        pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
-            .await
-            .map_err(map_err)?;
+        pidash_services::domain::projects::members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &bulk,
+            &props,
+            &prefs,
+            false,
+        )
+        .await
+        .map_err(map_err)?;
     }
 
     // Both querysets are (soft-)deleted after the joins (`:90-91`): the

@@ -814,7 +814,11 @@ async fn workspace_entity_save(
                     .map_err(|_| server_error())?;
             }
             pidash_services::domain::projects::stamp_cover_image(
-                pool, project_id, *asset_id, now, actor_id,
+                &pidash_db::pool::sea_orm_connection(pool),
+                project_id,
+                *asset_id,
+                now,
+                actor_id,
             )
             .await
             .map_err(|_| server_error())?;
@@ -877,7 +881,10 @@ async fn workspace_entity_delete(
             .map_err(|_| server_error())?;
             let Some(_) = row else { return Ok(()) };
             pidash_services::domain::projects::clear_cover_image_asset(
-                pool, project_id, now, actor_id,
+                &pidash_db::pool::sea_orm_connection(pool),
+                project_id,
+                now,
+                actor_id,
             )
             .await
             .map_err(|_| server_error())?;

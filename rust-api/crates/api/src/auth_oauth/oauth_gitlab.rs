@@ -1656,9 +1656,15 @@ async fn bulk_insert_project_members(
             },
         )
         .collect();
-    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &view_props, &prefs, false)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk,
+        &view_props,
+        &prefs,
+        false,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 

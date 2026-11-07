@@ -1641,7 +1641,7 @@ pub(crate) async fn create_project_member(
         let prefs: Value =
             serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
         pidash_services::domain::projects::members::add_property_db_now(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &pidash_services::domain::projects::members::NewMemberProperty {
                 workspace_id,
                 project_id: *project_id,
@@ -1664,7 +1664,7 @@ pub(crate) async fn create_project_member(
     let prefs: Value =
         serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
     pidash_services::domain::projects::members::add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &pidash_services::domain::projects::members::NewProjectMember {
             workspace_id,
             project_id: Some(*project_id),
@@ -2531,9 +2531,15 @@ async fn bulk_insert_members(
             },
         )
         .collect();
-    pidash_services::domain::projects::members::bulk_add(pool, &rows, &props, &prefs, true)
-        .await
-        .map_err(integrity_denial)?;
+    pidash_services::domain::projects::members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &rows,
+        &props,
+        &prefs,
+        true,
+    )
+    .await
+    .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2577,9 +2583,13 @@ async fn bulk_insert_user_properties(
             },
         )
         .collect();
-    pidash_services::domain::projects::members::bulk_add_properties(pool, &rows, true)
-        .await
-        .map_err(integrity_denial)?;
+    pidash_services::domain::projects::members::bulk_add_properties(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &rows,
+        true,
+    )
+    .await
+    .map_err(integrity_denial)?;
     Ok(())
 }
 
@@ -2736,7 +2746,7 @@ async fn user_invite_create(
     if !project_ids.is_empty() {
         // Reactivate live rows (`QuerySet.update` stamps no `updated_at`).
         pidash_services::domain::projects::members::reactivate_slug(
-            &pool,
+            &pidash_db::pool::sea_orm_connection(&pool),
             &slug,
             &project_ids,
             resolved.id,
@@ -2992,9 +3002,13 @@ async fn join_post(
         Some(id) => {
             // `project_member.role = project_member.role`: the role
             // re-saves unchanged (ported quirk).
-            pidash_services::domain::projects::members::reactivate_by_id(&pool, id, created_by)
-                .await
-                .map_err(|_| Denial::ServerError)?;
+            pidash_services::domain::projects::members::reactivate_by_id(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                id,
+                created_by,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
         }
     }
     Ok(json_response(StatusCode::OK, JOIN_ACCEPTED_BODY.to_owned()))

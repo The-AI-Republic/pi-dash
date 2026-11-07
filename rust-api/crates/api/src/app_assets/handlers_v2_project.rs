@@ -1370,7 +1370,7 @@ async fn post_bulk_asset(
                     return does_not_exist();
                 }
                 if domain_projects::save_project_cover(
-                    &pool,
+                    &pidash_db::pool::sea_orm_connection(&pool),
                     project_id,
                     row.id,
                     Utc::now(),

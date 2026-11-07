@@ -383,7 +383,6 @@ pub fn download_filename(attributes_name: Option<&str>, fresh_uuid_hex: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::projects::SAVE_PROJECT_COVER_SQL;
     use serde_json::Value;
 
     /// Committed evidence replayed here without a database:
@@ -551,10 +550,8 @@ mod tests {
         assert!(!bulk_swallows_integrity_error(BulkBranch::PageDescription));
         assert!(!bulk_swallows_integrity_error(BulkBranch::ProjectCover));
         // Cover loop re-gets the project per row; last row wins (documented).
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"cover_image_asset_id\" = $2"));
-        // Full save(): stamps updated_by (CRUM user) + updated_at (auto_now).
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_at\" = $3"));
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_by_id\" = $4"));
+        // The write itself (`domain::projects::save_project_cover`: the FK
+        // plus the full-save stamps) is pinned in the domain tests.
         // The per-row project re-get uses the default manager.
         assert!(SAVE_PROJECT_COVER_GET_SQL.contains("\"deleted_at\" IS NULL"));
         // Lookup scopes ids + slug + active rows.

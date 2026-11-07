@@ -4128,14 +4128,13 @@ async fn ensure_triage(
     let created_at = cycle_mod::micros_now();
     let updated_at = cycle_mod::micros_now();
     let result = pidash_services::domain::projects::states::add_triage(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         project.id,
         project.workspace_id,
         sequence,
         *user_id,
         created_at,
         updated_at,
-        pidash_services::domain::projects::states::TriageText::Full,
     )
     .await;
     match result {

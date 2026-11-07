@@ -2669,7 +2669,7 @@ async fn member_create_write(
     // statement with Django's `CAST(CASE ... AS smallint)` shape
     // (QUIRK-bulk-cast); skipped entirely when there is nothing to
     // reactivate.
-    project_members::update_roles_bulk(pool, &updates)
+    project_members::update_roles_bulk(&pidash_db::pool::sea_orm_connection(pool), &updates)
         .await
         .map_err(db_denial)?;
     // Per-user `MIN(sort_order)` over the workspace (`member.py:99-111`).
@@ -2753,9 +2753,15 @@ async fn member_create_write(
                 updated_at: chrono::Utc::now(),
             })
             .collect();
-        project_members::bulk_add(pool, &member_rows, &member_view, &member_prefs, false)
-            .await
-            .map_err(db_denial)?;
+        project_members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &member_rows,
+            &member_view,
+            &member_prefs,
+            false,
+        )
+        .await
+        .map_err(db_denial)?;
         let prop_rows: Vec<project_members::BulkProperty<'_>> = new_members
             .iter()
             .map(|(member_id, _, sort_order)| project_members::BulkProperty {
@@ -2773,9 +2779,13 @@ async fn member_create_write(
                 updated_at: chrono::Utc::now(),
             })
             .collect();
-        project_members::bulk_add_properties(pool, &prop_rows, false)
-            .await
-            .map_err(db_denial)?;
+        project_members::bulk_add_properties(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &prop_rows,
+            false,
+        )
+        .await
+        .map_err(db_denial)?;
     }
     // Re-read newest-first for the emits + 201 body (`member.py:140-150`).
     let created = pm_entity::Entity::find()
@@ -3084,9 +3094,15 @@ async fn member_partial_update_inner(
         is_active: patch.is_active,
         created_by: patch.created_by,
     };
-    project_members::patch_member(&pool, pk, &domain_patch, saved_at, user_id)
-        .await
-        .map_err(db_denial)?;
+    project_members::patch_member(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        pk,
+        &domain_patch,
+        saved_at,
+        user_id,
+    )
+    .await
+    .map_err(db_denial)?;
     // The response renders the in-memory instance (validated values in
     // request order for JSONB), never a DB re-read.
     let mut merged = target;
@@ -3215,9 +3231,14 @@ async fn member_destroy_inner(
             "You cannot remove a user having role higher than you",
         ));
     }
-    project_members::deactivate_by_id(&pool, target_id, chrono::Utc::now(), user_id)
-        .await
-        .map_err(db_denial)?;
+    project_members::deactivate_by_id(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        target_id,
+        chrono::Utc::now(),
+        user_id,
+    )
+    .await
+    .map_err(db_denial)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -3282,9 +3303,14 @@ async fn member_leave_inner(
             ));
         }
     }
-    project_members::deactivate_by_id(&pool, member_id, chrono::Utc::now(), user_id)
-        .await
-        .map_err(db_denial)?;
+    project_members::deactivate_by_id(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        member_id,
+        chrono::Utc::now(),
+        user_id,
+    )
+    .await
+    .map_err(db_denial)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -3619,9 +3645,15 @@ async fn preference_patch_inner(
         .id
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
-    project_members::save_preferences(&pool, member_id, &merged, chrono::Utc::now(), user_id)
-        .await
-        .map_err(db_denial)?;
+    project_members::save_preferences(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        member_id,
+        &merged,
+        chrono::Utc::now(),
+        user_id,
+    )
+    .await
+    .map_err(db_denial)?;
     // The response renders the in-memory merge (stored order + appended
     // keys), never a DB re-read (`endpoint:383-385`).
     let mut response = serde_json::Map::new();

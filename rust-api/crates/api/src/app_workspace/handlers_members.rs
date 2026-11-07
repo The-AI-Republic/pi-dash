@@ -2854,9 +2854,13 @@ async fn guest_demote_cascade(
     slug: &str,
     target_user_id: &Uuid,
 ) -> Result<(), Denial> {
-    pidash_services::domain::projects::members::demote_cascade(pool, slug, *target_user_id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::demote_cascade(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        *target_user_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -2941,7 +2945,7 @@ async fn deactivate_project_rows(
     now: &DateTime<Utc>,
 ) -> Result<(), Denial> {
     pidash_services::domain::projects::members::cascade_deactivate_ws(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         slug,
         *target_user_id,
         *now,
