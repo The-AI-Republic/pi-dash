@@ -54,6 +54,12 @@ use pidash_db::config::{ConfigValue, Keyring};
 
 use super::tasks::delay_message;
 use crate::task_message::TaskMessage;
+use pidash_db::entity::{instance_configurations, instances};
+use pidash_db::pool::sea_orm_connection;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
+};
 
 /// What the command layer reports as failure. Messages mirror Django's
 /// `CommandError` strings exactly.
@@ -911,19 +917,21 @@ impl PgSeedStore {
 
 impl ConfigStore for PgSeedStore {
     async fn fetch(&self, keys: &[&str]) -> Result<HashMap<String, ConfigRow>, ConfigError> {
-        let rows: Vec<(String, Option<String>, bool)> = sqlx::query_as(Self::FETCH_SQL)
-            .bind(keys)
-            .fetch_all(&self.pool)
+        let db = sea_orm_connection(&self.pool);
+        let owned: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
+        let rows = instance_configurations::Entity::find()
+            .filter(instance_configurations::Column::Key.is_in(owned))
+            .all(&db)
             .await
             .map_err(|e| ConfigError::Store(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .map(|(key, value, is_encrypted)| {
+            .map(|m| {
                 (
-                    key,
+                    m.key,
                     ConfigRow {
-                        value,
-                        is_encrypted,
+                        value: m.value,
+                        is_encrypted: m.is_encrypted,
                     },
                 )
             })
@@ -933,85 +941,99 @@ impl ConfigStore for PgSeedStore {
 
 impl SeedStore for PgSeedStore {
     async fn get_or_create(&self, seed: NewConfigRow) -> Result<(ConfigRow, bool), CommandError> {
-        let existing: Option<(Option<String>, bool)> = sqlx::query_as(
-            "SELECT value, is_encrypted FROM instance_configurations WHERE key = $1 AND deleted_at IS NULL",
-        )
-        .bind(&seed.key)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| CommandError::Store(e.to_string()))?;
-        if let Some((value, is_encrypted)) = existing {
+        let db = sea_orm_connection(&self.pool);
+        let existing = instance_configurations::Entity::find()
+            .filter(instance_configurations::Column::Key.eq(&seed.key))
+            .filter(instance_configurations::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|e| CommandError::Store(e.to_string()))?;
+        if let Some(m) = existing {
             return Ok((
                 ConfigRow {
-                    value,
-                    is_encrypted,
+                    value: m.value,
+                    is_encrypted: m.is_encrypted,
                 },
                 false,
             ));
         }
-        let inserted: Option<String> = sqlx::query_scalar(
-            "INSERT INTO instance_configurations (id, created_at, updated_at, key, value, category, is_encrypted) VALUES ($1, now(), now(), $2, $3, $4, $5) ON CONFLICT (key) DO NOTHING RETURNING key",
-        )
-        .bind(uuid::Uuid::new_v4())
-        .bind(&seed.key)
-        .bind(&seed.value)
-        .bind(&seed.category)
-        .bind(seed.is_encrypted)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| CommandError::Store(e.to_string()))?;
-        if inserted.is_some() {
-            Ok((
+        // Try insert via SeaORM; ON CONFLICT handling: if unique violation, fetch any row with key and return as not-created.
+        let now = chrono::Utc::now();
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        let am = instance_configurations::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            created_by_id: Set(None),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            key: Set(seed.key.clone()),
+            value: Set(seed.value.clone()),
+            category: Set(seed.category.clone()),
+            is_encrypted: Set(seed.is_encrypted),
+        };
+        match am.insert(&db).await {
+            Ok(_) => Ok((
                 ConfigRow {
                     value: seed.value,
                     is_encrypted: seed.is_encrypted,
                 },
                 true,
-            ))
-        } else {
-            // Lost a race (or hit a soft-deleted row shadowing the key):
-            // resolve to the conflicting row, like Django's retry-`get`.
-            let row: (Option<String>, bool) = sqlx::query_as(
-                "SELECT value, is_encrypted FROM instance_configurations WHERE key = $1",
-            )
-            .bind(&seed.key)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| CommandError::Store(e.to_string()))?;
-            Ok((
-                ConfigRow {
-                    value: row.0,
-                    is_encrypted: row.1,
-                },
-                false,
-            ))
+            )),
+            Err(_) => {
+                // Lost a race (or hit a soft-deleted row shadowing the key):
+                // resolve to the conflicting row, like Django's retry-`get`.
+                let row = instance_configurations::Entity::find()
+                    .filter(instance_configurations::Column::Key.eq(&seed.key))
+                    .one(&db)
+                    .await
+                    .map_err(|e| CommandError::Store(e.to_string()))?;
+                let m = row
+                    .ok_or_else(|| CommandError::Store("missing row after conflict".to_string()))?;
+                Ok((
+                    ConfigRow {
+                        value: m.value,
+                        is_encrypted: m.is_encrypted,
+                    },
+                    false,
+                ))
+            }
         }
     }
 
     async fn insert(&self, row: NewConfigRow) -> Result<(), CommandError> {
-        sqlx::query(
-            "INSERT INTO instance_configurations (id, created_at, updated_at, key, value, category, is_encrypted) VALUES ($1, now(), now(), $2, $3, $4, $5)",
-        )
-        .bind(uuid::Uuid::new_v4())
-        .bind(&row.key)
-        .bind(&row.value)
-        .bind(&row.category)
-        .bind(row.is_encrypted)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| CommandError::Store(e.to_string()))?;
+        let db = sea_orm_connection(&self.pool);
+        let now = chrono::Utc::now();
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        let am = instance_configurations::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            created_by_id: Set(None),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            key: Set(row.key),
+            value: Set(row.value),
+            category: Set(row.category),
+            is_encrypted: Set(row.is_encrypted),
+        };
+        am.insert(&db)
+            .await
+            .map_err(|e| CommandError::Store(e.to_string()))?;
         Ok(())
     }
 
     async fn derived_present(&self) -> Result<bool, CommandError> {
-        let keys: Vec<&str> = DERIVED_FLAG_KEYS.to_vec();
-        let present: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM instance_configurations WHERE key = ANY($1) AND deleted_at IS NULL)",
-        )
-        .bind(&keys)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| CommandError::Store(e.to_string()))?;
+        let db = sea_orm_connection(&self.pool);
+        let owned: Vec<String> = DERIVED_FLAG_KEYS.iter().map(|s| s.to_string()).collect();
+        let present = instance_configurations::Entity::find()
+            .filter(instance_configurations::Column::Key.is_in(owned))
+            .filter(instance_configurations::Column::DeletedAt.is_null())
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(|e| CommandError::Store(e.to_string()))?
+            .is_some();
         Ok(present)
     }
 }
@@ -1029,23 +1051,18 @@ impl PgInstanceStore {
 
 impl InstanceStore for PgInstanceStore {
     async fn first(&self) -> Result<Option<StoredInstance>, CommandError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_db::license::queries::INSTANCE_FIRST_SQL)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| CommandError::Store(e.to_string()))?;
-        row.map(|row| {
-            use sqlx::Row;
-            Ok(StoredInstance {
-                id: row
-                    .try_get("id")
-                    .map_err(|e| CommandError::Store(e.to_string()))?,
-                instance_id: row
-                    .try_get("instance_id")
-                    .map_err(|e| CommandError::Store(e.to_string()))?,
-            })
-        })
-        .transpose()
+        let db = sea_orm_connection(&self.pool);
+        let m = instances::Entity::find()
+            .filter(instances::Column::DeletedAt.is_null())
+            .order_by_desc(instances::Column::CreatedAt)
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(|e| CommandError::Store(e.to_string()))?;
+        Ok(m.map(|m| StoredInstance {
+            id: m.id,
+            instance_id: m.instance_id,
+        }))
     }
 
     async fn create(&self, input: InstanceInput) -> Result<StoredInstance, CommandError> {
@@ -1053,21 +1070,38 @@ impl InstanceStore for PgInstanceStore {
         // Django field default (`instance.py:22-50`): `domain` stores `""`
         // (blank, not null), telemetry/support default true, setup/visited/
         // verified/test-deprecated default false, audit ids null.
+        let db = sea_orm_connection(&self.pool);
         let id = uuid::Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO instances (id, created_at, updated_at, instance_name, instance_id, current_version, latest_version, edition, domain, last_checked_at, is_telemetry_enabled, is_support_required, is_setup_done, is_signup_screen_visited, is_verified, is_test, is_current_version_deprecated) VALUES ($1, now(), now(), $2, $3, $4, $5, $6, '', $7, true, true, false, false, false, $8, false)",
-        )
-        .bind(id)
-        .bind(&input.instance_name)
-        .bind(&input.instance_id)
-        .bind(&input.current_version)
-        .bind(&input.latest_version)
-        .bind(COMMUNITY_EDITION)
-        .bind(input.checked_at)
-        .bind(input.is_test)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| CommandError::Store(e.to_string()))?;
+        let now = chrono::Utc::now();
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        let checked_tz = sea_orm::prelude::DateTimeWithTimeZone::from(input.checked_at);
+        let am = instances::ActiveModel {
+            id: Set(id),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            created_by_id: Set(None),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            instance_name: Set(input.instance_name.clone()),
+            whitelist_emails: Set(None),
+            instance_id: Set(input.instance_id.clone()),
+            current_version: Set(input.current_version.clone()),
+            latest_version: Set(input.latest_version.clone()),
+            edition: Set(COMMUNITY_EDITION.to_string()),
+            domain: Set(String::new()),
+            last_checked_at: Set(checked_tz),
+            namespace: Set(None),
+            is_telemetry_enabled: Set(true),
+            is_support_required: Set(true),
+            is_setup_done: Set(false),
+            is_signup_screen_visited: Set(false),
+            is_verified: Set(false),
+            is_test: Set(input.is_test),
+            is_current_version_deprecated: Set(false),
+        };
+        am.insert(&db)
+            .await
+            .map_err(|e| CommandError::Store(e.to_string()))?;
         Ok(StoredInstance {
             id,
             instance_id: input.instance_id,
@@ -1085,18 +1119,38 @@ impl InstanceStore for PgInstanceStore {
         // `instance.save()` rewrites every column; the unchanged ones go
         // back with identical values (unobservable), so only the five
         // changed columns plus the `auto_now` bump are emitted here.
-        sqlx::query(
-            "UPDATE instances SET last_checked_at = $2, current_version = $3, latest_version = $4, is_test = $5, edition = $6, updated_at = now() WHERE id = $1",
-        )
-        .bind(id)
-        .bind(checked_at)
-        .bind(current_version)
-        .bind(latest_version)
-        .bind(is_test)
-        .bind(COMMUNITY_EDITION)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| CommandError::Store(e.to_string()))?;
+        let db = sea_orm_connection(&self.pool);
+        let checked_tz = sea_orm::prelude::DateTimeWithTimeZone::from(checked_at);
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(chrono::Utc::now());
+        instances::Entity::update_many()
+            .col_expr(
+                instances::Column::LastCheckedAt,
+                sea_orm::sea_query::Expr::value(checked_tz),
+            )
+            .col_expr(
+                instances::Column::CurrentVersion,
+                sea_orm::sea_query::Expr::value(current_version.to_string()),
+            )
+            .col_expr(
+                instances::Column::LatestVersion,
+                sea_orm::sea_query::Expr::value(latest_version.map(|s| s.to_string())),
+            )
+            .col_expr(
+                instances::Column::IsTest,
+                sea_orm::sea_query::Expr::value(is_test),
+            )
+            .col_expr(
+                instances::Column::Edition,
+                sea_orm::sea_query::Expr::value(COMMUNITY_EDITION.to_string()),
+            )
+            .col_expr(
+                instances::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_tz),
+            )
+            .filter(instances::Column::Id.eq(id))
+            .exec(&db)
+            .await
+            .map_err(|e| CommandError::Store(e.to_string()))?;
         Ok(())
     }
 }
