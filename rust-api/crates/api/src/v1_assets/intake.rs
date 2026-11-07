@@ -4398,11 +4398,17 @@ async fn intake_list(
             .all(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
+        // The count inherits the list's full scope (all three
+        // `select_related` INNER JOINs): the pre-SeaORM count was
+        // derived by string surgery from the list SQL, so a count
+        // without the `issues`/`projects` joins would be wider.
         let total = intake_issues::Entity::find()
+            .join(JoinType::InnerJoin, intake_issues::Relation::Issues1.def())
             .join(
                 JoinType::InnerJoin,
                 intake_issues::Relation::Workspaces.def(),
             )
+            .join(JoinType::InnerJoin, intake_issues::Relation::Projects.def())
             .filter(intake_issues::Column::DeletedAt.is_null())
             .filter(intake_issues::Column::IntakeId.eq(intake_id))
             .filter(intake_issues::Column::ProjectId.eq(ctx.project_id))
@@ -15878,6 +15884,257 @@ mod tests {
         }
     }
 
+    // -- SeaORM statement shapes (orm-migration.md §3.2) --
+    //
+    // DB-free pins: each replicates the production builder chain and
+    // asserts the rendered SQL carries the Django scope (joins, filters,
+    // ordering, unique aliases). A scope regression (e.g. a dropped join)
+    // fails here without a database.
+
+    #[test]
+    fn intake_list_statement_shape() {
+        use pidash_db::entity::{intake_issues, workspaces};
+        use sea_orm::{DbBackend, JoinType, QueryOrder, QuerySelect, QueryTrait};
+        let intake_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let now = Utc::now();
+        let snoozed = sea_orm::Condition::any()
+            .add(
+                intake_issues::Column::SnoozedTill
+                    .gte(now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+            )
+            .add(intake_issues::Column::SnoozedTill.is_null());
+        let list_sql = intake_issues::Entity::find()
+            .join(JoinType::InnerJoin, intake_issues::Relation::Issues1.def())
+            .join(
+                JoinType::InnerJoin,
+                intake_issues::Relation::Workspaces.def(),
+            )
+            .join(JoinType::InnerJoin, intake_issues::Relation::Projects.def())
+            .filter(intake_issues::Column::DeletedAt.is_null())
+            .filter(intake_issues::Column::IntakeId.eq(intake_id))
+            .filter(intake_issues::Column::ProjectId.eq(project_id))
+            .filter(workspaces::Column::Slug.eq("slug".to_owned()))
+            .filter(snoozed.clone())
+            .order_by_desc(intake_issues::Column::CreatedAt)
+            .limit(10u64)
+            .offset(0u64)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(list_sql.contains("\"issues\""), "list join: {list_sql}");
+        assert!(list_sql.contains("\"workspaces\""), "list join: {list_sql}");
+        assert!(list_sql.contains("\"projects\""), "list join: {list_sql}");
+        assert!(
+            list_sql.contains("\"deleted_at\" IS NULL"),
+            "list scope: {list_sql}"
+        );
+        assert!(
+            list_sql.contains("\"snoozed_till\""),
+            "list snooze: {list_sql}"
+        );
+        assert!(
+            list_sql.contains("ORDER BY \"intake_issues\".\"created_at\" DESC"),
+            "list order: {list_sql}"
+        );
+        // The count must inherit the list's full three-join scope (the
+        // pre-SeaORM count was string-surgery over the list SQL).
+        let count_sql = intake_issues::Entity::find()
+            .join(JoinType::InnerJoin, intake_issues::Relation::Issues1.def())
+            .join(
+                JoinType::InnerJoin,
+                intake_issues::Relation::Workspaces.def(),
+            )
+            .join(JoinType::InnerJoin, intake_issues::Relation::Projects.def())
+            .filter(intake_issues::Column::DeletedAt.is_null())
+            .filter(intake_issues::Column::IntakeId.eq(intake_id))
+            .filter(intake_issues::Column::ProjectId.eq(project_id))
+            .filter(workspaces::Column::Slug.eq("slug".to_owned()))
+            .filter(snoozed)
+            .build(DbBackend::Postgres)
+            .to_string();
+        for table in ["\"issues\"", "\"workspaces\"", "\"projects\""] {
+            assert!(count_sql.contains(table), "count join {table}: {count_sql}");
+        }
+        assert!(
+            !count_sql.contains("ORDER BY"),
+            "count has no order: {count_sql}"
+        );
+    }
+
+    #[test]
+    fn intake_retrieve_triage_statement_shapes() {
+        use pidash_db::entity::{intake_issues, workspaces};
+        use sea_orm::{DbBackend, JoinType, QueryOrder, QuerySelect, QueryTrait};
+        let intake_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let issue_id = Uuid::new_v4();
+        let now = Utc::now();
+        let retrieve_sql = intake_issues::Entity::find()
+            .join(JoinType::InnerJoin, intake_issues::Relation::Issues1.def())
+            .join(
+                JoinType::InnerJoin,
+                intake_issues::Relation::Workspaces.def(),
+            )
+            .join(JoinType::InnerJoin, intake_issues::Relation::Projects.def())
+            .filter(intake_issues::Column::DeletedAt.is_null())
+            .filter(intake_issues::Column::IntakeId.eq(intake_id))
+            .filter(intake_issues::Column::ProjectId.eq(project_id))
+            .filter(workspaces::Column::Slug.eq("slug".to_owned()))
+            .filter(intake_issues::Column::IssueId.eq(issue_id))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(
+                        intake_issues::Column::SnoozedTill
+                            .gte(now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+                    )
+                    .add(intake_issues::Column::SnoozedTill.is_null()),
+            )
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            retrieve_sql.contains("\"issues\""),
+            "retrieve join: {retrieve_sql}"
+        );
+        assert!(
+            retrieve_sql.contains("\"issue_id\" = "),
+            "retrieve filters issue: {retrieve_sql}"
+        );
+        assert!(
+            retrieve_sql.contains("\"snoozed_till\""),
+            "retrieve snooze: {retrieve_sql}"
+        );
+        // Triage lookup: INNER workspace join, triage group, sequence ASC.
+        let triage_sql = states::Entity::find()
+            .join(JoinType::InnerJoin, states::Relation::Workspaces.def())
+            .filter(states::Column::Group.eq("triage"))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::ProjectId.eq(project_id))
+            .filter(workspaces::Column::Slug.eq("slug".to_owned()))
+            .order_by_asc(states::Column::Sequence)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            triage_sql.contains("\"workspaces\""),
+            "triage join: {triage_sql}"
+        );
+        assert!(
+            triage_sql.contains("ORDER BY \"states\".\"sequence\" ASC"),
+            "triage order: {triage_sql}"
+        );
+        // Max-sequence: ORDER BY sequence DESC LIMIT 1 over live non-triage.
+        let max_sql = states::Entity::find()
+            .filter(states::Column::ProjectId.eq(project_id))
+            .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::DeletedAt.is_null())
+            .select_only()
+            .column(states::Column::Sequence)
+            .order_by_desc(states::Column::Sequence)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            max_sql.contains("ORDER BY \"states\".\"sequence\" DESC"),
+            "max order: {max_sql}"
+        );
+        assert!(max_sql.contains("LIMIT 1"), "max limit: {max_sql}");
+    }
+
+    #[test]
+    fn intake_exists_fetch_statement_shapes() {
+        use pidash_db::entity::{intakes, workspaces};
+        use sea_orm::{DbBackend, JoinType, QueryOrder, QuerySelect, QueryTrait};
+        let id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        // issue_choice: INNER projects, LEFT states, triage-group OR.
+        let choice_sql = issues::Entity::find_by_id(id)
+            .filter(issues::Column::DeletedAt.is_null())
+            .filter(issues::Column::ArchivedAt.is_null())
+            .filter(issues::Column::IsDraft.eq(false))
+            .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+            .join(
+                JoinType::LeftJoin,
+                issues::Entity::belongs_to(states::Entity)
+                    .from(issues::Column::StateId)
+                    .to(states::Column::Id)
+                    .into(),
+            )
+            .filter(projects::Column::ArchivedAt.is_null())
+            .filter(
+                sea_orm::Condition::any()
+                    .add(states::Column::Group.is_null())
+                    .add(states::Column::Group.ne("triage")),
+            )
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            choice_sql.contains("INNER JOIN \"projects\""),
+            "choice join: {choice_sql}"
+        );
+        assert!(
+            choice_sql.contains("LEFT JOIN \"states\""),
+            "choice join: {choice_sql}"
+        );
+        assert!(
+            choice_sql.contains("\"group\" IS NULL"),
+            "choice null group: {choice_sql}"
+        );
+        // fetch_intake_id: INNER workspaces + name ASC.
+        let intake_sql = intakes::Entity::find()
+            .join(JoinType::InnerJoin, intakes::Relation::Workspaces.def())
+            .filter(intakes::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Slug.eq("slug".to_owned()))
+            .filter(intakes::Column::ProjectId.eq(project_id))
+            .order_by_asc(intakes::Column::Name)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            intake_sql.contains("INNER JOIN \"workspaces\""),
+            "intake join: {intake_sql}"
+        );
+        assert!(
+            intake_sql.contains("ORDER BY \"intakes\".\"name\" ASC"),
+            "intake order: {intake_sql}"
+        );
+        // fetch_default_state: sequence ASC over live non-triage defaults.
+        let default_sql = states::Entity::find()
+            .filter(states::Column::WorkspaceId.eq(id))
+            .filter(states::Column::ProjectId.eq(project_id))
+            .filter(states::Column::Default.eq(true))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .order_by_asc(states::Column::Sequence)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            default_sql.contains("ORDER BY \"states\".\"sequence\" ASC"),
+            "default order: {default_sql}"
+        );
+        assert!(
+            default_sql.contains("\"default\""),
+            "default flag: {default_sql}"
+        );
+        // get_member_role: narrow role read over the workspace join.
+        let role_sql = project_members::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                project_members::Relation::Workspaces.def(),
+            )
+            .filter(workspaces::Column::Slug.eq("slug".to_owned()))
+            .filter(project_members::Column::MemberId.eq(id))
+            .filter(project_members::Column::ProjectId.eq(project_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .select_only()
+            .column(project_members::Column::Role)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            role_sql.contains("INNER JOIN \"workspaces\""),
+            "role join: {role_sql}"
+        );
+        assert!(role_sql.contains("\"role\""), "role column: {role_sql}");
+    }
+
     #[tokio::test]
     async fn live_seaorm_existence_checks() {
         let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -15938,6 +16195,16 @@ mod tests {
             .expect("triage")
             .is_none();
         assert!(t_hit);
+        // The migrated module functions themselves (same temp tables on
+        // the single-connection pool) agree with the inline filters.
+        assert!(pod_exists(&pool, &pod_id).await.expect("pod_exists"));
+        assert!(state_choice_exists(&pool, &state_id)
+            .await
+            .expect("state_choice"));
+        assert!(!state_choice_exists(&pool, &triage_id)
+            .await
+            .expect("state_choice"));
+        assert!(!pod_exists(&pool, &Uuid::new_v4()).await.expect("pod miss"));
     }
 
     #[test]
