@@ -142,9 +142,6 @@ crates/db/src/orchestration/workpad.rs 1
 crates/db/src/runner_runs/pod.rs 3
 crates/db/src/runner_sessions/machine_outbox.rs 1
 crates/db/src/runner_sessions/outbox.rs 1
-crates/db/src/tasks_cleanup/cleanup_queries.rs 2
-crates/db/src/tasks_cleanup/deletion_queries.rs 17
-crates/db/src/tasks_cleanup/version_queries.rs 2
 crates/db/src/v1_assets/asset_queries.rs 14
 crates/db/src/v1_assets/sticky_queries.rs 3
 crates/db/src/v1_cli_auth/queries.rs 1
@@ -181,10 +178,7 @@ crates/jobs/src/runner_runs/offline_recovery.rs 15
 crates/jobs/src/runner_runs/sweeps_chat.rs 43
 crates/jobs/src/runner_runs/sweeps_runs.rs 12
 crates/jobs/src/scheduler.rs 4
-crates/jobs/src/tasks_cleanup/assets.rs 9
 crates/jobs/src/tasks_cleanup/dummy_data.rs 34
-crates/jobs/src/tasks_cleanup/expiry.rs 2
-crates/jobs/src/tasks_cleanup/versions.rs 17
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
 crates/jobs/src/tasks_ticker/fire_binding.rs 9
