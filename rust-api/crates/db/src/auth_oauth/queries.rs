@@ -28,17 +28,22 @@
 //! PIDASHCONV-324. The `#[cfg(test)]` suite asserts the SQL text and the
 //! pure row/field semantics against those fixtures field-for-field.
 //!
-//! SQL execution uses runtime `sqlx::query` (no `query!` macros): there is
-//! no build-time database and no `.sqlx` offline cache, following the merged
-//! `license/queries` precedent. Django's `%s` placeholders render as
-//! Postgres `$N` here; the predicate/column order matches the recorded
-//! Django SQL exactly.
+//! SQL execution goes through SeaORM entities and the query builder
+//! (`rust-api/docs/orm-migration.md`): one-table reads by key/filter,
+//! `select_only` + `lock_exclusive` + `FromQueryResult` for the locked
+//! read (decode by name), `update_many` for the touch writes, and
+//! `ActiveModel` inserts for creation. Rows decode by name so a column
+//! add/drop can never silently shift the working set (the #2857 /
+//! rustpidash duplicate-column class). Django's column, predicate and
+//! SET order matches the recorded SQL exactly; statement-shape pins
+//! live in the colocated tests below.
 //!
-//! Write routing: callers pick the pool and pass an executor in — every
-//! executor is generic over `sqlx::Executor`, except
-//! [`dev_machine::get_or_create_dev_machine`], which needs a `&mut
-//! PgConnection` to issue the `SAVEPOINT` Django's `transaction.atomic()`
-//! would create around the racing insert.
+//! Write routing: callers pass a SeaORM [`sea_orm::ConnectionTrait`]
+//! (the pool connection or [`crate::orm_tx::TxConn`] over an open sqlx
+//! transaction). [`dev_machine::get_or_create_dev_machine`] still needs
+//! a `&mut PgConnection` because the racing insert runs under a savepoint
+//! (a sqlx nested `begin()`, what Django's `transaction.atomic()` creates);
+//! it runs SeaORM on that connection through `TxConn`.
 //!
 //! # Ported bugs and quirks (translate, don't redesign)
 //!
@@ -64,8 +69,9 @@
 //!   [`dev_machine::TouchFields`] enumerates the four reachable lists so the
 //!   emitted `UPDATE` matches Django's column-for-column.
 
-use sqlx::postgres::{PgConnection, PgRow};
-use sqlx::Row;
+use sea_orm::sea_query::Expr;
+use sea_orm::{FromQueryResult, Set};
+use sqlx::postgres::PgConnection;
 
 // account — OauthAdapter.create_update_account (AUTHOAUTH-F6)
 // ---------------------------------------------------------------------------
@@ -182,22 +188,112 @@ pub mod dev_machine {
         }
     }
 
-    /// `DevMachine.objects.select_for_update().filter(pk=$1).first()`
-    /// (`device.py:91,105`).
-    pub const LOCK_SQL: &str = "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"owner_id\", \"dev_machine\".\"host_label\", \"dev_machine\".\"label\", \"dev_machine\".\"last_seen_at\" FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 FOR UPDATE LIMIT 1";
+    /// Builder for `DevMachine.objects.select_for_update().filter(pk=$1).first()`
+    /// (`device.py:91,105`): by-pk with `FOR UPDATE`. The column set is the
+    /// touch working set (`id`, `owner_id`, `host_label`, `label`) — the
+    /// former `last_seen_at` projection never left Rust — so only rendered
+    /// columns cross the wire (orm-migration §3.1, `FromQueryResult`
+    /// decode by name).
+    pub fn lock_machine_query(
+        id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::dev_machine::Entity> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+        crate::entity::dev_machine::Entity::find()
+            .select_only()
+            .columns([
+                crate::entity::dev_machine::Column::Id,
+                crate::entity::dev_machine::Column::OwnerId,
+                crate::entity::dev_machine::Column::HostLabel,
+                crate::entity::dev_machine::Column::Label,
+            ])
+            .filter(crate::entity::dev_machine::Column::Id.eq(id))
+            .lock_exclusive()
+    }
 
-    /// `DevMachine.objects.create(id=, owner=, host_label=, label=,
-    /// last_seen_at=)` inside `transaction.atomic()` (`device.py:94-101`):
-    /// Django fills the remaining columns from field defaults
-    /// (`visibility=PRIVATE`, `provisioning=MANUAL`, `created_at`/`updated_at`
-    /// = now, `last_seen_at`/`revoked_at` = NULL unless set).
-    pub const CREATE_SQL: &str = "INSERT INTO \"dev_machine\" (\"id\", \"owner_id\", \"host_label\", \"label\", \"visibility\", \"provisioning\", \"last_seen_at\", \"revoked_at\", \"created_at\", \"updated_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+    /// Builder for `machine.save(update_fields=[...])` (`device.py:73-85`)
+    /// for one [`TouchFields`] selection: `SET` order is `last_seen_at`,
+    /// `updated_at`, then `host_label`/`label` as selected, `WHERE id = $1`.
+    /// The `last_seen_at`/`updated_at` pair is always stamped, exactly the
+    /// Django `update_fields` list.
+    pub fn touch_update(
+        fields: TouchFields,
+        machine_id: uuid::Uuid,
+        normalized_host_label: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> sea_orm::UpdateMany<crate::entity::dev_machine::Entity> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let mut update = crate::entity::dev_machine::Entity::update_many()
+            .col_expr(
+                crate::entity::dev_machine::Column::LastSeenAt,
+                Expr::value(now),
+            )
+            .col_expr(
+                crate::entity::dev_machine::Column::UpdatedAt,
+                Expr::value(now),
+            );
+        match fields {
+            TouchFields::Base => {}
+            TouchFields::Host => {
+                update = update.col_expr(
+                    crate::entity::dev_machine::Column::HostLabel,
+                    Expr::value(normalized_host_label.to_owned()),
+                );
+            }
+            TouchFields::Label => {
+                update = update.col_expr(
+                    crate::entity::dev_machine::Column::Label,
+                    Expr::value(label_from_host_label(normalized_host_label)),
+                );
+            }
+            TouchFields::HostAndLabel => {
+                update = update
+                    .col_expr(
+                        crate::entity::dev_machine::Column::HostLabel,
+                        Expr::value(normalized_host_label.to_owned()),
+                    )
+                    .col_expr(
+                        crate::entity::dev_machine::Column::Label,
+                        Expr::value(label_from_host_label(normalized_host_label)),
+                    );
+            }
+        }
+        update.filter(crate::entity::dev_machine::Column::Id.eq(machine_id))
+    }
 
-    /// `machine.save(update_fields=[...])` for each reachable list.
-    pub const TOUCH_BASE_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2 WHERE \"dev_machine\".\"id\" = $3";
-    pub const TOUCH_HOST_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2, \"host_label\" = $3 WHERE \"dev_machine\".\"id\" = $4";
-    pub const TOUCH_LABEL_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2, \"label\" = $3 WHERE \"dev_machine\".\"id\" = $4";
-    pub const TOUCH_HOST_AND_LABEL_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2, \"host_label\" = $3, \"label\" = $4 WHERE \"dev_machine\".\"id\" = $5";
+    /// The `ActiveModel` for `DevMachine.objects.create(id=, owner=,
+    /// host_label=, label=, last_seen_at=)` (`device.py:94-101`): Django
+    /// fills every other column from field defaults — `visibility=PRIVATE`
+    /// (`0`), `provisioning=MANUAL`, the engine columns (`False`/`""`/
+    /// `"never"`/`{}`), `revoked_at=NULL`, `created_at`/`updated_at=now`.
+    /// The live table carries no `column_default`, so the insert supplies
+    /// them explicitly (the `catalog_reads::insert_dev_machine` precedent).
+    pub fn new_machine_model(
+        params: &NewDevMachine<'_>,
+        normalized_host_label: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> crate::entity::dev_machine::ActiveModel {
+        crate::entity::dev_machine::ActiveModel {
+            id: Set(params.id),
+            owner_id: Set(params.owner_id),
+            host_label: Set(normalized_host_label.to_owned()),
+            label: Set(label_from_host_label(normalized_host_label)),
+            visibility: Set(VISIBILITY_PRIVATE),
+            provisioning: Set(PROVISIONING_MANUAL.to_owned()),
+            engine_paused_by_owner: Set(false),
+            engine_auto_pause_reason: Set(String::new()),
+            engine_team_runs: Set(false),
+            engine_sign_in_state: Set("never".to_owned()),
+            engine_credential_expires_at: Set(None),
+            engine_state: Set(serde_json::json!({})),
+            engine_state_reported_at: Set(None),
+            merged_into_id: Set(None),
+            merge_result: Set(serde_json::json!({})),
+            last_seen_at: Set(Some(now.into())),
+            revoked_at: Set(None),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        }
+    }
 
     // NOTE: the rotate statements (`ROTATE_REVOKE_SQL`,
     // `ROTATE_CREATE_SQL`) and the `rotate_machine_token` driver used to
@@ -249,7 +345,10 @@ pub mod dev_machine {
     /// `pidash_compat::db` (OVL-04) so this public path keeps working.
     pub use pidash_compat::db::is_unique_violation;
 
-    /// The locked-row working set the touch path needs.
+    /// The locked-row working set the touch path needs. Decoded by name
+    /// from [`lock_machine_query`] via `FromQueryResult` (no positional
+    /// reads: the #2857 class cannot go stale when a column moves).
+    #[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
     pub struct LockedMachine {
         pub id: uuid::Uuid,
         pub owner_id: uuid::Uuid,
@@ -258,82 +357,56 @@ pub mod dev_machine {
     }
 
     /// `SELECT ... FOR UPDATE` by pk, projected to the touch working set.
-    pub async fn fetch_locked_machine<'e, E>(
-        ex: E,
+    /// `db` is the caller's `DatabaseConnection` or a `TxConn` over its
+    /// sqlx transaction — the caller keeps the lock inside its `atomic()`.
+    pub async fn fetch_locked_machine(
+        db: &impl sea_orm::ConnectionTrait,
         dev_machine_id: uuid::Uuid,
-    ) -> Result<Option<LockedMachine>, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let row: Option<PgRow> = sqlx::query(LOCK_SQL)
-            .bind(dev_machine_id)
-            .fetch_optional(ex)
-            .await?;
-        row.map(|r| {
-            Ok(LockedMachine {
-                id: r.try_get("id")?,
-                owner_id: r.try_get("owner_id")?,
-                host_label: r.try_get("host_label")?,
-                label: r.try_get("label")?,
-            })
-        })
-        .transpose()
+    ) -> Result<Option<LockedMachine>, sea_orm::DbErr> {
+        lock_machine_query(dev_machine_id)
+            .into_model::<LockedMachine>()
+            .one(db)
+            .await
     }
 
     /// `_touch_dev_machine` (`device.py:73-85`): always stamp
-    /// `last_seen_at`; conditionally `host_label`/`label`; save exactly the
-    /// selected fields.
-    pub async fn touch_dev_machine<'e, E>(
-        ex: E,
+    /// `last_seen_at`/`updated_at`; conditionally `host_label`/`label`;
+    /// save exactly the selected fields.
+    pub async fn touch_dev_machine(
+        db: &impl sea_orm::ConnectionTrait,
         machine_id: uuid::Uuid,
         current_host_label: &str,
         current_label: &str,
         host_label: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<TouchFields, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
+    ) -> Result<TouchFields, sea_orm::DbErr> {
         let normalized = normalize_host_label(host_label);
         let fields = touch_update_fields(current_host_label, current_label, &normalized);
-        match fields {
-            TouchFields::Base => {
-                sqlx::query(TOUCH_BASE_SQL)
-                    .bind(now)
-                    .bind(now)
-                    .bind(machine_id)
-                    .execute(ex)
-                    .await?;
-            }
-            TouchFields::Host => {
-                sqlx::query(TOUCH_HOST_SQL)
-                    .bind(now)
-                    .bind(now)
-                    .bind(&normalized)
-                    .bind(machine_id)
-                    .execute(ex)
-                    .await?;
-            }
-            TouchFields::Label => {
-                sqlx::query(TOUCH_LABEL_SQL)
-                    .bind(now)
-                    .bind(now)
-                    .bind(label_from_host_label(&normalized))
-                    .bind(machine_id)
-                    .execute(ex)
-                    .await?;
-            }
-            TouchFields::HostAndLabel => {
-                sqlx::query(TOUCH_HOST_AND_LABEL_SQL)
-                    .bind(now)
-                    .bind(now)
-                    .bind(&normalized)
-                    .bind(label_from_host_label(&normalized))
-                    .execute(ex)
-                    .await?;
-            }
-        }
-        Ok(fields)
+        touch_update(fields, machine_id, &normalized, now)
+            .exec(db)
+            .await
+            .map(|_| fields)
+    }
+
+    /// Insert one dev machine (`device.py:97-101` wants `insert` without
+    /// `RETURNING` semantics beyond the pk — the row id is caller-supplied,
+    /// nothing reads it back). `normalized_host_label` must already be
+    /// [`normalize_host_label`] output; `label` derives as `[:128]`.
+    pub async fn insert_dev_machine(
+        db: &impl sea_orm::ConnectionTrait,
+        params: &NewDevMachine<'_>,
+        normalized_host_label: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), sea_orm::DbErr> {
+        use sea_orm::EntityTrait;
+        crate::entity::dev_machine::Entity::insert(new_machine_model(
+            params,
+            normalized_host_label,
+            now,
+        ))
+        .exec_without_returning(db)
+        .await
+        .map(drop)
     }
 
     /// How `_get_or_create_dev_machine` finished.
@@ -354,75 +427,92 @@ pub mod dev_machine {
 
     /// `_get_or_create_dev_machine` (`device.py:88-109`): lock-then-create-
     /// or-retry. Needs `&mut PgConnection` because the racing insert runs
-    /// under a savepoint (what `transaction.atomic()` creates when already
-    /// inside a transaction): on a unique violation the savepoint rolls
-    /// back and the loser re-locks under the same scope.
+    /// under a savepoint (a sqlx nested `begin()`, what
+    /// `transaction.atomic()` creates when already inside a transaction):
+    /// on a unique violation the savepoint rolls back and the loser
+    /// re-locks under the same scope. All statements are SeaORM (`TxConn`
+    /// over the connection / savepoint).
     pub async fn get_or_create_dev_machine(
         conn: &mut PgConnection,
         user_id: uuid::Uuid,
         params: &NewDevMachine<'_>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(GetOrCreateOutcome, TouchFields), DevMachineError> {
+        use sqlx::Connection as _;
         let normalized = normalize_host_label(Some(params.host_label));
-        if let Some(locked) = fetch_locked_machine(&mut *conn, params.id).await? {
+        let locked = {
+            let db = crate::orm_tx::TxConn::new(&mut *conn);
+            fetch_locked_machine(&db, params.id)
+                .await
+                .map_err(|e| DevMachineError::Db(crate::orm_tx::into_sqlx(e)))?
+        };
+        if let Some(locked) = locked {
             check_owner(locked.owner_id, user_id)?;
-            let fields = touch_dev_machine(
-                &mut *conn,
-                locked.id,
-                &locked.host_label,
-                &locked.label,
-                Some(&normalized),
-                now,
-            )
-            .await?;
-            return Ok((GetOrCreateOutcome::Existing, fields));
-        }
-        sqlx::query("SAVEPOINT pidash_dev_machine")
-            .execute(&mut *conn)
-            .await?;
-        let insert = sqlx::query(CREATE_SQL)
-            .bind(params.id)
-            .bind(params.owner_id)
-            .bind(&normalized)
-            .bind(label_from_host_label(&normalized))
-            .bind(VISIBILITY_PRIVATE)
-            .bind(PROVISIONING_MANUAL)
-            .bind(now)
-            .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
-            .bind(now)
-            .bind(now)
-            .execute(&mut *conn)
-            .await;
-        match insert {
-            Ok(_) => {
-                sqlx::query("RELEASE SAVEPOINT pidash_dev_machine")
-                    .execute(&mut *conn)
-                    .await?;
-                Ok((GetOrCreateOutcome::Created, TouchFields::Base))
-            }
-            Err(e) if is_unique_violation(&e) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT pidash_dev_machine")
-                    .execute(&mut *conn)
-                    .await?;
-                sqlx::query("RELEASE SAVEPOINT pidash_dev_machine")
-                    .execute(&mut *conn)
-                    .await?;
-                let relocked = fetch_locked_machine(&mut *conn, params.id).await?;
-                let owner = relocked.as_ref().map(|m| m.owner_id);
-                resolve_race(owner, user_id)?;
-                let relocked = relocked.expect("owner checked Some");
-                let fields = touch_dev_machine(
-                    &mut *conn,
-                    relocked.id,
-                    &relocked.host_label,
-                    &relocked.label,
+            let fields = {
+                let db = crate::orm_tx::TxConn::new(&mut *conn);
+                touch_dev_machine(
+                    &db,
+                    locked.id,
+                    &locked.host_label,
+                    &locked.label,
                     Some(&normalized),
                     now,
                 )
-                .await?;
+                .await
+                .map_err(|e| DevMachineError::Db(crate::orm_tx::into_sqlx(e)))?
+            };
+            return Ok((GetOrCreateOutcome::Existing, fields));
+        }
+        let mut savepoint = conn.begin().await.map_err(DevMachineError::Db)?;
+        let created = {
+            let db = crate::orm_tx::TxConn::new(&mut savepoint);
+            insert_dev_machine(&db, params, &normalized, now).await
+        };
+        match created {
+            Ok(()) => {
+                savepoint.commit().await.map_err(DevMachineError::Db)?;
+                Ok((GetOrCreateOutcome::Created, TouchFields::Base))
+            }
+            Err(e)
+                if {
+                    use sea_orm::{DbErr, RuntimeErr};
+                    match &e {
+                        DbErr::Exec(RuntimeErr::SqlxError(inner)) => is_unique_violation(inner),
+                        DbErr::Query(RuntimeErr::SqlxError(inner)) => is_unique_violation(inner),
+                        DbErr::Conn(RuntimeErr::SqlxError(inner)) => is_unique_violation(inner),
+                        _ => false,
+                    }
+                } =>
+            {
+                savepoint.rollback().await.map_err(DevMachineError::Db)?;
+                let relocked = {
+                    let db = crate::orm_tx::TxConn::new(&mut *conn);
+                    fetch_locked_machine(&db, params.id)
+                        .await
+                        .map_err(|e| DevMachineError::Db(crate::orm_tx::into_sqlx(e)))?
+                };
+                let owner = relocked.as_ref().map(|m| m.owner_id);
+                resolve_race(owner, user_id)?;
+                let relocked = relocked.expect("owner checked Some");
+                let fields = {
+                    let db = crate::orm_tx::TxConn::new(&mut *conn);
+                    touch_dev_machine(
+                        &db,
+                        relocked.id,
+                        &relocked.host_label,
+                        &relocked.label,
+                        Some(&normalized),
+                        now,
+                    )
+                    .await
+                    .map_err(|e| DevMachineError::Db(crate::orm_tx::into_sqlx(e)))?
+                };
                 Ok((GetOrCreateOutcome::Existing, fields))
             }
-            Err(e) => Err(DevMachineError::Db(e)),
+            Err(e) => {
+                let _ = savepoint.rollback().await;
+                Err(DevMachineError::Db(crate::orm_tx::into_sqlx(e)))
+            }
         }
     }
 
@@ -477,6 +567,8 @@ pub mod dev_machine {
 mod tests {
     use super::super::test_support as ts;
     use super::*;
+    use sea_orm::EntityTrait as _;
+    use sea_orm::QueryTrait as _;
 
     fn fixture(name: &str) -> serde_json::Value {
         ts::fixture_file(name)
@@ -666,17 +758,78 @@ mod tests {
         assert!(dev_machine::resolve_race(Some(owner), owner).is_ok());
         assert!(dev_machine::resolve_race(Some(other), owner).is_err());
         assert!(dev_machine::resolve_race(None, owner).is_err());
-        // Lock SQL mirrors select_for_update().filter(pk).first().
-        assert!(dev_machine::LOCK_SQL.contains("FOR UPDATE"), "row lock");
+        // Lock statement mirrors select_for_update().filter(pk).first():
+        // pk filter + FOR UPDATE; `.one()` adds `LIMIT 1` at execution.
+        let lock_sql = dev_machine::lock_machine_query(
+            uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+        )
+        .build(sea_orm::DbBackend::Postgres)
+        .to_string();
+        assert!(lock_sql.contains("FOR UPDATE"), "row lock: {lock_sql}");
         assert!(
-            dev_machine::LOCK_SQL.contains("WHERE \"dev_machine\".\"id\" = $1"),
-            "pk filter"
+            lock_sql.contains("\"dev_machine\".\"id\""),
+            "pk filter: {lock_sql}"
         );
-        assert!(dev_machine::LOCK_SQL.ends_with("LIMIT 1"), "first()");
-        // Create pins caller pk + truncated labels (device.py:94-101).
         assert!(
-            dev_machine::CREATE_SQL.contains("(\"id\", \"owner_id\", \"host_label\", \"label\""),
-            "create columns"
+            lock_sql.contains("\"owner_id\"") && lock_sql.contains("\"host_label\""),
+            "working-set columns: {lock_sql}"
+        );
+        // Create pins caller pk + truncated labels (device.py:94-101).
+        let model = dev_machine::new_machine_model(
+            &dev_machine::NewDevMachine {
+                id: uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                owner_id: owner,
+                host_label: "myhost",
+                now: chrono::Utc::now(),
+            },
+            "myhost",
+            chrono::Utc::now(),
+        );
+        let cols = crate::entity::dev_machine::Entity::insert(model)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            cols.contains("\"id\"") && cols.contains("\"owner_id\""),
+            "create has caller pk: {cols}"
+        );
+        assert!(
+            cols.contains("\"visibility\"") && cols.contains("\"provisioning\""),
+            "create has Django defaults: {cols}"
+        );
+        // Touch builders emit exactly the Django update_fields subset per case.
+        let id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let now = chrono::Utc::now();
+        let base = dev_machine::touch_update(dev_machine::TouchFields::Base, id, "b", now)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            base.contains("\"last_seen_at\"") && base.contains("\"updated_at\""),
+            "base stamps both timestamps: {base}"
+        );
+        assert!(
+            !base.contains("\"host_label\""),
+            "base never writes host_label: {base}"
+        );
+        let host = dev_machine::touch_update(dev_machine::TouchFields::Host, id, "b", now)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            host.contains("\"host_label\"") && !host.contains("\"label\""),
+            "host writes host only: {host}"
+        );
+        let label = dev_machine::touch_update(dev_machine::TouchFields::Label, id, "b", now)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            label.contains("\"label\"") && !label.contains("\"host_label\""),
+            "label writes label only: {label}"
+        );
+        let both = dev_machine::touch_update(dev_machine::TouchFields::HostAndLabel, id, "b", now)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(
+            both.contains("\"host_label\"") && both.contains("\"label\""),
+            "host+label writes both: {both}"
         );
         let f8 = fixture("F8_device_helpers.golden.json");
         let create_cols = f8["_get_or_create_dev_machine"]["create_columns"]
@@ -716,5 +869,116 @@ mod tests {
         );
         assert_eq!(create_cols["is_service"], serde_json::json!(true));
         assert_eq!(f8["_rotate_machine_token"]["mint"], "runner_tokens.mint_machine_token() -> raw='mt_'+token_urlsafe(32) (runner/services/tokens.py:84-86)");
+    }
+
+    /// Live DB: locked fetch + touch + get-or-create round-trip on a temp
+    /// `dev_machine` table (the `orm_tx` precedent — `LIKE ... INCLUDING
+    /// DEFAULTS` shadows the real table without FK parents). Skips without
+    /// `DATABASE_URL` on a migrated database.
+    #[tokio::test]
+    async fn live_dev_machine_fetch_touch_get_or_create() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.dev_machine')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return;
+        }
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "CREATE TEMP TABLE dev_machine (LIKE public.dev_machine INCLUDING DEFAULTS) ON COMMIT DROP",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp dev_machine");
+        let owner_id = uuid::Uuid::new_v4();
+        let machine_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        // Miss path: lock fetch returns None (no row).
+        {
+            let db = crate::orm_tx::TxConn::new(&mut tx);
+            let missed = dev_machine::fetch_locked_machine(&db, machine_id)
+                .await
+                .expect("miss fetch");
+            assert!(missed.is_none());
+        }
+        // Create path: get_or_create inserts (Created, Base).
+        {
+            let (outcome, fields) = dev_machine::get_or_create_dev_machine(
+                &mut tx,
+                owner_id,
+                &dev_machine::NewDevMachine {
+                    id: machine_id,
+                    owner_id,
+                    host_label: "  testhost  ",
+                    now,
+                },
+                now,
+            )
+            .await
+            .expect("create");
+            assert_eq!(outcome, dev_machine::GetOrCreateOutcome::Created);
+            assert_eq!(fields, dev_machine::TouchFields::Base);
+        }
+        // Existing path: same owner touches (Existing, HostAndLabel when
+        // host changed and label present is false would be label-only;
+        // here host "testhost" is already stored so Base after same value).
+        {
+            let db = crate::orm_tx::TxConn::new(&mut tx);
+            let locked = dev_machine::fetch_locked_machine(&db, machine_id)
+                .await
+                .expect("locked fetch")
+                .expect("row exists");
+            assert_eq!(locked.owner_id, owner_id);
+            assert_eq!(locked.host_label, "testhost");
+            assert_eq!(locked.label, "testhost");
+            let fields = dev_machine::touch_dev_machine(
+                &db,
+                locked.id,
+                &locked.host_label,
+                &locked.label,
+                Some("  newhost  "),
+                now,
+            )
+            .await
+            .expect("touch host");
+            assert_eq!(fields, dev_machine::TouchFields::Host);
+            let relocked = dev_machine::fetch_locked_machine(&db, machine_id)
+                .await
+                .expect("relock")
+                .expect("row still exists");
+            assert_eq!(relocked.host_label, "newhost");
+            assert_eq!(relocked.label, "testhost");
+        }
+        // Wrong owner is a 404 error, not a silent miss.
+        {
+            let other = uuid::Uuid::new_v4();
+            let outcome = dev_machine::get_or_create_dev_machine(
+                &mut tx,
+                other,
+                &dev_machine::NewDevMachine {
+                    id: machine_id,
+                    owner_id: other,
+                    host_label: "newhost",
+                    now,
+                },
+                now,
+            )
+            .await;
+            assert!(matches!(
+                outcome,
+                Err(dev_machine::DevMachineError::Ownership(_))
+            ));
+        }
+        tx.rollback().await.expect("rollback");
     }
 }
