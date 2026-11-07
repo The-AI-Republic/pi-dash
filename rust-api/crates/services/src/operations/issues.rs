@@ -2725,6 +2725,30 @@ async fn fetch_pod_project_id(pool: &PgPool, pod_id: &Uuid) -> Result<Option<Uui
     Ok(row.map(|row| row.project_id))
 }
 
+/// `assigned_runner_detail` by runner id (`issue_assignment.py`,
+/// design §14.1): `None` when pod-assigned or the runner is gone.
+async fn fetch_assigned_runner_detail(
+    pool: &PgPool,
+    runner_id: Option<Uuid>,
+) -> Result<Option<serde_json::Value>, Error> {
+    use sea_orm::EntityTrait;
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let Some(runner) = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Error::ServerError)?
+    else {
+        return Ok(None);
+    };
+    crate::domain::issue_assignment::assigned_runner_detail(&orm, &runner)
+        .await
+        .map(Some)
+        .map_err(|_| Error::ServerError)
+}
+
 /// The `ProjectMember` filter backing the assignee allow-list
 /// (`serializers/issue.py:246-252`): active members with `role >= 15` in
 /// `ProjectMember.Meta.ordering = ("-created_at",)`.
@@ -4079,6 +4103,10 @@ async fn render_moved_issue_api(
     let state = issue.state_id.map(|id| id.to_string());
     let estimate_point = issue.estimate_point_id.map(|id| id.to_string());
     let assigned_pod = issue.assigned_pod_id.map(|id| id.to_string());
+    let assigned_runner = issue.assigned_runner_id.map(|id| id.to_string());
+    let assigned_runner_detail = fetch_assigned_runner_detail(pool, issue.assigned_runner_id)
+        .await
+        .map_err(|_| Error::ServerError)?;
     let created_by = issue.created_by_id.map(|id| id.to_string());
     let updated_by = issue.updated_by_id.map(|id| id.to_string());
     let url = crate::v1_work_items::shape_issue::issue_url(
@@ -4122,6 +4150,8 @@ async fn render_moved_issue_api(
         state: state.as_deref(),
         estimate_point: estimate_point.as_deref(),
         assigned_pod: assigned_pod.as_deref(),
+        assigned_runner: assigned_runner.as_deref(),
+        assigned_runner_detail: assigned_runner_detail.as_ref(),
     };
     let input = RepresentationInput {
         row: &row,

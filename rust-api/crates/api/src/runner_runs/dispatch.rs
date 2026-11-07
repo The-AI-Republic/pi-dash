@@ -818,7 +818,10 @@ async fn render_created_snapshot(pool: &PgPool, run: &AgentRun) -> Response {
         Ok(binding) => binding,
         Err(response) => return response,
     };
-    let payload = render_detail(run, &pod, &tool_calls, binding.as_ref());
+    let payload = match render_detail(pool, run, &pod, &tool_calls, binding.as_ref(), None).await {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
     json_response(StatusCode::CREATED, payload.to_string())
 }
 

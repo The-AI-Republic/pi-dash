@@ -2023,7 +2023,7 @@ mod tests {
     fn lock_sql_match_django_tails() {
         let pause = lock_run_for_pause_sql();
         assert!(pause.starts_with("SELECT \"agent_run\".\"id\", "), "prefix");
-        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 39)]);
+        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 40)]);
         assert!(
             pause.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \
@@ -2036,7 +2036,7 @@ mod tests {
         let requeue = lock_run_for_requeue_sql();
         assert_eq!(
             select_runs(&requeue),
-            vec![("\"agent_run\"".to_owned(), 39)]
+            vec![("\"agent_run\"".to_owned(), 40)]
         );
         assert!(
             requeue.ends_with(
@@ -2055,7 +2055,7 @@ mod tests {
         assert_eq!(
             select_runs(&reread),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
             ]
         );
@@ -2071,7 +2071,7 @@ mod tests {
         assert_eq!(
             select_runs(&drain),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
@@ -2091,7 +2091,7 @@ mod tests {
         assert_eq!(
             select_runs(&failure),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 40),
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
             ]
