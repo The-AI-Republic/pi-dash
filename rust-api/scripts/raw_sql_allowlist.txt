@@ -16,7 +16,6 @@ crates/api/src/app_modules/handlers_module_issues.rs 10
 crates/api/src/app_modules/handlers_module_links.rs 16
 crates/api/src/app_modules/handlers_modules.rs 32
 crates/api/src/app_notifications/mod.rs 15
-
 crates/api/src/app_scheduler/gate.rs 6
 crates/api/src/app_scheduler/handlers_bind.rs 40
 crates/api/src/app_scheduler/handlers_occ.rs 4
@@ -61,9 +60,6 @@ crates/db/src/ops/users.rs 12
 crates/db/src/runner_runs/pod.rs 3
 crates/db/src/runner_sessions/machine_outbox.rs 1
 crates/db/src/runner_sessions/outbox.rs 1
-crates/jobs/src/integrations/git_sync.rs 26
-crates/jobs/src/integrations/github_signals.rs 4
-crates/jobs/src/integrations/github_sync.rs 33
 crates/jobs/src/license/commands.rs 9
 crates/jobs/src/license/tasks.rs 4
 crates/jobs/src/runner_enroll.rs 5
