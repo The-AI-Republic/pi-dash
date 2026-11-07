@@ -343,7 +343,25 @@ jobs:
         # which this Django-only job never boots; they run in the
         # tasks-cleanup-rust job instead. The file's Celery-oracle tests
         # still run here.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' --deselect tasks_cleanup/test_beat_catchup.py::test_rust_worker_liveness --deselect tasks_cleanup/test_beat_catchup.py::test_rust_scheduler_catches_up_stale_daily_entry tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py
+        # NEWPIDASH-54: the cloud-agent dispatch oracle (tenant isolation,
+        # concurrency, budgets, safety) joins here for the Django leg —
+        # it publishes in Celery wire format, so the queued runs are
+        # executed by this solo Celery worker. Single exception:
+        # test_create_project_issue_transition.py cannot run on either
+        # backend (pre-existing KeyError: 'error' on clean main — the
+        # agent_run columns were folded into error_details, PDASHOSS01-187;
+        # reported as found: on NEWPIDASH-1, fix filed separately).
+        # Three dispatch concurrency proofs deselect here: their
+        # ordering proofs need concurrent claims and this solo worker
+        # serialises them (the stall test, the per-tenant failure
+        # isolation's in-flight assertion, and the hanging tool's
+        # completes-behind-it assertion); they run in
+        # rust-api-contract-tests-dispatch-rust.yml instead (the
+        # `--concurrency 24` worker), where local validation ran them
+        # against both legs.
+        # assistant/test_turn_isolation.py (NEWPIDASH-54) is the turns'
+        # credential-isolation half — same worker, same shape.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' --ignore=dispatch/test_create_project_issue_transition.py --deselect tasks_cleanup/test_beat_catchup.py::test_rust_worker_liveness --deselect tasks_cleanup/test_beat_catchup.py::test_rust_scheduler_catches_up_stale_daily_entry --deselect dispatch/test_concurrency.py::test_slow_provider_does_not_stall_independent_tenant --deselect dispatch/test_concurrency.py::test_per_tenant_provider_failures_isolate --deselect dispatch/test_concurrency.py::test_hanging_tool_runs_to_completion_past_tool_timeout tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_turn_isolation.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py dispatch
 
       - name: Upload service logs on failure
         if: failure()
