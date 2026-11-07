@@ -722,7 +722,7 @@ mod tests {
             "parent selects parent_id: {parent}"
         );
         assert!(
-            parent.contains("LEFT OUTER JOIN"),
+            parent.contains("LEFT JOIN"),
             "states is LEFT JOIN: {parent}"
         );
         assert!(
