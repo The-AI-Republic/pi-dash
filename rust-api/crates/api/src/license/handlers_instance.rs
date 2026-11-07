@@ -192,7 +192,7 @@ async fn get_instance(
     let pool = pool_of(&state)?;
     let actor = request_actor(pool, state.settings().secret_key.as_bytes(), extension).await?;
     let timezone = actor.map(|a| a.timezone).unwrap_or(chrono_tz::UTC);
-    let row = fetch_instance_first(&sea_orm_connection(pool))
+    let row = fetch_instance_first(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let Some(row) = row else {
@@ -1010,7 +1010,7 @@ async fn patch_instance(
         let PatchRejection::FieldErrors(errors) = rejection;
         HandlerError::FieldErrors(render_field_errors(&errors))
     })?;
-    let row = fetch_instance_first(&sea_orm_connection(pool))
+    let row = fetch_instance_first(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // `instance_id` unique check (DRF `UniqueValidator`), excluding the
@@ -1092,11 +1092,6 @@ async fn fetch_instance_by_id(
     }))
 }
 
-#[allow(dead_code)]
-fn license_queries_into_sqlx(e: sea_orm::DbErr) -> sqlx::Error {
-    pidash_db::orm_tx::into_sqlx(e)
-}
-
 /// Decode the PATCH body like DRF `_parse`: empty → `{}`; otherwise the
 /// content-type selects the parser in `select_parser` order (JSON, form,
 /// multipart — `form_body::select_body_kind`). JSON and multipart framing
@@ -1153,7 +1148,7 @@ fn patch_body(
 /// have an admin row for the user with `role >= 15`.
 async fn admin_allowed(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<bool, HandlerError> {
     let db = sea_orm_connection(pool);
-    let row = fetch_instance_first(&db)
+    let row = fetch_instance_first(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let Some(instance) = row else {
@@ -1336,7 +1331,7 @@ async fn apply_patch(
             sea_orm::sea_query::Expr::value(Some(*user_id)),
         )
         .filter(instances::Column::Id.eq(*id));
-    
+
     update
         .exec(&db)
         .await
@@ -1366,17 +1361,6 @@ fn instance_column_for_assignment_column(col: &str) -> Option<instances::Column>
         "updated_by" => instances::Column::UpdatedById,
         _ => return None,
     })
-}
-
-#[allow(dead_code)]
-fn assignment_column(set: &Assignment) -> &'static str {
-    match set {
-        Assignment::Text(column, _)
-        | Assignment::NullableText(column, _)
-        | Assignment::Flag(column, _)
-        | Assignment::NullableUuid(column, _)
-        | Assignment::NullableDateTime(column, _) => column,
-    }
 }
 
 /// `serializer.save()` with `instance=None`: create. Missing columns fall
@@ -1536,7 +1520,7 @@ async fn signup_screen_visited(
     // exactly like Django.
     let actor = request_actor(pool, state.settings().secret_key.as_bytes(), extension).await?;
     let db = sea_orm_connection(pool);
-    let row = fetch_instance_first(&db)
+    let row = fetch_instance_first(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let Some(instance) = row else {

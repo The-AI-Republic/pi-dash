@@ -31,11 +31,16 @@
 //! here because the `workspaces` table is owned by the app domain, not by
 //! `license/models`.
 //!
-//! Write routing: callers pass a SeaORM connection (`&impl ConnectionTrait`)
-//! — either `sea_orm_connection(&pool)` for pool callers or
-//! `TxConn::new(&mut tx)` for sqlx-transaction callers (orm-transaction
-//! bridge). Errors stay `sqlx::Error` via `orm_tx::into_sqlx` so callers'
-//! SQLSTATE classification is unchanged.
+//! Write routing: the `*_conn` functions take a SeaORM connection
+//! (`&impl ConnectionTrait`) — either `sea_orm_connection(&pool)` for pool
+//! callers or `TxConn::new(&mut tx)` for sqlx-transaction callers
+//! (orm-transaction bridge). The five functions also reached by batches
+//! that own their callers (`fetch_instance_first`, `fetch_config_by_keys`,
+//! `apply_config_batch`, `disable_email_config`, `fetch_workspace_page`)
+//! keep a pool entry point with their original names taking `&PgPool`
+//! (the only `sqlx::Executor` production callers pass); the SeaORM impls
+//! are the `*_conn` variants. Errors stay `sqlx::Error` via
+//! `orm_tx::into_sqlx` so callers' SQLSTATE classification is unchanged.
 //!
 //! `create_admin` takes the new row's `id` from the caller (Django assigns
 //! the UUID client-side pre-insert); the `uuid` crate here has no `v4`
@@ -61,10 +66,10 @@
 //!   are intentionally not touched.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Set,
 };
-use sea_query::{Alias, Expr};
+use sea_query::{Alias, Expr, Func};
 
 use super::models::{
     instance::Instance as InstanceRow, instance_admin::InstanceAdmin as InstanceAdminRow,
@@ -112,7 +117,7 @@ fn instances_model_to_row(m: instances::Model) -> InstanceRow {
 
 /// Newest non-deleted instance, or `None` (the GET null-instance branch,
 /// `instance.py:39-44`).
-pub async fn fetch_instance_first(
+pub async fn fetch_instance_first_conn(
     db: &impl ConnectionTrait,
 ) -> Result<Option<InstanceRow>, sqlx::Error> {
     let row = instances::Entity::find()
@@ -123,6 +128,13 @@ pub async fn fetch_instance_first(
         .await
         .map_err(crate::orm_tx::into_sqlx)?;
     Ok(row.map(instances_model_to_row))
+}
+
+/// Pool entry point (LICENSE-1 backward compat): the same query over a
+/// `&PgPool`, for batches whose callers still pass the pool.
+pub async fn fetch_instance_first(pool: &sqlx::PgPool) -> Result<Option<InstanceRow>, sqlx::Error> {
+    let db = crate::pool::sea_orm_connection(pool);
+    fetch_instance_first_conn(&db).await
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +448,7 @@ pub fn config_bulk_update_sql(pairs: &[(uuid::Uuid, &str)]) -> Option<String> {
 /// Rows for the requested keys (unknown keys silently ignored — they are
 /// never fetched and never created). Empty input returns `[]` with no
 /// query, mirroring Django's `EmptyResultSet` short-circuit.
-pub async fn fetch_config_by_keys(
+pub async fn fetch_config_by_keys_conn(
     db: &impl ConnectionTrait,
     keys: &[&str],
 ) -> Result<Vec<InstanceConfigurationRow>, sqlx::Error> {
@@ -454,37 +466,70 @@ pub async fn fetch_config_by_keys(
     Ok(rows.into_iter().map(instance_config_model_to_row).collect())
 }
 
+/// Pool entry point (LICENSE-1 backward compat): the same read over a
+/// `&PgPool`, for batches whose callers still pass the pool.
+pub async fn fetch_config_by_keys(
+    pool: &sqlx::PgPool,
+    keys: &[&str],
+) -> Result<Vec<InstanceConfigurationRow>, sqlx::Error> {
+    let db = crate::pool::sea_orm_connection(pool);
+    fetch_config_by_keys_conn(&db, keys).await
+}
+
+/// One `bulk_update` batch as a SeaORM `UPDATE ... CASE` (Django emits one
+/// `UPDATE ... CASE` per 100-row batch; fixture `config_patch.sql`
+/// §write). Returns `None` for an empty batch: the view skips the write
+/// when nothing matched (`configuration.py:56`).
+fn apply_config_batch_update(
+    pairs: &[(uuid::Uuid, &str)],
+) -> Option<sea_orm::UpdateMany<instance_configurations::Entity>> {
+    let mut arms = pairs.iter();
+    let (first_id, first_value) = arms.next()?;
+    let mut case = Expr::case(
+        instance_configurations::Column::Id.eq(*first_id),
+        Expr::value(Some(first_value.to_string())),
+    );
+    for (id, value) in arms {
+        case = case.case(
+            instance_configurations::Column::Id.eq(*id),
+            Expr::value(Some(value.to_string())),
+        );
+    }
+    Some(
+        instance_configurations::Entity::update_many()
+            .col_expr(
+                instance_configurations::Column::Value,
+                case.finally(Expr::col(instance_configurations::Column::Value))
+                    .into(),
+            )
+            .filter(instance_configurations::Column::Id.is_in(pairs.iter().map(|(id, _)| *id))),
+    )
+}
+
 /// Apply one pre-built batch (`id -> value`): a single `UPDATE ... CASE`.
 /// Returns affected rows. Callers split larger inputs with
 /// [`config_bulk_update_batches`] (chunks of
-/// [`CONFIG_BULK_UPDATE_BATCH_SIZE`]).
-///
-/// Implemented as per-row `UPDATE` statements via SeaORM `update_many`
-/// (one per id) — same row semantics as the single CASE statement but
-/// with multiple statements; the product behavior (values written) is
-/// identical. The single-statement CASE is preserved in the builder
-/// [`config_bulk_update_sql`] for fixture parity.
-pub async fn apply_config_batch(
+/// [`CONFIG_BULK_UPDATE_BATCH_SIZE`]). The `CASE` is one statement, so a
+/// batch is all-or-nothing like Django's `bulk_update`.
+pub async fn apply_config_batch_conn(
     db: &impl ConnectionTrait,
     pairs: &[(uuid::Uuid, &str)],
 ) -> Result<u64, sqlx::Error> {
-    if pairs.is_empty() {
+    let Some(update) = apply_config_batch_update(pairs) else {
         return Ok(0);
-    }
-    let mut total = 0u64;
-    for (id, value) in pairs {
-        let res = instance_configurations::Entity::update_many()
-            .col_expr(
-                instance_configurations::Column::Value,
-                Expr::value(Some(value.to_string())),
-            )
-            .filter(instance_configurations::Column::Id.eq(*id))
-            .exec(db)
-            .await
-            .map_err(crate::orm_tx::into_sqlx)?;
-        total += res.rows_affected;
-    }
-    Ok(total)
+    };
+    let res = update.exec(db).await.map_err(crate::orm_tx::into_sqlx)?;
+    Ok(res.rows_affected)
+}
+
+/// Pool entry point (LICENSE-1 backward compat): the same write over a
+/// `&PgPool`, for batches whose callers still pass the pool.
+pub async fn apply_config_batch(
+    pool: &sqlx::PgPool,
+    pairs: &[(uuid::Uuid, &str)],
+) -> Result<u64, sqlx::Error> {
+    let db = crate::pool::sea_orm_connection(pool);
+    apply_config_batch_conn(&db, pairs).await
 }
 
 // ---------------------------------------------------------------------------
@@ -510,42 +555,38 @@ pub const DISABLE_EMAIL_KEYS: &[&str] = &[
 /// 400 `{"error": "Failed to disable email configuration"}`.
 pub const DISABLE_EMAIL_SQL: &str = "UPDATE \"instance_configurations\" SET \"value\" = CASE WHEN (\"instance_configurations\".\"key\" = 'ENABLE_SMTP') THEN '0' ELSE '' END WHERE (\"instance_configurations\".\"deleted_at\" IS NULL AND \"instance_configurations\".\"key\" IN ('EMAIL_HOST', 'EMAIL_HOST_USER', 'EMAIL_HOST_PASSWORD', 'ENABLE_SMTP', 'EMAIL_PORT', 'EMAIL_FROM'))";
 
-/// Run the disable-email `UPDATE`; returns affected rows.
-pub async fn disable_email_config(db: &impl ConnectionTrait) -> Result<u64, sqlx::Error> {
-    // Implemented as two SeaORM updates (ENABLE_SMTP -> "0", others -> "")
-    // to keep single-statement semantics; fall back to per-key updates
-    // if needed. The single CASE statement is preserved in DISABLE_EMAIL_SQL
-    // for fixture parity.
+/// The disable-email `UPDATE` as one SeaORM statement: one `CASE`, like
+/// Django (`configuration.py:79`), so no reader can observe a half-reset.
+fn disable_email_update() -> sea_orm::UpdateMany<instance_configurations::Entity> {
     let keys: Vec<String> = DISABLE_EMAIL_KEYS.iter().map(|s| s.to_string()).collect();
-    // ENABLE_SMTP -> "0"
-    let res1 = instance_configurations::Entity::update_many()
+    instance_configurations::Entity::update_many()
         .col_expr(
             instance_configurations::Column::Value,
-            Expr::value(Some("0".to_string())),
+            Expr::case(
+                instance_configurations::Column::Key.eq("ENABLE_SMTP"),
+                Expr::value(Some("0".to_string())),
+            )
+            .finally(Expr::value(Some(String::new())))
+            .into(),
         )
         .filter(instance_configurations::Column::DeletedAt.is_null())
-        .filter(instance_configurations::Column::Key.eq("ENABLE_SMTP"))
-        .filter(instance_configurations::Column::Key.is_in(keys.clone()))
+        .filter(instance_configurations::Column::Key.is_in(keys))
+}
+
+/// Run the disable-email `UPDATE` (one statement); returns affected rows.
+pub async fn disable_email_config_conn(db: &impl ConnectionTrait) -> Result<u64, sqlx::Error> {
+    let res = disable_email_update()
         .exec(db)
         .await
         .map_err(crate::orm_tx::into_sqlx)?;
-    // Others -> "" : key in set minus ENABLE_SMTP
-    let others: Vec<String> = DISABLE_EMAIL_KEYS
-        .iter()
-        .filter(|k| **k != "ENABLE_SMTP")
-        .map(|s| s.to_string())
-        .collect();
-    let res2 = instance_configurations::Entity::update_many()
-        .col_expr(
-            instance_configurations::Column::Value,
-            Expr::value(Some("".to_string())),
-        )
-        .filter(instance_configurations::Column::DeletedAt.is_null())
-        .filter(instance_configurations::Column::Key.is_in(others))
-        .exec(db)
-        .await
-        .map_err(crate::orm_tx::into_sqlx)?;
-    Ok(res1.rows_affected + res2.rows_affected)
+    Ok(res.rows_affected)
+}
+
+/// Pool entry point (LICENSE-1 backward compat): the same write over a
+/// `&PgPool`, for batches whose callers still pass the pool.
+pub async fn disable_email_config(pool: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
+    let db = crate::pool::sea_orm_connection(pool);
+    disable_email_config_conn(&db).await
 }
 
 // ---------------------------------------------------------------------------
@@ -803,15 +844,81 @@ pub struct WorkspaceListRow {
 /// [`WORKSPACE_MAX_PER_PAGE`]); cursor parsing stays with the paginator
 /// kernel (`pidash_api::paginator`) and the handler layer.
 ///
-/// SeaORM implementation: fetch the workspace page, then fetch two counts
-/// per workspace via SeaORM (same row semantics as the original correlated
-/// subqueries, with the same ordering and pagination).
-pub async fn fetch_workspace_page(
+/// One grouped project count: [`PROJECT_COUNT_SUBQUERY`] without the
+/// per-row correlated scope (the page ids scope it instead).
+#[derive(Debug, Clone, Copy, PartialEq, sea_orm::FromQueryResult)]
+struct ProjectCountRow {
+    workspace_id: uuid::Uuid,
+    total_projects: i64,
+}
+
+/// One grouped member count: [`MEMBER_COUNT_SUBQUERY`] without the
+/// per-row correlated scope. The `INNER JOIN` excludes orphan
+/// memberships (no `users` row) exactly like the subquery.
+#[derive(Debug, Clone, Copy, PartialEq, sea_orm::FromQueryResult)]
+struct MemberCountRow {
+    workspace_id: uuid::Uuid,
+    total_members: i64,
+}
+
+/// Live projects grouped by workspace over an explicit id set.
+fn project_counts_select(ids: &[uuid::Uuid]) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::WorkspaceId.is_in(ids.iter().copied()))
+        .select_only()
+        .columns([projects::Column::WorkspaceId])
+        .expr_as(
+            Func::count(Expr::col(projects::Column::Id)),
+            "total_projects",
+        )
+        .group_by(projects::Column::WorkspaceId)
+}
+
+/// Active non-bot members grouped by workspace over an explicit id set.
+/// The `INNER JOIN users ON member_id` excludes orphan memberships
+/// (no `users` row), exactly like [`MEMBER_COUNT_SUBQUERY`]; counting
+/// membership rows (not distinct users) keeps duplicate-but-one bot
+/// rows at zero, again like the subquery.
+fn member_counts_select(ids: &[uuid::Uuid]) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Users2.def(),
+        )
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(users::Column::IsBot.eq(false))
+        .filter(workspace_members::Column::WorkspaceId.is_in(ids.iter().copied()))
+        .select_only()
+        .columns([workspace_members::Column::WorkspaceId])
+        .expr_as(
+            Func::count(Expr::col((
+                Alias::new("workspace_members"),
+                Alias::new("id"),
+            ))),
+            "total_members",
+        )
+        .group_by(workspace_members::Column::WorkspaceId)
+}
+
+/// SeaORM implementation: fetch the workspace page with one query, then
+/// the two annotations with one grouped `is_in` query per relation
+/// (playbook §3.4; the correlated subqueries run as grouped counts, so
+/// a page costs 3 statements, not 1 + 4N). Same row semantics as the
+/// original subqueries: live projects per workspace, and active
+/// membership rows joined to non-bot users (orphans excluded).
+///
+/// A `TxConn` caller sees the page and its counts in one snapshot; a
+/// pool caller gets the same page with bounded count queries.
+pub async fn fetch_workspace_page_conn(
     db: &impl ConnectionTrait,
     search: Option<&str>,
     page: i64,
     per_page: i64,
 ) -> Result<(Vec<WorkspaceListRow>, bool), sqlx::Error> {
+    use std::collections::HashMap;
+
     let offset = page * per_page;
     let limit = per_page + 1;
 
@@ -832,96 +939,65 @@ pub async fn fetch_workspace_page(
 
     let has_more = (entities.len() as i64) > per_page;
     let limited: Vec<workspaces::Model> = entities.into_iter().take(per_page as usize).collect();
-
-    let mut out = Vec::with_capacity(limited.len());
-    for ws in limited {
-        let total_projects = projects::Entity::find()
-            .filter(projects::Column::DeletedAt.is_null())
-            .filter(projects::Column::WorkspaceId.eq(ws.id))
-            .count(db)
-            .await
-            .map_err(crate::orm_tx::into_sqlx)? as i64;
-
-        let total_members_raw = workspace_members::Entity::find()
-            .filter(workspace_members::Column::DeletedAt.is_null())
-            .filter(workspace_members::Column::IsActive.eq(true))
-            .filter(workspace_members::Column::WorkspaceId.eq(ws.id))
-            .count(db)
-            .await
-            .map_err(crate::orm_tx::into_sqlx)? as i64;
-        let bot_count = {
-            let member_ids: Vec<uuid::Uuid> = workspace_members::Entity::find()
-                .filter(workspace_members::Column::DeletedAt.is_null())
-                .filter(workspace_members::Column::IsActive.eq(true))
-                .filter(workspace_members::Column::WorkspaceId.eq(ws.id))
-                .select_only()
-                .columns([workspace_members::Column::MemberId])
-                .into_tuple::<uuid::Uuid>()
-                .all(db)
-                .await
-                .map_err(crate::orm_tx::into_sqlx)?
-                .into_iter()
-                .collect();
-            if member_ids.is_empty() {
-                0
-            } else {
-                users::Entity::find()
-                    .filter(users::Column::Id.is_in(member_ids))
-                    .filter(users::Column::IsBot.eq(true))
-                    .count(db)
-                    .await
-                    .map_err(crate::orm_tx::into_sqlx)? as i64
-            }
-        };
-        let total_members = total_members_raw - bot_count;
-
-        out.push(WorkspaceListRow {
-            created_at: ws.created_at.with_timezone(&chrono::Utc),
-            updated_at: ws.updated_at.with_timezone(&chrono::Utc),
-            created_by_id: ws.created_by_id,
-            updated_by_id: ws.updated_by_id,
-            deleted_at: ws.deleted_at.map(|dt| dt.with_timezone(&chrono::Utc)),
-            id: ws.id,
-            name: ws.name,
-            logo: ws.logo,
-            logo_asset_id: ws.logo_asset_id,
-            owner_id: ws.owner_id,
-            slug: ws.slug,
-            organization_size: ws.organization_size,
-            timezone: ws.timezone,
-            background_color: ws.background_color,
-            total_projects,
-            total_members,
-        });
+    if limited.is_empty() {
+        return Ok((Vec::new(), has_more));
     }
+    let ids: Vec<uuid::Uuid> = limited.iter().map(|ws| ws.id).collect();
+    let project_counts: HashMap<uuid::Uuid, i64> = project_counts_select(&ids)
+        .into_model::<ProjectCountRow>()
+        .all(db)
+        .await
+        .map_err(crate::orm_tx::into_sqlx)?
+        .into_iter()
+        .map(|row| (row.workspace_id, row.total_projects))
+        .collect();
+    let member_counts: HashMap<uuid::Uuid, i64> = member_counts_select(&ids)
+        .into_model::<MemberCountRow>()
+        .all(db)
+        .await
+        .map_err(crate::orm_tx::into_sqlx)?
+        .into_iter()
+        .map(|row| (row.workspace_id, row.total_members))
+        .collect();
+
+    let out = limited
+        .into_iter()
+        .map(|ws| {
+            let total_projects = project_counts.get(&ws.id).copied().unwrap_or(0);
+            let total_members = member_counts.get(&ws.id).copied().unwrap_or(0);
+            WorkspaceListRow {
+                created_at: ws.created_at.with_timezone(&chrono::Utc),
+                updated_at: ws.updated_at.with_timezone(&chrono::Utc),
+                created_by_id: ws.created_by_id,
+                updated_by_id: ws.updated_by_id,
+                deleted_at: ws.deleted_at.map(|dt| dt.with_timezone(&chrono::Utc)),
+                id: ws.id,
+                name: ws.name,
+                logo: ws.logo,
+                logo_asset_id: ws.logo_asset_id,
+                owner_id: ws.owner_id,
+                slug: ws.slug,
+                organization_size: ws.organization_size,
+                timezone: ws.timezone,
+                background_color: ws.background_color,
+                total_projects,
+                total_members,
+            }
+        })
+        .collect();
     Ok((out, has_more))
 }
 
-#[derive(Debug, Clone, PartialEq, sea_orm::FromQueryResult)]
-#[allow(dead_code)]
-struct WorkspacePartial {
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-    created_by_id: Option<uuid::Uuid>,
-    updated_by_id: Option<uuid::Uuid>,
-    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    id: uuid::Uuid,
-    name: String,
-    logo: Option<String>,
-    logo_asset_id: Option<uuid::Uuid>,
-    owner_id: uuid::Uuid,
-    slug: String,
-    organization_size: Option<String>,
-    timezone: String,
-    background_color: String,
-    total_projects: i64,
-    total_members: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, sea_orm::FromQueryResult)]
-#[allow(dead_code)]
-struct MemberIdPartial {
-    member_id: uuid::Uuid,
+/// Pool entry point (LICENSE-1 backward compat): the same page over a
+/// `&PgPool`, for batches whose callers still pass the pool.
+pub async fn fetch_workspace_page(
+    pool: &sqlx::PgPool,
+    search: Option<&str>,
+    page: i64,
+    per_page: i64,
+) -> Result<(Vec<WorkspaceListRow>, bool), sqlx::Error> {
+    let db = crate::pool::sea_orm_connection(pool);
+    fetch_workspace_page_conn(&db, search, page, per_page).await
 }
 
 /// Compatibility helpers for out-of-scope callers that still use `sqlx::PgRow`.
@@ -954,7 +1030,9 @@ pub fn map_instance_row(row: &sqlx::postgres::PgRow) -> Result<InstanceRow, sqlx
     })
 }
 
-pub fn map_instance_admin_row(row: &sqlx::postgres::PgRow) -> Result<InstanceAdminRow, sqlx::Error> {
+pub fn map_instance_admin_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<InstanceAdminRow, sqlx::Error> {
     use sqlx::Row;
     Ok(InstanceAdminRow {
         id: row.try_get("id")?,
@@ -970,7 +1048,9 @@ pub fn map_instance_admin_row(row: &sqlx::postgres::PgRow) -> Result<InstanceAdm
     })
 }
 
-pub fn map_config_row(row: &sqlx::postgres::PgRow) -> Result<InstanceConfigurationRow, sqlx::Error> {
+pub fn map_config_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<InstanceConfigurationRow, sqlx::Error> {
     use sqlx::Row;
     Ok(InstanceConfigurationRow {
         id: row.try_get("id")?,
@@ -986,7 +1066,9 @@ pub fn map_config_row(row: &sqlx::postgres::PgRow) -> Result<InstanceConfigurati
     })
 }
 
-pub fn map_workspace_list_row(row: &sqlx::postgres::PgRow) -> Result<WorkspaceListRow, sqlx::Error> {
+pub fn map_workspace_list_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<WorkspaceListRow, sqlx::Error> {
     use sqlx::Row;
     Ok(WorkspaceListRow {
         id: row.try_get("id")?,
@@ -1007,7 +1089,6 @@ pub fn map_workspace_list_row(row: &sqlx::postgres::PgRow) -> Result<WorkspaceLi
         deleted_at: row.try_get("deleted_at")?,
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1355,6 +1436,66 @@ mod tests {
         assert!(sql.contains("ORDER BY \"instance_admins\".\"created_at\" DESC"));
     }
 
+    #[test]
+    fn seaorm_apply_config_batch_build_pinned() {
+        // One UPDATE ... CASE ... IN statement per batch (Django
+        // bulk_update), never one statement per row.
+        use sea_orm::QueryTrait;
+        use sea_query::PostgresQueryBuilder;
+        let nil = uuid::Uuid::nil();
+        assert!(apply_config_batch_update(&[]).is_none());
+        let sql = apply_config_batch_update(&[(nil, "a"), (nil, "b")])
+            .expect("two pairs")
+            .into_query()
+            .to_string(PostgresQueryBuilder);
+        assert!(sql.contains("UPDATE \"instance_configurations\""), "{sql}");
+        assert!(sql.contains("CASE"), "{sql}");
+        assert!(sql.contains("WHEN"), "{sql}");
+        assert!(sql.contains("\"value\""), "{sql}");
+        assert!(sql.contains("\"id\" IN"), "{sql}");
+    }
+
+    #[test]
+    fn seaorm_disable_email_build_pinned() {
+        // One conditional UPDATE: ENABLE_SMTP -> "0", others -> "".
+        use sea_orm::QueryTrait;
+        use sea_query::PostgresQueryBuilder;
+        let sql = disable_email_update()
+            .into_query()
+            .to_string(PostgresQueryBuilder);
+        assert!(sql.contains("UPDATE \"instance_configurations\""), "{sql}");
+        assert!(sql.contains("CASE"), "{sql}");
+        assert!(sql.contains("'ENABLE_SMTP'"), "{sql}");
+        assert!(sql.contains("'0'"), "{sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("IN"), "{sql}");
+    }
+
+    #[test]
+    fn seaorm_workspace_counts_build_pinned() {
+        // Grouped counts: live projects per workspace, and active
+        // non-bot members via the INNER JOIN (orphans excluded).
+        use sea_orm::QueryTrait;
+        use sea_query::PostgresQueryBuilder;
+        let nil = uuid::Uuid::nil();
+        let projects_sql = project_counts_select(&[nil])
+            .into_query()
+            .to_string(PostgresQueryBuilder);
+        assert!(projects_sql.contains("FROM \"projects\""), "{projects_sql}");
+        assert!(projects_sql.contains("GROUP BY"), "{projects_sql}");
+        assert!(
+            projects_sql.contains("\"total_projects\""),
+            "{projects_sql}"
+        );
+        let members_sql = member_counts_select(&[nil])
+            .into_query()
+            .to_string(PostgresQueryBuilder);
+        assert!(members_sql.contains("JOIN \"users\""), "{members_sql}");
+        assert!(members_sql.contains("\"is_bot\""), "{members_sql}");
+        assert!(members_sql.contains("GROUP BY"), "{members_sql}");
+        assert!(members_sql.contains("\"total_members\""), "{members_sql}");
+    }
+
     // -- live scratch-DB tests (env-gated) -------------------------------
 
     /// Scratch Postgres for the Done-when verification. Unset (plain
@@ -1405,11 +1546,6 @@ mod tests {
         chrono::DateTime::from_timestamp(secs, 0).expect("fixed test timestamp")
     }
 
-    #[allow(dead_code)]
-    fn sea_conn(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
-        crate::pool::sea_orm_connection(pool)
-    }
-
     #[tokio::test]
     async fn live_instance_first() {
         let Some(pool) = scratch_pool().await else {
@@ -1438,7 +1574,7 @@ mod tests {
         }
         // Newest non-deleted row wins; the soft-deleted newest is skipped.
         let conn = crate::orm_tx::TxConn::new(&mut tx);
-        let got = fetch_instance_first(&conn)
+        let got = fetch_instance_first_conn(&conn)
             .await
             .expect("first")
             .expect("a row");
@@ -1450,7 +1586,10 @@ mod tests {
             .await
             .expect("clear");
         let conn2 = crate::orm_tx::TxConn::new(&mut tx);
-        assert!(fetch_instance_first(&conn2).await.expect("empty").is_none());
+        assert!(fetch_instance_first_conn(&conn2)
+            .await
+            .expect("empty")
+            .is_none());
         tx.rollback().await.expect("rollback");
     }
 
@@ -1548,6 +1687,348 @@ mod tests {
                 .expect("delete"),
             0
         );
+    }
 
+    #[tokio::test]
+    async fn live_config_patch() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let (c1, c2) = (live_uuid(20), live_uuid(21));
+        let (t_old, t_new) = (live_ts(1_700_000_000), live_ts(1_700_000_100));
+        for (id, ts, key, value, enc) in [
+            (c1, t_old, "EMAIL_HOST", "smtp.old", false),
+            (c2, t_new, "LLM_API_KEY", "old-token", true),
+        ] {
+            sqlx::query("INSERT INTO instance_configurations (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, key, value, category, is_encrypted) VALUES ($1, $2, $2, NULL, NULL, NULL, $3, $4, 'general', $5)")
+                .bind(id).bind(ts).bind(key).bind(value).bind(enc)
+                .execute(&mut *tx).await.expect("seed config");
+        }
+        // Unknown keys ignored; newest first.
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let rows = fetch_config_by_keys_conn(&conn, &["EMAIL_HOST", "LLM_API_KEY", "NOPE"])
+            .await
+            .expect("fetch");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].key, "LLM_API_KEY");
+        // Per-row transform then write (one CASE statement for the batch).
+        let v1 = normalize_config_value(Some("  smtp.new  "));
+        let v2 = normalize_config_value(Some("tok"));
+        let conn2 = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            apply_config_batch_conn(&conn2, &[(c1, &v1), (c2, &v2)])
+                .await
+                .expect("bulk"),
+            2
+        );
+        let conn3 = crate::orm_tx::TxConn::new(&mut tx);
+        let after = fetch_config_by_keys_conn(&conn3, &["EMAIL_HOST", "LLM_API_KEY"])
+            .await
+            .expect("refetch");
+        assert_eq!(
+            after
+                .iter()
+                .find(|r| r.key == "EMAIL_HOST")
+                .expect("host")
+                .value
+                .as_deref(),
+            Some("smtp.new")
+        );
+        // Empty fetch / empty batch touch nothing.
+        let conn4 = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            fetch_config_by_keys_conn(&conn4, &[])
+                .await
+                .expect("empty")
+                .len(),
+            0
+        );
+        let conn5 = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            apply_config_batch_conn(&conn5, &[]).await.expect("empty"),
+            0
+        );
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_disable_email() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ts = live_ts(1_700_000_000);
+        for (i, (key, value, enc)) in [
+            ("EMAIL_HOST", "smtp.acme.test", false),
+            ("EMAIL_HOST_USER", "ops@acme.test", false),
+            ("EMAIL_HOST_PASSWORD", "gAAAAA-token", true),
+            ("ENABLE_SMTP", "1", false),
+            ("EMAIL_PORT", "587", false),
+            ("EMAIL_FROM", "Team <t@e.test>", false),
+            ("POSTHOG_API_KEY", "z", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query("INSERT INTO instance_configurations (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, key, value, category, is_encrypted) VALUES ($1, $2, $2, NULL, NULL, NULL, $3, $4, 'email', $5)")
+                .bind(live_uuid(30 + i as u8)).bind(ts).bind(key).bind(value).bind(enc)
+                .execute(&mut *tx).await.expect("seed config");
+        }
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(disable_email_config_conn(&conn).await.expect("disable"), 6);
+        let conn2 = crate::orm_tx::TxConn::new(&mut tx);
+        let rows = fetch_config_by_keys_conn(
+            &conn2,
+            &[
+                "EMAIL_HOST",
+                "EMAIL_HOST_USER",
+                "EMAIL_HOST_PASSWORD",
+                "ENABLE_SMTP",
+                "EMAIL_PORT",
+                "EMAIL_FROM",
+                "POSTHOG_API_KEY",
+            ],
+        )
+        .await
+        .expect("refetch");
+        for row in &rows {
+            let want = if row.key == "ENABLE_SMTP" {
+                "0"
+            } else if row.key == "POSTHOG_API_KEY" {
+                "z"
+            } else {
+                ""
+            };
+            assert_eq!(row.value.as_deref(), Some(want), "key {}", row.key);
+        }
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_instance_setup_flip() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ts = live_ts(1_700_000_000);
+        for (suffix, done, visited, iid) in [
+            (40u8, false, false, "both"),
+            (41u8, false, true, "done"),
+            (42u8, true, false, "visited"),
+            (43u8, true, true, "noop"),
+        ] {
+            sqlx::query("INSERT INTO instances (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, instance_name, whitelist_emails, instance_id, current_version, latest_version, edition, domain, last_checked_at, namespace, is_telemetry_enabled, is_support_required, is_setup_done, is_signup_screen_visited, is_verified, is_test, is_current_version_deprecated) VALUES ($1, $2, $2, NULL, NULL, NULL, 'Acme', NULL, $3, 'v1', NULL, 'PI_DASH_COMMUNITY', '', $2, NULL, TRUE, TRUE, $4, $5, TRUE, FALSE, FALSE)")
+                .bind(live_uuid(suffix)).bind(ts).bind(iid).bind(done).bind(visited)
+                .execute(&mut *tx).await.expect("seed instance");
+        }
+        // Each reachable subset flips exactly its flags.
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            update_instance_setup(&conn, live_uuid(40), true, true)
+                .await
+                .expect("both"),
+            1
+        );
+        let conn2 = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            update_instance_setup(&conn2, live_uuid(41), true, false)
+                .await
+                .expect("done"),
+            1
+        );
+        let conn3 = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            update_instance_setup(&conn3, live_uuid(42), false, true)
+                .await
+                .expect("visited"),
+            1
+        );
+        // No-write path: no statement, zero rows.
+        let conn4 = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            update_instance_setup(&conn4, live_uuid(43), false, false)
+                .await
+                .expect("noop"),
+            0
+        );
+        let rows: Vec<(bool, bool, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT is_setup_done, is_signup_screen_visited, updated_at FROM instances ORDER BY instance_id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .expect("refetch");
+        assert_eq!(rows.len(), 4);
+        for (done, visited, updated) in &rows {
+            assert!(done, "is_setup_done flipped");
+            assert!(visited, "is_signup_screen_visited flipped");
+            assert_eq!(updated, &ts, "updated_at untouched by the flip");
+        }
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_config_purge_by_keys() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ts = live_ts(1_700_000_000);
+        let already_gone = live_ts(1_600_000_000);
+        for (i, (key, deleted)) in [
+            ("K1", None),
+            ("K2", None),
+            ("K3", Some(already_gone)),
+            ("KEEP", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query("INSERT INTO instance_configurations (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, key, value, category, is_encrypted) VALUES ($1, $2, $2, NULL, NULL, $3, $4, 'v', 'general', FALSE)")
+                .bind(live_uuid(50 + i as u8)).bind(ts).bind(deleted).bind(key)
+                .execute(&mut *tx).await.expect("seed config");
+        }
+        let now = live_ts(1_800_000_000);
+        // K1 + K2 stamped; K3 already deleted, MISSING has no row.
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            soft_delete_configs_by_keys(&conn, &["K1", "K2", "K3", "MISSING"], now)
+                .await
+                .expect("purge"),
+            2
+        );
+        let rows: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> =
+            sqlx::query_as("SELECT key, deleted_at FROM instance_configurations ORDER BY key")
+                .fetch_all(&mut *tx)
+                .await
+                .expect("refetch");
+        for (key, deleted) in &rows {
+            let want = if key == "K1" || key == "K2" {
+                Some(now)
+            } else if key == "K3" {
+                Some(already_gone)
+            } else {
+                None
+            };
+            assert_eq!(deleted, &want, "key {key}");
+        }
+        // Empty key set touches nothing.
+        let conn2 = crate::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            soft_delete_configs_by_keys(&conn2, &[], now)
+                .await
+                .expect("empty"),
+            0
+        );
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_workspace_list() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = live_tx(&pool).await;
+        let ts = live_ts(1_700_000_000);
+        let (owner, m1, m2, m3, m4) = (
+            live_uuid(40),
+            live_uuid(41),
+            live_uuid(42),
+            live_uuid(43),
+            live_uuid(44),
+        );
+        for (u, bot) in [
+            (owner, false),
+            (m1, false),
+            (m2, false),
+            (m3, true),
+            (m4, false),
+        ] {
+            sqlx::query("INSERT INTO users (id, is_bot) VALUES ($1, $2)")
+                .bind(u)
+                .bind(bot)
+                .execute(&mut *tx)
+                .await
+                .expect("seed user");
+        }
+        let (acme, other) = (live_uuid(45), live_uuid(46));
+        for (id, name, slug) in [
+            (acme, "Acme Works", "acme-works"),
+            (other, "Other", "other"),
+        ] {
+            sqlx::query("INSERT INTO workspaces (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, name, logo, logo_asset_id, owner_id, slug, organization_size, timezone, background_color) VALUES ($1, $2, $2, NULL, NULL, NULL, $3, NULL, NULL, $4, $5, NULL, 'UTC', '#fff')")
+                .bind(id).bind(ts).bind(name).bind(owner).bind(slug)
+                .execute(&mut *tx).await.expect("seed workspace");
+        }
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO projects (id, deleted_at, workspace_id) VALUES ($1, NULL, $2)",
+            )
+            .bind(live_uuid(50 + i))
+            .bind(acme)
+            .execute(&mut *tx)
+            .await
+            .expect("seed project");
+        }
+        sqlx::query("INSERT INTO projects (id, deleted_at, workspace_id) VALUES ($1, $2, $3)")
+            .bind(live_uuid(53))
+            .bind(ts)
+            .bind(acme)
+            .execute(&mut *tx)
+            .await
+            .expect("seed deleted project");
+        // m1 active human, m4 active human, m2 inactive, m3 bot (two active
+        // rows), one orphan with no users row, m4-dupe soft-deleted.
+        // The JOIN count is 2 (m1, m4); raw-minus-distinct-bots would be 3.
+        let orphan = live_uuid(65);
+        for (i, (member, active, deleted)) in [
+            (m1, true, false),
+            (m2, false, false),
+            (m3, true, false),
+            (m3, true, false),
+            (orphan, true, false),
+            (m4, true, false),
+            (m4, true, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query("INSERT INTO workspace_members (id, deleted_at, is_active, workspace_id, member_id) VALUES ($1, $2, $3, $4, $5)")
+                .bind(live_uuid(60 + i as u8))
+                .bind(if deleted { Some(ts) } else { None })
+                .bind(active)
+                .bind(acme)
+                .bind(member)
+                .execute(&mut *tx).await.expect("seed member");
+        }
+        // icontains search (case-insensitive via UPPER).
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
+        let (rows, more) = fetch_workspace_page_conn(&conn, Some("ACME"), 0, 10)
+            .await
+            .expect("search page");
+        assert!(!more);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Acme Works");
+        assert_eq!(rows[0].total_projects, 3);
+        assert_eq!(rows[0].total_members, 2);
+        // No search: both rows; windowing with per_page=1.
+        let conn2 = crate::orm_tx::TxConn::new(&mut tx);
+        let (p0, more0) = fetch_workspace_page_conn(&conn2, None, 0, 1)
+            .await
+            .expect("p0");
+        assert_eq!((p0.len(), more0), (1, true));
+        let conn3 = crate::orm_tx::TxConn::new(&mut tx);
+        let (p1, more1) = fetch_workspace_page_conn(&conn3, None, 1, 1)
+            .await
+            .expect("p1");
+        assert_eq!((p1.len(), more1), (1, false));
+        assert_ne!(p0[0].id, p1[0].id);
+        // Miss: empty page, no more.
+        let conn4 = crate::orm_tx::TxConn::new(&mut tx);
+        let (miss, miss_more) = fetch_workspace_page_conn(&conn4, Some("zzz"), 0, 10)
+            .await
+            .expect("miss");
+        assert_eq!((miss.len(), miss_more), (0, false));
+        tx.rollback().await.expect("rollback");
     }
 }

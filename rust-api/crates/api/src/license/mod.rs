@@ -230,20 +230,6 @@ fn none_str(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| "None".to_owned())
 }
 
-/// One `users` row for session resolution (kept for compatibility).
-type UserLookupRow = (
-    uuid::Uuid,
-    Option<String>,
-    String,
-    String,
-    String,
-    bool,
-    String,
-);
-
-#[allow(dead_code)]
-type _UserLookupRowUnused = UserLookupRow;
-
 /// The authenticated actor: the `users` row behind a verified session.
 #[derive(Debug, Clone)]
 pub struct Actor {
