@@ -51,7 +51,7 @@ crates/api/src/runner_sessions/machine.rs 9
 crates/api/src/runner_sessions/runner_open.rs 31
 crates/api/src/runner_sessions/runner_poll.rs 20
 crates/api/src/space/assets.rs 12
-crates/api/src/space/intake.rs 27
+crates/api/src/space/intake.rs 26
 crates/api/src/space/issues.rs 5
 crates/api/src/space/project_meta.rs 3
 crates/api/src/space/social.rs 15
@@ -73,7 +73,7 @@ crates/db/src/runner_sessions/outbox.rs 1
 crates/jobs/src/dispatch/dispatch.rs 11
 crates/jobs/src/dispatch/execute.rs 19
 crates/jobs/src/integrations/git_sync.rs 26
-crates/jobs/src/integrations/github_signals.rs 4
+crates/jobs/src/integrations/github_signals.rs 3
 crates/jobs/src/integrations/github_sync.rs 33
 crates/jobs/src/license/commands.rs 9
 crates/jobs/src/license/tasks.rs 4
@@ -90,7 +90,7 @@ crates/services/src/operations/issues.rs 18
 crates/services/src/operations/pull_requests.rs 1
 crates/services/src/operations/relations.rs 6
 crates/services/src/ops/boot.rs 1
-crates/services/src/read/comment.rs 5
+crates/services/src/read/comment.rs 4
 crates/services/src/read/identity.rs 3
 crates/services/src/read/issues.rs 7
 crates/services/src/read/pr_links.rs 3
