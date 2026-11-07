@@ -164,7 +164,7 @@ crates/services/src/ops/boot.rs 1
 crates/services/src/read/pr_links.rs 3
 crates/services/src/read/projects.rs 1
 crates/services/src/read/search.rs 1
-crates/services/src/read/work_items.rs 20
+crates/services/src/read/work_items.rs 10
 crates/services/src/runner_enroll/revoke.rs 1
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1
