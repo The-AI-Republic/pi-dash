@@ -128,11 +128,18 @@ fn render_number(n: &serde_json::Number) -> String {
     if let Some(u) = n.as_u64() {
         return u.to_string();
     }
+    // Beyond i64/u64. The workspace build unifies
+    // `serde_json/arbitrary_precision` (from pidash-api), so an integer
+    // literal keeps its exact digits here; Python ints are unbounded, so
+    // `json.dumps` echoes them verbatim — never route them through `f64`.
+    // Only float-syntax literals (`.`, `e`, `E`) take the `repr` path.
+    let token = n.to_string();
+    if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        return token;
+    }
     match n.as_f64() {
         Some(f) => render_float_py(f, true),
-        // Unreachable without `arbitrary_precision`: every Number is
-        // i64, u64 or f64.
-        None => n.to_string(),
+        None => token,
     }
 }
 
@@ -325,5 +332,40 @@ mod tests {
         let value = json!({"f": 0.1});
         assert_eq!(render_compact_utf8(&value), r#"{"f":0.1}"#);
         assert_eq!(render_spaced_ascii(&value), r#"{"f": 0.1}"#);
+    }
+
+    #[test]
+    fn renderer_big_integers() {
+        // Python ints are unbounded: `json.dumps` echoes the exact digits
+        // past u64/i64 (outbox.py:135, poll JsonResponse). The workspace
+        // build unifies `serde_json/arbitrary_precision` (from
+        // pidash-api), so the literal survives parsing and both renderers
+        // must echo it verbatim (PIDASHCONV-1332).
+        let value: Value = serde_json::from_str(
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#,
+        )
+        .expect("valid JSON");
+        assert_eq!(
+            render_spaced_ascii(&value),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#
+        );
+        assert_eq!(
+            render_compact_utf8(&value),
+            r#"{"big":18446744073709551616,"neg":-9223372036854775809,"huge":1267650600228229401496703205376}"#
+        );
+        // Float-syntax literals still take the float path (`repr` spelling).
+        let floats: Value =
+            serde_json::from_str(r#"{"e": 1e19, "f": 100.00}"#).expect("valid JSON");
+        assert_eq!(render_spaced_ascii(&floats), r#"{"e": 1e+19, "f": 100.0}"#);
+        assert_eq!(render_compact_utf8(&floats), r#"{"e":1e+19,"f":100.0}"#);
+        // i64/u64 edges still echo exactly.
+        let edges: Value = serde_json::from_str(
+            r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#,
+        )
+        .expect("valid JSON");
+        assert_eq!(
+            render_spaced_ascii(&edges),
+            r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#
+        );
     }
 }
