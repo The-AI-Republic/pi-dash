@@ -29,6 +29,7 @@ from .integration import (
     GithubRepository,
     GithubRepositorySync,
     GitProviderAccount,
+    GitProviderInstallSession,
     GitRepository,
     GitRepositoryBinding,
     GitIssueSync,
