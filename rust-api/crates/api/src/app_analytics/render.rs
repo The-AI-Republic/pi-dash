@@ -138,9 +138,15 @@ use crate::app_issues::{fetch_json_rows, query_last, Denial as IssuesDenial, Que
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_compat::response::json_response;
+use pidash_db::entity::{
+    analytic_views, cycles, modules, project_members, projects, workspace_members, workspaces,
+};
 use pidash_db::issue_filters::issue_filters_get;
 use pidash_services::app_analytics::queries as q;
 use pidash_types::WorkspaceId;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -360,23 +366,37 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
 /// the same row filters Python uses: `member=user, workspace__slug=slug,
 /// role__in=[ADMIN, MEMBER], is_active=True` (`app/permissions/base.py`) —
 /// the `app_cycles` precedent (soft-deleted rows excluded on both sides).
+fn workspace_role_query(
+    slug: &str,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+}
+
 async fn workspace_role(
     pool: &sqlx::PgPool,
     slug: &str,
     user_id: &uuid::Uuid,
 ) -> Result<Option<i16>, Denial> {
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<i16>> = workspace_role_query(slug, *user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // `role` is non-nullable; the outer Option is row presence.
-    Ok(row.and_then(|row| row.0))
+    Ok(row.flatten())
 }
 
 /// Build the gate facts for a workspace advance route: WORKSPACE-level
@@ -437,41 +457,62 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = resolve_project_query(slug, &upper)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
+}
+
+fn resolve_project_query(slug: &str, upper: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
 }
 
 /// The active project-membership role for the PROJECT-level gates:
 /// `member=user, workspace__slug=slug, project_id=project_id, is_active=True`
 /// (`app/permissions/base.py:53-59`) — the `app_cycles` precedent
 /// (soft-deleted rows excluded on both sides).
+fn project_role_query(
+    slug: &str,
+    project_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+}
+
 async fn project_role(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Option<i16>, Denial> {
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<i16>> = project_role_query(slug, *project_id, *user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.flatten())
 }
 
 /// Build the gate facts for a project advance route: PROJECT-level
@@ -903,6 +944,7 @@ async fn count_one(
     ctx: &FilterCtx,
     range_kind: RangeKind,
 ) -> Result<i64, Denial> {
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let row: (i64,) = bind_range!(sqlx::query_as(sql), slug, user_id, ctx, range_kind)
         .fetch_one(pool)
         .await
@@ -1008,6 +1050,7 @@ async fn overview_data(
     // `wph` and the agent scope below).
     let mwindow_vals = ctx.window;
     let run_member_count = |sql: String| async move {
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         let mut query = sqlx::query_as::<_, (i64,)>(&sql);
         if is_workspace_path {
             query = query.bind(slug);
@@ -1103,6 +1146,7 @@ async fn overview_data(
     // list, never in the scope).
     let asql = asql.replace(",0)", ",0)::BIGINT");
     let tokens: (Option<i64>, Option<i64>, Option<i64>) =
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         bind_range!(sqlx::query_as(&asql), slug, user_id, ctx, RangeKind::Window)
             .fetch_one(pool)
             .await
@@ -1208,6 +1252,7 @@ async fn project_issues_stats(
     // already expose — no extra join needed.
     let shell = q::advance_project_issues_stats_sql(&base, None);
     let sql = with_joins(shell, "issues", ISSUE_JOINS);
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows: Vec<(uuid::Uuid, String, i64, i64, i64, i64, i64)> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(user_id)
@@ -1365,6 +1410,7 @@ async fn project_chart(
         "workspace_members",
         " INNER JOIN \"workspaces\" ON (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\")",
     );
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let mut mem_query = sqlx::query_as::<_, (i64,)>(&mem_sql).bind(slug);
     if let Some((start, end)) = ctx.period.as_ref() {
         mem_query = mem_query.bind(*start).bind(*end);
@@ -1430,6 +1476,14 @@ async fn project_chart(
 /// `created_at` month-start through the current month-start. Each row is
 /// `{key, name, count=created, completed_issues, created_issues}` with the
 /// `{"completed_issues": ..., "created_issues": ...}` schema.
+fn workspace_created_query(slug: &str) -> sea_orm::Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::CreatedAt)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+}
+
 async fn work_item_completion_chart(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -1439,14 +1493,13 @@ async fn work_item_completion_chart(
 ) -> Result<String, Denial> {
     // `Workspace.objects.get(slug=...)` — 404 when missing (unreachable past
     // the gate; the gate denies unknown slugs first).
-    let ws: Option<(DateTime<Utc>,)> = sqlx::query_as(
-        "SELECT \"created_at\" FROM \"workspaces\" WHERE \"slug\" = $1 AND \"deleted_at\" IS NULL",
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (ws_created,) = ws.ok_or(Denial::NotFound)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let ws: Option<chrono::DateTime<chrono::FixedOffset>> = workspace_created_query(slug)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let ws_created = ws.ok_or(Denial::NotFound)?.with_timezone(&chrono::Utc);
     let start = ws_created.date_naive().with_day(1).expect("month start");
 
     let base = issue_scope(ctx)?;
@@ -1462,6 +1515,7 @@ async fn work_item_completion_chart(
     // `AT TIME ZONE`); `%Y-%m-%d` keys the local month-start like Django's
     // `stat["month"].strftime("%Y-%m-%d")` on the zoned `TruncMonth`.
     let rows: Vec<(NaiveDateTime, i64, i64)> =
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
             .fetch_all(pool)
             .await
@@ -1897,6 +1951,7 @@ async fn simple_chart_response(
     } else {
         RangeKind::None
     };
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows = bind_range!(sqlx::query(&sql), slug, user_id, ctx, kind)
         .fetch_all(pool)
         .await
@@ -1905,6 +1960,7 @@ async fn simple_chart_response(
     for row in rows {
         let key = decode_key(&row, 0, axis.key_kind).await?;
         let name = decode_key(&row, 1, axis.name_kind).await?;
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         let count: i64 = row.try_get(2).map_err(|_| Denial::ServerError)?;
         let mut item = Map::new();
         item.insert("key".to_owned(), key.simple_json());
@@ -1947,6 +2003,7 @@ async fn grouped_chart_response(
     } else {
         RangeKind::None
     };
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows = bind_range!(sqlx::query(&sql), slug, user_id, ctx, kind)
         .fetch_all(pool)
         .await
@@ -1970,6 +2027,7 @@ async fn grouped_chart_response(
         let group_key = decode_key(&row, 1, group.key_kind).await?;
         let group_name = decode_key(&row, 2, group.name_kind).await?;
         let display = decode_key(&row, 3, axis.name_kind).await?;
+        // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
         let count: i64 = row.try_get(4).map_err(|_| Denial::ServerError)?;
 
         let bucket = buckets.entry(key.clone()).or_insert_with(|| {
@@ -2229,6 +2287,7 @@ async fn project_assignee_stats(
         i64,
         i64,
     );
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows: Vec<AssigneeStatRow> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(user_id)
@@ -2340,6 +2399,30 @@ async fn project_advance_charts_get(
 /// (`cycle.end_date.date()` / the `<= None` comparison raising into the
 /// generic branch).
 #[allow(clippy::too_many_arguments)]
+fn cycle_dates_query(id: uuid::Uuid) -> sea_orm::Select<cycles::Entity> {
+    cycles::Entity::find()
+        .select_only()
+        .columns([cycles::Column::StartDate, cycles::Column::EndDate])
+        .filter(cycles::Column::Id.eq(id))
+        .filter(cycles::Column::DeletedAt.is_null())
+}
+
+fn module_dates_query(id: uuid::Uuid) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .columns([modules::Column::StartDate, modules::Column::TargetDate])
+        .filter(modules::Column::Id.eq(id))
+        .filter(modules::Column::DeletedAt.is_null())
+}
+
+fn project_created_query(id: uuid::Uuid) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::CreatedAt)
+        .filter(projects::Column::Id.eq(id))
+        .filter(projects::Column::DeletedAt.is_null())
+}
+
 async fn project_completion_chart(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2351,14 +2434,16 @@ async fn project_completion_chart(
 ) -> Result<String, Denial> {
     match branch {
         ThroughBranch::Cycle(id) => {
-            type CycleDatesRow = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
-            let row: Option<CycleDatesRow> = sqlx::query_as(
-                "SELECT \"start_date\", \"end_date\" FROM \"cycles\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            type CycleDatesRow = (
+                Option<chrono::DateTime<chrono::FixedOffset>>,
+                Option<chrono::DateTime<chrono::FixedOffset>>,
+            );
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let row: Option<CycleDatesRow> = cycle_dates_query(id)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
             let (start, end) = match row {
                 Some((Some(start), end)) => (start.date_naive(), end),
                 _ => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
@@ -2378,13 +2463,12 @@ async fn project_completion_chart(
             .await
         }
         ThroughBranch::Module(id) => {
-            let row: Option<(Option<NaiveDate>, Option<NaiveDate>)> = sqlx::query_as(
-                "SELECT \"start_date\", \"target_date\" FROM \"modules\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let row: Option<(Option<NaiveDate>, Option<NaiveDate>)> = module_dates_query(id)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
             let (start, end) = match row {
                 Some((Some(start), end)) => (start, end),
                 _ => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
@@ -2408,16 +2492,16 @@ async fn project_completion_chart(
             // unreachable past the gate for live projects, but a soft-deleted
             // project keeps its membership rows, so the MISS branch is live:
             // `project.created_at` on `None` is the generic 500).
-            let row: Option<(Option<DateTime<Utc>>,)> = sqlx::query_as(
-                "SELECT \"created_at\" FROM \"projects\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-            )
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let row: Option<Option<chrono::DateTime<chrono::FixedOffset>>> =
+                project_created_query(*project_id)
+                    .into_tuple()
+                    .one(&db)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
             let start = match row {
-                Some((Some(created),)) => created.date_naive().with_day(1).expect("month start"),
-                Some((None,)) => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
+                Some(Some(created)) => created.date_naive().with_day(1).expect("month start"),
+                Some(None) => return Ok(EMPTY_PROJECT_CHART_BODY.to_owned()),
                 None => return Err(Denial::ServerError),
             };
             let mut scope = issue_scope(ctx)?;
@@ -2435,7 +2519,8 @@ async fn project_completion_chart(
             let sql = with_joins(shell, "issues", ISSUE_JOINS);
             // Naive local month-start (see the workspace chart above).
             let rows: Vec<(NaiveDateTime, i64, i64)> =
-                bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
+                // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
+        bind_range!(sqlx::query_as(&sql), slug, user_id, ctx, RangeKind::Period)
                     .fetch_all(pool)
                     .await
                     .map_err(|_| Denial::ServerError)?;
@@ -2497,6 +2582,7 @@ async fn project_completion_daily(
         fk = fk_col,
         lit = uuid_literal(fk_id),
     );
+    // raw-sql: dynamic advance/project SQL from services Q-04/Q-05 String builder (dimension_sql/month_dimension_expr are shared with Q-01/jobs and legacy_sql/Binder with the app_issues pilot); sea-query rebuild requires the shared-helper rewrite (dependency).
     let rows: Vec<(NaiveDate, i64, i64)> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(user_id)
@@ -2654,6 +2740,26 @@ fn pool_owned(state: &AppState) -> Result<sqlx::PgPool, IssuesDenial> {
 /// order. Anonymous answers 401 before anything else (the slug-existence
 /// oracle stays closed); a caller with no allowed-role row — including
 /// unknown slugs and cross-tenant slugs — answers the decorator 403.
+/// Membership lookup for [`authed_gate`]: same filters as
+/// [`workspace_role_query`] but WITHOUT the workspace soft-delete guard
+/// (the hand-written JOIN drops it) — kept verbatim.
+fn authed_member_query(
+    slug: &str,
+    actor_id: uuid::Uuid,
+) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(actor_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+}
+
 async fn authed_gate(
     state: &AppState,
     slug: &str,
@@ -2670,18 +2776,15 @@ async fn authed_gate(
     let row = gate_for(method, path).ok_or(IssuesDenial::ServerError)?;
     // Same row filters as the decorator (`is_active=True`, soft-delete
     // scope, slug scoping); `role` is non-nullable, the outer Option is
-    // row presence.
-    let member: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| IssuesDenial::ServerError)?;
-    let role = member.and_then(|row| row.0).map(i32::from);
+    // row presence. No workspace soft-delete guard here (the hand-written
+    // JOIN drops it) — kept verbatim.
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let member: Option<Option<i16>> = authed_member_query(slug, actor.id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| IssuesDenial::ServerError)?;
+    let role = member.flatten().map(i32::from);
     let allowed = match row.gate {
         super::gates::Gate::Workspace { roles } | super::gates::Gate::Project { roles } => {
             role.is_some_and(|role| roles.contains(&role))
@@ -3222,6 +3325,26 @@ fn saved_statements(
 /// `AnalyticView.objects.get(pk, workspace__slug)` lookup (miss →
 /// `ObjectDoesNotExist` 404), then axes validation from `query_dict`,
 /// then the stored-scope count + plot.
+fn saved_analytic_query(
+    slug: &str,
+    view_id: uuid::Uuid,
+) -> sea_orm::Select<analytic_views::Entity> {
+    analytic_views::Entity::find()
+        .select_only()
+        .columns([
+            analytic_views::Column::Query,
+            analytic_views::Column::QueryDict,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            analytic_views::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(analytic_views::Column::Id.eq(view_id))
+        .filter(analytic_views::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
 async fn get_saved_analytic(
     State(state): State<AppState>,
     Path((slug, analytic_id)): Path<(String, String)>,
@@ -3253,19 +3376,20 @@ async fn get_saved_analytic(
     // `AnalyticView.objects.get(pk=analytic_id, workspace__slug=slug)` —
     // the soft-delete-scoped default manager (`AuditModel` carries
     // `SoftDeleteModel`).
-    let found: Option<(Option<Value>, Option<Value>)> = sqlx::query_as(
-        "SELECT \"analytic_views\".\"query\", \"analytic_views\".\"query_dict\" \
-         FROM \"analytic_views\" \
-         INNER JOIN \"workspaces\" ON (\"analytic_views\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"analytic_views\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 \
-         AND \"analytic_views\".\"deleted_at\" IS NULL) LIMIT 1",
-    )
-    .bind(view_id)
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| IssuesDenial::ServerError)?;
-    let (stored_query, query_dict) = found.ok_or(IssuesDenial::NotFound)?;
+    #[derive(FromQueryResult)]
+    struct SavedAnalyticRow {
+        query: Option<Value>,
+        query_dict: Option<Value>,
+    }
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let found: Option<SavedAnalyticRow> = saved_analytic_query(&slug, view_id)
+        .into_model::<SavedAnalyticRow>()
+        .one(&db)
+        .await
+        .map_err(|_| IssuesDenial::ServerError)?;
+    let (stored_query, query_dict) = found
+        .map(|row| (row.query, row.query_dict))
+        .ok_or(IssuesDenial::NotFound)?;
     // `analytic_view.query_dict.get(...)`: a NULL column is
     // `None.get` → `AttributeError` → generic 500.
     let query_dict = query_dict.ok_or(IssuesDenial::ServerError)?;
@@ -4833,5 +4957,244 @@ mod pidashconv_736_tests {
         // TAB and U+0085 padding already matched Django; pin the behavior.
         assert_eq!(normalize_resolve_identifier("\teng\t"), "ENG");
         assert_eq!(normalize_resolve_identifier("\u{85}eng\u{85}"), "ENG");
+    }
+}
+
+#[cfg(test)]
+mod part3_tests {
+    use super::*;
+
+    #[test]
+    fn converted_lookup_shapes_pin_queries() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let nil = uuid::Uuid::nil();
+        let ws = workspace_role_query("acme", nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            ws.contains("from \"workspace_members\""),
+            "ws role from: {ws}"
+        );
+        assert!(ws.contains("inner join"), "ws role join: {ws}");
+        assert!(
+            ws.contains("\"workspaces\".\"deleted_at\" is null"),
+            "ws role ws guard: {ws}"
+        );
+        assert!(ws.contains("\"is_active\""), "ws role active: {ws}");
+
+        // authed_member_query keeps the handwritten JOIN without the
+        // workspace soft-delete guard (kept verbatim).
+        let authed = authed_member_query("acme", nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            !authed.contains("\"workspaces\".\"deleted_at\" is null"),
+            "authed no ws guard: {authed}"
+        );
+
+        let resolve = resolve_project_query("acme", "ENG")
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            resolve.contains("\"identifier\""),
+            "resolve identifier: {resolve}"
+        );
+        assert!(resolve.contains("inner join"), "resolve join: {resolve}");
+
+        let pm = project_role_query("acme", nil, nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            pm.contains("from \"project_members\""),
+            "pm role from: {pm}"
+        );
+        assert!(pm.contains("inner join"), "pm role join: {pm}");
+
+        let saved = saved_analytic_query("acme", nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            saved.contains("from \"analytic_views\""),
+            "saved from: {saved}"
+        );
+        assert!(saved.contains("inner join"), "saved join: {saved}");
+        assert!(
+            saved.contains("deleted_at\" is null"),
+            "saved soft delete: {saved}"
+        );
+        assert!(saved.contains("limit"), "saved limit: {saved}");
+
+        let created = workspace_created_query("acme")
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(
+            created.contains("\"created_at\""),
+            "ws created col: {created}"
+        );
+
+        let cyc = cycle_dates_query(nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(cyc.contains("\"start_date\""), "cycle start: {cyc}");
+        assert!(cyc.contains("\"end_date\""), "cycle end: {cyc}");
+
+        let modu = module_dates_query(nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(modu.contains("\"target_date\""), "module target: {modu}");
+
+        let proj = project_created_query(nil)
+            .build(DbBackend::Postgres)
+            .to_string()
+            .to_lowercase();
+        assert!(proj.contains("from \"projects\""), "proj from: {proj}");
+    }
+
+    /// TEMP tables shadow public (no FKs needed for statement execution).
+    #[tokio::test]
+    async fn live_converted_lookups() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "workspace_members",
+            "projects",
+            "project_members",
+            "analytic_views",
+            "cycles",
+            "modules",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, user, stranger, proj, cycle, module, view, dead) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, created_at, updated_at, slug, deleted_at) VALUES ('{ws}', now() - interval '3 months', now(), 'acme_render', NULL)"),
+            format!("INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{user}', 20, true, NULL)"),
+            format!("INSERT INTO projects (id, created_at, updated_at, workspace_id, identifier, deleted_at, archived_at) VALUES ('{proj}', now() - interval '3 months', now(), '{ws}', 'ENG', NULL, NULL)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user}', 20, true, NULL)"),
+            format!("INSERT INTO analytic_views (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, description, query, query_dict) VALUES ('{view}', now(), now(), '{user}', NULL, NULL, '{ws}', 'V', '', '{{}}', '{{}}')"),
+            format!("INSERT INTO analytic_views (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, name, description, query, query_dict) VALUES ('{dead}', now(), now(), '{user}', NULL, now(), '{ws}', 'D', '', '{{}}', '{{}}')"),
+            format!("INSERT INTO cycles (id, name, description, start_date, end_date, created_at, updated_at, project_id, owned_by_id, workspace_id, deleted_at) VALUES ('{cycle}', 'C', '', now(), now() + interval '1 month', now(), now(), '{proj}', '{user}', '{ws}', NULL)"),
+            format!("INSERT INTO modules (id, name, description, start_date, target_date, created_at, updated_at, project_id, workspace_id, deleted_at) VALUES ('{module}', 'M', '', current_date, current_date + 7, now(), now(), '{proj}', '{ws}', NULL)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // role lookups: hit + miss.
+        assert_eq!(
+            workspace_role(&pool, "acme_render", &user)
+                .await
+                .expect("role"),
+            Some(20)
+        );
+        assert_eq!(
+            workspace_role(&pool, "acme_render", &stranger)
+                .await
+                .expect("miss"),
+            None
+        );
+        assert_eq!(
+            project_role(&pool, "acme_render", &proj, &user)
+                .await
+                .expect("pm role"),
+            Some(20)
+        );
+        // identifier resolve: hit via directory, hit via raw UUID, miss.
+        assert_eq!(
+            resolve_project_id(&pool, "acme_render", "eng")
+                .await
+                .expect("resolve"),
+            proj
+        );
+        assert_eq!(
+            resolve_project_id(&pool, "acme_render", &proj.to_string())
+                .await
+                .expect("raw uuid"),
+            proj
+        );
+        assert!(matches!(
+            resolve_project_id(&pool, "acme_render", "missing").await,
+            Err(Denial::ProjectNotFound)
+        ));
+        // date lookups decode against TEMP seeds.
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        type CycleDatesRow = (
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+            Option<chrono::DateTime<chrono::FixedOffset>>,
+        );
+        let cycle_row: Option<CycleDatesRow> = cycle_dates_query(cycle)
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("cycle dates");
+        assert!(cycle_row.is_some_and(|(s, e)| s.is_some() && e.is_some()));
+        let module_row: Option<(Option<NaiveDate>, Option<NaiveDate>)> = module_dates_query(module)
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("module dates");
+        assert!(module_row.is_some_and(|(s, e)| s.is_some() && e.is_some()));
+        let ws_created: Option<chrono::DateTime<chrono::FixedOffset>> =
+            workspace_created_query("acme_render")
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("ws created");
+        assert!(ws_created.is_some());
+        let proj_created: Option<Option<chrono::DateTime<chrono::FixedOffset>>> =
+            project_created_query(proj)
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("proj created");
+        assert!(proj_created.is_some_and(|c| c.is_some()));
+        // saved-analytic lookup: hit + soft-deleted miss.
+        #[derive(sea_orm::FromQueryResult)]
+        struct SavedRow {
+            query: Option<serde_json::Value>,
+            query_dict: Option<serde_json::Value>,
+        }
+        let saved: Option<SavedRow> = saved_analytic_query("acme_render", view)
+            .into_model::<SavedRow>()
+            .one(&db)
+            .await
+            .expect("saved");
+        let saved = saved.expect("saved row");
+        assert_eq!(saved.query, Some(serde_json::json!({})));
+        assert_eq!(saved.query_dict, Some(serde_json::json!({})));
+        let saved_dead: Option<SavedRow> = saved_analytic_query("acme_render", dead)
+            .into_model::<SavedRow>()
+            .one(&db)
+            .await
+            .expect("saved dead");
+        assert!(saved_dead.is_none());
     }
 }
