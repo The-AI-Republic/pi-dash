@@ -28,35 +28,9 @@ crates/jobs/src/tasks_cleanup/dummy_data.rs 34
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
 crates/services/src/dispatch/execution.rs 7
-<<<<<<< HEAD
-crates/services/src/read/comment.rs 5
-crates/services/src/read/issues.rs 7
-=======
-crates/services/src/domain/identity.rs 43
-crates/services/src/domain/projects.rs 66
-crates/services/src/integrations/github_client.rs 9
-crates/services/src/operations/comments.rs 3
-crates/services/src/operations/issues.rs 18
-crates/services/src/operations/pull_requests.rs 1
-crates/services/src/operations/relations.rs 6
-crates/services/src/ops/boot.rs 1
->>>>>>> 6b859a178 (NEWPIDASH-77 Part 2/3: SeaORM batch READ-1 — comment (5) + issues scalar/txn (5))
 crates/services/src/read/pr_links.rs 3
 crates/services/src/read/projects.rs 1
 crates/services/src/read/search.rs 1
-<<<<<<< HEAD
-<<<<<<< HEAD
-crates/services/src/read/work_items.rs 20
-<<<<<<< HEAD
-crates/services/src/read/workspace.rs 3
-=======
-=======
-crates/services/src/read/work_items.rs 10
->>>>>>> 805f01be0 (NEWPIDASH-77 reseed: work_items 20→10 after simple expands (Parts 1-3a))
-=======
->>>>>>> 7654a8a68 (NEWPIDASH-77 Part 3b/3: SeaORM batch READ-1 — work_items complex (7 sites))
-crates/services/src/runner_enroll/revoke.rs 1
->>>>>>> ff6311f57 (NEWPIDASH-77 Part 1/3: SeaORM batch READ-1 — identity, workspace, relations (7 sites))
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1
 
