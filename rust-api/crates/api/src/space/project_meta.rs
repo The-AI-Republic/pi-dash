@@ -112,9 +112,11 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_compat::datetime::render_rfc3339_in;
 use pidash_compat::response::json_response;
+use pidash_db::entity::users;
 use pidash_services::space::guards::{self, AnchorLookup, ErrorBody, ExceptionKind};
 use pidash_services::space::queries::project_meta as queries;
 use pidash_services::space::serializers::lite;
+use sea_orm::EntityTrait;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -263,16 +265,15 @@ async fn request_tz(
         Some(id) => id,
         None => return Ok(chrono_tz::UTC),
     };
-    let row: Option<(bool, Option<String>)> =
-        sqlx::query_as("SELECT is_active, user_timezone FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
-    match row {
-        Some((true, timezone)) => timezone
-            .as_deref()
-            .unwrap_or("")
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    match user {
+        Some(user) if user.is_active => user
+            .user_timezone
+            .as_str()
             .parse::<chrono_tz::Tz>()
             .map_err(|_| HandlerError::ServerError),
         _ => Ok(chrono_tz::UTC),
@@ -309,6 +310,7 @@ async fn fetch_optional_object(
     params: &[SqlParam<'_>],
 ) -> Result<Option<Value>, HandlerError> {
     let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
+    // raw-sql: executes pidash_services::space::queries::project_meta builder SQL (boards/members/meta/cycles/modules joins, ordering, pagination) that the queries module owns as text; rebuilding the same joins/filters via sea-query here would duplicate those builders and risk drift — simple author lookups use SeaORM Entities directly
     let mut query = sqlx::query(&sql);
     for param in params {
         query = match param {
@@ -343,6 +345,7 @@ async fn fetch_all_objects(
     params: &[SqlParam<'_>],
 ) -> Result<Vec<Value>, HandlerError> {
     let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
+    // raw-sql: same project_meta builder execution as fetch_optional_object (members/meta/cycles/modules list paths with joins/ordering/pagination) — see above; simple reads use SeaORM Entities directly
     let mut query = sqlx::query(&sql);
     for param in params {
         query = match param {

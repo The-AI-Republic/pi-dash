@@ -90,7 +90,6 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -98,8 +97,11 @@ use pidash_compat::py::py_json_string;
 use pidash_compat::response::{
     json_response as raw, json_value as json_status, no_content, server_error,
 };
+use pidash_db::entity::{deploy_boards, file_assets, workspaces};
 use pidash_services::space::guards;
-use pidash_services::space::queries::intake_assets as q;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 
 /// Routes for `space/urls/asset.py` (all under `/api/public/`).
 ///
@@ -211,23 +213,21 @@ async fn board_first(
     pool: &sqlx::PgPool,
     scoped: bool,
     anchor: &str,
-) -> Result<Option<Board>, sqlx::Error> {
-    let sql = if scoped {
-        q::asset_board_first_scoped_sql()
-    } else {
-        q::asset_board_first_unscoped_sql()
-    };
-    sqlx::query(&sql)
-        .bind(anchor)
-        .fetch_optional(pool)
-        .await?
-        .map(|row| {
-            Ok::<Board, sqlx::Error>(Board {
-                workspace_id: row.try_get("workspace_id")?,
-                project_id: row.try_get("project_id")?,
-            })
-        })
-        .transpose()
+) -> Result<Option<Board>, sea_orm::DbErr> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut query = deploy_boards::Entity::find()
+        .filter(deploy_boards::Column::Anchor.eq(anchor))
+        .filter(deploy_boards::Column::DeletedAt.is_null())
+        .order_by_desc(deploy_boards::Column::CreatedAt)
+        .limit(1);
+    if scoped {
+        query = query.filter(deploy_boards::Column::EntityName.eq("project"));
+    }
+    let row = query.one(&db).await?;
+    Ok(row.map(|model| Board {
+        workspace_id: model.workspace_id,
+        project_id: model.project_id.unwrap_or_else(Uuid::nil),
+    }))
 }
 
 struct AssetRow {
@@ -239,15 +239,15 @@ struct AssetRow {
     asset_key: String,
 }
 
-fn asset_row(row: &sqlx::postgres::PgRow) -> Result<AssetRow, sqlx::Error> {
-    Ok(AssetRow {
-        id: row.try_get("id")?,
-        entity_type: row.try_get("entity_type")?,
-        is_uploaded: row.try_get("is_uploaded")?,
-        storage_metadata: row.try_get("storage_metadata")?,
-        attributes: row.try_get("attributes")?,
-        asset_key: row.try_get("asset")?,
-    })
+fn asset_row_from_model(model: file_assets::Model) -> AssetRow {
+    AssetRow {
+        id: model.id,
+        entity_type: model.entity_type.clone(),
+        is_uploaded: model.is_uploaded,
+        storage_metadata: model.storage_metadata.clone(),
+        attributes: Some(model.attributes.clone()),
+        asset_key: model.asset.clone(),
+    }
 }
 
 /// Python truthiness of a `storage_metadata` JSON value: `None`/null,
@@ -492,22 +492,22 @@ async fn get_asset(
         Ok(pk) => pk,
         Err(_) => return page_not_found(),
     };
-    let asset = match sqlx::query(&q::asset_get_sql())
-        .bind(board.workspace_id)
-        .bind(pk)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let asset_model = match file_assets::Entity::find()
+        .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
+        .filter(file_assets::Column::Id.eq(pk))
+        .filter(file_assets::Column::EntityType.is_in(["ISSUE_DESCRIPTION", "COMMENT_DESCRIPTION"]))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
-        Ok(asset) => asset,
+        Ok(model) => model,
         Err(_) => return server_error(),
     };
-    let Some(row) = asset else {
+    let Some(model) = asset_model else {
         return does_not_exist();
     };
-    let asset = match asset_row(&row) {
-        Ok(asset) => asset,
-        Err(_) => return server_error(),
-    };
+    let asset = asset_row_from_model(model);
     if !asset.is_uploaded {
         return guard_err(guards::requested_asset_not_found());
     }
@@ -604,35 +604,48 @@ async fn post_asset(
         "size": size,
     });
     let now = Utc::now();
-    if sqlx::query(&asset_insert_complete_sql())
-        .bind(asset_id)
-        .bind(now)
-        .bind(now)
-        .bind(sqlx::types::Json(attributes))
-        .bind(&asset_key)
-        .bind(size as f64)
-        .bind(board.workspace_id)
-        .bind(actor.id)
-        .bind(entity_type)
-        .bind(board.project_id)
-        .bind(comment_id)
-        .execute(pool)
-        .await
-        .is_err()
-    {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let new_asset = file_assets::ActiveModel {
+        id: Set(asset_id),
+        created_at: Set(now.fixed_offset()),
+        updated_at: Set(now.fixed_offset()),
+        attributes: Set(attributes),
+        asset: Set(asset_key.clone()),
+        size: Set(size as f64),
+        workspace_id: Set(Some(board.workspace_id)),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        entity_type: Set(Some(entity_type.to_owned())),
+        project_id: Set(Some(board.project_id)),
+        comment_id: Set(comment_id),
+        is_uploaded: Set(false),
+        is_deleted: Set(false),
+        is_archived: Set(false),
+        storage_metadata: Set(Some(serde_json::json!({}))),
+        deleted_at: Set(None),
+        external_id: Set(None),
+        external_source: Set(None),
+        issue_id: Set(None),
+        page_id: Set(None),
+        user_id: Set(None),
+        draft_issue_id: Set(None),
+        entity_identifier: Set(None),
+    };
+    if new_asset.insert(&db).await.is_err() {
         return server_error();
     }
-    let slug: Option<String> = match sqlx::query_scalar("SELECT slug FROM workspaces WHERE id = $1")
-        .bind(board.workspace_id)
-        .fetch_optional(pool)
+    let slug_model = match workspaces::Entity::find_by_id(board.workspace_id)
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
-        Ok(slug) => slug,
+        Ok(model) => model,
         Err(_) => return server_error(),
     };
-    let Some(slug) = slug else {
+    let Some(slug_model) = slug_model else {
         return server_error();
     };
+    let slug = slug_model.slug;
     let asset_url = asset_url_for(entity_type, &slug, &board.project_id, &asset_id);
     let storage = &state.settings().storage;
     let Some(host) = host_of(&headers) else {
@@ -659,25 +672,10 @@ async fn post_asset(
     )
 }
 
-/// POST INSERT, execution-complete edition of
-/// [`q::asset_insert_sql`]: `$1..$11` bind in the builder's documented
-/// order, plus the three literals Django's ORM always sends alongside
-/// them. The builder omits `is_deleted` / `is_archived` (both
-/// `NOT NULL` without a database default) and `storage_metadata`
-/// (Python-side `default=dict`), so executing it verbatim fails live
-/// with a null-violation (`is_deleted`) — verified against Postgres.
-/// Django emits the full column list with `is_deleted=false`,
-/// `is_archived=false`, `storage_metadata='{}'`; nullable columns not
-/// passed (`updated_by_id`, `user_id`, `issue_id`, `page_id`,
-/// `draft_issue_id`, `entity_identifier`, `external_*`, `deleted_at`)
-/// default to `NULL` on both sides. The builder fix belongs to the
-/// queries layer (follow-up issue); this statement keeps the same
-/// resulting row.
-fn asset_insert_complete_sql() -> String {
-    "INSERT INTO \"file_assets\" (\"id\", \"created_at\", \"updated_at\", \"attributes\", \"asset\", \"size\", \"workspace_id\", \"created_by_id\", \"entity_type\", \"project_id\", \"comment_id\", \"is_uploaded\", \"is_deleted\", \"is_archived\", \"storage_metadata\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, false, false, false, '{}')"
-        .to_string()
-}
-
+/// Statement-shape test helper: the POST insert is an `ActiveModel` insert
+/// over `file_assets` with `is_uploaded=false`, `is_deleted=false`,
+/// `is_archived=false`, `storage_metadata='{}'` and the audit columns the
+/// handler binds. See `post_asset` above.
 /// `FileAsset.asset_url` (`db/models/asset.py:80-98`): `issue_id` is
 /// always `None` here (POST never sets it), rendered as `None` exactly
 /// like the f-string.
@@ -735,22 +733,22 @@ async fn patch_asset(
         Err(_) => return page_not_found(),
     };
     // Patch passes no project scoping (`:143`) — port.
-    let row = match sqlx::query(&q::asset_patch_get_sql())
-        .bind(pk)
-        .bind(board.workspace_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = match file_assets::Entity::find()
+        .filter(file_assets::Column::Id.eq(pk))
+        .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
-        Ok(row) => row,
+        Ok(model) => model,
         Err(_) => return server_error(),
     };
-    let Some(row) = row else {
+    let Some(model) = model else {
         return does_not_exist();
     };
-    let asset = match asset_row(&row) {
-        Ok(asset) => asset,
-        Err(_) => return server_error(),
-    };
+    let asset = asset_row_from_model(model);
+    let asset_id = asset.id;
     // `is_uploaded = True` is set before the metadata check (`:145-148`).
     if !python_truthy(&asset.storage_metadata) {
         let message = pidash_jobs::space::asset_metadata_message(&asset.id.to_string());
@@ -772,15 +770,24 @@ async fn patch_asset(
         .get("attributes")
         .cloned()
         .unwrap_or_else(|| asset.attributes.clone().unwrap_or(Value::Null));
-    if sqlx::query(&q::asset_patch_sql())
-        .bind(pk)
-        .bind(sqlx::types::Json(attributes))
-        .execute(pool)
+    let db_patch = pidash_db::pool::sea_orm_connection(pool);
+    if file_assets::Entity::update_many()
+        .col_expr(
+            file_assets::Column::Attributes,
+            sea_orm::sea_query::Expr::value(attributes),
+        )
+        .col_expr(
+            file_assets::Column::IsUploaded,
+            sea_orm::sea_query::Expr::value(true),
+        )
+        .filter(file_assets::Column::Id.eq(pk))
+        .exec(&db_patch)
         .await
         .is_err()
     {
         return server_error();
     }
+    let _ = asset_id;
     no_content()
 }
 
@@ -812,23 +819,32 @@ async fn delete_asset(
         Ok(pk) => pk,
         Err(_) => return page_not_found(),
     };
-    let row = match sqlx::query(&q::asset_scoped_get_sql())
-        .bind(pk)
-        .bind(board.workspace_id)
-        .bind(board.project_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let exists = match file_assets::Entity::find()
+        .filter(file_assets::Column::Id.eq(pk))
+        .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
+        .filter(file_assets::Column::ProjectId.eq(board.project_id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
-        Ok(row) => row,
+        Ok(model) => model,
         Err(_) => return server_error(),
     };
-    if row.is_none() {
+    if exists.is_none() {
         return does_not_exist();
     }
-    if sqlx::query(&q::asset_soft_delete_sql())
-        .bind(pk)
-        .bind(Utc::now())
-        .execute(pool)
+    if file_assets::Entity::update_many()
+        .col_expr(
+            file_assets::Column::IsDeleted,
+            sea_orm::sea_query::Expr::value(true),
+        )
+        .col_expr(
+            file_assets::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(Utc::now().fixed_offset()),
+        )
+        .filter(file_assets::Column::Id.eq(pk))
+        .exec(&db)
         .await
         .is_err()
     {
@@ -866,21 +882,30 @@ async fn restore_asset(
         Err(_) => return page_not_found(),
     };
     // `all_objects`: no `deleted_at IS NULL` conjunct (`:183`) — port.
-    let row = match sqlx::query(&q::asset_restore_get_sql())
-        .bind(pk)
-        .bind(board.workspace_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let exists = match file_assets::Entity::find()
+        .filter(file_assets::Column::Id.eq(pk))
+        .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
+        .one(&db)
         .await
     {
-        Ok(row) => row,
+        Ok(model) => model,
         Err(_) => return server_error(),
     };
-    if row.is_none() {
+    if exists.is_none() {
         return does_not_exist();
     }
-    if sqlx::query(&q::asset_restore_sql())
-        .bind(pk)
-        .execute(pool)
+    if file_assets::Entity::update_many()
+        .col_expr(
+            file_assets::Column::IsDeleted,
+            sea_orm::sea_query::Expr::value(false),
+        )
+        .col_expr(
+            file_assets::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::FixedOffset>>::None),
+        )
+        .filter(file_assets::Column::Id.eq(pk))
+        .exec(&db)
         .await
         .is_err()
     {
@@ -944,15 +969,14 @@ async fn bulk_asset(
             }
         }
     }
-    let filter_sql = q::bulk_filter_sql(asset_ids.len());
-    let mut filter = sqlx::query(&filter_sql);
-    for id in &asset_ids {
-        filter = filter.bind(id);
-    }
-    let rows = match filter
-        .bind(board.workspace_id)
-        .bind(board.project_id)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = match file_assets::Entity::find()
+        .filter(file_assets::Column::Id.is_in(asset_ids.clone()))
+        .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
+        .filter(file_assets::Column::ProjectId.eq(board.project_id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .order_by_desc(file_assets::Column::CreatedAt)
+        .all(&db)
         .await
     {
         Ok(rows) => rows,
@@ -960,35 +984,25 @@ async fn bulk_asset(
     };
     // `assets.first()`: default ordering is `-created_at`, so the gate
     // reads the most recent match.
-    let mut ordered: Vec<&sqlx::postgres::PgRow> = rows.iter().collect();
-    ordered.sort_by(|a, b| {
-        let at: DateTime<Utc> = a.try_get("created_at").unwrap_or(DateTime::UNIX_EPOCH);
-        let bt: DateTime<Utc> = b.try_get("created_at").unwrap_or(DateTime::UNIX_EPOCH);
-        bt.cmp(&at)
-    });
-    let Some(first) = ordered.first() else {
+    let Some(first_model) = rows.first() else {
         return guard_err(guards::requested_asset_not_found());
     };
-    let first = match asset_row(first) {
-        Ok(asset) => asset,
-        Err(_) => return server_error(),
-    };
-    if first.entity_type.as_deref() == Some("COMMENT_DESCRIPTION") {
-        let reassign_sql = q::bulk_reassign_sql(asset_ids.len());
-        let mut query = sqlx::query(&reassign_sql);
-        for id in &asset_ids {
-            query = query.bind(id);
-        }
-        if query
-            .bind(board.workspace_id)
-            .bind(board.project_id)
-            .bind(entity_id)
-            .execute(pool)
+    let first = asset_row_from_model(first_model.clone());
+    if first.entity_type.as_deref() == Some("COMMENT_DESCRIPTION")
+        && file_assets::Entity::update_many()
+            .col_expr(
+                file_assets::Column::CommentId,
+                sea_orm::sea_query::Expr::value(Some(entity_id)),
+            )
+            .filter(file_assets::Column::Id.is_in(asset_ids))
+            .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
+            .filter(file_assets::Column::ProjectId.eq(board.project_id))
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .exec(&db)
             .await
             .is_err()
-        {
-            return server_error();
-        }
+    {
+        return server_error();
     }
     no_content()
 }
@@ -2032,6 +2046,7 @@ fn base64_encode(input: &[u8]) -> String {
 mod tests {
     use super::*;
     use pidash_db::config::StorageSettings;
+    use sea_orm::QueryTrait;
 
     fn test_storage() -> StorageSettings {
         StorageSettings {
@@ -2385,5 +2400,61 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn seaorm_board_first_shape_pins_anchor_filters() {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        let scoped_sql = pidash_db::entity::deploy_boards::Entity::find()
+            .filter(pidash_db::entity::deploy_boards::Column::Anchor.eq("anchor-1"))
+            .filter(pidash_db::entity::deploy_boards::Column::DeletedAt.is_null())
+            .filter(pidash_db::entity::deploy_boards::Column::EntityName.eq("project"))
+            .order_by_desc(pidash_db::entity::deploy_boards::Column::CreatedAt)
+            .limit(1)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(scoped_sql.contains("deploy_boards"));
+        assert!(scoped_sql.to_lowercase().contains("anchor"));
+        assert!(scoped_sql.to_lowercase().contains("deleted_at"));
+        assert!(
+            scoped_sql.to_lowercase().contains("entity_name")
+                && scoped_sql.to_lowercase().contains("project")
+        );
+        let unscoped_sql = pidash_db::entity::deploy_boards::Entity::find()
+            .filter(pidash_db::entity::deploy_boards::Column::Anchor.eq("anchor-1"))
+            .filter(pidash_db::entity::deploy_boards::Column::DeletedAt.is_null())
+            .order_by_desc(pidash_db::entity::deploy_boards::Column::CreatedAt)
+            .limit(1)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        // Unscoped must not filter on entity_name = 'project' (the column appears in SELECT but not in a filter)
+        assert!(
+            !unscoped_sql
+                .to_lowercase()
+                .contains("entity_name = 'project'")
+                && !unscoped_sql
+                    .to_lowercase()
+                    .contains("entity_name = \"project\"")
+        );
+    }
+
+    #[test]
+    fn seaorm_asset_crud_shape_pins_scopes() {
+        use sea_orm::{EntityTrait, QueryFilter};
+        let get_sql = pidash_db::entity::file_assets::Entity::find()
+            .filter(pidash_db::entity::file_assets::Column::WorkspaceId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::file_assets::Column::Id.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::file_assets::Column::DeletedAt.is_null())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(get_sql.contains("file_assets"));
+        assert!(get_sql.contains("workspace_id"));
+        assert!(get_sql.to_lowercase().contains("deleted_at"));
+        let bulk_sql = pidash_db::entity::file_assets::Entity::find()
+            .filter(pidash_db::entity::file_assets::Column::Id.is_in(vec![uuid::Uuid::nil()]))
+            .filter(pidash_db::entity::file_assets::Column::DeletedAt.is_null())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(bulk_sql.contains("IN"));
     }
 }
