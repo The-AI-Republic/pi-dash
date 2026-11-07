@@ -786,14 +786,8 @@ fn binding_runs_base(binding_id: Uuid, user_id: Uuid) -> sea_orm::Select<agent_r
         .add(agent_run::Column::RunnerId.is_null())
         .add(runner::Column::OwnerId.eq(user_id))
         .add(agent_run::Column::CreatedById.eq(user_id));
-    let pod_relation = agent_run::Entity::belongs_to(pod::Entity)
-        .from(agent_run::Column::PodId)
-        .to(pod::Column::Id)
-        .into();
     agent_run::Entity::find()
         .join(JoinType::LeftJoin, agent_run::Relation::Runner.def())
-        .join(JoinType::InnerJoin, pod_relation)
-        .join(JoinType::InnerJoin, pod::Relation::Projects.def())
         .filter(agent_run::Column::SchedulerBindingId.eq(binding_id))
         .filter(gate)
 }
@@ -814,7 +808,13 @@ fn binding_runs_page_statement(
     limit: u64,
     offset: u64,
 ) -> sea_orm::Selector<sea_orm::SelectModel<RunPageRow>> {
+    let pod_relation = agent_run::Entity::belongs_to(pod::Entity)
+        .from(agent_run::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
     binding_runs_base(binding_id, user_id)
+        .join(JoinType::InnerJoin, pod_relation)
+        .join(JoinType::InnerJoin, pod::Relation::Projects.def())
         .column_as(pod::Column::Id, "mini_id")
         .column_as(pod::Column::Name, "mini_name")
         .column_as(pod::Column::IsDefault, "mini_is_default")
