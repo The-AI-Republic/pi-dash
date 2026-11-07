@@ -2,7 +2,6 @@
 # Counts only go down: lower an entry (or delete it at 0) in the PR
 # that migrates sites to SeaORM. Never raise one; mark a justified
 # exception with `// raw-sql: <reason>` instead.
-crates/api/src/app_analytics/render.rs 22
 crates/api/src/app_assets/handlers_v2_project.rs 22
 crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
 crates/api/src/app_notifications/mod.rs 15
