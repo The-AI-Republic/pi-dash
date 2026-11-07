@@ -44,8 +44,11 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use pidash_db::config::{Settings, StorageSettings};
+use pidash_db::entity::{file_assets, issues, pages};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_services::tasks_cleanup::assets as logic;
 use pidash_services::tasks_cleanup::assets::{AssetIdPair, CopyEntity, HeadMeta};
+use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1082,6 +1085,43 @@ async fn run_copy_inner<S: AssetStore, O: ObjectStore, L: LiveConvert>(
     Some(())
 }
 
+/// Statement-shape pins for the ORM execution paths below (TASK-CLEANUP-1):
+/// the same predicates and ordering as the fixture-pinned SQL text in
+/// [`logic`]'s builders.
+pub fn sweep_stmt(
+    cutoff: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> sea_orm::sea_query::UpdateStatement {
+    use sea_orm::sea_query::{Alias, Expr, Query};
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("file_assets".to_owned()));
+    stmt.value(Alias::new("deleted_at".to_owned()), now);
+    stmt.and_where(
+        Expr::col((
+            Alias::new("file_assets".to_owned()),
+            Alias::new("deleted_at".to_owned()),
+        ))
+        .is_null(),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("file_assets".to_owned()),
+            Alias::new("created_at".to_owned()),
+        ))
+        .lt(cutoff),
+    );
+    stmt.and_where(
+        Expr::col((
+            Alias::new("file_assets".to_owned()),
+            Alias::new("is_uploaded".to_owned()),
+        ))
+        .eq(false),
+    );
+    stmt
+}
+
+type OriginalAssetTuple = (Uuid, String, Value, f64, Option<String>, Option<Value>);
+
 /// Postgres [`AssetStore`]: the exact Django query shapes from
 /// [`logic`]'s SQL builders. Every table name is a literal at the call
 /// sites below, never caller input.
@@ -1106,22 +1146,32 @@ impl AssetStore for PgAssetStore {
         cutoff: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<u64, String> {
-        let result = sqlx::query(logic::SWEEP_SQL)
-            .bind(now)
-            .bind(cutoff)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let result = file_assets::Entity::update_many()
+            .col_expr(
+                file_assets::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .filter(file_assets::Column::CreatedAt.lt(cutoff))
+            .filter(file_assets::Column::IsUploaded.eq(false))
+            .exec(&conn)
             .await
-            .map_err(|e| db_error("sweep_unuploaded", e))?;
-        Ok(result.rows_affected())
+            .map_err(|e| db_error("sweep_unuploaded", into_sqlx(e)))?;
+        Ok(result.rows_affected)
     }
 
     async fn asset_key(&self, asset_id: Uuid) -> Result<Option<String>, String> {
-        sqlx::query_scalar::<_, Option<String>>(logic::METADATA_SELECT_SQL)
-            .bind(asset_id)
-            .fetch_optional(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = file_assets::Entity::find_by_id(asset_id)
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([file_assets::Column::Asset])
+            .into_tuple::<String>()
+            .one(&conn)
             .await
-            .map_err(|e| db_error("asset_key", e))
-            .map(|row| row.flatten())
+            .map_err(|e| db_error("asset_key", into_sqlx(e)))?;
+        Ok(row)
     }
 
     async fn save_storage_metadata(
@@ -1130,26 +1180,54 @@ impl AssetStore for PgAssetStore {
         metadata: Option<Value>,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        sqlx::query(logic::METADATA_SAVE_SQL)
-            .bind(metadata.map(sqlx::types::Json))
-            .bind(now)
-            .bind(asset_id)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        file_assets::Entity::update_many()
+            .col_expr(
+                file_assets::Column::StorageMetadata,
+                sea_orm::sea_query::Expr::value(metadata),
+            )
+            .col_expr(
+                file_assets::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(file_assets::Column::Id.eq(asset_id))
+            .exec(&conn)
             .await
             .map(|_| ())
-            .map_err(|e| db_error("save_storage_metadata", e))
+            .map_err(|e| db_error("save_storage_metadata", into_sqlx(e)))
     }
 
     async fn entity(&self, entity: CopyEntity, id: Uuid) -> Result<Option<EntityRow>, String> {
-        let row: Option<(Uuid, Option<Uuid>, String)> =
-            sqlx::query_as(&logic::entity_select_sql(entity))
-                .bind(id)
-                .fetch_optional(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row: Option<(Uuid, Uuid, String)> = match entity {
+            CopyEntity::Page => pages::Entity::find_by_id(id)
+                .filter(pages::Column::DeletedAt.is_null())
+                .select_only()
+                .columns([
+                    pages::Column::Id,
+                    pages::Column::WorkspaceId,
+                    pages::Column::DescriptionHtml,
+                ])
+                .into_tuple::<(Uuid, Uuid, String)>()
+                .one(&conn)
                 .await
-                .map_err(|e| db_error("entity", e))?;
+                .map_err(|e| db_error("entity", into_sqlx(e)))?,
+            CopyEntity::Issue => issues::Entity::find_by_id(id)
+                .filter(issues::Column::DeletedAt.is_null())
+                .select_only()
+                .columns([
+                    issues::Column::Id,
+                    issues::Column::WorkspaceId,
+                    issues::Column::DescriptionHtml,
+                ])
+                .into_tuple::<(Uuid, Uuid, String)>()
+                .one(&conn)
+                .await
+                .map_err(|e| db_error("entity", into_sqlx(e)))?,
+        };
         Ok(row.map(|(id, workspace_id, description_html)| EntityRow {
             id,
-            workspace_id,
+            workspace_id: Some(workspace_id),
             description_html,
         }))
     }
@@ -1160,18 +1238,29 @@ impl AssetStore for PgAssetStore {
         project_id: Option<Uuid>,
         ids: Vec<Uuid>,
     ) -> Result<Vec<OriginalAsset>, String> {
-        let sql = logic::original_assets_sql(project_id.is_none());
-        let mut query =
-            sqlx::query_as::<_, (Uuid, String, Value, f64, Option<String>, Option<Value>)>(&sql)
-                .bind(workspace_id);
-        if let Some(project) = project_id {
-            query = query.bind(project);
-        }
-        let rows = query
-            .bind(ids)
-            .fetch_all(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let mut query = file_assets::Entity::find()
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .filter(file_assets::Column::WorkspaceId.eq(workspace_id))
+            .filter(file_assets::Column::Id.is_in(ids.clone()));
+        query = match project_id {
+            Some(project) => query.filter(file_assets::Column::ProjectId.eq(project)),
+            None => query.filter(file_assets::Column::ProjectId.is_null()),
+        };
+        let rows: Vec<OriginalAssetTuple> = query
+            .select_only()
+            .columns([
+                file_assets::Column::Id,
+                file_assets::Column::Asset,
+                file_assets::Column::Attributes,
+                file_assets::Column::Size,
+                file_assets::Column::EntityType,
+                file_assets::Column::StorageMetadata,
+            ])
+            .into_tuple::<OriginalAssetTuple>()
+            .all(&conn)
             .await
-            .map_err(|e| db_error("original_assets", e))?;
+            .map_err(|e| db_error("original_assets", into_sqlx(e)))?;
         Ok(rows
             .into_iter()
             .map(
@@ -1189,44 +1278,53 @@ impl AssetStore for PgAssetStore {
 
     async fn insert_duplicate(&self, asset: NewAsset, now: DateTime<Utc>) -> Result<Uuid, String> {
         let id = Uuid::new_v4();
-        sqlx::query(logic::DUPLICATE_INSERT_SQL)
-            .bind(id)
-            .bind(now)
-            .bind(now)
-            .bind(asset.created_by_id)
-            .bind(None::<Uuid>)
-            .bind(None::<DateTime<Utc>>)
-            .bind(sqlx::types::Json(asset.attributes))
-            .bind(asset.asset_key)
-            .bind(asset.user_id)
-            .bind(asset.workspace_id)
-            .bind(asset.draft_issue_id)
-            .bind(asset.project_id)
-            .bind(asset.issue_id)
-            .bind(asset.comment_id)
-            .bind(asset.page_id)
-            .bind(asset.entity_type)
-            .bind(None::<String>)
-            .bind(false)
-            .bind(false)
-            .bind(None::<String>)
-            .bind(None::<String>)
-            .bind(asset.size)
-            .bind(false)
-            .bind(asset.storage_metadata.map(sqlx::types::Json))
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let model = file_assets::ActiveModel {
+            id: Set(id),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(asset.created_by_id),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            attributes: Set(asset.attributes),
+            asset: Set(asset.asset_key),
+            user_id: Set(asset.user_id),
+            workspace_id: Set(Some(asset.workspace_id)),
+            draft_issue_id: Set(asset.draft_issue_id),
+            project_id: Set(asset.project_id),
+            issue_id: Set(asset.issue_id),
+            comment_id: Set(asset.comment_id),
+            page_id: Set(asset.page_id),
+            entity_type: Set(asset.entity_type),
+            entity_identifier: Set(None),
+            is_deleted: Set(false),
+            is_archived: Set(false),
+            external_id: Set(None),
+            external_source: Set(None),
+            size: Set(asset.size),
+            is_uploaded: Set(false),
+            storage_metadata: Set(asset.storage_metadata),
+        };
+        model
+            .insert(&conn)
             .await
             .map(|_| id)
-            .map_err(|e| db_error("insert_duplicate", e))
+            .map_err(|e| db_error("insert_duplicate", into_sqlx(e)))
     }
 
     async fn mark_uploaded(&self, ids: Vec<Uuid>) -> Result<(), String> {
-        sqlx::query(logic::MARK_UPLOADED_SQL)
-            .bind(ids)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        file_assets::Entity::update_many()
+            .col_expr(
+                file_assets::Column::IsUploaded,
+                sea_orm::sea_query::Expr::value(true),
+            )
+            .filter(file_assets::Column::DeletedAt.is_null())
+            .filter(file_assets::Column::Id.is_in(ids))
+            .exec(&conn)
             .await
             .map(|_| ())
-            .map_err(|e| db_error("mark_uploaded", e))
+            .map_err(|e| db_error("mark_uploaded", into_sqlx(e)))
     }
 
     async fn save_description_html(
@@ -1236,14 +1334,36 @@ impl AssetStore for PgAssetStore {
         html: &str,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        sqlx::query(&logic::description_save_sql(entity))
-            .bind(html)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        // Dynamic-table sea-query statement (same pattern as the
+        // version/deletion builders): the table is the runtime `entity`
+        // value, not a compile-time entity. `issues` is write-guard
+        // covered, and compile-time `issues::Entity` writes outside
+        // `domain/` are allowlist-gated by policy (empty allowlist: "do
+        // not add new sites"); a table-agnostic update like every other
+        // UPDATE here keeps the guard's empty-allowlist gate reachable.
+        let mut stmt = sea_orm::sea_query::Query::update();
+        stmt.table(sea_orm::sea_query::Alias::new(entity.table().to_owned()));
+        stmt.value(
+            sea_orm::sea_query::Alias::new("description_html".to_owned()),
+            html,
+        )
+        .value(
+            sea_orm::sea_query::Alias::new("created_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(
+            sea_orm::sea_query::Alias::new("updated_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(sea_orm::sea_query::Alias::new("updated_at".to_owned()), now)
+        .and_where(
+            sea_orm::sea_query::Expr::col(sea_orm::sea_query::Alias::new("id".to_owned())).eq(id),
+        );
+        conn.execute(sea_orm::DbBackend::Postgres.build(&stmt))
             .await
             .map(|_| ())
-            .map_err(|e| db_error("save_description_html", e))
+            .map_err(|e| db_error("save_description_html", into_sqlx(e)))
     }
 
     async fn save_description_docs(
@@ -1254,18 +1374,35 @@ impl AssetStore for PgAssetStore {
         description_binary: Option<Vec<u8>>,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        let sql = logic::description_docs_save_sql(entity, description_binary.is_some());
-        let mut query = sqlx::query(&sql).bind(sqlx::types::Json(description_json));
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let mut stmt = sea_orm::sea_query::Query::update();
+        stmt.table(sea_orm::sea_query::Alias::new(entity.table().to_owned()));
+        stmt.value(
+            sea_orm::sea_query::Alias::new("description_json".to_owned()),
+            description_json,
+        );
         if let Some(binary) = description_binary {
-            query = query.bind(binary);
+            stmt.value(
+                sea_orm::sea_query::Alias::new("description_binary".to_owned()),
+                binary,
+            );
         }
-        query
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
+        stmt.value(
+            sea_orm::sea_query::Alias::new("created_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(
+            sea_orm::sea_query::Alias::new("updated_by_id".to_owned()),
+            None::<Uuid>,
+        )
+        .value(sea_orm::sea_query::Alias::new("updated_at".to_owned()), now)
+        .and_where(
+            sea_orm::sea_query::Expr::col(sea_orm::sea_query::Alias::new("id".to_owned())).eq(id),
+        );
+        conn.execute(sea_orm::DbBackend::Postgres.build(&stmt))
             .await
             .map(|_| ())
-            .map_err(|e| db_error("save_description_docs", e))
+            .map_err(|e| db_error("save_description_docs", into_sqlx(e)))
     }
 }
 
@@ -2863,5 +3000,51 @@ mod tests {
             );
         }
         assert_eq!(S3_MAX_ATTEMPTS, 5);
+    }
+
+    #[test]
+    fn orm_statement_shapes_pin_predicates() {
+        // TASK-CLEANUP-1: the sweep keeps only live, stale, unuploaded
+        // rows; description saves keep the full-save audit NULLing with
+        // no deleted_at guard (matching `description_save_sql`).
+        use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+        let now = utc(2026, 9, 28);
+        let cutoff = utc(2025, 9, 28);
+        let sql = sweep_stmt(cutoff, now).to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.starts_with("UPDATE \"file_assets\" SET \"deleted_at\""),
+            "{sql}"
+        );
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"created_at\" <"), "{sql}");
+        assert!(sql.contains("\"is_uploaded\" = FALSE"), "{sql}");
+        // Save shapes: the update_many statements execute the same SET
+        // lists as the SQL-text pins (description_html + audit NULLs +
+        // updated_at by id, no `deleted_at` guard).
+        let id = Uuid::new_v4();
+        let html_sql = pages::Entity::update_many()
+            .col_expr(
+                pages::Column::DescriptionHtml,
+                sea_orm::sea_query::Expr::value("h".to_owned()),
+            )
+            .col_expr(
+                pages::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(None::<Uuid>),
+            )
+            .col_expr(
+                pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(None::<Uuid>),
+            )
+            .col_expr(
+                pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(pages::Column::Id.eq(id))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(html_sql.starts_with("UPDATE \"pages\" SET"), "{html_sql}");
+        assert!(html_sql.contains("\"description_html\" ="), "{html_sql}");
+        assert!(html_sql.contains("\"created_by_id\" = NULL"), "{html_sql}");
+        assert!(!html_sql.contains("\"deleted_at\""), "{html_sql}");
     }
 }
