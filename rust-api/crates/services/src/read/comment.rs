@@ -695,7 +695,8 @@ async fn fetch_display_name(pool: &PgPool, user_id: &str) -> Result<String, Erro
 }
 
 /// The synced-comment lock (`app/serializers/issue.py:79-91`): native rows
-/// (`external_source` empty) short-circuit before any DB probe.
+/// (`external_source` empty) short-circuit before any DB probe. Git-only
+/// after PDASHOSS01-354.
 pub async fn comment_is_synced(
     pool: &PgPool,
     external_source: Option<&str>,
@@ -712,17 +713,7 @@ pub async fn comment_is_synced(
     .fetch_optional(pool)
     .await
     .map_err(|error| DbError::new("comment-synced-git", error))?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM github_comment_syncs WHERE deleted_at IS NULL AND comment_id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("comment-synced-github", error))?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 #[cfg(test)]

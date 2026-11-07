@@ -123,8 +123,6 @@ const ENTRY_TABLES: &[(&str, &str, &str)] = &[
         "githubappinstallsession",
         "github_app_install_sessions",
     ),
-    ("db", "githubcommentsync", "github_comment_syncs"),
-    ("db", "githubissuesync", "github_issue_syncs"),
     ("db", "githubpullrequestlink", "github_pull_request_links"),
     ("db", "githubrepository", "github_repositories"),
     ("db", "githubrepositorysync", "github_repository_syncs"),
@@ -254,7 +252,7 @@ const ENTRY_TABLES: &[(&str, &str, &str)] = &[
 ///     if hasattr(m, "deleted_at"):
 ///         print(m._meta.db_table)
 /// ```
-pub const HARD_DELETE_SWEEP_TABLES: [&str; 114] = [
+pub const HARD_DELETE_SWEEP_TABLES: [&str; 112] = [
     "analytic_views",
     "api_tokens",
     "cli_device_codes",
@@ -316,8 +314,6 @@ pub const HARD_DELETE_SWEEP_TABLES: [&str; 114] = [
     "workspace_integrations",
     "github_repositories",
     "github_repository_syncs",
-    "github_issue_syncs",
-    "github_comment_syncs",
     "github_app_installations",
     "github_webhook_deliveries",
     "github_app_install_sessions",
@@ -2548,7 +2544,7 @@ mod tests {
 
     #[test]
     fn sweep_order_freeze_covers_the_named_tables() {
-        assert_eq!(HARD_DELETE_SWEEP_TABLES.len(), 114);
+        assert_eq!(HARD_DELETE_SWEEP_TABLES.len(), 112);
         for table in HARD_DELETE_NAMED_TABLES {
             assert!(
                 HARD_DELETE_SWEEP_TABLES.contains(&table),
@@ -2570,7 +2566,7 @@ mod tests {
         // the `db` app, before the `license` models (PIDASHCONV-1703).
         assert!(position("loop_user_preferences") < position("issue_worklogs"));
         assert!(position("issue_worklogs") < position("instances"));
-        assert_eq!(HARD_DELETE_SWEEP_TABLES[113], "pod");
+        assert_eq!(HARD_DELETE_SWEEP_TABLES[111], "pod");
     }
 
     #[test]

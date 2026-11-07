@@ -6752,9 +6752,8 @@ async fn run_issue_create_validate(
     let probes = ValidateProbes {
         // Unreached on create (`instance=None`): step 1 never runs, the
         // pod-reassign / mid-flight legs need an instance, the triage
-        // manager leg is off.
+        // manager leg is off. Git-only after PDASHOSS01-354.
         git_sync_exists: &|| false,
-        github_sync_exists: &|| false,
         has_active_run: &|| false,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),

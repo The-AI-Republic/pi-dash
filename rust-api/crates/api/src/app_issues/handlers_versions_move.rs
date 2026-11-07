@@ -94,7 +94,7 @@ use pidash_services::app_issues::serializers_assoc::{
     issue_description_version_detail_to_representation, issue_version_detail_to_representation,
     IssueDescriptionVersionDetailRow, IssueVersionDetailRow,
 };
-use pidash_services::app_issues::serializers_engage::{git_issue_synced, github_issue_synced};
+use pidash_services::app_issues::serializers_engage::git_issue_synced;
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_is_actively_synced, IssueDetailBaseRow,
     SourceIssueRow,
@@ -1324,8 +1324,8 @@ async fn moved_is_epic(pool: &PgPool, type_id: Option<&str>) -> Result<bool, Den
 }
 
 /// The move's `is_synced` (`serializers/issue.py:297-323`): the bare
-/// instance carries no annotation, so the merged predicate runs — no
-/// probe when `external_source` is blank, else git then github.
+/// instance carries no annotation, so the predicate runs — no
+/// probe when `external_source` is blank, else git-only (PDASHOSS01-354).
 async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, Denial> {
     let blank = issue
         .external_source
@@ -1336,29 +1336,16 @@ async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, 
             issue.external_source.as_deref(),
             None,
             || false,
-            || false,
         ));
     }
     let db = orm(pool);
     let git_hit = git_issue_synced(&db, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git_hit {
-        return Ok(issue_is_actively_synced(
-            issue.external_source.as_deref(),
-            None,
-            || true,
-            || false,
-        ));
-    }
-    let github_hit = github_issue_synced(&db, issue.id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
     Ok(issue_is_actively_synced(
         issue.external_source.as_deref(),
         None,
-        || false,
-        || github_hit,
+        || git_hit,
     ))
 }
 

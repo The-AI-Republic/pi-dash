@@ -691,8 +691,8 @@ impl DetailOwned {
     }
 }
 
-/// `_issue_is_actively_synced`: no probes without a source; the git probe
-/// first, the github probe only on a git miss (Django's short-circuit).
+/// `_issue_is_actively_synced`: no probes without a source; git-only probe
+/// (PDASHOSS01-354, legacy tables sunset).
 /// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
 /// without a query; otherwise the type row's flag. A missing row is
 /// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
@@ -723,16 +723,7 @@ async fn fetch_is_synced(
     let git_hit = serializers_engage::git_issue_synced(&db, issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let github_hit = !git_hit
-        && serializers_engage::github_issue_synced(&db, issue_id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(issue_is_actively_synced(
-        Some(source),
-        None,
-        || git_hit,
-        || github_hit,
-    ))
+    Ok(issue_is_actively_synced(Some(source), None, || git_hit))
 }
 
 /// `obj.agent_ticker` through `_base_manager` (no soft-delete guard):

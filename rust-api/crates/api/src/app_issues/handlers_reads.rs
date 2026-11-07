@@ -1584,7 +1584,6 @@ fn render_lite(row: &Map<String, Value>) -> Response {
         get_str(row, "external_source"),
         get_bool(row, "is_synced"),
         || false,
-        || false,
     );
     let null = Value::Null;
     let mut body = String::from("{");
@@ -1695,24 +1694,17 @@ fn str_refs(ids: &[String]) -> Vec<&str> {
     ids.iter().map(String::as_str).collect()
 }
 
-/// One sync-table `.exists()` probe (`issue.py:76`).
-async fn sync_probe(
-    pool: &sqlx::PgPool,
-    github: bool,
-    issue_id: &uuid::Uuid,
-) -> Result<bool, Denial> {
+/// One git sync-table `.exists()` probe (`issue.py:76`, git-only after
+/// PDASHOSS01-354).
+async fn sync_probe(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<bool, Denial> {
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let hit = if github {
-        serializers_engage::github_issue_synced(&db, *issue_id).await
-    } else {
-        serializers_engage::git_issue_synced(&db, *issue_id).await
-    };
-    hit.map_err(|_| Denial::ServerError)
+    serializers_engage::git_issue_synced(&db, *issue_id)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// The full path carries no `is_synced` annotation, so a set
-/// `external_source` runs the probes — git first, github only on a miss
-/// (the predicate's short-circuit, hence the probe counts).
+/// `external_source` runs the git probe (PDASHOSS01-354).
 async fn full_is_synced(
     pool: &sqlx::PgPool,
     row: &Map<String, Value>,
@@ -1721,21 +1713,11 @@ async fn full_is_synced(
     let source = get_str(row, "i_external_source");
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, false, issue_id).await?
+        sync_probe(pool, issue_id).await?
     } else {
         false
     };
-    let github_hit = if has_source && !git_hit {
-        sync_probe(pool, true, issue_id).await?
-    } else {
-        false
-    };
-    Ok(issue_is_actively_synced(
-        source,
-        None,
-        || git_hit,
-        || github_hit,
-    ))
+    Ok(issue_is_actively_synced(source, None, || git_hit))
 }
 
 /// The per-instance `_blocker_summary_cache` (`:1250-1258`): one
@@ -1924,7 +1906,7 @@ async fn probe_is_epic(pool: &sqlx::PgPool, type_id: Option<&str>) -> Result<boo
 }
 
 /// Shared sync-probe evaluation: `external_source` short-circuits false;
-/// otherwise git first, github only on a miss.
+/// otherwise git-only (PDASHOSS01-354).
 async fn probe_synced(
     pool: &sqlx::PgPool,
     issue_id: &uuid::Uuid,
@@ -1932,21 +1914,11 @@ async fn probe_synced(
 ) -> Result<bool, Denial> {
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, false, issue_id).await?
+        sync_probe(pool, issue_id).await?
     } else {
         false
     };
-    let github_hit = if has_source && !git_hit {
-        sync_probe(pool, true, issue_id).await?
-    } else {
-        false
-    };
-    Ok(issue_is_actively_synced(
-        source,
-        None,
-        || git_hit,
-        || github_hit,
-    ))
+    Ok(issue_is_actively_synced(source, None, || git_hit))
 }
 
 // ---------------------------------------------------------------------------
