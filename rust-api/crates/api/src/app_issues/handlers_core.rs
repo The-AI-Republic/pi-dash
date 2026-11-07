@@ -110,8 +110,8 @@ use pidash_auth::scope::TenantScope;
 use pidash_db::entity::{
     assistant_user_llm_config, cycle_issues, estimate_points, file_assets, issue_assignees,
     issue_labels, issue_links, issue_reactions, issue_subscribers, issue_types, issues, labels,
-    module_issues, modules, pod, project_issue_types, project_members, projects, states, users,
-    workspaces,
+    module_issues, modules, pod, project_issue_types, project_members, projects, runner, states,
+    users, workspaces,
 };
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{tickers_for_issue, IssueAgentTicker};
 use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
@@ -1534,6 +1534,8 @@ enum PkQueryset {
     Issues,
     /// `Pod.all_objects`.
     PodsAll,
+    /// `Runner.objects` (the runner table carries no soft-delete column).
+    Runners,
     /// `Label.objects` (no soft-deleted).
     Labels,
     /// `User.objects` (the users table has no soft-delete column).
@@ -1562,6 +1564,11 @@ const FIELD_TABLE: &[FieldSpec] = &[
     FieldSpec {
         name: "assigned_pod_id",
         shape: FieldShape::UuidPk(PkQueryset::PodsAll),
+        allow_null: true,
+    },
+    FieldSpec {
+        name: "assigned_runner_id",
+        shape: FieldShape::UuidPk(PkQueryset::Runners),
         allow_null: true,
     },
     FieldSpec {
@@ -2247,6 +2254,15 @@ async fn pk_exists(pool: &sqlx::PgPool, queryset: PkQueryset, id: &Uuid) -> Resu
                 .one(&db)
                 .await?
         }
+        PkQueryset::Runners => {
+            runner::Entity::find()
+                .select_only()
+                .column(runner::Column::Id)
+                .filter(runner::Column::Id.eq(id))
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
         PkQueryset::Users => {
             users::Entity::find()
                 .select_only()
@@ -2535,6 +2551,15 @@ async fn run_validate(
         Some(Validated::Pod(pod)) => Some(Some(*pod)),
         _ => None,
     };
+    // `attrs["assigned_runner"]` (design §7.1): outer `None` = key absent
+    // (a pod-only request skips the E-checks entirely), inner `None` =
+    // explicit clear (E8 applies), `Some(id)` = the dedicated choice.
+    let assigned_runner: Option<Option<Uuid>> = match validated.get("assigned_runner_id") {
+        None => None,
+        Some(Validated::Null) => Some(None),
+        Some(Validated::Uuid(id)) => Some(Some(*id)),
+        _ => None,
+    };
     let agent_executor: Option<Option<&str>> = match validated.get("agent_executor") {
         None => None,
         Some(Validated::Null) => Some(None),
@@ -2570,6 +2595,7 @@ async fn run_validate(
             _ => None,
         }),
         assigned_pod,
+        assigned_runner,
         agent_executor,
         description_html: text("description_html"),
         description_binary: None,
@@ -2782,6 +2808,37 @@ async fn run_validate(
     };
     let run_value = run_probe_one.or(run_probe_two).unwrap_or(false);
 
+    // The dedicated-runner E-check (`validate_execution_target`): precomputed
+    // here (async) and raised by the kernel in order — after the pod
+    // checks, before the executor normalize, exactly Django's order. A
+    // pod failure returns first, so the runner never queries then.
+    let runner_error = if !pod_returns && assigned_runner.is_some() {
+        let write = pidash_services::domain::issue_assignment::ExecutionTargetWrite {
+            issue_id: instance.map(|row| row.id),
+            runner_present: true,
+            runner_id: assigned_runner.flatten(),
+            pod_id: assigned_pod.flatten().map(|pod| pod.id),
+            project_id: project_id.or_else(|| instance.map(|row| row.project_id)),
+            user_id: Some(actor.user_id),
+        };
+        match pidash_services::domain::issue_assignment::validate_execution_target(
+            &orm(pool),
+            &write,
+        )
+        .await
+        {
+            Ok(()) => None,
+            Err(pidash_services::domain::issue_assignment::ValidateError::Field(error)) => {
+                Some(error)
+            }
+            Err(pidash_services::domain::issue_assignment::ValidateError::Db(_)) => {
+                return Err(db_error());
+            }
+        }
+    } else {
+        None
+    };
+
     // Steps 7-8. The assignee arm `KeyError`s (no probe) when the context
     // project is `None`; empty lists skip both filters.
     let filtered_assignees = match assignee_ids.as_deref() {
@@ -2857,6 +2914,7 @@ async fn run_validate(
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
         paused_exists: &|| paused_exists,
+        runner_error: &|| runner_error,
     };
     let ctx = ValidateContext {
         project_id,
@@ -4024,9 +4082,10 @@ fn assemble_new_issue(
             Some(Validated::Pod(pod)) => Some(pod.id),
             _ => None,
         },
-        // Slice 5b wires the `assigned_runner_id` create field + E2/E7/E8
-        // validation (design §7.1); the assembly stays NULL until then.
-        assigned_runner_id: None,
+        // Design §7.1: the dedicated choice the (already validated) field
+        // pass accepted; `apply_execution_target` stamps the pod +
+        // activity after the create commit.
+        assigned_runner_id: v_uuid(validated, "assigned_runner_id"),
         // The normalized write (#2903): deprecated choices land local.
         agent_executor: filtered.agent_executor.clone().flatten(),
     };
@@ -4067,6 +4126,12 @@ fn apply_validated_to_existing(
     if validated.contains_key("assigned_pod_id") {
         row.assigned_pod_id = match validated.get("assigned_pod_id") {
             Some(Validated::Pod(pod)) => Some(pod.id),
+            _ => None,
+        };
+    }
+    if validated.contains_key("assigned_runner_id") {
+        row.assigned_runner_id = match validated.get("assigned_runner_id") {
+            Some(Validated::Uuid(id)) => Some(*id),
             _ => None,
         };
     }
@@ -4567,6 +4632,18 @@ async fn create_issue_inner(
         return Err(Denial::ServerError);
     }
     let issue_id = outcome.issue.id;
+    // A named dedicated choice: persist + activity (design §13.2). No
+    // queued run can exist on a just-created issue, so there is never a
+    // re-point or a drain. Django runs this in its own transaction after
+    // the create commit; mirror that.
+    if validated.contains_key("assigned_runner_id") {
+        let runner_id = outcome.issue.assigned_runner_id;
+        pidash_services::domain::issue_assignment::apply_execution_target(
+            orm, issue_id, runner_id, user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     let Some(post) = fetch_create_response_row(&pool, &slug, &tenant.project_id, &issue_id).await?
     else {
         // `user_timezone_converter(None)` → `TypeError` → the generic 500,
@@ -4747,6 +4824,9 @@ async fn partial_update_inner(
     let ctx = write_ctx(&tenant, &user_id);
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    // The post-overlay dedicated choice, captured before the domain
+    // write moves the row: the apply/pick below runs on it.
+    let overlay_runner_id = row.assigned_runner_id;
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
@@ -4785,6 +4865,40 @@ async fn partial_update_inner(
     .map_err(domain_denial)?;
     if outcome.chain.stopped().is_some() {
         return Err(Denial::ServerError);
+    }
+    // The dedicated choice (design §13.2): the row already moved, so the
+    // apply re-points the QUEUED run (if any) and writes the activity;
+    // a re-pointed run drains its pod on commit, exactly as Django's
+    // `transaction.on_commit(_drain)`.
+    if validated.contains_key("assigned_runner_id") {
+        let apply = pidash_services::domain::issue_assignment::apply_execution_target(
+            orm,
+            pk,
+            overlay_runner_id,
+            user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        if let Some(pod_id) = apply.drain_pod {
+            if crate::runner_enroll::teardown::drain_pod_by_id(&pool, &state, pod_id)
+                .await
+                .is_err()
+            {
+                return Err(Denial::ServerError);
+            }
+        }
+    } else if validated.contains_key("assigned_pod_id") && overlay_runner_id.is_some() {
+        // §13.1: the issue's pod changed with no runner in the request —
+        // the dedicated assignment clears (the old pod's runner can no
+        // longer serve it).
+        pidash_services::domain::issue_assignment::clear_dedicated_runner(
+            orm,
+            pk,
+            "pod changed",
+            user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
     }
     Ok(empty_response())
 }
@@ -4869,6 +4983,7 @@ pub async fn put_update_issue(
     let ctx = write_ctx(&tenant, &user_id);
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
+    let put_runner_id = row.assigned_runner_id;
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
@@ -4903,9 +5018,49 @@ pub async fn put_update_issue(
     if outcome.chain.stopped().is_some() {
         return Err(Denial::ServerError);
     }
+    // The dedicated choice (design §13.2), before the render so the
+    // response body carries the post-apply image, exactly as Django's
+    // `update()` → `apply_execution_target` → serialize.
+    if validated.contains_key("assigned_runner_id") {
+        let apply = pidash_services::domain::issue_assignment::apply_execution_target(
+            orm,
+            pk,
+            put_runner_id,
+            user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        if let Some(pod_id) = apply.drain_pod {
+            if crate::runner_enroll::teardown::drain_pod_by_id(&pool, &state, pod_id)
+                .await
+                .is_err()
+            {
+                return Err(Denial::ServerError);
+            }
+        }
+    } else if validated.contains_key("assigned_pod_id") && put_runner_id.is_some() {
+        // §13.1: the pod changed with no runner in the request.
+        pidash_services::domain::issue_assignment::clear_dedicated_runner(
+            orm,
+            pk,
+            "pod changed",
+            user_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     // The representation renders from the saved row (hook outputs
-    // included), as it rendered from the post-legs row before.
-    let row = IssueSaveRow::from(&outcome.issue);
+    // included), as it rendered from the post-legs row before. The
+    // dedicated apply stamped pod + runner, so re-read the row the
+    // way Django serializes the post-apply in-memory instance.
+    let row = if validated.contains_key("assigned_runner_id") {
+        match fetch_put_issue(&pool, &slug, &project_id, &pk).await? {
+            Some(fresh) => fresh,
+            None => IssueSaveRow::from(&outcome.issue),
+        }
+    } else {
+        IssueSaveRow::from(&outcome.issue)
+    };
     let initial = data.value.as_object();
     let body = render_put_body(
         &pool,

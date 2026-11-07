@@ -799,6 +799,7 @@ struct ParsedWrite {
     state: Option<Option<Uuid>>,
     estimate_point: Option<Option<Uuid>>,
     assigned_pod: Option<Option<Uuid>>,
+    assigned_runner: Option<Option<Uuid>>,
 }
 
 /// One queued existence probe: the parsed UUID plus the raw echo for the
@@ -820,6 +821,7 @@ enum PkTable {
     Issues,
     EstimatePoints,
     Pods,
+    Runners,
 }
 
 /// Batch one table's probes: returns the ids that exist under the
@@ -902,6 +904,17 @@ async fn probe_exists(pool: &PgPool, table: PkTable, ids: &[Uuid]) -> Result<Vec
                 .column(pod::Column::Id)
                 .filter(pod::Column::Id.is_in(ids.to_vec()))
                 .filter(pod::Column::DeletedAt.is_null())
+                .into_tuple()
+                .all(&db)
+                .await
+        }
+        // `Runner.objects` — the runner table carries no soft-delete
+        // column, so every row validates as existing.
+        PkTable::Runners => {
+            pidash_db::entity::runner::Entity::find()
+                .select_only()
+                .column(pidash_db::entity::runner::Column::Id)
+                .filter(pidash_db::entity::runner::Column::Id.is_in(ids.to_vec()))
                 .into_tuple()
                 .all(&db)
                 .await
@@ -1186,6 +1199,8 @@ async fn parse_issue_write(
 
     // --- assigned_pod (PKRF Pod, allow_null) ---
     let pod_shape = parse_optional_pk(get("assigned_pod"), from_form);
+    // --- assigned_runner (PKRF Runner, allow_null) ---
+    let runner_shape = parse_optional_pk(get("assigned_runner"), from_form);
 
     // Batch the existence probes (one query per table).
     let mut assignee_ids: Vec<Uuid> = Vec::new();
@@ -1196,6 +1211,7 @@ async fn parse_issue_write(
     let mut issue_ids: Vec<Uuid> = Vec::new();
     let mut estimate_ids: Vec<Uuid> = Vec::new();
     let mut pod_ids: Vec<Uuid> = Vec::new();
+    let mut runner_ids: Vec<Uuid> = Vec::new();
     if let ListShape::Value(probes) = &assignees_shape {
         assignee_ids.extend(probes.iter().map(|probe| probe.id));
     }
@@ -1223,6 +1239,9 @@ async fn parse_issue_write(
     if let FieldParse::Value(Some(probe)) = &pod_shape {
         pod_ids.push(probe.id);
     }
+    if let FieldParse::Value(Some(probe)) = &runner_shape {
+        runner_ids.push(probe.id);
+    }
     let assignee_ids = dedup(assignee_ids);
     let label_ids = dedup(label_ids);
     let user_ids = dedup(user_ids);
@@ -1231,6 +1250,7 @@ async fn parse_issue_write(
     let issue_ids = dedup(issue_ids);
     let estimate_ids = dedup(estimate_ids);
     let pod_ids = dedup(pod_ids);
+    let runner_ids = dedup(runner_ids);
     let (
         assignees_live,
         labels_live,
@@ -1240,6 +1260,7 @@ async fn parse_issue_write(
         issues_live,
         estimates_live,
         pods_live,
+        runners_live,
     ) = tokio::join!(
         probe_exists(pool, PkTable::Users, &assignee_ids),
         probe_exists(pool, PkTable::Labels, &label_ids),
@@ -1249,6 +1270,7 @@ async fn parse_issue_write(
         probe_exists(pool, PkTable::Issues, &issue_ids),
         probe_exists(pool, PkTable::EstimatePoints, &estimate_ids),
         probe_exists(pool, PkTable::Pods, &pod_ids),
+        probe_exists(pool, PkTable::Runners, &runner_ids),
     );
     let assignees_live = assignees_live?;
     let labels_live = labels_live?;
@@ -1258,6 +1280,7 @@ async fn parse_issue_write(
     let issues_live = issues_live?;
     let estimates_live = estimates_live?;
     let pods_live = pods_live?;
+    let runners_live = runners_live?;
     let has = |live: &[Uuid], id: &Uuid| live.contains(id);
 
     // Assemble the ordered error dict (or the value). `type` wins over
@@ -1583,6 +1606,32 @@ async fn parse_issue_write(
         FieldParse::Errors(messages) => {
             entries.push((
                 "assigned_pod",
+                Value::Array(messages.into_iter().map(Value::String).collect()),
+            ));
+        }
+    }
+    // assigned_runner
+    match runner_shape {
+        FieldParse::Absent => {}
+        FieldParse::Value(None) => {
+            parsed.assigned_runner = Some(None);
+        }
+        FieldParse::Value(Some(probe)) => {
+            if has(&runners_live, &probe.id) {
+                parsed.assigned_runner = Some(Some(probe.id));
+            } else {
+                entries.push((
+                    "assigned_runner",
+                    Value::Array(vec![Value::String(format!(
+                        "Invalid pk \"{}\" - object does not exist.",
+                        probe.raw
+                    ))]),
+                ));
+            }
+        }
+        FieldParse::Errors(messages) => {
+            entries.push((
+                "assigned_runner",
                 Value::Array(messages.into_iter().map(Value::String).collect()),
             ));
         }
@@ -2820,6 +2869,7 @@ async fn run_write_validate(
     workspace_id: &Uuid,
     instance: Option<&DecodedIssue>,
     from_markdown: bool,
+    user_id: Option<Uuid>,
 ) -> Result<(), Error> {
     use shape::ValidateError;
     let fail = |error: ValidateError| Error::FieldErrors(error.body().to_owned());
@@ -2893,6 +2943,30 @@ async fn run_write_validate(
                 .await?
             {
                 return Err(fail(ValidateError::PodReassignActiveRun));
+            }
+        }
+    }
+
+    // Dedicated runner (`validate_execution_target`, design §7.1): same
+    // position as Django's `validate()` — after the pod block, before
+    // the executor normalize. The E-check needs the requested pod.
+    if parsed.assigned_runner.is_some() {
+        let orm = pidash_db::pool::sea_orm_connection(pool);
+        let write = crate::domain::issue_assignment::ExecutionTargetWrite {
+            issue_id: instance.and_then(|current| current.id.parse::<Uuid>().ok()),
+            runner_present: true,
+            runner_id: parsed.assigned_runner.flatten(),
+            pod_id: parsed.assigned_pod.flatten(),
+            project_id: Some(*project_id),
+            user_id,
+        };
+        match crate::domain::issue_assignment::validate_execution_target(&orm, &write).await {
+            Ok(()) => {}
+            Err(crate::domain::issue_assignment::ValidateError::Field(error)) => {
+                return Err(fail(ValidateError::from_runner_code(error.code)));
+            }
+            Err(crate::domain::issue_assignment::ValidateError::Db(_)) => {
+                return Err(Error::ServerError);
             }
         }
     }
@@ -3357,6 +3431,7 @@ pub async fn create(
         &workspace_id,
         None,
         from_markdown,
+        Some(ctx.actor.user_id),
     )
     .await?;
 
@@ -3421,9 +3496,10 @@ pub async fn create(
         workpad: String::new(),
         created_via: parsed.created_via.clone().flatten(),
         assigned_pod_id: parsed.assigned_pod.flatten(),
-        // The tool create path accepts no dedicated runner (design §7: the
-        // web app and v1 surfaces own the write path); always NULL here.
-        assigned_runner_id: None,
+        // The dedicated choice (design §7.1): the v1 surface is one of
+        // the two serializers that own the write path (Django's v1
+        // `create()` validates + applies exactly like the app surface).
+        assigned_runner_id: parsed.assigned_runner.flatten(),
         agent_executor: parsed.agent_executor.clone().flatten(),
     };
     // The raw-data overrides resolve pre-save (pure), but their failures
@@ -3512,6 +3588,20 @@ pub async fn create(
             return Err(Error::BadError("Please provide valid detail".to_owned()));
         }
         Some(_) => return Err(Error::ServerError),
+    }
+    // A named dedicated choice (design §13.2): the create commit is
+    // done, so the apply stamps the runner's pod + activity in its own
+    // transaction, exactly Django's `create()` → `apply_execution_target`.
+    if parsed.assigned_runner.is_some() {
+        let runner_id = outcome.issue.assigned_runner_id;
+        crate::domain::issue_assignment::apply_execution_target(
+            &deps.orm,
+            outcome.issue.id,
+            runner_id,
+            actor_id,
+        )
+        .await
+        .map_err(|_| Error::ServerError)?;
     }
     // The 201 renders the PRE-override in-memory instance: refetch the
     // row, then restore the insert-time `created_at` / `created_by`.
@@ -3604,6 +3694,7 @@ pub async fn update(
         &workspace_id,
         Some(current),
         from_markdown,
+        Some(ctx.actor.user_id),
     )
     .await?;
 
@@ -3747,6 +3838,9 @@ pub async fn update(
     if let Some(value) = parsed.assigned_pod {
         fields.assigned_pod_id = value;
     }
+    if let Some(value) = parsed.assigned_runner {
+        fields.assigned_runner_id = value;
+    }
     fields.state_id = match parsed.state {
         Some(value) => value,
         None => base.state_id,
@@ -3812,12 +3906,37 @@ pub async fn update(
     if outcome.chain.stopped().is_some() {
         return Err(Error::ServerError);
     }
+    // The dedicated choice (design §13.2), before the render so the
+    // response body carries the post-apply image. The pod-only change
+    // (§13.1) clears the assignment with a "pod changed" comment.
+    let mut drain_pod = None;
+    if parsed.assigned_runner.is_some() {
+        let apply = crate::domain::issue_assignment::apply_execution_target(
+            &deps.orm,
+            outcome.issue.id,
+            outcome.issue.assigned_runner_id,
+            actor_id,
+        )
+        .await
+        .map_err(|_| Error::ServerError)?;
+        drain_pod = apply.drain_pod;
+    } else if parsed.assigned_pod.is_some() && outcome.issue.assigned_runner_id.is_some() {
+        crate::domain::issue_assignment::clear_dedicated_runner(
+            &deps.orm,
+            outcome.issue.id,
+            "pod changed",
+            actor_id,
+        )
+        .await
+        .map_err(|_| Error::ServerError)?;
+    }
     let decoded = fetch_issue_for_write(&deps.pool, slug, &project_id, &pk, &tz).await?;
     let rendered =
         render_write_response(&deps.pool, &decoded, &tz, write.web_base.as_deref()).await?;
-    Ok(Outcome::ok(
-        serde_json::to_string(&rendered).map_err(|_| Error::ServerError)?,
-    ))
+    let mut outcome =
+        Outcome::ok(serde_json::to_string(&rendered).map_err(|_| Error::ServerError)?);
+    outcome.drain_pod = drain_pod;
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
