@@ -2780,36 +2780,6 @@ impl From<FavoriteDbRow> for FavoriteRow {
     }
 }
 
-pub(crate) fn favorite_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<FavoriteRow, Denial> {
-    use sqlx::Row;
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let entity_type: String = row
-        .try_get("entity_type")
-        .map_err(|_| Denial::ServerError)?;
-    let entity_identifier: Option<Uuid> = row
-        .try_get("entity_identifier")
-        .map_err(|_| Denial::ServerError)?;
-    let name: Option<String> = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let is_folder: bool = row.try_get("is_folder").map_err(|_| Denial::ServerError)?;
-    let sequence: f64 = row.try_get("sequence").map_err(|_| Denial::ServerError)?;
-    let parent: Option<Uuid> = row.try_get("parent_id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Uuid = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Option<Uuid> = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    Ok(FavoriteRow {
-        id: id.to_string(),
-        entity_type,
-        entity_identifier: entity_identifier.map(|id| id.to_string()),
-        name,
-        is_folder,
-        sequence,
-        parent: parent.map(|id| id.to_string()),
-        workspace_id: workspace_id.to_string(),
-        project_id: project_id.map(|id| id.to_string()),
-    })
-}
-
 /// The rendered favorite columns over the ported scope (`favorite_list_sql`
 /// without the `*`).
 fn favorites_select(slug: &str, user_id: Uuid, parent: Option<Uuid>, top: bool) -> SelectStatement {
