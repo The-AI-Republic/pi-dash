@@ -3174,10 +3174,11 @@ fn activity_annotate(stmt: &mut SelectStatement) {
 /// "workspace", "issue", "project")`): `actor_u` is INNER (promoted under
 /// the `actor_id =` equality), `i` is LEFT (nullable FK).
 fn activity_joins(stmt: &mut SelectStatement, with_slug: bool) {
-    stmt.join(
+    stmt.join_as(
         JoinType::InnerJoin,
         workspaces::Entity,
-        Expr::col((workspaces::Entity, workspaces::Column::Id))
+        p_a("w"),
+        p_col("w", workspaces::Column::Id)
             .equals((p_a("a"), issue_activities::Column::WorkspaceId)),
     )
     .join_as(
@@ -3228,7 +3229,7 @@ fn user_activity_base(
                 .and(p_col("a", issue_activities::Column::Field).is_not_null())
                 .not(),
         )
-        .add(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+        .add(p_col("w", workspaces::Column::Slug).eq(slug))
         .add(p_col("rpm", project_members::Column::MemberId).eq(viewer))
         .add(p_col("rpm", project_members::Column::IsActive).eq(true))
         .add(p_col("p", projects::Column::ArchivedAt).is_null())
@@ -4198,6 +4199,40 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn activity_statements_carry_matched_w_alias() {
+        // `activity_annotate` selects the workspace lite columns as
+        // `"w"."..."`; the joins must alias workspaces AS "w" (the old
+        // `JOIN workspaces w`). An unaliased join leaves every select
+        // dangling: Postgres rejects with `missing FROM-clause entry
+        // for table "w"` on both activity endpoints.
+        let uid = uuid::Uuid::nil();
+        let viewer = uuid::Uuid::max();
+        let mut stmt = user_activity_base(uid, "acme", viewer, Some(vec![uuid::Uuid::nil()]));
+        activity_annotate(&mut stmt);
+        let text = stmt.to_string(PostgresQueryBuilder);
+        assert_parens_balanced(&text);
+        assert!(text.contains(r#"INNER JOIN "workspaces" AS "w""#), "{text}");
+        assert!(!text.contains(r#"INNER JOIN "workspaces" ON"#), "{text}");
+        for column in ["name", "slug", "id", "logo", "logo_asset_id"] {
+            assert!(
+                text.contains(&format!(r#""w"."{column}" AS "workspace_"#)),
+                "{text}"
+            );
+        }
+        assert!(text.contains(r#""w"."slug""#), "{text}");
+        // The me-activities base shares the join inventory minus the
+        // slug predicate and the membership leg.
+        let mut me = me_activity_base(viewer);
+        activity_annotate(&mut me);
+        let me_text = me.to_string(PostgresQueryBuilder);
+        assert!(
+            me_text.contains(r#"INNER JOIN "workspaces" AS "w""#),
+            "{me_text}"
+        );
+        assert!(!me_text.contains(r#""rpm""#), "{me_text}");
     }
 
     #[test]
