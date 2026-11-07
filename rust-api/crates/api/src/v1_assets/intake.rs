@@ -1370,19 +1370,22 @@ async fn render_issue_full(
     .await
     .map_err(cycle_denial)?;
     if let Value::Object(ref mut map) = rendered {
+        // One combined read (3 statements): the split wrappers each run
+        // the full read, so two calls would double the statements per
+        // render. Same shape as `v1_cycles_modules::cycle`.
+        let summary = pidash_services::orchestration::blockers::fetch_relations_summary(
+            &pidash_db::pool::sea_orm_connection(pool),
+            issue.id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
         map.insert(
             "relations_summary".to_owned(),
-            cycle_mod::fetch_relations_summary(pool, &issue.id)
-                .await
-                .map_err(cycle_denial)?,
+            serde_json::to_value(summary.relations_summary).map_err(|_| Denial::ServerError)?,
         );
         map.insert(
             "has_open_blockers".to_owned(),
-            Value::Bool(
-                cycle_mod::has_open_blockers(pool, &issue.id)
-                    .await
-                    .map_err(cycle_denial)?,
-            ),
+            Value::Bool(summary.has_open_blockers),
         );
     }
     Ok(rendered)
