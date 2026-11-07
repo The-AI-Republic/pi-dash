@@ -77,17 +77,18 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::Router;
 use chrono_tz::Tz;
-use sea_orm::sea_query::{Condition, Expr, OnConflict};
+use sea_orm::sea_query::extension::postgres::PgFunc;
+use sea_orm::sea_query::{Alias, CaseStatement, Condition, Expr, Func, Order, Query as SeaQuery};
 use sea_orm::{
     ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, RelationTrait,
 };
 use serde_json::{Map, Value};
-use sqlx::Row;
 
 use pidash_db::entity::{
-    estimates, issues, module_issues, module_links, module_members, modules, project_members,
-    projects, states, user_favorites, user_recent_visits, users, workspace_members, workspaces,
+    estimate_points, estimates, issue_assignees, issue_labels, issues, labels, module_issues,
+    module_links, module_members, modules, project_members, projects, states, user_favorites,
+    user_recent_visits, users, workspace_members, workspaces,
 };
 use pidash_services::app_modules::{queries, shape, tasks};
 
@@ -692,29 +693,8 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
 // Annotated module rows (Q1 over `get_queryset`, `base.py:78-292`)
 // ---------------------------------------------------------------------------
 
-/// Base module columns selected on every annotated read, in model order.
-/// Shared with sibling handler issue 407 (archived-row fetch).
-pub(crate) const MODULE_BASE_COLUMNS: &[&str] = &[
-    "m.id",
-    "m.workspace_id",
-    "m.project_id",
-    "m.name",
-    "m.description",
-    "m.description_text",
-    "m.description_html",
-    "m.start_date",
-    "m.target_date",
-    "m.status",
-    "m.lead_id",
-    "m.view_props",
-    "m.sort_order",
-    "m.external_source",
-    "m.external_id",
-    "m.logo_props",
-    "m.archived_at",
-    "m.created_at",
-    "m.updated_at",
-];
+/// (Former `MODULE_BASE_COLUMNS` deleted with the raw-SQL annotated-row
+/// fetch: the SeaORM statement selects by column.)
 
 /// Annotated-row key order shared by create/list/partial_update: the
 /// `.values()` calls list the same 28 keys in different orders, but
@@ -757,68 +737,531 @@ const SHARED_ROW_ORDER: &[&str] = &[
 /// Shared with sibling handler issue 407 (archived detail).
 pub(crate) const DETAIL_ROW_ORDER: &[&str] = shape::MODULE_LIST_FIELD_ORDER;
 
-/// Swap the services builders' symbolic placeholders for positional
-/// binds (`$1` project, `$2` slug, `$3` user, `$4` module) and re-point
-/// the correlated `modules.id` at this query's `m` alias.
-fn bind_placeholders(fragment: String) -> String {
-    fragment
-        .replace(":project_id", "$1")
-        .replace(":module_id", "$4")
-        .replace(":slug", "$2")
-        .replace(":user", "$3")
-        .replace("modules.id", "m.id")
+/// (Former `bind_placeholders` deleted with the raw-SQL annotated-row
+/// fetch: the SeaORM statement binds by column, not by placeholder.)
+
+/// One annotated module row, decoded by name (the `row_to_json` /
+/// `GROUP BY` statement twin).
+#[derive(Debug, FromQueryResult)]
+pub(crate) struct ModuleRowData {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    name: String,
+    description: String,
+    description_text: Option<Value>,
+    description_html: Option<Value>,
+    start_date: Option<chrono::NaiveDate>,
+    target_date: Option<chrono::NaiveDate>,
+    status: String,
+    lead_id: Option<uuid::Uuid>,
+    view_props: Value,
+    sort_order: f64,
+    external_source: Option<String>,
+    external_id: Option<String>,
+    logo_props: Value,
+    archived_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    is_favorite: bool,
+    completed_issues: i64,
+    cancelled_issues: i64,
+    started_issues: i64,
+    unstarted_issues: i64,
+    backlog_issues: i64,
+    total_issues: i64,
+    backlog_estimate_points: Option<f64>,
+    unstarted_estimate_points: Option<f64>,
+    started_estimate_points: Option<f64>,
+    cancelled_estimate_points: Option<f64>,
+    completed_estimate_points: Option<f64>,
+    total_estimate_points: Option<f64>,
+    member_ids: Vec<uuid::Uuid>,
 }
 
-/// The Q1 annotation select list: `is_favorite`, the six `Count`s, the six
-/// estimate `Sum`s, `member_ids` (`base.py:216-290`). `member_deleted_guard`
-/// selects the `member_ids` deleted-at filter: the main queryset filters
-/// soft-deleted members (`base.py:217-222`) while the archive queryset does
-/// not (`archive.py:244-253`, ported bug). Shared with sibling handler
-/// issue 407 (archived-row fetch).
-pub(crate) fn annotation_selects(member_deleted_guard: bool) -> String {
-    let mut selects = vec![bind_placeholders(format!(
-        "{} AS is_favorite",
-        queries::favorite_exists_sql()
-    ))];
-    // NB: `queries::COUNT_GROUPS` leads with `cancelled` while
-    // `queries::COUNT_ALIASES` leads with `completed_issues`; zipping
-    // them swaps the two labels. `base.py:86-135` and the live wire both
-    // put `completed` first, so the pairs are spelled out explicitly
-    // (PIDASHCONV-504 filed for the groups const).
-    for (group, alias) in [
-        (Some("completed"), "completed_issues"),
-        (Some("cancelled"), "cancelled_issues"),
-        (Some("started"), "started_issues"),
-        (Some("unstarted"), "unstarted_issues"),
-        (Some("backlog"), "backlog_issues"),
-        (None, "total_issues"),
+/// `"alias"."column"` expression.
+fn mcol<C: sea_orm::sea_query::IntoIden + 'static>(alias: &'static str, column: C) -> Expr {
+    Expr::col((Alias::new(alias), column))
+}
+
+/// `"alias"."column"` column reference (for `equals` / `order_by` /
+/// `group_by_col`, which take `IntoColumnRef`, not `Expr`).
+fn mref<C: sea_orm::sea_query::IntoIden + 'static>(alias: &'static str, column: C) -> (Alias, C) {
+    (Alias::new(alias), column)
+}
+
+/// Wrap a select statement as a scalar subquery expression.
+fn msub(stmt: sea_orm::sea_query::SelectStatement) -> sea_orm::sea_query::SimpleExpr {
+    crate::app_issues::list_engine::sub(stmt)
+}
+
+/// `IssueManager` guards for the annotation subqueries
+/// (`queries::issue_manager_guards_sql`): the same five predicates.
+/// `states` must be joined (the callers join it).
+fn annotation_guards() -> Vec<sea_orm::sea_query::SimpleExpr> {
+    vec![
+        mcol("issues", issues::Column::DeletedAt).is_null(),
+        Condition::all()
+            .add(mcol("states", states::Column::Group).eq("triage"))
+            .add(mcol("states", states::Column::Group).is_not_null())
+            .not()
+            .into(),
+        mcol("issues", issues::Column::ArchivedAt).is_null(),
+        mcol("projects", projects::Column::ArchivedAt).is_null(),
+        mcol("issues", issues::Column::IsDraft).eq(false),
+    ]
+}
+
+/// The `is_favorite` `EXISTS` statement (`queries::favorite_exists_sql`):
+/// caller, entity_type='module', bridge to the outer module, project,
+/// workspace slug, all live rows (`LIMIT 1` kept).
+fn favorite_exists_stmt(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    let mut stmt = SeaQuery::select();
+    stmt.expr(Expr::val(1))
+        .from_as(user_favorites::Entity, Alias::new("uf"))
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            Alias::new("w"),
+            mcol("uf", user_favorites::Column::WorkspaceId)
+                .equals(mref("w", workspaces::Column::Id)),
+        )
+        .and_where(mcol("uf", user_favorites::Column::DeletedAt).is_null())
+        .and_where(
+            mcol("uf", user_favorites::Column::EntityIdentifier)
+                .equals(mref("m", modules::Column::Id)),
+        )
+        .and_where(mcol("uf", user_favorites::Column::EntityType).eq("module"))
+        .and_where(mcol("uf", user_favorites::Column::ProjectId).eq(*project_id))
+        .and_where(mcol("uf", user_favorites::Column::UserId).eq(*user_id))
+        .and_where(mcol("w", workspaces::Column::Slug).eq(slug))
+        .limit(1);
+    stmt.to_owned()
+}
+
+/// One per-group count annotation scalar subquery
+/// (`queries::count_issues_sql`): grouped counts `INNER JOIN states`,
+/// the total `LEFT JOIN`s it (NULL-safe guard semantics ported as
+/// observed), all `LIMIT 1` under the `COALESCE` at the use site.
+fn count_annotation(group: Option<&str>) -> sea_orm::sea_query::SimpleExpr {
+    let mut stmt = SeaQuery::select();
+    stmt.expr(mcol("issues", issues::Column::Id).count())
+        .from_as(issues::Entity, Alias::new("issues"))
+        .join_as(
+            match group {
+                Some(_) => JoinType::InnerJoin,
+                None => JoinType::LeftJoin,
+            },
+            states::Entity,
+            Alias::new("states"),
+            mcol("issues", issues::Column::StateId).equals(mref("states", states::Column::Id)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            Alias::new("projects"),
+            mcol("issues", issues::Column::ProjectId)
+                .equals(mref("projects", projects::Column::Id)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            module_issues::Entity,
+            Alias::new("module_issues"),
+            mcol("issues", issues::Column::Id)
+                .equals(mref("module_issues", module_issues::Column::IssueId)),
+        );
+    for condition in annotation_guards() {
+        stmt.and_where(condition);
+    }
+    stmt.and_where(mcol("module_issues", module_issues::Column::DeletedAt).is_null())
+        .and_where(
+            mcol("module_issues", module_issues::Column::ModuleId)
+                .equals(mref("m", modules::Column::Id)),
+        );
+    if let Some(group) = group {
+        stmt.and_where(mcol("states", states::Column::Group).eq(group));
+    }
+    let mut cell = stmt.to_owned();
+    cell.group_by_col(mref("module_issues", module_issues::Column::ModuleId));
+    cell.limit(1);
+    msub(cell)
+}
+
+/// One per-group estimate `SUM` annotation scalar subquery
+/// (`queries::estimate_subquery_sql`).
+fn estimate_annotation(group: Option<&str>) -> sea_orm::sea_query::SimpleExpr {
+    let mut stmt = SeaQuery::select();
+    stmt.expr(Func::sum(
+        mcol("estimate_points", estimate_points::Column::Value)
+            .cast_as(Alias::new("double precision")),
+    ))
+    .from_as(issues::Entity, Alias::new("issues"))
+    .join_as(
+        JoinType::InnerJoin,
+        states::Entity,
+        Alias::new("states"),
+        mcol("issues", issues::Column::StateId).equals(mref("states", states::Column::Id)),
+    )
+    .join_as(
+        JoinType::InnerJoin,
+        projects::Entity,
+        Alias::new("projects"),
+        mcol("issues", issues::Column::ProjectId).equals(mref("projects", projects::Column::Id)),
+    )
+    .join_as(
+        JoinType::InnerJoin,
+        estimate_points::Entity,
+        Alias::new("estimate_points"),
+        mcol("issues", issues::Column::EstimatePointId)
+            .equals(mref("estimate_points", estimate_points::Column::Id)),
+    )
+    .join_as(
+        JoinType::InnerJoin,
+        estimates::Entity,
+        Alias::new("estimates"),
+        mcol("estimate_points", estimate_points::Column::EstimateId)
+            .equals(mref("estimates", estimates::Column::Id)),
+    )
+    .join_as(
+        JoinType::InnerJoin,
+        module_issues::Entity,
+        Alias::new("module_issues"),
+        mcol("issues", issues::Column::Id)
+            .equals(mref("module_issues", module_issues::Column::IssueId)),
+    );
+    for condition in annotation_guards() {
+        stmt.and_where(condition);
+    }
+    stmt.and_where(mcol("estimates", estimates::Column::Type).eq("points"))
+        .and_where(mcol("module_issues", module_issues::Column::DeletedAt).is_null())
+        .and_where(
+            mcol("module_issues", module_issues::Column::ModuleId)
+                .equals(mref("m", modules::Column::Id)),
+        );
+    if let Some(group) = group {
+        stmt.and_where(mcol("states", states::Column::Group).eq(group));
+    }
+    let mut cell = stmt.to_owned();
+    cell.group_by_col(mref("module_issues", module_issues::Column::ModuleId));
+    cell.limit(1);
+    msub(cell)
+}
+
+/// The annotated module-row statement shared by the list/detail fetch and
+/// the archived fetch. `member_deleted_guard` selects the `member_ids`
+/// deleted-at filter: the main queryset filters soft-deleted members
+/// (`base.py:217-222`) while the archive queryset does not
+/// (`archive.py:244-253`, ported bug). `archived_only` marks the archive
+/// fetch (`archived_at IS NOT NULL`); otherwise unarchived rows only.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn module_rows_statement(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    module_id: Option<&uuid::Uuid>,
+    archived_null: bool,
+    archived_only: bool,
+    member_deleted_guard: bool,
+) -> sea_orm::sea_query::SelectStatement {
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(mcol("m", modules::Column::Id), Alias::new("id"))
+        .expr_as(
+            mcol("m", modules::Column::WorkspaceId),
+            Alias::new("workspace_id"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::ProjectId),
+            Alias::new("project_id"),
+        )
+        .expr_as(mcol("m", modules::Column::Name), Alias::new("name"))
+        .expr_as(
+            mcol("m", modules::Column::Description),
+            Alias::new("description"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::DescriptionText),
+            Alias::new("description_text"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::DescriptionHtml),
+            Alias::new("description_html"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::StartDate),
+            Alias::new("start_date"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::TargetDate),
+            Alias::new("target_date"),
+        )
+        .expr_as(mcol("m", modules::Column::Status), Alias::new("status"))
+        .expr_as(mcol("m", modules::Column::LeadId), Alias::new("lead_id"))
+        .expr_as(
+            mcol("m", modules::Column::ViewProps),
+            Alias::new("view_props"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::SortOrder),
+            Alias::new("sort_order"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::ExternalSource),
+            Alias::new("external_source"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::ExternalId),
+            Alias::new("external_id"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::LogoProps),
+            Alias::new("logo_props"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::ArchivedAt),
+            Alias::new("archived_at"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::CreatedAt),
+            Alias::new("created_at"),
+        )
+        .expr_as(
+            mcol("m", modules::Column::UpdatedAt),
+            Alias::new("updated_at"),
+        )
+        .expr_as(
+            Expr::exists(favorite_exists_stmt(slug, project_id, user_id)),
+            Alias::new("is_favorite"),
+        );
+    // Six group counts in queries::COUNT_ALIASES source order. NB: the
+    // `queries::COUNT_GROUPS` order (cancelled-const first) does NOT match
+    // COUNT_ALIASES (completed first); zipping them swaps the labels. The
+    // pairs below follow base.py:86-135 and the live wire (completed
+    // first); PIDASHCONV-504 tracks the groups const.
+    for (alias, group) in [
+        ("completed_issues", Some("completed")),
+        ("cancelled_issues", Some("cancelled")),
+        ("started_issues", Some("started")),
+        ("unstarted_issues", Some("unstarted")),
+        ("backlog_issues", Some("backlog")),
+        ("total_issues", None),
     ] {
-        let filter = match group {
-            Some(group) => queries::GroupFilter::Eq(group),
-            None => queries::GroupFilter::All,
-        };
-        selects.push(bind_placeholders(queries::count_coalesce_sql(
-            filter, alias,
-        )));
+        stmt.expr_as(
+            Func::coalesce([count_annotation(group), Expr::val(0).into()]),
+            Alias::new(alias),
+        );
     }
-    for (group, alias) in queries::ESTIMATE_GROUPS
-        .iter()
-        .zip(queries::ESTIMATE_POINT_ALIASES.iter())
-    {
-        selects.push(bind_placeholders(queries::estimate_coalesce_sql(
-            *group, alias,
-        )));
+    // Six estimate sums in queries::ESTIMATE_POINT_ALIASES order.
+    for (alias, group) in [
+        ("backlog_estimate_points", Some("backlog")),
+        ("unstarted_estimate_points", Some("unstarted")),
+        ("started_estimate_points", Some("started")),
+        ("cancelled_estimate_points", Some("cancelled")),
+        ("completed_estimate_points", Some("completed")),
+        ("total_estimate_points", None),
+    ] {
+        stmt.expr_as(
+            Func::coalesce([estimate_annotation(group), Expr::val(0.0).into()]),
+            Alias::new(alias),
+        );
     }
-    selects.push(bind_placeholders(format!(
-        "{} AS member_ids",
-        queries::member_ids_sql(member_deleted_guard)
-    )));
-    selects.join(", ")
+    // ARRAY_AGG(DISTINCT member_id) never yields NULL elements in
+    // Postgres, so the legacy FILTER (WHERE member_id IS NOT NULL) is a
+    // no-op: the COALESCE+array-agg form returns the same array.
+    stmt.expr_as(
+        Func::coalesce([
+            PgFunc::array_agg_distinct(mcol("module_members", module_members::Column::MemberId))
+                .into(),
+            Expr::val("{}").cast_as(Alias::new("uuid[]")),
+        ]),
+        Alias::new("member_ids"),
+    )
+    .from_as(modules::Entity, Alias::new("m"))
+    .join_as(
+        JoinType::InnerJoin,
+        workspaces::Entity,
+        Alias::new("w"),
+        mcol("m", modules::Column::WorkspaceId).equals(mref("w", workspaces::Column::Id)),
+    )
+    .join_as(
+        JoinType::LeftJoin,
+        module_members::Entity,
+        Alias::new("module_members"),
+        {
+            let on = Condition::all().add(
+                mcol("m", modules::Column::Id)
+                    .equals(mref("module_members", module_members::Column::ModuleId)),
+            );
+            if member_deleted_guard {
+                // The ported bug lives here: the archive queryset does
+                // not filter soft-deleted members.
+                on.add(mcol("module_members", module_members::Column::DeletedAt).is_null())
+            } else {
+                on
+            }
+        },
+    )
+    .and_where(mcol("m", modules::Column::ProjectId).eq(*project_id))
+    .and_where(mcol("w", workspaces::Column::Slug).eq(slug))
+    .and_where(mcol("m", modules::Column::DeletedAt).is_null())
+    .group_by_col(mref("m", modules::Column::Id))
+    .order_by(Alias::new("is_favorite"), Order::Desc)
+    .order_by(mref("m", modules::Column::CreatedAt), Order::Desc);
+    if archived_only {
+        stmt.and_where(mcol("m", modules::Column::ArchivedAt).is_not_null());
+    } else if archived_null {
+        stmt.and_where(mcol("m", modules::Column::ArchivedAt).is_null());
+    }
+    if let Some(id) = module_id {
+        stmt.and_where(mcol("m", modules::Column::Id).eq(*id));
+    }
+    stmt
 }
 
-/// Fetch annotated module rows via `row_to_json`: Postgres renders every
-/// column and the caller re-renders only the datetime/float keys, so key
-/// order and scalar bytes stay under handler control (pilot-2 precedent).
+/// Bridge one annotated module row to the wire map (the
+/// `fetch_module_links` Map precedent: uuids as strings, datetimes
+/// RFC3339; `shape_row` re-renders only what it lists).
+pub(crate) fn module_row_map(row: ModuleRowData) -> Map<String, Value> {
+    let mut map = Map::new();
+    map.insert("id".into(), Value::String(row.id.to_string()));
+    map.insert(
+        "workspace_id".into(),
+        Value::String(row.workspace_id.to_string()),
+    );
+    map.insert(
+        "project_id".into(),
+        Value::String(row.project_id.to_string()),
+    );
+    map.insert("name".into(), Value::String(row.name));
+    map.insert("description".into(), Value::String(row.description));
+    map.insert(
+        "description_text".into(),
+        row.description_text.unwrap_or(Value::Null),
+    );
+    map.insert(
+        "description_html".into(),
+        row.description_html.unwrap_or(Value::Null),
+    );
+    map.insert(
+        "start_date".into(),
+        row.start_date
+            .map(|d| Value::String(d.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "target_date".into(),
+        row.target_date
+            .map(|d| Value::String(d.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert("status".into(), Value::String(row.status));
+    map.insert(
+        "lead_id".into(),
+        row.lead_id
+            .map(|v| Value::String(v.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert("view_props".into(), row.view_props);
+    map.insert("sort_order".into(), serde_json::json!(row.sort_order));
+    map.insert(
+        "external_source".into(),
+        row.external_source
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "external_id".into(),
+        row.external_id.map(Value::String).unwrap_or(Value::Null),
+    );
+    map.insert("logo_props".into(), row.logo_props);
+    map.insert(
+        "archived_at".into(),
+        row.archived_at
+            .map(|v| Value::String(v.to_rfc3339()))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "created_at".into(),
+        Value::String(row.created_at.to_rfc3339()),
+    );
+    map.insert(
+        "updated_at".into(),
+        Value::String(row.updated_at.to_rfc3339()),
+    );
+    map.insert("is_favorite".into(), Value::Bool(row.is_favorite));
+    map.insert(
+        "completed_issues".into(),
+        serde_json::json!(row.completed_issues),
+    );
+    map.insert(
+        "cancelled_issues".into(),
+        serde_json::json!(row.cancelled_issues),
+    );
+    map.insert(
+        "started_issues".into(),
+        serde_json::json!(row.started_issues),
+    );
+    map.insert(
+        "unstarted_issues".into(),
+        serde_json::json!(row.unstarted_issues),
+    );
+    map.insert(
+        "backlog_issues".into(),
+        serde_json::json!(row.backlog_issues),
+    );
+    map.insert("total_issues".into(), serde_json::json!(row.total_issues));
+    map.insert(
+        "backlog_estimate_points".into(),
+        row.backlog_estimate_points
+            .map(|v| serde_json::json!(v))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "unstarted_estimate_points".into(),
+        row.unstarted_estimate_points
+            .map(|v| serde_json::json!(v))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "started_estimate_points".into(),
+        row.started_estimate_points
+            .map(|v| serde_json::json!(v))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "cancelled_estimate_points".into(),
+        row.cancelled_estimate_points
+            .map(|v| serde_json::json!(v))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "completed_estimate_points".into(),
+        row.completed_estimate_points
+            .map(|v| serde_json::json!(v))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "total_estimate_points".into(),
+        row.total_estimate_points
+            .map(|v| serde_json::json!(v))
+            .unwrap_or(Value::Null),
+    );
+    map.insert(
+        "member_ids".into(),
+        Value::Array(
+            row.member_ids
+                .into_iter()
+                .map(|id| Value::String(id.to_string()))
+                .collect(),
+        ),
+    );
+    map
+}
+
+/// Fetch annotated module rows (one statement, the statement above).
 async fn fetch_module_rows(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
@@ -827,42 +1270,21 @@ async fn fetch_module_rows(
     module_id: Option<&uuid::Uuid>,
     archived_null: bool,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
-    let mut columns = MODULE_BASE_COLUMNS.join(", ");
-    columns.push_str(", ");
-    columns.push_str(&annotation_selects(true));
-    let mut sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM (SELECT {columns} \
-         FROM modules m JOIN workspaces w ON w.id = m.workspace_id \
-         LEFT JOIN module_members ON module_members.module_id = m.id \
-         WHERE m.project_id = $1 AND w.slug = $2 AND m.deleted_at IS NULL"
-    );
-    if archived_null {
-        sql.push_str(" AND m.archived_at IS NULL");
-    }
-    if module_id.is_some() {
-        sql.push_str(" AND m.id = $4");
-    }
-    sql.push_str(" GROUP BY m.id ORDER BY ");
-    sql.push_str(&queries::MODULE_ORDER_SQL.replace("modules.", "m."));
-    sql.push_str(") AS __r");
-    let mut query = sqlx::query(&sql).bind(project_id).bind(slug).bind(user_id);
-    if let Some(id) = module_id {
-        query = query.bind(id);
-    }
-    let rows = query
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-        let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-        match value {
-            Value::Object(map) => out.push(map),
-            _ => return Err(Denial::ServerError),
-        }
-    }
-    Ok(out)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = crate::app_issues::list_engine::query_built::<ModuleRowData>(
+        &db,
+        &module_rows_statement(
+            slug,
+            project_id,
+            user_id,
+            module_id,
+            archived_null,
+            false,
+            true,
+        ),
+    )
+    .await?;
+    Ok(rows.into_iter().map(module_row_map).collect())
 }
 
 trait Pipe: Sized {
@@ -1624,7 +2046,11 @@ async fn replace_members(
             })
             .collect();
         module_members::Entity::insert_many(models)
-            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::new()
+                    .do_nothing()
+                    .to_owned(),
+            )
             .exec(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
@@ -1887,61 +2313,296 @@ pub(crate) async fn fetch_estimate_type(
 /// `deleted_at` guard, because Django groups through the `assignees` /
 /// `labels` relations whose ORM joins never filter soft-deleted through
 /// rows — removed assignees/labels still distribute.
-fn distribution_from_where(assignee_join: bool, label_join: bool) -> String {
-    let mut sql = String::from(
-        "FROM issues \
-         JOIN projects ON projects.id = issues.project_id \
-         JOIN workspaces ON workspaces.id = issues.workspace_id \
-         LEFT OUTER JOIN states ON states.id = issues.state_id \
-         JOIN module_issues ON module_issues.issue_id = issues.id \
-         LEFT JOIN estimate_points ON estimate_points.id = issues.estimate_point_id ",
-    );
+/// Shared issue-facet `FROM` + `WHERE` (`queries::distribution_from_where`):
+/// the "current module" scope with the IssueManager guards. Every
+/// distribution and the burndown scope build on this fragment. The M2M
+/// joins carry no `deleted_at` guard on purpose (Django groups through
+/// the `assignees`/`labels` relations whose ORM joins never filter
+/// soft-deleted through rows — PB-2035, PB-0102 class).
+#[allow(clippy::too_many_arguments)]
+fn distribution_scope(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    module_id: &uuid::Uuid,
+    assignee_join: bool,
+    label_join: bool,
+    scope_deleted_guard: bool,
+) -> sea_orm::sea_query::SelectStatement {
+    let mut stmt = SeaQuery::select();
+    stmt.from_as(issues::Entity, Alias::new("issues"))
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            Alias::new("projects"),
+            mcol("projects", projects::Column::Id)
+                .equals(mref("issues", issues::Column::ProjectId)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            Alias::new("workspaces"),
+            mcol("workspaces", workspaces::Column::Id)
+                .equals(mref("issues", issues::Column::WorkspaceId)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            states::Entity,
+            Alias::new("states"),
+            mcol("states", states::Column::Id).equals(mref("issues", issues::Column::StateId)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            module_issues::Entity,
+            Alias::new("module_issues"),
+            mcol("module_issues", module_issues::Column::IssueId)
+                .equals(mref("issues", issues::Column::Id)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            estimate_points::Entity,
+            Alias::new("estimate_points"),
+            mcol("estimate_points", estimate_points::Column::Id)
+                .equals(mref("issues", issues::Column::EstimatePointId)),
+        );
     if assignee_join {
-        sql.push_str(
-            "LEFT JOIN issue_assignees ON issue_assignees.issue_id = issues.id \
-             LEFT JOIN users AS assignees ON assignees.id = issue_assignees.assignee_id ",
+        stmt.join_as(
+            JoinType::LeftJoin,
+            issue_assignees::Entity,
+            Alias::new("issue_assignees"),
+            mcol("issue_assignees", issue_assignees::Column::IssueId)
+                .equals(mref("issues", issues::Column::Id)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            users::Entity,
+            Alias::new("assignees"),
+            mcol("assignees", users::Column::Id)
+                .equals(mref("issue_assignees", issue_assignees::Column::AssigneeId)),
         );
     }
     if label_join {
-        sql.push_str(
-            "LEFT JOIN issue_labels ON issue_labels.issue_id = issues.id \
-             LEFT JOIN labels ON labels.id = issue_labels.label_id ",
+        stmt.join_as(
+            JoinType::LeftJoin,
+            issue_labels::Entity,
+            Alias::new("issue_labels"),
+            mcol("issue_labels", issue_labels::Column::IssueId)
+                .equals(mref("issues", issues::Column::Id)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            labels::Entity,
+            Alias::new("labels"),
+            mcol("labels", labels::Column::Id)
+                .equals(mref("issue_labels", issue_labels::Column::LabelId)),
         );
     }
-    sql.push_str("WHERE ");
-    sql.push_str(&queries::issue_manager_guards_sql());
-    sql.push_str(
-        " AND workspaces.slug = $1 AND issues.project_id = $2 \
-         AND module_issues.module_id = $3 AND module_issues.deleted_at IS NULL",
-    );
-    sql
+    for condition in annotation_guards() {
+        stmt.and_where(condition);
+    }
+    stmt.and_where(mcol("workspaces", workspaces::Column::Slug).eq(slug))
+        .and_where(mcol("issues", issues::Column::ProjectId).eq(*project_id))
+        .and_where(mcol("module_issues", module_issues::Column::ModuleId).eq(*module_id));
+    if scope_deleted_guard {
+        // The archive label-estimate queryset omits this guard (the
+        // :386-391 ported bug); see fetch_archive_label_estimate.
+        stmt.and_where(mcol("module_issues", module_issues::Column::DeletedAt).is_null());
+    }
+    stmt
 }
 
-/// Shared with sibling handler issue 407 (archive label-estimate query).
-pub(crate) async fn fetch_json_maps(
+/// Archive label estimate (archive.py:386-391): identical to the main
+/// label estimate query except the ported bug — no
+/// `module_issues.deleted_at IS NULL` filter, and no `deleted_at` guard
+/// on the label M2M joins (PB-2035, PB-0102 class).
+pub(crate) async fn fetch_archive_label_estimate(
     pool: &sqlx::PgPool,
-    sql: &str,
     slug: &str,
     project_id: &uuid::Uuid,
     module_id: &uuid::Uuid,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(module_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-        let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-        match value {
-            Value::Object(map) => out.push(map),
-            _ => return Err(Denial::ServerError),
-        }
+    let mut stmt = distribution_scope(slug, project_id, module_id, false, true, false);
+    stmt.expr_as(
+        mcol("labels", labels::Column::Name),
+        Alias::new("label_name"),
+    )
+    .expr_as(mcol("labels", labels::Column::Color), Alias::new("color"))
+    .expr_as(mcol("labels", labels::Column::Id), Alias::new("label_id"))
+    .expr_as(sum_filter_aggregation(None), Alias::new("total_estimates"))
+    .expr_as(
+        sum_filter_aggregation(Some(true)),
+        Alias::new("completed_estimates"),
+    )
+    .expr_as(
+        sum_filter_aggregation(Some(false)),
+        Alias::new("pending_estimates"),
+    )
+    .group_by_columns([
+        mref("labels", labels::Column::Name),
+        mref("labels", labels::Column::Color),
+        mref("labels", labels::Column::Id),
+    ])
+    .order_by(mref("labels", labels::Column::Name), Order::Asc);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = crate::app_issues::list_engine::query_built::<DistributionRow>(&db, &stmt).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| distribution_map(row, true, false))
+        .collect())
+}
+
+/// One distribution output row, decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct DistributionRow {
+    first_name: Option<String>,
+    last_name: Option<String>,
+    assignee_id: Option<uuid::Uuid>,
+    avatar_url: Option<String>,
+    display_name: Option<String>,
+    label_name: Option<String>,
+    color: Option<String>,
+    label_id: Option<uuid::Uuid>,
+    total_estimates: Option<f64>,
+    completed_estimates: Option<f64>,
+    pending_estimates: Option<f64>,
+    total_issues: Option<i64>,
+    completed_issues: Option<i64>,
+    pending_issues: Option<i64>,
+}
+
+/// Bridge one distribution row to the wire map.
+fn distribution_map(row: DistributionRow, estimate: bool, assignee: bool) -> Map<String, Value> {
+    let opt_uuid = |v: Option<uuid::Uuid>| {
+        v.map(|v| Value::String(v.to_string()))
+            .unwrap_or(Value::Null)
+    };
+    let mut map = Map::new();
+    if assignee {
+        map.insert(
+            "first_name".into(),
+            row.first_name.map(Value::String).unwrap_or(Value::Null),
+        );
+        map.insert(
+            "last_name".into(),
+            row.last_name.map(Value::String).unwrap_or(Value::Null),
+        );
+        map.insert("assignee_id".into(), opt_uuid(row.assignee_id));
+        map.insert(
+            "avatar_url".into(),
+            row.avatar_url.map(Value::String).unwrap_or(Value::Null),
+        );
+        map.insert(
+            "display_name".into(),
+            row.display_name.map(Value::String).unwrap_or(Value::Null),
+        );
+    } else {
+        map.insert(
+            "label_name".into(),
+            row.label_name.map(Value::String).unwrap_or(Value::Null),
+        );
+        map.insert(
+            "color".into(),
+            row.color.map(Value::String).unwrap_or(Value::Null),
+        );
+        map.insert("label_id".into(), opt_uuid(row.label_id));
     }
-    Ok(out)
+    if estimate {
+        map.insert(
+            "total_estimates".into(),
+            row.total_estimates
+                .map(|v| serde_json::json!(v))
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "completed_estimates".into(),
+            row.completed_estimates
+                .map(|v| serde_json::json!(v))
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "pending_estimates".into(),
+            row.pending_estimates
+                .map(|v| serde_json::json!(v))
+                .unwrap_or(Value::Null),
+        );
+    } else {
+        map.insert(
+            "total_issues".into(),
+            row.total_issues
+                .map(|v| serde_json::json!(v))
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "completed_issues".into(),
+            row.completed_issues
+                .map(|v| serde_json::json!(v))
+                .unwrap_or(Value::Null),
+        );
+        map.insert(
+            "pending_issues".into(),
+            row.pending_issues
+                .map(|v| serde_json::json!(v))
+                .unwrap_or(Value::Null),
+        );
+    }
+    map
+}
+
+/// The assignee avatar CASE (`queries::avatar_url_case_sql` with the real
+/// stores column `avatar_asset_id` — PIDASHCONV-502 filed for the
+/// services builder): the file's static asset URL or the text avatar.
+fn assignee_avatar_case() -> sea_orm::sea_query::SimpleExpr {
+    CaseStatement::new()
+        .case(
+            mcol("assignees", users::Column::AvatarAssetId).is_not_null(),
+            Func::cust(Alias::new("concat"))
+                .arg(Expr::val("/api/assets/v2/static/"))
+                .arg(mcol("assignees", users::Column::AvatarAssetId).cast_as(Alias::new("text")))
+                .arg(Expr::val("/")),
+        )
+        .case(
+            mcol("assignees", users::Column::AvatarAssetId).is_null(),
+            mcol("assignees", users::Column::Avatar),
+        )
+        .finally(Expr::val(Option::<String>::None))
+        .into()
+}
+
+/// `FILTER (WHERE ...)` spelled as CASE (`list_engine` precedent):
+/// counts match `COUNT FILTER` rows (0 fallthrough), sums match
+/// `SUM FILTER` NULLs (filtered-out everywhere stays NULL).
+fn count_filter_aggregation(completed: Option<bool>) -> sea_orm::sea_query::SimpleExpr {
+    let condition: sea_orm::sea_query::SimpleExpr = completed_filter_condition(completed).into();
+    Func::sum(
+        CaseStatement::new()
+            .case(condition, Expr::val(1))
+            .finally(Expr::val(0)),
+    )
+    .into()
+}
+
+fn sum_filter_aggregation(completed: Option<bool>) -> sea_orm::sea_query::SimpleExpr {
+    let condition: sea_orm::sea_query::SimpleExpr = completed_filter_condition(completed).into();
+    Func::sum(
+        CaseStatement::new()
+            .case(
+                condition,
+                mcol("estimate_points", estimate_points::Column::Value)
+                    .cast_as(Alias::new("float")),
+            )
+            .finally(Expr::val(Option::<f64>::None)),
+    )
+    .into()
+}
+
+fn completed_filter_condition(completed: Option<bool>) -> Condition {
+    let base = Condition::all()
+        .add(mcol("issues", issues::Column::ArchivedAt).is_null())
+        .add(mcol("issues", issues::Column::IsDraft).eq(false));
+    match completed {
+        Some(true) => base.add(mcol("issues", issues::Column::CompletedAt).is_not_null()),
+        Some(false) => base.add(mcol("issues", issues::Column::CompletedAt).is_null()),
+        None => base,
+    }
 }
 
 /// Assignee distribution rows (`base.py:430-490,538-589`):
@@ -1954,19 +2615,6 @@ pub(crate) async fn fetch_assignee_distribution(
     module_id: &uuid::Uuid,
     estimate: bool,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
-    let (total, completed, pending) = if estimate {
-        (
-            queries::estimate_sum_sql(None),
-            queries::estimate_sum_sql(Some(true)),
-            queries::estimate_sum_sql(Some(false)),
-        )
-    } else {
-        (
-            queries::distribution_count_sql(None),
-            queries::distribution_count_sql(Some(true)),
-            queries::distribution_count_sql(Some(false)),
-        )
-    };
     let (total_key, completed_key, pending_key) = if estimate {
         (
             "total_estimates",
@@ -1976,22 +2624,49 @@ pub(crate) async fn fetch_assignee_distribution(
     } else {
         ("total_issues", "completed_issues", "pending_issues")
     };
-    // NB: `queries::avatar_url_case_sql()` spells the Django field name
-    // (`assignees.avatar_asset`); the column is `avatar_asset_id`
-    // (PIDASHCONV-502 filed for the services builder). This local CASE
-    // keeps the builder's SQL semantics with the real column.
-    let avatar = "CASE WHEN assignees.avatar_asset_id IS NOT NULL THEN CONCAT('/api/assets/v2/static/', assignees.avatar_asset_id, '/') WHEN assignees.avatar_asset_id IS NULL THEN assignees.avatar ELSE NULL END";
-    let sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM (SELECT assignees.first_name AS first_name, \
-         assignees.last_name AS last_name, assignees.id AS assignee_id, ({avatar}) AS avatar_url, \
-         assignees.display_name AS display_name, {total} AS {total_key}, \
-         {completed} AS {completed_key}, {pending} AS {pending_key} {} \
-         GROUP BY assignees.first_name, assignees.last_name, assignees.id, \
-         assignees.display_name, ({avatar}) \
-         ORDER BY assignees.first_name, assignees.last_name) AS __r",
-        distribution_from_where(true, false)
-    );
-    fetch_json_maps(pool, &sql, slug, project_id, module_id).await
+    let aggregate = |completed: Option<bool>| {
+        if estimate {
+            sum_filter_aggregation(completed)
+        } else {
+            count_filter_aggregation(completed)
+        }
+    };
+    let mut stmt = distribution_scope(slug, project_id, module_id, true, false, true);
+    stmt.expr_as(
+        mcol("assignees", users::Column::FirstName),
+        Alias::new("first_name"),
+    )
+    .expr_as(
+        mcol("assignees", users::Column::LastName),
+        Alias::new("last_name"),
+    )
+    .expr_as(
+        mcol("assignees", users::Column::Id),
+        Alias::new("assignee_id"),
+    )
+    .expr_as(assignee_avatar_case(), Alias::new("avatar_url"))
+    .expr_as(
+        mcol("assignees", users::Column::DisplayName),
+        Alias::new("display_name"),
+    )
+    .expr_as(aggregate(None), Alias::new(total_key))
+    .expr_as(aggregate(Some(true)), Alias::new(completed_key))
+    .expr_as(aggregate(Some(false)), Alias::new(pending_key))
+    .group_by_columns([
+        mref("assignees", users::Column::FirstName),
+        mref("assignees", users::Column::LastName),
+        mref("assignees", users::Column::Id),
+        mref("assignees", users::Column::DisplayName),
+    ])
+    .add_group_by(vec![assignee_avatar_case()])
+    .order_by(mref("assignees", users::Column::FirstName), Order::Asc)
+    .order_by(mref("assignees", users::Column::LastName), Order::Asc);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = crate::app_issues::list_engine::query_built::<DistributionRow>(&db, &stmt).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| distribution_map(row, estimate, true))
+        .collect())
 }
 
 /// Label distribution rows (`base.py:492-525,591-624`).
@@ -2003,19 +2678,6 @@ pub(crate) async fn fetch_label_distribution(
     module_id: &uuid::Uuid,
     estimate: bool,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
-    let (total, completed, pending) = if estimate {
-        (
-            queries::estimate_sum_sql(None),
-            queries::estimate_sum_sql(Some(true)),
-            queries::estimate_sum_sql(Some(false)),
-        )
-    } else {
-        (
-            queries::distribution_count_sql(None),
-            queries::distribution_count_sql(Some(true)),
-            queries::distribution_count_sql(Some(false)),
-        )
-    };
     let (total_key, completed_key, pending_key) = if estimate {
         (
             "total_estimates",
@@ -2025,14 +2687,35 @@ pub(crate) async fn fetch_label_distribution(
     } else {
         ("total_issues", "completed_issues", "pending_issues")
     };
-    let sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM (SELECT labels.name AS label_name, \
-         labels.color AS color, labels.id AS label_id, {total} AS {total_key}, \
-         {completed} AS {completed_key}, {pending} AS {pending_key} {} \
-         GROUP BY labels.name, labels.color, labels.id ORDER BY labels.name) AS __r",
-        distribution_from_where(false, true)
-    );
-    fetch_json_maps(pool, &sql, slug, project_id, module_id).await
+    let aggregate = |completed: Option<bool>| {
+        if estimate {
+            sum_filter_aggregation(completed)
+        } else {
+            count_filter_aggregation(completed)
+        }
+    };
+    let mut stmt = distribution_scope(slug, project_id, module_id, false, true, true);
+    stmt.expr_as(
+        mcol("labels", labels::Column::Name),
+        Alias::new("label_name"),
+    )
+    .expr_as(mcol("labels", labels::Column::Color), Alias::new("color"))
+    .expr_as(mcol("labels", labels::Column::Id), Alias::new("label_id"))
+    .expr_as(aggregate(None), Alias::new(total_key))
+    .expr_as(aggregate(Some(true)), Alias::new(completed_key))
+    .expr_as(aggregate(Some(false)), Alias::new(pending_key))
+    .group_by_columns([
+        mref("labels", labels::Column::Name),
+        mref("labels", labels::Column::Color),
+        mref("labels", labels::Column::Id),
+    ])
+    .order_by(mref("labels", labels::Column::Name), Order::Asc);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = crate::app_issues::list_engine::query_built::<DistributionRow>(&db, &stmt).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| distribution_map(row, estimate, false))
+        .collect())
 }
 
 /// Assignee row orders: `.values()` lists `avatar_url` (a `Case`
@@ -2095,6 +2778,12 @@ pub(crate) fn render_distribution_array(keys: &[&str], rows: &[Map<String, Value
     out
 }
 
+/// One aggregate-only burndown row (total points `SUM`).
+#[derive(Debug, FromQueryResult)]
+struct BurndownAggregate {
+    total: Option<f64>,
+}
+
 /// `burndown_plot` module branch (`utils/analytics_plot.py:198-264`,
 /// `plot_type="points"` or `"issues"`): per-day remaining over the
 /// module's date range, future days `null`.
@@ -2120,56 +2809,83 @@ pub(crate) async fn fetch_burndown_chart(
         chart.push('}');
         return Ok(chart);
     }
-    // Per-day completed inputs, truncated in the actor's zone (bound
-    // `$4`; the cycle PIDASHCONV-1184 precedent).
-    let scope_where = distribution_from_where(false, false);
+    // Per-day completed inputs. `AT TIME ZONE` truncation has no
+    // sea-query builder (the `$4` zone bind would need an Expr::cust,
+    // raw SQL per the guard), so the statement fetches per-issue rows
+    // and truncation+grouping happens below in the actor's zone — the
+    // cycle PIDASHCONV-1184 precedent. Day arithmetic is the same:
+    // summing per-issue values per day equals summing grouped days.
     // Points total sums ALL live module-issue estimates, not just the
     // completed ones (`analytics_plot.py:212-214` — no completed filter
     // on the total). `SUM` over no rows is NULL, and then Python's
     // `sum([])` is the INT `0`, so the chart renders ints, not `0.0`.
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let total_points: Option<f64> = if points {
-        let row: Option<(Option<f64>,)> = sqlx::query_as(&format!(
-            "SELECT SUM(CAST(estimate_points.value AS FLOAT)) {scope_where} \
-             AND estimate_points.id IS NOT NULL"
-        ))
-        .bind(slug)
-        .bind(project_id)
-        .bind(module_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        row.and_then(|(total,)| total)
+        let mut stmt = distribution_scope(slug, project_id, module_id, false, false, true);
+        stmt.expr_as(
+            Func::sum(
+                mcol("estimate_points", estimate_points::Column::Value)
+                    .cast_as(Alias::new("double precision")),
+            ),
+            Alias::new("total"),
+        )
+        .and_where(mcol("estimate_points", estimate_points::Column::Id).is_not_null());
+        let rate_rows =
+            crate::app_issues::list_engine::query_built::<BurndownAggregate>(&db, &stmt).await?;
+        rate_rows.into_iter().next().and_then(|row| row.total)
     } else {
         None
     };
-    let rows: Vec<(Option<chrono::NaiveDate>, Option<f64>, Option<i64>)> = if points {
-        sqlx::query_as(&format!(
-            "SELECT (issues.completed_at AT TIME ZONE $4)::date AS d, \
-             CAST(estimate_points.value AS FLOAT) AS v, NULL::bigint AS n \
-             {scope_where} AND estimate_points.id IS NOT NULL AND issues.completed_at IS NOT NULL \
-             ORDER BY issues.completed_at"
-        ))
-        .bind(slug)
-        .bind(project_id)
-        .bind(module_id)
-        .bind(timezone.name())
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
+    #[derive(Debug, FromQueryResult)]
+    struct RawBurndownRow {
+        completed_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        v: Option<f64>,
+        n: Option<i64>,
+    }
+    let raw_rows = if points {
+        let mut stmt = distribution_scope(slug, project_id, module_id, false, false, true);
+        stmt.expr_as(
+            mcol("issues", issues::Column::CompletedAt),
+            Alias::new("completed_at"),
+        )
+        .expr_as(
+            mcol("estimate_points", estimate_points::Column::Value)
+                .cast_as(Alias::new("double precision")),
+            Alias::new("v"),
+        )
+        .expr_as(
+            Expr::val(Option::<i64>::None).cast_as(Alias::new("bigint")),
+            Alias::new("n"),
+        )
+        .and_where(mcol("estimate_points", estimate_points::Column::Id).is_not_null())
+        .and_where(mcol("issues", issues::Column::CompletedAt).is_not_null())
+        .order_by(mref("issues", issues::Column::CompletedAt), Order::Asc);
+        crate::app_issues::list_engine::query_built::<RawBurndownRow>(&db, &stmt).await?
     } else {
-        sqlx::query_as(&format!(
-            "SELECT (issues.completed_at AT TIME ZONE $4)::date AS d, NULL::float AS v, \
-             COUNT(*) AS n {scope_where} AND issues.completed_at IS NOT NULL \
-             GROUP BY d ORDER BY d"
-        ))
-        .bind(slug)
-        .bind(project_id)
-        .bind(module_id)
-        .bind(timezone.name())
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
+        let mut stmt = distribution_scope(slug, project_id, module_id, false, false, true);
+        stmt.expr_as(
+            mcol("issues", issues::Column::CompletedAt),
+            Alias::new("completed_at"),
+        )
+        .expr_as(
+            Expr::val(Option::<f64>::None).cast_as(Alias::new("float8")),
+            Alias::new("v"),
+        )
+        .expr_as(Expr::val(1), Alias::new("n"))
+        .and_where(mcol("issues", issues::Column::CompletedAt).is_not_null())
+        .order_by(mref("issues", issues::Column::CompletedAt), Order::Asc);
+        crate::app_issues::list_engine::query_built::<RawBurndownRow>(&db, &stmt).await?
     };
+    use chrono::TimeZone as _;
+    let rows: Vec<(Option<chrono::NaiveDate>, Option<f64>, Option<i64>)> = raw_rows
+        .into_iter()
+        .map(|row| {
+            let day = row
+                .completed_at
+                .map(|ts| timezone.from_utc_datetime(&ts.naive_utc()).date_naive());
+            (day, row.v, row.n)
+        })
+        .collect();
     let today = chrono::Utc::now().date_naive();
     for (index, offset) in (0..=days).enumerate() {
         let date = start + chrono::Duration::days(offset);
@@ -3232,6 +3948,65 @@ mod modules1_seaorm_tests {
         assert!(sql.contains(r#""estimates"."type" = "#), "{sql}");
     }
 
+    fn module_rows_stmt(
+        slug: &str,
+        module_id: Option<&uuid::Uuid>,
+        archived_null: bool,
+        archived_only: bool,
+        member_guard: bool,
+    ) -> String {
+        let pid = uuid::Uuid::nil();
+        let uid = uuid::Uuid::nil();
+        let (sql, _) = module_rows_statement(
+            slug,
+            &pid,
+            &uid,
+            module_id,
+            archived_null,
+            archived_only,
+            member_guard,
+        )
+        .build(sea_orm::sea_query::PostgresQueryBuilder);
+        sql
+    }
+
+    #[test]
+    fn module_rows_pins_group_order_and_annotations() {
+        let sql = module_rows_stmt("acme", None, true, false, true);
+        assert!(sql.contains("GROUP BY"), "{sql}");
+        assert!(sql.contains(r#"AS "is_favorite""#), "{sql}");
+        assert!(sql.contains(r#"AS "completed_issues""#), "{sql}");
+        assert!(sql.contains(r#"AS "total_estimate_points""#), "{sql}");
+        assert!(sql.contains(r#"AS "member_ids""#), "{sql}");
+        assert!(sql.contains(r#""m"."archived_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.contains(r#""module_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"ORDER BY "is_favorite" DESC"#), "{sql}");
+        // 17 annotation columns: is_favorite + 6 counts + 6 sums + member_ids + 19 base = 33 total; check unique aliases
+        assert!(sql.contains(r#"AS "backlog_issues""#), "{sql}");
+        assert!(sql.contains(r#"AS "backlog_estimate_points""#), "{sql}");
+    }
+
+    #[test]
+    fn module_rows_archived_variant_pins_flags() {
+        let sql = module_rows_stmt("acme", None, false, true, false);
+        assert!(sql.contains(r#""m"."archived_at" IS NOT NULL"#), "{sql}");
+        assert!(
+            !sql.contains(r#""module_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(!sql.contains(r#""m"."archived_at" IS NULL"#), "{sql}");
+    }
+
+    #[test]
+    fn module_rows_detail_scopes_id() {
+        let mid = uuid::Uuid::nil();
+        let sql = module_rows_stmt("acme", Some(&mid), true, false, true);
+        assert!(sql.contains(r#""m"."id" = "#), "{sql}");
+    }
+
     #[tokio::test]
     async fn live_resolve_and_timezone_roundtrip() {
         let url = match std::env::var("DATABASE_URL") {
@@ -3445,15 +4220,19 @@ mod tests {
     fn count_annotations_pair_completed_first() {
         // `base.py:86-135` annotates `completed` before `cancelled`;
         // the live wire counts a completed-group issue under
-        // `completed_issues` (PIDASHCONV-504).
-        let selects = annotation_selects(true);
-        let completed = selects.find("AS completed_issues").expect("alias");
-        let cancelled = selects.find("AS cancelled_issues").expect("alias");
-        let completed_group = selects[..completed]
-            .rfind("states.group = 'completed'")
+        // `completed_issues` (PIDASHCONV-504). Pinned on the SeaORM
+        // statement twin.
+        let pid = uuid::Uuid::nil();
+        let uid = uuid::Uuid::nil();
+        let (sql, _) = module_rows_statement("acme", &pid, &uid, None, true, false, true)
+            .build(sea_orm::sea_query::PostgresQueryBuilder);
+        let completed = sql.find("AS \"completed_issues\"").expect("alias");
+        let cancelled = sql.find("AS \"cancelled_issues\"").expect("alias");
+        let completed_group = sql[..completed]
+            .rfind("\"states\".\"group\" = 'completed'")
             .expect("group");
-        let cancelled_group = selects[..cancelled]
-            .rfind("states.group = 'cancelled'")
+        let cancelled_group = sql[..cancelled]
+            .rfind("\"states\".\"group\" = 'cancelled'")
             .expect("group");
         assert!(completed_group < completed);
         assert!(cancelled_group < cancelled);
