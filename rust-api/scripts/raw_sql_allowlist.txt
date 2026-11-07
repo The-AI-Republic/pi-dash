@@ -109,14 +109,6 @@ crates/jobs/src/scheduler.rs 4
 crates/jobs/src/tasks_cleanup/dummy_data.rs 34
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
-crates/jobs/src/tasks_webhooks/activity_dispatch.rs 15
-crates/jobs/src/tasks_webhooks/automation.rs 4
-crates/jobs/src/tasks_webhooks/link_crawl.rs 2
-crates/jobs/src/tasks_webhooks/model_data.rs 16
-crates/jobs/src/tasks_webhooks/sinks.rs 2
-crates/jobs/src/tasks_webhooks/visit_page.rs 15
-crates/jobs/src/tasks_webhooks/webhook_fanout.rs 1
-crates/jobs/src/tasks_webhooks/webhook_send.rs 6
 crates/services/src/dispatch/execution.rs 7
 crates/services/src/domain/identity.rs 43
 crates/services/src/domain/projects.rs 66
