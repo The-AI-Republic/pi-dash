@@ -10,8 +10,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect};
 use serde_json::{Map, Value};
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::entity::{issue_comments, projects, workspaces};
@@ -630,15 +629,9 @@ pub async fn update(
     .map_err(|error| Error::FieldErrors(error.body().to_owned()))?;
     // Merge validated keys over the before-image (untouched keys keep
     // their values — equivalent to the ORM's field-wise `save()`).
-    let before_json: Value = before
-        .try_get("comment_json")
-        .map_err(|_| Error::ServerError)?;
-    let before_html: String = before
-        .try_get("comment_html")
-        .map_err(|_| Error::ServerError)?;
-    let before_stripped: String = before
-        .try_get("comment_stripped")
-        .map_err(|_| Error::ServerError)?;
+    let before_json: Value = before.comment_json.clone();
+    let before_html: String = before.comment_html.clone();
+    let before_stripped: String = before.comment_stripped.clone();
     let new_json = validated
         .comment_json
         .clone()
@@ -727,8 +720,7 @@ pub async fn update(
         .as_ref()
         .is_some_and(|json| *json != before_json);
     let stripped_changed = new_stripped != before_stripped;
-    let stored_description_id =
-        read::row_uuid_opt(before, "description_id").map_err(map_read_error)?;
+    let stored_description_id = before.description_id;
     if let Some(description_id) = stored_description_id {
         if html_changed || json_changed || stripped_changed {
             comment_domain::sync_v1_description_subset(
@@ -943,7 +935,7 @@ pub struct CommentUpdate<'a> {
     /// The patched comment id.
     pub pk: Uuid,
     /// The pre-fetched live row (the handler 404s before parsing).
-    pub before: &'a PgRow,
+    pub before: &'a read::CommentDbRow,
     /// The negotiated payload.
     pub body: &'a Value,
     /// Whether the payload arrived as an HTML form.

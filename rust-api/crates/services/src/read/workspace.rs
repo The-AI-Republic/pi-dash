@@ -3,7 +3,12 @@
 //! Verbatim moves of the `pidash-api` handler helpers (OVL-05,
 //! PIDASHCONV-1543); the handlers call these and map [`Error`](super::Error)
 //! onto their denial type.
+//!
+//! SeaORM conversion (READ-1): entity reads, decode by name, preserving
+//! Django default-manager scopes.
 
+use pidash_db::entity::{projects, workspaces};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -12,13 +17,21 @@ use super::{DbError, Error};
 /// `Workspace.objects.get(slug=slug)`: the id/slug pair, default-manager
 /// scoped. A miss is [`NotFound`](Error::NotFound). Moved from
 /// `api::app_issues::handlers_labels_attachments`.
+fn workspace_row_query(slug: &str) -> sea_orm::Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([workspaces::Column::Id, workspaces::Column::Slug])
+}
+
 pub async fn workspace_row(pool: &PgPool, slug: &str) -> Result<(Uuid, String), Error> {
-    let row: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT id, slug FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| DbError::new("workspace-row", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspace_row_query(slug)
+        .into_tuple::<(Uuid, String)>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("workspace-row", error))?;
     row.ok_or(Error::NotFound)
 }
 
@@ -30,17 +43,18 @@ pub async fn workspace_slug(
     pool: &PgPool,
     workspace_id: Option<Uuid>,
 ) -> Result<Option<String>, Error> {
-    match workspace_id {
-        Some(id) => Ok(
-            sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|error| DbError::new("file-asset-slug", error))?
-                .flatten(),
-        ),
-        None => Ok(None),
-    }
+    let Some(id) = workspace_id else {
+        return Ok(None);
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let slug: Option<String> = workspaces::Entity::find_by_id(id)
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .into_tuple::<String>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("file-asset-slug", error))?;
+    Ok(slug)
 }
 
 /// The workspace that owns a project: `PROJECT_WORKSPACE_LOOKUP_SQL`
@@ -49,15 +63,50 @@ pub async fn workspace_slug(
 /// miss is [`NotFound`](Error::NotFound). Consolidates the twin
 /// `PrStore::workspace_of` helpers in `v1_work_items::handlers_pr_links`
 /// and `app_issues::handlers_relations`.
+fn workspace_of_query(project_id: Uuid) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find_by_id(project_id)
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+}
+
 pub async fn workspace_of(pool: &PgPool, project_id: &Uuid) -> Result<Uuid, Error> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("project workspace", error))?;
-    row.map(|row| row.0).ok_or(Error::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = workspace_of_query(*project_id)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("project workspace", error))?;
+    row.ok_or(Error::NotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{DbBackend, QueryTrait};
+
+    use super::*;
+
+    #[test]
+    fn workspace_row_query_scopes_by_slug_and_live() {
+        let sql = workspace_row_query("acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""workspaces"."slug" = "#), "{sql}");
+        assert!(
+            sql.contains(r#""workspaces"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn workspace_of_query_scopes_by_pk_and_live() {
+        let sql = workspace_of_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""projects"."id" = "#), "{sql}");
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""projects"."workspace_id""#), "{sql}");
+    }
 }
 
 #[cfg(test)]
