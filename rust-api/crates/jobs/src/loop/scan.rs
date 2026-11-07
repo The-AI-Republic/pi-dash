@@ -42,6 +42,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Timelike, Utc};
+use sea_orm::{ConnectionTrait, DbBackend};
+use sea_query::{Alias, Condition, Expr, InsertStatement, JoinType, Order, Query, SelectStatement};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -52,6 +54,7 @@ use crate::task_message::TaskMessage;
 use crate::tasks_ticker::rrule::next_fire_from_rrule;
 use crate::worker::{HandlerError, Registry, Verdict};
 use crate::Error;
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::r#loop::models::loop_job::{self, LoopJob};
 use pidash_db::r#loop::models::loop_target;
 use pidash_db::r#loop::queries;
@@ -204,7 +207,7 @@ pub fn next_fire_for_job(job: &LoopJob, now: &DateTime<Utc>) -> Option<DateTime<
 // ---------------------------------------------------------------------------
 
 /// Missing-edge anti-join for one job (`bgtasks/loop.py:80-93`).
-/// Binds `$1 = job_id`. Arm for arm with the ORM:
+/// Arm for arm with the ORM:
 ///
 /// * `WorkspaceMember(is_active=True, member__is_active=True,
 ///   deleted_at__isnull=True)` — the member join follows the non-nullable
@@ -214,49 +217,85 @@ pub fn next_fire_for_job(job: &LoopJob, now: &DateTime<Utc>) -> Option<DateTime<
 ///   manager plus the explicit filter, as in `member_exists_select`).
 /// * `Exists(has_target)` negated — the `NOT EXISTS` on the live
 ///   `(job, workspace, user)` edge (`loop_target_unique_edge_when_active`).
-fn missing_edges_sql() -> String {
-    format!(
-        "SELECT \"wm\".\"workspace_id\", \"wm\".\"member_id\" \
-        FROM \"workspace_members\" AS \"wm\" \
-        INNER JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"wm\".\"member_id\" \
-        WHERE \"wm\".\"deleted_at\" IS NULL AND \"wm\".\"deleted_at\" IS NULL \
-        AND \"wm\".\"is_active\" = TRUE AND \"u\".\"is_active\" = TRUE \
-        AND NOT EXISTS (SELECT 1 AS \"a\" FROM \"{targets}\" AS \"lt\" \
-        WHERE \"lt\".\"deleted_at\" IS NULL AND \"lt\".\"deleted_at\" IS NULL \
-        AND \"lt\".\"job_id\" = $1 \
-        AND \"lt\".\"workspace_id\" = \"wm\".\"workspace_id\" \
-        AND \"lt\".\"user_id\" = \"wm\".\"member_id\")",
-        targets = loop_target::TABLE,
-    )
+fn missing_edges_select(job_id: Uuid) -> SelectStatement {
+    let wm = Alias::new("wm");
+    let lt = Alias::new("lt");
+    let mut sub = Query::select();
+    sub.expr(Expr::val(1))
+        .from_as(Alias::new(loop_target::TABLE), lt.clone())
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((lt.clone(), Alias::new("deleted_at"))).is_null())
+                .add(Expr::col((lt.clone(), Alias::new("deleted_at"))).is_null())
+                .add(Expr::col((lt.clone(), Alias::new("job_id"))).eq(job_id))
+                .add(
+                    Expr::col((lt.clone(), Alias::new("workspace_id")))
+                        .equals((wm.clone(), Alias::new("workspace_id"))),
+                )
+                .add(
+                    Expr::col((lt.clone(), Alias::new("user_id")))
+                        .equals((wm.clone(), Alias::new("member_id"))),
+                ),
+        )
+        .limit(1);
+    let mut sel = Query::select();
+    sel.column((wm.clone(), Alias::new("workspace_id")))
+        .column((wm.clone(), Alias::new("member_id")))
+        .from_as(Alias::new("workspace_members"), wm.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("users"),
+            Alias::new("u"),
+            Expr::col((Alias::new("u"), Alias::new("id")))
+                .equals((wm.clone(), Alias::new("member_id"))),
+        )
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((wm.clone(), Alias::new("deleted_at"))).is_null())
+                .add(Expr::col((wm.clone(), Alias::new("deleted_at"))).is_null())
+                .add(Expr::col((wm.clone(), Alias::new("is_active"))).eq(true))
+                .add(Expr::col((Alias::new("u"), Alias::new("is_active"))).eq(true))
+                .add(Expr::exists(sub).not()),
+        );
+    sel
 }
 
 /// Live membership role for the fire-time re-check
 /// (`eligibility.py:138-146`, `check`'s `WorkspaceMember` read).
-/// Binds `$1 = workspace_id`, `$2 = user_id`. `ORDER BY created_at DESC`
-/// is the queryset's `Meta.ordering = ("-created_at",)` under `.first()`;
-/// the live-edge partial unique admits at most one row anyway.
-fn member_role_sql() -> String {
-    "SELECT \"wm\".\"role\" FROM \"workspace_members\" AS \"wm\" \
-    WHERE \"wm\".\"workspace_id\" = $1 AND \"wm\".\"member_id\" = $2 \
-    AND \"wm\".\"is_active\" = TRUE \
-    AND \"wm\".\"deleted_at\" IS NULL AND \"wm\".\"deleted_at\" IS NULL \
-    ORDER BY \"wm\".\"created_at\" DESC LIMIT 1"
-        .to_owned()
+/// `ORDER BY created_at DESC` is the queryset's
+/// `Meta.ordering = ("-created_at",)` under `.first()`; the live-edge
+/// partial unique admits at most one row anyway.
+fn member_role_select(workspace_id: Uuid, user_id: Uuid) -> SelectStatement {
+    let wm = Alias::new("wm");
+    let mut sel = Query::select();
+    sel.column((wm.clone(), Alias::new("role")))
+        .from_as(Alias::new("workspace_members"), wm.clone())
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((wm.clone(), Alias::new("workspace_id"))).eq(workspace_id))
+                .add(Expr::col((wm.clone(), Alias::new("member_id"))).eq(user_id))
+                .add(Expr::col((wm.clone(), Alias::new("is_active"))).eq(true))
+                .add(Expr::col((wm.clone(), Alias::new("deleted_at"))).is_null())
+                .add(Expr::col((wm.clone(), Alias::new("deleted_at"))).is_null()),
+        )
+        .order_by((wm, Alias::new("created_at")), Order::Desc)
+        .limit(1);
+    sel
 }
 
-/// One enabled job by id: the advance pass warms its per-job cache from
+/// One job by id: the advance pass warms its per-job cache from
 /// `fetch_enabled_jobs` and only falls back here on a mid-tick race
-/// (a job disabled between the two reads).
-fn job_by_id_sql() -> String {
-    let cols = loop_job::COLUMNS
-        .iter()
-        .map(|c| format!("\"{t}\".\"{c}\"", t = loop_job::TABLE))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT {cols} FROM \"{t}\" WHERE \"{t}\".\"id\" = $1",
-        t = loop_job::TABLE
-    )
+/// (a job disabled between the two reads). Note: no `deleted_at`
+/// filter — the Python `.get(pk)` falls back to the job row itself
+/// and the caller re-checks `enabled` on the returned row.
+fn job_by_id_select(job_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    for col in loop_job::COLUMNS {
+        sel.column((Alias::new(loop_job::TABLE), Alias::new(*col)));
+    }
+    sel.from(Alias::new(loop_job::TABLE))
+        .cond_where(Expr::col((Alias::new(loop_job::TABLE), Alias::new("id"))).eq(job_id));
+    sel
 }
 
 /// One fire job per due id: `fire_loop_target.delay(str(id))` is
@@ -292,67 +331,110 @@ pub fn cap_ids(mut ids: Vec<Uuid>, cap: i64) -> Vec<Uuid> {
 // ---------------------------------------------------------------------------
 
 /// Fetch one job by id (mid-tick race fallback for the advance cache).
-async fn fetch_job_by_id<'e, E>(ex: E, job_id: &Uuid) -> Result<Option<LoopJob>, Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row = sqlx::query(&job_by_id_sql())
-        .bind(*job_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| queries::map_loop_job_row(&r))
-        .transpose()
-        .map_err(Error::from)
+async fn fetch_job_by_id(
+    db: &impl ConnectionTrait,
+    job_id: &Uuid,
+) -> Result<Option<LoopJob>, Error> {
+    let row = db
+        .query_one(DbBackend::Postgres.build(&job_by_id_select(*job_id)))
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row
+        .map(|row| queries::map_loop_job_row_q(&row))
+        .transpose()?)
 }
 
 /// Live membership role for one edge, or `None` when no active row
 /// (`eligibility.py:138-148`, `membership is None` → `MEMBERSHIP_GONE`).
-async fn fetch_member_role<'e, E>(
-    ex: E,
+async fn fetch_member_role(
+    db: &impl ConnectionTrait,
     workspace_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Option<i16>, Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<(i16,)> = sqlx::query_as(&member_role_sql())
-        .bind(*workspace_id)
-        .bind(*user_id)
-        .fetch_optional(ex)
-        .await?;
-    Ok(row.map(|r| r.0))
+) -> Result<Option<i16>, Error> {
+    let row = db
+        .query_one(DbBackend::Postgres.build(&member_role_select(*workspace_id, *user_id)))
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row
+        .map(|r| r.try_get::<i16>("", "role").map_err(into_sqlx))
+        .transpose()?)
 }
 
 /// Multi-row INSERT for one reconcile chunk
 /// (`bulk_create(batch, ignore_conflicts=True, batch_size=500)`).
-/// Eight bound values per row in column order (`id`, `created_at`,
+/// Eight values per row in column order (`id`, `created_at`,
 /// `updated_at`, `job_id`, `workspace_id`, `user_id`, `next_run_at`,
 /// `last_skip_reason`); `ON CONFLICT DO NOTHING` is
 /// `ignore_conflicts=True`.
-fn reconcile_insert_sql(chunk_len: usize) -> String {
-    let placeholders = (0..chunk_len)
-        .map(|i| {
-            let b = i * 8 + 1;
-            format!(
-                "(${b}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
-                b + 1,
-                b + 2,
-                b + 3,
-                b + 4,
-                b + 5,
-                b + 6,
-                b + 7
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{t}\" (\"id\", \"created_at\", \"updated_at\", \
-        \"job_id\", \"workspace_id\", \"user_id\", \"next_run_at\", \
-        \"last_skip_reason\") VALUES {placeholders} \
-        ON CONFLICT DO NOTHING",
-        t = loop_target::TABLE,
-    )
+type ReconcileRow = (
+    Uuid,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Uuid,
+    Uuid,
+    Uuid,
+    DateTime<Utc>,
+);
+
+fn reconcile_insert(rows: &[ReconcileRow]) -> InsertStatement {
+    let mut stmt = Query::insert();
+    stmt.into_table(Alias::new(loop_target::TABLE)).columns([
+        Alias::new("id"),
+        Alias::new("created_at"),
+        Alias::new("updated_at"),
+        Alias::new("job_id"),
+        Alias::new("workspace_id"),
+        Alias::new("user_id"),
+        Alias::new("next_run_at"),
+        Alias::new("last_skip_reason"),
+    ]);
+    for (id, created_at, updated_at, job_id, workspace_id, user_id, next_run_at) in rows {
+        stmt.values_panic([
+            Expr::val(*id).into(),
+            Expr::val(created_at.fixed_offset()).into(),
+            Expr::val(updated_at.fixed_offset()).into(),
+            Expr::val(*job_id).into(),
+            Expr::val(*workspace_id).into(),
+            Expr::val(*user_id).into(),
+            Expr::val(next_run_at.fixed_offset()).into(),
+            Expr::val(loop_target::DEFAULT_LAST_SKIP_REASON.to_owned()).into(),
+        ]);
+    }
+    stmt.on_conflict(sea_query::OnConflict::new().do_nothing().to_owned());
+    stmt
+}
+
+/// Skip-advance write for the ineligible pass (`bgtasks/loop.py:111-145`):
+/// `bulk_update` of the cursor + reason + timestamps for one target.
+fn advance_update(
+    next_run_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    reason: &str,
+    updated_at: DateTime<Utc>,
+    target_id: Uuid,
+) -> sea_query::UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(loop_target::TABLE))
+        .values([
+            (
+                Alias::new("next_run_at"),
+                Expr::val(next_run_at.map(|n| n.fixed_offset())).into(),
+            ),
+            (
+                Alias::new("last_skipped_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+            (
+                Alias::new("last_skip_reason"),
+                Expr::val(reason.to_owned()).into(),
+            ),
+            (
+                Alias::new("updated_at"),
+                Expr::val(updated_at.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(target_id));
+    stmt
 }
 
 /// Create missing `LoopTarget` rows for (enabled job × active edge)
@@ -372,10 +454,19 @@ pub async fn reconcile_targets(pool: &PgPool, now: &DateTime<Utc>) -> Result<usi
             tracing::warn!(job_slug = %job.slug, rrule = %job.rrule, "loop.reconcile: unusable rrule");
             continue;
         };
-        let edges: Vec<(Uuid, Uuid)> = sqlx::query_as(&missing_edges_sql())
-            .bind(job.id)
-            .fetch_all(pool)
-            .await?;
+        let edge_rows = db
+            .query_all(DbBackend::Postgres.build(&missing_edges_select(job.id)))
+            .await
+            .map_err(into_sqlx)?;
+        let edges: Vec<(Uuid, Uuid)> = edge_rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<Uuid>("", "workspace_id").map_err(into_sqlx)?,
+                    row.try_get::<Uuid>("", "member_id").map_err(into_sqlx)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
         for chunk in edges.chunks(BULK_BATCH_SIZE) {
             // One multi-row INSERT per chunk; `ON CONFLICT DO NOTHING` is
             // `bulk_create(ignore_conflicts=True)`. Django fills
@@ -400,21 +491,9 @@ pub async fn reconcile_targets(pool: &PgPool, now: &DateTime<Utc>) -> Result<usi
                     next_run_at,
                 ));
             }
-            let sql = reconcile_insert_sql(values.len());
-            let mut query = sqlx::query(&sql);
-            for (id, created_at, updated_at, job_id, workspace_id, user_id, next_run_at) in &values
-            {
-                query = query
-                    .bind(*id)
-                    .bind(*created_at)
-                    .bind(*updated_at)
-                    .bind(*job_id)
-                    .bind(*workspace_id)
-                    .bind(*user_id)
-                    .bind(*next_run_at)
-                    .bind(loop_target::DEFAULT_LAST_SKIP_REASON);
-            }
-            query.execute(pool).await?;
+            db.execute(DbBackend::Postgres.build(&reconcile_insert(&values)))
+                .await
+                .map_err(into_sqlx)?;
             created += chunk.len();
         }
     }
@@ -452,13 +531,19 @@ pub async fn advance_ineligible_due(
         }
         let job = match jobs.get(&target.job_id) {
             Some(job) => job.clone(),
-            None => match fetch_job_by_id(&mut *tx, &target.job_id).await? {
-                Some(job) => {
-                    jobs.insert(job.id, job.clone());
-                    job
+            None => {
+                let fetched = {
+                    let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                    fetch_job_by_id(&conn, &target.job_id).await?
+                };
+                match fetched {
+                    Some(job) => {
+                        jobs.insert(job.id, job.clone());
+                        job
+                    }
+                    None => continue,
                 }
-                None => continue,
-            },
+            }
         };
         let next = match next_by_job.get(&job.id) {
             Some(cached) => *cached,
@@ -479,9 +564,12 @@ pub async fn advance_ineligible_due(
             let off_ids = queries::fetch_off_job_ids(&conn, target.user_id).await?;
             (master_paused, off_ids.contains(&target.job_id))
         };
-        let role = fetch_member_role(&mut *tx, &target.workspace_id, &target.user_id)
-            .await?
-            .map(|r| r as i32);
+        let role = {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            fetch_member_role(&conn, &target.workspace_id, &target.user_id)
+                .await?
+                .map(|r| r as i32)
+        };
         let has_llm = {
             let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
             queries::fetch_user_has_llm(&conn, target.user_id).await?
@@ -503,18 +591,18 @@ pub async fn advance_ineligible_due(
         });
         // `bulk_update` bypasses `auto_now`: `updated_at` goes back
         // unchanged (faithful no-op, kept as-is — see module docs).
-        sqlx::query(&format!(
-            "UPDATE \"{t}\" SET \"next_run_at\" = $1, \"last_skipped_at\" = $2, \
-            \"last_skip_reason\" = $3, \"updated_at\" = $4 WHERE \"id\" = $5",
-            t = loop_target::TABLE,
-        ))
-        .bind(next_run_at)
-        .bind(*now)
-        .bind(reason.map(|r| r.as_str()).unwrap_or(""))
-        .bind(target.updated_at)
-        .bind(target.id)
-        .execute(&mut *tx)
-        .await?;
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            conn.execute(DbBackend::Postgres.build(&advance_update(
+                next_run_at,
+                *now,
+                reason.map(|r| r.as_str()).unwrap_or(""),
+                target.updated_at,
+                target.id,
+            )))
+            .await
+            .map_err(into_sqlx)?;
+        }
         advanced += 1;
     }
     tx.commit().await?;
@@ -765,7 +853,8 @@ mod tests {
     // with the `$1` job bind, and the role read's ordering + limit.
     #[test]
     fn scanner_sql_carries_every_python_arm() {
-        let missing = missing_edges_sql();
+        let pinned = Uuid::from_bytes([7; 16]);
+        let missing = missing_edges_select(pinned).to_string(sea_query::PostgresQueryBuilder);
         assert!(matches!(
             parse(&missing),
             sqlparser::ast::Statement::Query(_)
@@ -779,57 +868,67 @@ mod tests {
             "u.is_active = true",
             "not exists",
             "from loop_targets as lt",
-            "lt.job_id = $1",
+            "lt.job_id = '07070707-0707-0707-0707-070707070707'",
             "lt.workspace_id = wm.workspace_id",
             "lt.user_id = wm.member_id",
         ] {
             assert!(mine.contains(fragment), "missing {fragment} in:\n{missing}");
         }
-        let role = member_role_sql();
+        let role = member_role_select(pinned, pinned).to_string(sea_query::PostgresQueryBuilder);
         assert!(matches!(parse(&role), sqlparser::ast::Statement::Query(_)));
         let mine = norm(&role);
         for fragment in [
-            "select wm.role from workspace_members as wm",
-            "wm.workspace_id = $1",
-            "wm.member_id = $2",
+            "select wm.role",
+            "from workspace_members as wm",
+            "wm.workspace_id = '07070707-0707-0707-0707-070707070707'",
+            "wm.member_id = '07070707-0707-0707-0707-070707070707'",
             "wm.is_active = true",
             "order by wm.created_at desc limit 1",
         ] {
             assert!(mine.contains(fragment), "missing {fragment} in:\n{role}");
         }
-        let by_id = job_by_id_sql();
+        let by_id = job_by_id_select(pinned).to_string(sea_query::PostgresQueryBuilder);
         assert!(matches!(parse(&by_id), sqlparser::ast::Statement::Query(_)));
-        assert!(norm(&by_id).contains("from loop_jobs where loop_jobs.id = $1"));
+        let by_id_where = norm(&by_id);
+        assert!(by_id_where.contains("from loop_jobs where loop_jobs.id ="));
+        assert!(!by_id_where.contains("deleted_at is null"));
     }
 
-    // Reconcile INSERT (`bulk_create(ignore_conflicts=True)`): eight
-    // bound values per row need eight placeholders per row. A short
-    // placeholder list compiles and passes every broker-free test, then
-    // fails at runtime with a bind-count mismatch on the first non-empty
-    // reconcile — so the placeholder sequence is asserted exactly.
+    // Reconcile INSERT (`bulk_create(ignore_conflicts=True)`): one
+    // VALUES tuple per row with eight fields per row, so a short tuple
+    // list compiles and passes every broker-free test, then fails at
+    // runtime with a column-count mismatch on the first non-empty
+    // reconcile — the tuple shape is asserted exactly.
     #[test]
     fn reconcile_insert_binds_match_placeholders() {
+        fn dummy_rows(n: usize) -> Vec<ReconcileRow> {
+            let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("fits");
+            (0..n)
+                .map(|_| {
+                    (
+                        Uuid::from_bytes([7; 16]),
+                        now,
+                        now,
+                        Uuid::from_bytes([7; 16]),
+                        Uuid::from_bytes([7; 16]),
+                        Uuid::from_bytes([7; 16]),
+                        now,
+                    )
+                })
+                .collect()
+        }
         for n in [1, 2, 3] {
-            let sql = reconcile_insert_sql(n);
+            let sql = reconcile_insert(&dummy_rows(n)).to_string(sea_query::PostgresQueryBuilder);
             assert!(matches!(parse(&sql), sqlparser::ast::Statement::Insert(_)));
-            let mut nums: Vec<usize> = Vec::new();
-            let bytes = sql.as_bytes();
-            let mut k = 0;
-            while k < bytes.len() {
-                if bytes[k] == b'$' {
-                    let mut j = k + 1;
-                    while j < bytes.len() && bytes[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    assert!(j > k + 1, "bare $ in:\n{sql}");
-                    nums.push(sql[k + 1..j].parse().expect("placeholder index"));
-                    k = j;
-                } else {
-                    k += 1;
-                }
-            }
-            nums.sort_unstable();
-            assert_eq!(nums, (1..=8 * n).collect::<Vec<_>>(), "in:\n{sql}");
+            let mine = norm(&sql);
+            assert!(mine.contains("insert into loop_targets"), "{sql}");
+            assert!(mine.contains("on conflict do nothing"), "{sql}");
+            // Eight fields per row: n tuples means 8n value slots.
+            assert_eq!(mine.matches("values (").count(), 1, "{sql}");
+            let tail = mine.split("values").nth(1).expect("has VALUES");
+            let tail = tail.split("on conflict").next().expect("has ON CONFLICT");
+            assert_eq!(tail.matches('(').count(), n, "{sql}");
+            assert_eq!(tail.matches(')').count(), n, "{sql}");
         }
     }
 

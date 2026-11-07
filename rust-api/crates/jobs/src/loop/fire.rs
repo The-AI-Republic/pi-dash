@@ -63,7 +63,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sea_orm::{ConnectionTrait, DbBackend};
+use sea_query::{Alias, Condition, Expr, LockType, Order, Query, SelectStatement};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::loop_dispatch::dispatch_loop_turn;
@@ -73,6 +75,7 @@ use crate::loop_scan::{
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
 use crate::Error;
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::r#loop::models::loop_job::{self, LoopJob};
 use pidash_db::r#loop::queries;
 
@@ -91,25 +94,44 @@ use pidash_db::r#loop::queries;
 /// only the target row; the job join is inner (non-nullable FK).
 /// `t.deleted_at IS NULL` appears twice — the soft-delete manager plus
 /// the explicit filter, exactly as Django compiles it.
-pub fn fire_claim_sql() -> String {
+pub fn fire_claim_select(target_id: Uuid) -> SelectStatement {
     // The job columns keep their bare names so the queries layer can map
-    // the row ([`queries::map_loop_job_row`], owned by PIDASHCONV-154);
+    // the row ([`queries::map_loop_job_row_q`], owned by PIDASHCONV-154);
     // the target columns take a `t_` prefix so no name collides.
-    let job_cols = loop_job::COLUMNS
-        .iter()
-        .map(|c| format!("\"j\".\"{c}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT \"t\".\"id\" AS \"t_id\", \"t\".\"workspace_id\" AS \"t_workspace_id\", \
-        \"t\".\"user_id\" AS \"t_user_id\", \"t\".\"next_run_at\" AS \"t_next_run_at\", \
-        {job_cols} \
-        FROM \"loop_targets\" AS \"t\" \
-        INNER JOIN \"loop_jobs\" AS \"j\" ON \"j\".\"id\" = \"t\".\"job_id\" \
-        WHERE \"t\".\"id\" = $1 \
-        AND \"t\".\"deleted_at\" IS NULL AND \"t\".\"deleted_at\" IS NULL \
-        FOR UPDATE OF \"t\""
-    )
+    let t = Alias::new("t");
+    let mut sel = Query::select();
+    sel.expr_as(Expr::col((t.clone(), Alias::new("id"))), Alias::new("t_id"));
+    sel.expr_as(
+        Expr::col((t.clone(), Alias::new("workspace_id"))),
+        Alias::new("t_workspace_id"),
+    );
+    sel.expr_as(
+        Expr::col((t.clone(), Alias::new("user_id"))),
+        Alias::new("t_user_id"),
+    );
+    sel.expr_as(
+        Expr::col((t.clone(), Alias::new("next_run_at"))),
+        Alias::new("t_next_run_at"),
+    );
+    for col in loop_job::COLUMNS {
+        sel.column((Alias::new("j"), Alias::new(*col)));
+    }
+    sel.from_as(Alias::new("loop_targets"), t.clone())
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            Alias::new("loop_jobs"),
+            Alias::new("j"),
+            Expr::col((Alias::new("j"), Alias::new("id")))
+                .equals((t.clone(), Alias::new("job_id"))),
+        )
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((t.clone(), Alias::new("id"))).eq(target_id))
+                .add(Expr::col((t.clone(), Alias::new("deleted_at"))).is_null())
+                .add(Expr::col((t.clone(), Alias::new("deleted_at"))).is_null()),
+        )
+        .lock_with_tables(LockType::Update, [t]);
+    sel
 }
 
 /// One fire claim row: the cursor plus the edge ids the stagger seeds on
@@ -124,52 +146,101 @@ pub struct FireClaim {
 
 /// Live membership role for the fire-time re-check
 /// (`eligibility.py:136-148`, `check`'s `WorkspaceMember` read).
-/// Binds `$1 = workspace_id`, `$2 = user_id`. `ORDER BY created_at DESC`
-/// is the queryset's `Meta.ordering = ("-created_at",)` under `.first()`;
-/// the live-edge partial unique admits at most one row anyway.
+/// `ORDER BY created_at DESC` is the queryset's
+/// `Meta.ordering = ("-created_at",)` under `.first()`; the live-edge
+/// partial unique admits at most one row anyway.
 ///
-/// Fire-owned twin of the scanner's `member_role_sql` (`loop/scan.rs`):
+/// Fire-owned twin of the scanner's `member_role_select` (`loop/scan.rs`):
 /// same read, separate call site — this issue owns no other paths, so
 /// the scanner's private helper is repeated here, not edited there.
-fn member_role_sql() -> String {
-    "SELECT \"wm\".\"role\" FROM \"workspace_members\" AS \"wm\" \
-    WHERE \"wm\".\"workspace_id\" = $1 AND \"wm\".\"member_id\" = $2 \
-    AND \"wm\".\"is_active\" = TRUE \
-    AND \"wm\".\"deleted_at\" IS NULL AND \"wm\".\"deleted_at\" IS NULL \
-    ORDER BY \"wm\".\"created_at\" DESC LIMIT 1"
-        .to_owned()
+fn member_role_select(workspace_id: Uuid, user_id: Uuid) -> SelectStatement {
+    let wm = Alias::new("wm");
+    let mut sel = Query::select();
+    sel.column((wm.clone(), Alias::new("role")))
+        .from_as(Alias::new("workspace_members"), wm.clone())
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((wm.clone(), Alias::new("workspace_id"))).eq(workspace_id))
+                .add(Expr::col((wm.clone(), Alias::new("member_id"))).eq(user_id))
+                .add(Expr::col((wm.clone(), Alias::new("is_active"))).eq(true))
+                .add(Expr::col((wm.clone(), Alias::new("deleted_at"))).is_null())
+                .add(Expr::col((wm.clone(), Alias::new("deleted_at"))).is_null()),
+        )
+        .order_by((wm, Alias::new("created_at")), Order::Desc)
+        .limit(1);
+    sel
 }
 
 /// Live membership role for one edge, or `None` when no active row
 /// (`eligibility.py:147-148`, `membership is None` → `MEMBERSHIP_GONE`).
-async fn fetch_member_role<'e, E>(
-    ex: E,
+async fn fetch_member_role(
+    db: &impl ConnectionTrait,
     workspace_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Option<i16>, Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<(i16,)> = sqlx::query_as(&member_role_sql())
-        .bind(*workspace_id)
-        .bind(*user_id)
-        .fetch_optional(ex)
-        .await?;
-    Ok(row.map(|r| r.0))
+) -> Result<Option<i16>, Error> {
+    let row = db
+        .query_one(DbBackend::Postgres.build(&member_role_select(*workspace_id, *user_id)))
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row
+        .map(|r| r.try_get::<i16>("", "role").map_err(into_sqlx))
+        .transpose()?)
 }
 
 /// Skip write (`bgtasks/loop.py:217-221`,
 /// `update_fields=["next_run_at", "last_skipped_at", "last_skip_reason",
 /// "updated_at"]`).
-pub fn fire_skip_sql() -> &'static str {
-    "UPDATE loop_targets SET next_run_at = $1, last_skipped_at = $2, \
-     last_skip_reason = $3, updated_at = $4 WHERE id = $5"
+pub fn fire_skip_update(
+    next_run_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    reason: &str,
+    target_id: Uuid,
+) -> sea_query::UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("loop_targets"))
+        .values([
+            (
+                Alias::new("next_run_at"),
+                Expr::val(next_run_at.map(|n| n.fixed_offset())).into(),
+            ),
+            (
+                Alias::new("last_skipped_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+            (
+                Alias::new("last_skip_reason"),
+                Expr::val(reason.to_owned()).into(),
+            ),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(target_id));
+    stmt
 }
 
 /// Eligible write (`bgtasks/loop.py:223`,
 /// `update_fields=["next_run_at", "updated_at"]`).
-pub fn fire_advance_sql() -> &'static str {
-    "UPDATE loop_targets SET next_run_at = $1, updated_at = $2 WHERE id = $3"
+pub fn fire_advance_update(
+    next_run_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    target_id: Uuid,
+) -> sea_query::UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("loop_targets"))
+        .values([
+            (
+                Alias::new("next_run_at"),
+                Expr::val(next_run_at.map(|n| n.fixed_offset())).into(),
+            ),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(target_id));
+    stmt
 }
 
 // ---------------------------------------------------------------------------
@@ -199,19 +270,25 @@ pub async fn phase1_claim(
     now: &DateTime<Utc>,
 ) -> Result<Phase1, Error> {
     let mut tx = pool.begin().await?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&fire_claim_sql())
-        .bind(*target_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some(row) = row else {
-        return Ok(Phase1::Skipped);
+    let claim: Option<FireClaim> = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let row = conn
+            .query_one(DbBackend::Postgres.build(&fire_claim_select(*target_id)))
+            .await
+            .map_err(into_sqlx)?;
+        row.map(|row| {
+            Ok::<_, sqlx::Error>(FireClaim {
+                id: row.try_get("", "t_id").map_err(into_sqlx)?,
+                workspace_id: row.try_get("", "t_workspace_id").map_err(into_sqlx)?,
+                user_id: row.try_get("", "t_user_id").map_err(into_sqlx)?,
+                next_run_at: row.try_get("", "t_next_run_at").map_err(into_sqlx)?,
+                job: queries::map_loop_job_row_q(&row)?,
+            })
+        })
+        .transpose()?
     };
-    let claim = FireClaim {
-        id: row.try_get("t_id")?,
-        workspace_id: row.try_get("t_workspace_id")?,
-        user_id: row.try_get("t_user_id")?,
-        next_run_at: row.try_get("t_next_run_at")?,
-        job: queries::map_loop_job_row(&row)?,
+    let Some(claim) = claim else {
+        return Ok(Phase1::Skipped);
     };
     // Future cursor = raced the scanner; another fire already claimed
     // (`:205-207`). No write.
@@ -241,9 +318,12 @@ pub async fn phase1_claim(
         let off_ids = queries::fetch_off_job_ids(&conn, claim.user_id).await?;
         (master_paused, off_ids.contains(&job.id))
     };
-    let role = fetch_member_role(&mut *tx, &claim.workspace_id, &claim.user_id)
-        .await?
-        .map(|r| r as i32);
+    let role = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        fetch_member_role(&conn, &claim.workspace_id, &claim.user_id)
+            .await?
+            .map(|r| r as i32)
+    };
     let has_llm = {
         let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
         queries::fetch_user_has_llm(&conn, claim.user_id).await?
@@ -257,14 +337,17 @@ pub async fn phase1_claim(
     );
     match skip {
         Some(reason) => {
-            sqlx::query(fire_skip_sql())
-                .bind(advanced)
-                .bind(*now)
-                .bind(reason.as_str())
-                .bind(*now)
-                .bind(claim.id)
-                .execute(&mut *tx)
-                .await?;
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                conn.execute(DbBackend::Postgres.build(&fire_skip_update(
+                    advanced,
+                    *now,
+                    reason.as_str(),
+                    claim.id,
+                )))
+                .await
+                .map_err(into_sqlx)?;
+            }
             tx.commit().await?;
             tracing::info!(
                 target = %claim.id,
@@ -274,12 +357,14 @@ pub async fn phase1_claim(
             Ok(Phase1::Skipped)
         }
         None => {
-            sqlx::query(fire_advance_sql())
-                .bind(advanced)
-                .bind(*now)
-                .bind(claim.id)
-                .execute(&mut *tx)
-                .await?;
+            {
+                let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                conn.execute(
+                    DbBackend::Postgres.build(&fire_advance_update(advanced, *now, claim.id)),
+                )
+                .await
+                .map_err(into_sqlx)?;
+            }
             tx.commit().await?;
             Ok(Phase1::Claimed { target: claim.id })
         }
@@ -374,19 +459,31 @@ mod tests {
         stmts.pop().unwrap()
     }
 
+    fn pinned() -> Uuid {
+        Uuid::from_bytes([7; 16])
+    }
+
+    fn render_stmt(stmt: &SelectStatement) -> String {
+        stmt.to_string(sea_query::PostgresQueryBuilder)
+    }
+
+    fn render_update(stmt: &sea_query::UpdateStatement) -> String {
+        stmt.to_string(sea_query::PostgresQueryBuilder)
+    }
+
     // Fire claim SQL (`bgtasks/loop.py:196-201`): the target row plus the
     // full job column list over an inner join, the manager's
     // `deleted_at IS NULL` doubled (manager + explicit filter), and
     // `FOR UPDATE OF` the target table only.
     #[test]
     fn fire_claim_sql_carries_every_python_arm() {
-        let sql = fire_claim_sql();
+        let sql = render_stmt(&fire_claim_select(pinned()));
         assert!(matches!(parse(&sql), sqlparser::ast::Statement::Query(_)));
         let mine = norm(&sql);
         for fragment in [
             "from loop_targets as t",
             "inner join loop_jobs as j on j.id = t.job_id",
-            "t.id = $1",
+            "t.id = '07070707-0707-0707-0707-070707070707'",
             "for update of t",
             "t.workspace_id as t_workspace_id",
             "t.user_id as t_user_id",
@@ -440,16 +537,18 @@ mod tests {
     // the scanner's probe — same arms, separate call site.
     #[test]
     fn member_role_sql_matches_check_read() {
-        let sql = member_role_sql();
+        let sql = render_stmt(&member_role_select(pinned(), pinned()));
         assert!(matches!(parse(&sql), sqlparser::ast::Statement::Query(_)));
         let mine = norm(&sql);
         for fragment in [
-            "select wm.role from workspace_members as wm",
-            "wm.workspace_id = $1",
-            "wm.member_id = $2",
+            "select wm.role",
+            "from workspace_members as wm",
+            "wm.workspace_id = '07070707-0707-0707-0707-070707070707'",
+            "wm.member_id = '07070707-0707-0707-0707-070707070707'",
             "wm.is_active = true",
             "wm.deleted_at is null",
-            "order by wm.created_at desc limit 1",
+            "order by wm.created_at desc",
+            "limit 1",
         ] {
             assert!(mine.contains(fragment), "missing {fragment} in:\n{sql}");
         }
@@ -460,30 +559,31 @@ mod tests {
     // cursor; both refresh `updated_at` (`auto_now`).
     #[test]
     fn phase1_writes_match_save_fields() {
-        let skip = fire_skip_sql();
-        assert!(matches!(parse(skip), sqlparser::ast::Statement::Update(_)));
-        let mine = norm(skip);
+        let now = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).expect("fits");
+        let skip = render_update(&fire_skip_update(Some(now), now, "master_paused", pinned()));
+        assert!(matches!(parse(&skip), sqlparser::ast::Statement::Update(_)));
+        let mine = norm(&skip);
         for fragment in [
             "update loop_targets",
-            "next_run_at = $1",
-            "last_skipped_at = $2",
-            "last_skip_reason = $3",
-            "updated_at = $4",
-            "where id = $5",
+            "next_run_at =",
+            "last_skipped_at =",
+            "last_skip_reason = 'master_paused'",
+            "updated_at =",
+            "where id =",
         ] {
             assert!(mine.contains(fragment), "missing {fragment} in:\n{skip}");
         }
-        let advance = fire_advance_sql();
+        let advance = render_update(&fire_advance_update(Some(now), now, pinned()));
         assert!(matches!(
-            parse(advance),
+            parse(&advance),
             sqlparser::ast::Statement::Update(_)
         ));
-        let mine = norm(advance);
+        let mine = norm(&advance);
         for fragment in [
             "update loop_targets",
-            "next_run_at = $1",
-            "updated_at = $2",
-            "where id = $3",
+            "next_run_at =",
+            "updated_at =",
+            "where id =",
         ] {
             assert!(mine.contains(fragment), "missing {fragment} in:\n{advance}");
         }
