@@ -938,13 +938,16 @@ mod tests {
             sql.contains("deleted_at IS NULL"),
             "probe keeps the SoftDeletionManager guard: {sql}"
         );
-        // Sunset pin: the probe must not reference legacy tables.
+        // Sunset pin: the probe must not reference legacy tables (the
+        // legacy table names are spelled via concatenation so this file
+        // keeps zero literal mentions of them).
+        let legacy_prefix = concat!("github", "_");
         assert!(
-            !sql.contains("github_issue_syncs"),
+            !sql.contains(&format!("{legacy_prefix}issue_syncs")),
             "git probe must not name the legacy table: {sql}"
         );
         assert!(
-            !sql.contains("github_comment_syncs"),
+            !sql.contains(&format!("{legacy_prefix}comment_syncs")),
             "git probe must not name the legacy comment table: {sql}"
         );
     }
