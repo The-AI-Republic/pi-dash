@@ -701,6 +701,8 @@ fn provider_account_from_row(
         workspace_integration_id: req!("workspace_integration_id", Option<Uuid>)?,
         status: req!("status", String)?,
         verified_at: req!("verified_at", Option<chrono::DateTime<chrono::Utc>>)?,
+        suspended_at: req!("suspended_at", Option<chrono::DateTime<chrono::Utc>>)?,
+        last_checked_at: req!("last_checked_at", Option<chrono::DateTime<chrono::Utc>>)?,
         last_check_error: req!("last_check_error", String)?,
         metadata: req!("metadata", Value)?,
     })
@@ -1206,6 +1208,8 @@ impl GitStore for ReviewStore {
             workspace_integration_id: None,
             status: row.status,
             verified_at: Some(row.verified_at),
+            suspended_at: None,
+            last_checked_at: None,
             last_check_error: String::new(),
             metadata: row.metadata,
         })
@@ -1518,6 +1522,8 @@ impl GitStore for ReviewStore {
             workspace_integration_id: req!("a_workspace_integration_id", Option<Uuid>)?,
             status: req!("a_status", String)?,
             verified_at: req!("a_verified_at", Option<chrono::DateTime<chrono::Utc>>)?,
+            suspended_at: req!("a_suspended_at", Option<chrono::DateTime<chrono::Utc>>)?,
+            last_checked_at: req!("a_last_checked_at", Option<chrono::DateTime<chrono::Utc>>)?,
             last_check_error: req!("a_last_check_error", String)?,
             metadata: req!("a_metadata", Value)?,
         };

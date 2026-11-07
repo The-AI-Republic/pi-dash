@@ -1890,6 +1890,8 @@ mod tests {
             workspace_integration_id: None,
             status: git_provider_account::STATUS_CONNECTED.into(),
             verified_at: Some(stamp()),
+            suspended_at: None,
+            last_checked_at: None,
             last_check_error: String::new(),
             metadata: serde_json::json!({}),
         }

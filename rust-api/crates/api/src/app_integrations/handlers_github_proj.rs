@@ -1614,6 +1614,8 @@ async fn upsert_git_binding(
                 workspace_integration_id: Set(Some(*workspace_integration_id)),
                 status: Set("degraded".to_owned()),
                 verified_at: Set(None),
+                suspended_at: Set(None),
+                last_checked_at: Set(None),
                 last_check_error: Set(
                     "Backfilled while binding legacy GitHub repository".to_owned()
                 ),
