@@ -128,7 +128,7 @@ pub async fn fire_due(
             // The mark runs on the same open transaction, so an enqueue
             // without its bookkeeping (or vice versa) still cannot
             // survive a crash between the two.
-            let tx_conn = orm_tx::TxConn::new(&mut *tx);
+            let tx_conn = orm_tx::TxConn::new(&mut tx);
             tx_conn
                 .execute(DbBackend::Postgres.build(&mark_run_statement(entry.name, *now)))
                 .await

@@ -305,7 +305,6 @@ pub fn owned_action(
 // Authentication
 // ---------------------------------------------------------------------------
 
-
 /// The authenticated actor: user id plus the RAW stored time-zone name.
 /// The zone is NOT parsed here — `TimezoneMixin.initial`
 /// (`api/views/base.py:43-48`) calls `super().initial()`
