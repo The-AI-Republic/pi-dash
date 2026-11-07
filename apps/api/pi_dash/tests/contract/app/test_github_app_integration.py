@@ -14,6 +14,8 @@ from rest_framework import status
 
 from pi_dash.app.views.integration.github import _get_or_create_workspace_integration
 from pi_dash.db.models import (
+    GitProviderAccount,
+    GitWebhookDelivery,
     GithubAppInstallation,
     GithubAppInstallSession,
     GithubWebhookDelivery,
@@ -310,6 +312,7 @@ def test_github_app_webhook_rejects_invalid_signature(api_client):
         )
 
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    assert GitWebhookDelivery.objects.count() == 0
     assert GithubWebhookDelivery.objects.count() == 0
 
 
@@ -327,23 +330,31 @@ def test_github_app_webhook_persists_ping_delivery(api_client):
         )
 
     assert response.status_code == status.HTTP_202_ACCEPTED
-    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
+    assert response.data == {"status": GitWebhookDelivery.Status.PROCESSED}
 
-    delivery = GithubWebhookDelivery.objects.get(delivery_id=delivery_id)
+    delivery = GitWebhookDelivery.objects.get(
+        provider="github", host_url="https://github.com", delivery_id=str(delivery_id)
+    )
     assert delivery.event == "ping"
-    assert delivery.status == GithubWebhookDelivery.Status.PROCESSED
+    assert delivery.status == GitWebhookDelivery.Status.PROCESSED
     assert delivery.processed_at is not None
+    assert GithubWebhookDelivery.objects.count() == 0
 
 
 def test_github_app_webhook_unsuspend_persists_installation_state(api_client, workspace, create_user):
     workspace_integration = _get_or_create_workspace_integration(workspace, create_user)
-    app_installation = GithubAppInstallation.objects.create(
+    # Sunset 4/6: the webhook resolves the generic git_provider_accounts row.
+    provider_account = GitProviderAccount.objects.create(
+        workspace=workspace,
+        provider=GitProviderAccount.Provider.GITHUB,
+        host_url="https://github.com",
+        auth_type=GitProviderAccount.AuthType.GITHUB_APP,
+        external_account_id="98765",
+        external_account_login="acme-corp",
         workspace_integration=workspace_integration,
-        installation_id=98765,
-        account_login="acme-corp",
-        account_type=GithubAppInstallation.AccountType.ORGANIZATION,
-        suspended_at=timezone.now(),
+        status=GitProviderAccount.Status.DEGRADED,
         last_check_error="GitHub App installation removed or suspended",
+        metadata={"suspended_at": timezone.now().isoformat()},
     )
     delivery_id = uuid4()
 
@@ -364,8 +375,9 @@ def test_github_app_webhook_unsuspend_persists_installation_state(api_client, wo
         )
 
     assert response.status_code == status.HTTP_202_ACCEPTED
-    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
-    app_installation.refresh_from_db()
-    assert app_installation.suspended_at is None
-    assert app_installation.last_check_error == ""
-    assert app_installation.repository_count == 5
+    assert response.data == {"status": GitWebhookDelivery.Status.PROCESSED}
+    provider_account.refresh_from_db()
+    assert provider_account.status == GitProviderAccount.Status.CONNECTED
+    assert provider_account.last_check_error == ""
+    assert "suspended_at" not in (provider_account.metadata or {})
+    assert (provider_account.metadata or {})["repository_count"] == 5
