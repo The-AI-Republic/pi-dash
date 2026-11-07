@@ -159,15 +159,9 @@ crates/services/src/operations/issues.rs 18
 crates/services/src/operations/pull_requests.rs 1
 crates/services/src/operations/relations.rs 6
 crates/services/src/ops/boot.rs 1
-crates/services/src/read/comment.rs 5
-crates/services/src/read/identity.rs 3
-crates/services/src/read/issues.rs 7
 crates/services/src/read/pr_links.rs 3
 crates/services/src/read/projects.rs 1
-crates/services/src/read/relations.rs 1
 crates/services/src/read/search.rs 1
-crates/services/src/read/work_items.rs 20
-crates/services/src/read/workspace.rs 3
 crates/services/src/runner_enroll/revoke.rs 1
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1
@@ -187,4 +181,3 @@ crates/services/src/dispatch/tools.rs | a0222fd82904
 crates/services/src/dispatch/tools.rs | cff6c3ac1988
 crates/services/src/orchestration/creation.rs | d83ad2c2db97
 crates/services/src/orchestration/creation.rs | e6ca9f0c88d3
-crates/services/src/read/work_items.rs | 3f4dedf5b7c7
