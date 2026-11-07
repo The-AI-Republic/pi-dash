@@ -756,6 +756,44 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         });
     }
 
+    // Refusal before reconcile (§11.2, §23.3): a person's state move
+    // into a ticking state on an unavailable or usage-excluded
+    // dedicated runner is refused with nothing queued and the clock
+    // untouched. The state change itself stands (the caller already
+    // saved it); no run is created. An agent move (`moved_by_run`
+    // set) is automatic.
+    let creator = match req.actor {
+        Some(actor) => Some(actor),
+        None => resolve_fallback_creator(seam, req.issue_id).await?,
+    };
+    if req.moved_by_run.is_none() {
+        let creator = creator.unwrap_or_else(Uuid::nil);
+        let pin = CreationSeam::dedicated_pin(
+            seam,
+            &crate::orchestration::creation::DedicatedPinArgs {
+                issue_id: req.issue_id,
+                parent: None,
+                pod_id: None,
+                fresh_session: false,
+                creator_id: Some(creator),
+                trigger: AgentRunTrigger::StateTransition.value(),
+                pod_once: false,
+                actor_id: creator,
+                now: req.now,
+            },
+        )
+        .await?;
+        if let Some(code) = pin.refusal {
+            if let Some(comment) = pin.refusal_comment {
+                CreationSeam::insert_system_comment(seam, &comment).await?;
+            }
+            return Ok(TransitionOutcome {
+                created_run: None,
+                reason: code.to_owned(),
+            });
+        }
+    }
+
     let event = if from_ticking {
         TickerEvent::moved_stage(
             req.moved_by_run,
@@ -827,10 +865,6 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
     let (parent, fresh_session) =
         parent_for_next_run(seam, req.issue_id, to_state_id, Some(cross_stage)).await?;
 
-    let creator = match req.actor {
-        Some(actor) => Some(actor),
-        None => resolve_fallback_creator(seam, req.issue_id).await?,
-    };
     let Some(creator) = creator else {
         return Ok(TransitionOutcome {
             created_run: None,
@@ -868,6 +902,7 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
             parent,
             creator_id: creator,
             pod_id: pod,
+            pod_once: false,
             fresh_session,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: req.now,
@@ -944,6 +979,35 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
         });
     };
 
+    // Refusal before reconcile (§11.2): the comment is saved; the
+    // clock is never armed and one system comment explains why no
+    // run started.
+    let pin = CreationSeam::dedicated_pin(
+        seam,
+        &crate::orchestration::creation::DedicatedPinArgs {
+            issue_id: issue.id,
+            parent: None,
+            pod_id: None,
+            fresh_session: false,
+            creator_id: Some(actor_id),
+            trigger: AgentRunTrigger::CommentAndRun.value(),
+            pod_once: false,
+            actor_id,
+            now: req.now,
+        },
+    )
+    .await?;
+    if let Some(code) = pin.refusal {
+        if let Some(comment) = pin.refusal_comment {
+            CreationSeam::insert_system_comment(seam, &comment).await?;
+        }
+        return Ok(ContinuationOutcome {
+            created_run: None,
+            coalesced_into: None,
+            reason: code.to_owned(),
+        });
+    }
+
     // A human comment is engagement: one free run. If a run is in
     // flight, the clock queues the follow-up and fires it as soon as
     // the issue is free; otherwise re-time the clock and dispatch now —
@@ -996,6 +1060,7 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
             parent: prior,
             creator_id: actor_id,
             pod_id: pod,
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: req.now,
         },
@@ -1403,9 +1468,12 @@ mod tests {
     use crate::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use crate::orchestration::creation::{
         AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, IssueView, NewAgentRun,
-        PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView,
+        NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView,
+        StateView,
     };
-    use crate::orchestration::creation::{CreationError, CreationSeam, FinalizeAgentRunSeam};
+    use crate::orchestration::creation::{
+        CreationError, CreationSeam, DedicatedPinArgs, FinalizeAgentRunSeam,
+    };
     use crate::prompting::composer::OverrideRow;
     use crate::prompting::{composer, context};
 
@@ -1463,6 +1531,7 @@ mod tests {
             parent_id: None,
             created_by_id: Some(uid(0x40)),
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             git_work_branch: None,
             workpad: None,
@@ -1521,6 +1590,7 @@ mod tests {
             pod_id: uid(0x50),
             runner_id: None,
             pinned_runner_id: None,
+            pin_kind: String::new(),
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status,
@@ -1687,6 +1757,9 @@ mod tests {
         rollbacks: usize,
         policies: HashMap<Uuid, ProjectClockPolicy>,
         bindings: HashMap<Uuid, BindingView>,
+        assigned_runners: HashMap<Uuid, Option<Uuid>>,
+        system_comments: Vec<NewSystemComment>,
+        cleared_threads: Vec<Uuid>,
         schedulers: HashMap<Uuid, SchedulerView>,
         workspaces: HashMap<Uuid, WorkspaceView>,
         role_facts: HashMap<Uuid, (bool, bool, bool, bool)>,
@@ -1875,6 +1948,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: row.pin_kind.clone(),
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
@@ -1954,6 +2028,64 @@ mod tests {
 
         fn extra_toolsets_schema_tool(&self) -> String {
             String::new()
+        }
+        async fn dedicated_pin(
+            &mut self,
+            args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            let assigned = self
+                .assigned_runners
+                .get(&args.issue_id)
+                .copied()
+                .unwrap_or(None);
+            let (runner_id, pin_kind) = match assigned {
+                Some(runner_id) if !args.pod_once => (Some(runner_id), "dedicated".to_owned()),
+                _ => (
+                    None,
+                    crate::domain::issue_assignment::PIN_LOCALITY.to_owned(),
+                ),
+            };
+            Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id,
+                pin_kind,
+            })
+        }
+
+        async fn insert_system_comment(
+            &mut self,
+            comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            self.system_comments.push(comment.clone());
+            Ok(())
+        }
+
+        async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+            self.cleared_threads.push(run_id);
+            Ok(())
+        }
+
+        async fn pod_once_started_comment(
+            &mut self,
+            issue_id: Uuid,
+            _pod_id: Uuid,
+            actor_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            let issue = self.issue(issue_id).await?;
+            Ok(NewSystemComment {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                now,
+                project_id: issue.project_id.unwrap_or_else(Uuid::nil),
+                workspace_id: issue.workspace_id,
+                issue_id,
+                actor_id,
+                comment_html: "pod_once".to_owned(),
+                comment_stripped: "pod_once".to_owned(),
+            })
         }
     }
 
@@ -2132,6 +2264,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: String::new(),
                 parent_run_id: None,
                 work_item_id: None,
                 status: AgentRunStatus::Queued,
@@ -4013,12 +4146,14 @@ mod tests {
 
     #[test]
     fn scheduler_insert_shares_l6_column_order() {
-        // Same 38 non-generated columns in model order as RUN_INSERT_SQL;
-        // only the VALUES shape differs.
+        // Same non-generated columns in model order as RUN_INSERT_SQL,
+        // except the folded §9.1 `pin_kind` (the scheduler builds no pin;
+        // Django's scheduler-created rows default it to ""), only the
+        // VALUES shape differs.
         let head = |sql: &str| sql.split(") VALUES").next().expect("head").to_owned();
         assert_eq!(
             head(SCHEDULER_RUN_INSERT_SQL),
-            head(crate::orchestration::creation::RUN_INSERT_SQL)
+            head(crate::orchestration::creation::RUN_INSERT_SQL).replace(", pin_kind", "")
         );
         let values = SCHEDULER_RUN_INSERT_SQL
             .split("VALUES")

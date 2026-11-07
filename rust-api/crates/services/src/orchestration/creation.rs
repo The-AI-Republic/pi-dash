@@ -172,7 +172,7 @@ pub const OWNER_UNASSIGNED: Option<Uuid> = None;
 /// The issue projection every unit reads (`service.py` passes full issue
 /// rows; this projects the consumed columns). `$1` is the issue id.
 pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_id, parent_id, \
-    created_by_id, assigned_pod_id, agent_executor, git_work_branch, workpad, name, \
+    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, git_work_branch, workpad, name, \
     description_stripped, priority, sequence_id, target_date FROM issues WHERE id = $1";
 
 /// The project projection (`service.py` reads `issue.project` for the
@@ -216,6 +216,7 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "pod_id",
     "runner_id",
     "pinned_runner_id",
+    "pin_kind",
     "parent_run_id",
     "work_item_id",
     "status",
@@ -329,8 +330,9 @@ pub fn run_lock_sql() -> String {
 /// this lists every non-generated column in model order (the three
 /// `JSONKeyBigIntegerField` generated columns and the
 /// `JSONKeyTextField` `refusal_category` excluded). Fixed values
-/// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14`
-/// carry the caller-supplied fields in [`NewAgentRun`] order.
+/// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14` and
+/// `$15` (`pin_kind`, appended at the end) carry the caller-supplied
+/// fields in [`NewAgentRun`] order.
 pub const RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
@@ -338,10 +340,17 @@ pub const RUN_INSERT_SQL: &str =
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
-    assigned_at, started_at, ended_at) \
+    assigned_at, started_at, ended_at, pin_kind) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
     NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
-    NULL, NULL, NULL)";
+    NULL, NULL, NULL, $15)";
+
+/// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+/// (`service.py:494-495,896-897`, `pod_once`, §23.3): a one-shot pod run
+/// starts a fresh agent session. Unsaved when the parent row has no
+/// thread. `$1` is the run id.
+pub const THREAD_CLEAR_SQL: &str =
+    "UPDATE agent_run SET thread_id = '' WHERE id = $1 AND thread_id <> ''";
 
 /// `run.save(update_fields=["prompt", "prompt_manifest"])`
 /// (`service.py:522,639,824`). `$1`/`$2` are prompt/manifest, `$3` the
@@ -602,13 +611,14 @@ pub mod orm {
     }
 
     /// The [`RUN_VIEW_COLUMNS`] projection as entity columns.
-    pub const RUN_VIEW: [run::Column; 18] = [
+    pub const RUN_VIEW: [run::Column; 19] = [
         run::Column::Id,
         run::Column::WorkspaceId,
         run::Column::CreatedById,
         run::Column::PodId,
         run::Column::RunnerId,
         run::Column::PinnedRunnerId,
+        run::Column::PinKind,
         run::Column::ParentRunId,
         run::Column::WorkItemId,
         run::Column::Status,
@@ -649,6 +659,7 @@ pub mod orm {
                 C::ParentId,
                 C::CreatedById,
                 C::AssignedPodId,
+                C::AssignedRunnerId,
                 C::AgentExecutor,
                 C::GitWorkBranch,
                 C::Workpad,
@@ -937,6 +948,7 @@ pub mod orm {
                 C::AssignedAt,
                 C::StartedAt,
                 C::EndedAt,
+                C::PinKind,
             ])
             .values_panic([
                 Expr::value(row.id),
@@ -974,8 +986,20 @@ pub mod orm {
                 none_at(),
                 none_at(),
                 none_at(),
+                Expr::value(row.pin_kind.as_str()),
             ])
             .returning(Query::returning().columns(RUN_VIEW))
+            .to_owned()
+    }
+
+    /// [`super::THREAD_CLEAR_SQL`]: `parent.thread_id = ""` (`pod_once`,
+    /// §23.3), a no-op when the parent row has no thread.
+    pub fn thread_clear(run_id: Uuid) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::ThreadId, "")
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .and_where(run_col(run::Column::ThreadId).ne(""))
             .to_owned()
     }
 
@@ -1398,6 +1422,9 @@ pub struct IssueView {
     pub parent_id: Option<Uuid>,
     pub created_by_id: Option<Uuid>,
     pub assigned_pod_id: Option<Uuid>,
+    /// `Issue.assigned_runner_id`: the dedicated runner (design §9.1),
+    /// `None` for a pod-shared issue.
+    pub assigned_runner_id: Option<Uuid>,
     /// `Issue.agent_executor`: NULL/blank inherits the project default.
     pub agent_executor: Option<String>,
     pub git_work_branch: Option<String>,
@@ -1451,6 +1478,10 @@ pub struct RunView {
     pub pod_id: Uuid,
     pub runner_id: Option<Uuid>,
     pub pinned_runner_id: Option<Uuid>,
+    /// `AgentRun.pin_kind` ("dedicated", "locality", or "" pre-dedicated
+    /// rows): the pin source (§9.1), stamped at insert and echoed on
+    /// the read projection.
+    pub pin_kind: String,
     pub parent_run_id: Option<Uuid>,
     pub work_item_id: Option<Uuid>,
     pub status: AgentRunStatus,
@@ -1521,6 +1552,7 @@ pub fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         pod_id: row.try_get("pod_id")?,
         runner_id: row.try_get("runner_id")?,
         pinned_runner_id: row.try_get("pinned_runner_id")?,
+        pin_kind: row.try_get("pin_kind")?,
         parent_run_id: row.try_get("parent_run_id")?,
         work_item_id: row.try_get("work_item_id")?,
         status: map_status(status)?,
@@ -1600,6 +1632,76 @@ pub struct NewAgentRun {
     pub run_config: Value,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
+    /// `pin_kind` ($15, design §9.1): "dedicated" when the issue pins
+    /// its dedicated runner, else "locality".
+    pub pin_kind: String,
+}
+
+/// One §11.2/§23.3 system comment (Django `IssueComment.objects.create`,
+/// `SpeakerType.SYSTEM`): the refusal comment on a refused human run
+/// and the waiting comment for an automatic run queued behind an
+/// unavailable dedicated runner (Django `_post_dedicated_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSystemComment {
+    pub id: Uuid,
+    pub description_id: Uuid,
+    pub now: DateTime<Utc>,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub issue_id: Uuid,
+    pub actor_id: Uuid,
+    pub comment_html: String,
+    pub comment_stripped: String,
+}
+
+/// One [`CreationSeam::dedicated_pin`] call (design §9.1/§9.2): the
+/// pin decision for a creation, with the H-11/H-10 refusal answered in
+/// the same probe (Django `dedicated_run_refusal` + `resolve_run_pin`
+/// read the same assignment).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DedicatedPinArgs<'a> {
+    pub issue_id: Uuid,
+    /// The lineage parent (`None` for a first run / fresh session).
+    pub parent: Option<&'a RunView>,
+    /// The run's pod. `None` when the caller only needs the refusal
+    /// (entry surfaces resolve the pod after the refusal, like Django).
+    pub pod_id: Option<Uuid>,
+    pub fresh_session: bool,
+    pub creator_id: Option<Uuid>,
+    /// The raw trigger string (`run_ai`, `state_transition`, …) — the
+    /// human distinguisher (§8) reads it, like the usage rule does.
+    pub trigger: &'a str,
+    pub pod_once: bool,
+    pub actor_id: Uuid,
+    /// The creation clock (`created_at` of the run this pin feeds):
+    /// the §9.4 waiting comment anchors its 12-hour expiry to it.
+    pub now: DateTime<Utc>,
+}
+
+/// What [`CreationSeam::dedicated_pin`] decided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PinOutcome {
+    /// The H-11/H-10 refusal code (`assigned_runner_*`), `None` when
+    /// admitted. A refused human run creates nothing.
+    pub refusal: Option<&'static str>,
+    /// The §11.2 refusal comment to file (`None` on admission), and
+    /// the §9.4 waiting comment when the run is created behind an
+    /// unavailable dedicated runner.
+    pub refusal_comment: Option<NewSystemComment>,
+    pub waiting_comment: Option<NewSystemComment>,
+    /// The resolved pin for the INSERT (`runner_id` + `pin_kind`).
+    pub runner_id: Option<Uuid>,
+    pub pin_kind: String,
+}
+
+/// The `pin: "pod_once"` request bit, the serializers' shared parse
+/// (`(request.data.get("pin") or "").strip() == "pod_once"`).
+pub fn pod_once_requested(body: &Value) -> bool {
+    body.get("pin")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        == "pod_once"
 }
 
 // ---------------------------------------------------------------------------
@@ -2277,6 +2379,37 @@ pub trait CreationSeam {
     /// `context.py:512-517`): consulted only when the run's plan
     /// enables extra toolsets. CE names none.
     fn extra_toolsets_schema_tool(&self) -> String;
+    /// The dedicated-runner pin decision for one creation (design
+    /// §9.1/§9.2 + §11.2/§23.3): the H-11/H-10 refusal answered in
+    /// the same probe as the pin (Django `dedicated_run_refusal`
+    /// then `resolve_run_pin` read the same assignment). A refused
+    /// caller creates nothing; the comments are filed by the seam.
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError>;
+    /// One §11.2/§23.3 system comment (Django
+    /// `_post_dedicated_refusal_comment` /
+    /// `_post_dedicated_waiting_comment` /
+    /// `_post_pod_once_started_comment`).
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError>;
+    /// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+    /// (`service.py:494-495,896-897`, `pod_once`, §23.3).
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError>;
+    /// The §23.3 `pod_once` started-comment row (Django
+    /// `_post_pod_once_started_comment`, `scheduling.py:1044-1067`),
+    /// filed by [`Self::insert_system_comment`] after a successful
+    /// create.
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError>;
 }
 
 /// The one-method seam for the `finalize_agent_run(run.id, FAILED, …)`
@@ -2314,6 +2447,10 @@ pub struct CreateDispatchRequest {
     pub parent: Option<RunView>,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
+    /// One-shot pod run (§23.3): the dedicated pin is bypassed for
+    /// this run only, and the parent's thread (the resume hint) is
+    /// cleared.
+    pub pod_once: bool,
     pub fresh_session: bool,
     /// The trigger to stamp, carried verbatim like Django's
     /// `trigger: str` (`service.py:742`): usually a member value,
@@ -2331,6 +2468,10 @@ pub struct ContinuationRequest {
     pub parent: RunView,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
+    /// One-shot pod run (§23.3): the dedicated pin is bypassed for
+    /// this run only, and the parent's thread (the resume hint) is
+    /// cleared.
+    pub pod_once: bool,
     /// The trigger to stamp, carried verbatim like Django's
     /// `trigger: str` (`service.py:443`): usually a member value,
     /// but the dispatch path forwards the stored `triggered_by`
@@ -2464,6 +2605,27 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             }
         }
     }
+    // The dedicated pin (§9.1): a dedicated issue pins its runner,
+    // whatever the parent/locality path computed.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        let outcome = seam
+            .dedicated_pin(&DedicatedPinArgs {
+                issue_id: issue.id,
+                parent: effective_parent.as_ref(),
+                pod_id: Some(req.pod_id),
+                fresh_session: req.fresh_session,
+                creator_id: Some(req.creator_id),
+                trigger: req.trigger.as_str(),
+                pod_once: req.pod_once,
+                actor_id: req.creator_id,
+                now: req.now,
+            })
+            .await?;
+        computed_pin = outcome.runner_id;
+        outcome.pin_kind
+    } else {
+        String::new()
+    };
     let pinned_runner = execution.merge_pin(computed_pin);
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
@@ -2491,6 +2653,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
                 None,
             ),
             now: req.now,
+            pin_kind: pin_kind.clone(),
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -2594,6 +2757,27 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
         .await?
         .or(admission_error);
+    // The dedicated pin (§9.2): a dedicated issue pins its runner,
+    // whatever the parent/locality path computed.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        let outcome = seam
+            .dedicated_pin(&DedicatedPinArgs {
+                issue_id: issue.id,
+                parent: Some(&req.parent),
+                pod_id: Some(req.pod_id),
+                fresh_session: false,
+                creator_id: Some(req.creator_id),
+                trigger: req.trigger.as_str(),
+                pod_once: req.pod_once,
+                actor_id: req.creator_id,
+                now: req.now,
+            })
+            .await?;
+        computed_pin = outcome.runner_id;
+        outcome.pin_kind
+    } else {
+        String::new()
+    };
     // Continuation inserts the literal repo snapshot, not the
     // `_run_config_for_issue` refresh (`service.py:489-493`): same
     // three keys, no base to strip.
@@ -2624,6 +2808,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             phase_kind: kind.clone(),
             run_config,
             now: req.now,
+            pin_kind: pin_kind.clone(),
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -2726,6 +2911,26 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
         Some(&req.parent.run_config),
     );
     let run_id = Uuid::new_v4();
+    // The dedicated pin (§9.2) survives a project move — the issue
+    // carries its runner into the new project; affinity clears only
+    // the locality pin.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        seam.dedicated_pin(&DedicatedPinArgs {
+            issue_id: issue.id,
+            parent: Some(&req.parent),
+            pod_id: Some(req.pod_id),
+            fresh_session: false,
+            creator_id: Some(req.parent.created_by_id),
+            trigger: req.parent.trigger.as_str(),
+            pod_once: false,
+            actor_id: req.parent.created_by_id,
+            now: req.now,
+        })
+        .await?
+        .pin_kind
+    } else {
+        String::new()
+    };
     let run = seam
         .insert_run(&NewAgentRun {
             id: run_id,
@@ -2744,6 +2949,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             phase_kind: String::new(),
             run_config,
             now: req.now,
+            pin_kind,
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -3218,6 +3424,7 @@ mod tests {
             created_by_id: uid(0x40),
             pod_id: uid(0x50),
             pinned_runner_id: None,
+            pin_kind: "locality".to_owned(),
             work_item_id: uid(0x02),
             parent_run_id: None,
             executor_kind: AgentExecutorKind::CloudAgent,
@@ -3270,6 +3477,7 @@ mod tests {
             parent_id: None,
             created_by_id: Some(uid(0x40)),
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             git_work_branch: None,
             workpad: None,
@@ -3316,6 +3524,7 @@ mod tests {
             pod_id: uid(0x50),
             runner_id: None,
             pinned_runner_id: None,
+            pin_kind: String::new(),
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status: AgentRunStatus::Queued,
@@ -3417,6 +3626,10 @@ mod tests {
         /// plans come back key-normalized while the caller's value keeps
         /// insertion order (PIDASHCONV-1072).
         normalize_tool_plan: bool,
+        /// Dedicated-runner assignments (design §9.1) keyed by issue.
+        assigned_runners: HashMap<Uuid, Option<Uuid>>,
+        system_comments: Vec<NewSystemComment>,
+        cleared_threads: Vec<Uuid>,
     }
 
     impl Default for FakeSeam {
@@ -3442,6 +3655,9 @@ mod tests {
                 finalized: Vec::new(),
                 lock_order: std::cell::RefCell::new(Vec::new()),
                 normalize_tool_plan: false,
+                assigned_runners: HashMap::new(),
+                system_comments: Vec::new(),
+                cleared_threads: Vec::new(),
             }
         }
     }
@@ -3631,6 +3847,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: row.pin_kind.clone(),
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
@@ -3716,6 +3933,67 @@ mod tests {
 
         fn extra_toolsets_schema_tool(&self) -> String {
             String::new()
+        }
+
+        async fn dedicated_pin(
+            &mut self,
+            args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            // The fake mirrors "no dedicated assignment": the issue's
+            // assigned runner decides; no refusal and unpinned.
+            let assigned = self
+                .assigned_runners
+                .get(&args.issue_id)
+                .copied()
+                .unwrap_or(None);
+            let (runner_id, pin_kind) = match assigned {
+                Some(runner_id) if !args.pod_once => (Some(runner_id), "dedicated".to_owned()),
+                _ => (
+                    None,
+                    crate::domain::issue_assignment::PIN_LOCALITY.to_owned(),
+                ),
+            };
+            Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id,
+                pin_kind,
+            })
+        }
+
+        async fn insert_system_comment(
+            &mut self,
+            comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            self.system_comments.push(comment.clone());
+            Ok(())
+        }
+
+        async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+            self.cleared_threads.push(run_id);
+            Ok(())
+        }
+
+        async fn pod_once_started_comment(
+            &mut self,
+            issue_id: Uuid,
+            _pod_id: Uuid,
+            actor_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            let issue = self.issue(issue_id).await?;
+            Ok(NewSystemComment {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                now,
+                project_id: issue.project_id.unwrap_or_else(Uuid::nil),
+                workspace_id: issue.workspace_id,
+                issue_id,
+                actor_id,
+                comment_html: "pod_once".to_owned(),
+                comment_stripped: "pod_once".to_owned(),
+            })
         }
     }
 
@@ -4229,6 +4507,7 @@ mod tests {
             parent,
             creator_id: uid(0x40),
             pod_id: uid(0x50),
+            pod_once: false,
             fresh_session: false,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: now(),
@@ -4427,6 +4706,7 @@ mod tests {
             parent,
             creator_id: uid(0x40),
             pod_id: uid(0x50),
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: now(),
         }
@@ -5092,6 +5372,7 @@ mod tests {
             "assigned_at",
             "started_at",
             "ended_at",
+            "pin_kind",
         ] {
             assert!(RUN_INSERT_SQL.contains(column), "missing {column}");
         }
@@ -5107,9 +5388,10 @@ mod tests {
         ] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
-        // `$1..$14` in NewAgentRun order.
+        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind,
+        // appended so no other bind moves.
         assert!(RUN_INSERT_SQL.contains("$14"));
-        assert!(!RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("$15"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
         assert!(!finalize_update_sql().contains("queue_position"));
         assert!(!RUN_INSERT_SQL.contains("queue_position"));

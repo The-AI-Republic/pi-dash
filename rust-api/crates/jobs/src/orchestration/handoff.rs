@@ -47,9 +47,9 @@ use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
 use pidash_services::orchestration::creation::{
     finalize_error_details_patch, AdmissionError as ServiceAdmissionError, CreationError,
-    CreationSeam, ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields as ServiceExecutionFields,
+    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
+    PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -226,6 +226,7 @@ struct IssueRow {
     parent_id: Option<Uuid>,
     created_by_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
     git_work_branch: Option<String>,
     workpad: Option<String>,
@@ -269,6 +270,7 @@ struct RunRow {
     pod_id: Uuid,
     runner_id: Option<Uuid>,
     pinned_runner_id: Option<Uuid>,
+    pin_kind: String,
     parent_run_id: Option<Uuid>,
     work_item_id: Option<Uuid>,
     status: String,
@@ -293,6 +295,7 @@ fn run_view_from_row(row: RunRow) -> Result<RunView, CreationError> {
         pod_id: row.pod_id,
         runner_id: row.runner_id,
         pinned_runner_id: row.pinned_runner_id,
+        pin_kind: row.pin_kind,
         parent_run_id: row.parent_run_id,
         work_item_id: row.work_item_id,
         status,
@@ -318,6 +321,7 @@ fn run_view_from_model(m: agent_run::Model) -> Result<RunView, CreationError> {
         pod_id: m.pod_id,
         runner_id: m.runner_id,
         pinned_runner_id: m.pinned_runner_id,
+        pin_kind: m.pin_kind,
         parent_run_id: m.parent_run_id,
         work_item_id: m.work_item_id,
         status,
@@ -342,6 +346,7 @@ fn issue_view_from_row(row: IssueRow) -> IssueView {
         parent_id: row.parent_id,
         created_by_id: row.created_by_id,
         assigned_pod_id: row.assigned_pod_id,
+        assigned_runner_id: row.assigned_runner_id,
         agent_executor: row.agent_executor,
         git_work_branch: row.git_work_branch,
         workpad: row.workpad,
@@ -381,6 +386,7 @@ fn issue_select_query(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
         issues::Column::ParentId,
         issues::Column::CreatedById,
         issues::Column::AssignedPodId,
+        issues::Column::AssignedRunnerId,
         issues::Column::AgentExecutor,
         issues::Column::GitWorkBranch,
         issues::Column::Workpad,
@@ -429,6 +435,7 @@ fn run_columns_select(q: sea_orm::Select<agent_run::Entity>) -> sea_orm::Select<
         agent_run::Column::PodId,
         agent_run::Column::RunnerId,
         agent_run::Column::PinnedRunnerId,
+        agent_run::Column::PinKind,
         agent_run::Column::ParentRunId,
         agent_run::Column::WorkItemId,
         agent_run::Column::Status,
@@ -478,6 +485,57 @@ impl CreationSeam for HandoffStore<'_, '_> {
             .map_err(Self::db)?
             .ok_or_else(|| CreationError::Db("row not found".to_owned()))?;
         Ok(issue_view_from_row(row))
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        // Project-move handoffs never pass them through Django's
+        // refusal/waiting-comment path here; the pin still resolves.
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::flight_pin(&conn, args, args.actor_id)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::system_comment_row(&conn, comment)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::pod_once_started_comment(
+            &conn, issue_id, pod_id, actor_id, now,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        // `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+        // (`service.py:494-495,896-897`, `pod_once`, §23.3).
+        let conn = TxConn::new(self.tx.inner());
+        agent_run::Entity::update_many()
+            .col_expr(agent_run::Column::ThreadId, Expr::value(""))
+            .filter(agent_run::Column::Id.eq(run_id))
+            .filter(agent_run::Column::ThreadId.ne(""))
+            .exec(&conn)
+            .await
+            .map_err(Self::db)?;
+        Ok(())
     }
 
     async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
@@ -770,6 +828,7 @@ impl CreationSeam for HandoffStore<'_, '_> {
             pod_id: Set(row.pod_id),
             runner_id: Set(None),
             pinned_runner_id: Set(row.pinned_runner_id),
+            pin_kind: Set(row.pin_kind.clone()),
             work_item_id: Set(Some(row.work_item_id)),
             scheduler_binding_id: Set(None),
             parent_run_id: Set(row.parent_run_id),
@@ -2640,6 +2699,7 @@ mod tests {
             created_by_id: user,
             pod_id: pod,
             pinned_runner_id: None,
+            pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
             executor_kind: AgentExecutorKind::CloudAgent,

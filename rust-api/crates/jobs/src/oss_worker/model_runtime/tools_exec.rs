@@ -107,9 +107,9 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView,
+    AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
+    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment,
+    PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView, RunnerView, StateView,
 };
 use pidash_services::orchestration::entries::{
     fire_state_transition, handle_issue_state_transition, BindingView, EntriesSeam, FireOutcome,
@@ -1803,6 +1803,35 @@ where
 
     async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
         self.store.state(state_id).await
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        CreationSeam::dedicated_pin(&mut self.store, args).await
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        CreationSeam::insert_system_comment(&mut self.store, comment).await
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        CreationSeam::clear_parent_thread(&mut self.store, run_id).await
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        CreationSeam::pod_once_started_comment(&mut self.store, issue_id, pod_id, actor_id, now)
+            .await
     }
 
     async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -4349,6 +4378,7 @@ mod live_tests {
             is_default: Set(false),
             guest_view_all_features: Set(false),
             members_can_edit_states: Set(true),
+            dedicated_runner_lost_action: Set("fail_to_backlog".to_owned()),
             archive_in: Set(0),
             close_in: Set(0),
             logo_props: Set(serde_json::json!({})),

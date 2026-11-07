@@ -39,9 +39,10 @@ use crate::dispatch::DeferredConsume;
 use crate::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use crate::orchestration::creation::{
     finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
-    CreationError, CreationSeam, ExecutionError, ExecutionFields as ServiceExecutionFields,
-    ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView,
-    ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
+    CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
+    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
+    LockedIssue, NewAgentRun, NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle,
+    RunView, RunnerView, StateView, TickerBudget,
 };
 use crate::prompting::{composer, context};
 
@@ -444,6 +445,219 @@ impl CreationSeam for SeaHandoffStore<'_> {
     fn extra_toolsets_schema_tool(&self) -> String {
         self.toolsets.schema_tool_name().to_owned()
     }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        use crate::domain::issue_assignment as dedicated;
+        use pidash_db::entity::{agent_run as run_entity, dev_machine, issues, runner};
+        use pidash_types::runner_runs::enums::{AgentRunTrigger, HUMAN_TRIGGERS};
+        use sea_orm::EntityTrait;
+
+        let conn = &self.conn;
+        let Some(issue) = issues::Entity::find_by_id(args.issue_id)
+            .one(conn)
+            .await
+            .map_err(twin_db)?
+        else {
+            return Err(CreationError::MissingRow("issue".to_owned()));
+        };
+        let human = AgentRunTrigger::from_value(args.trigger)
+            .map(|trigger| HUMAN_TRIGGERS.contains(&trigger))
+            .unwrap_or(false);
+        let refusal =
+            dedicated::dedicated_run_refusal(conn, &issue, human, args.creator_id, args.pod_once)
+                .await
+                .map_err(twin_db)?;
+        let refusal_comment = match refusal {
+            Some(code) => Some(new_system_comment(
+                issue.id,
+                issue.project_id,
+                issue.workspace_id,
+                args.actor_id,
+                dedicated::dedicated_refusal_comment_html(conn, issue.id, code)
+                    .await
+                    .map_err(twin_db)?,
+                args.now,
+            )),
+            None => None,
+        };
+        if refusal.is_some() {
+            return Ok(PinOutcome {
+                refusal,
+                refusal_comment,
+                waiting_comment: None,
+                runner_id: None,
+                pin_kind: String::new(),
+            });
+        }
+        let Some(pod_id) = args.pod_id else {
+            return Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id: None,
+                pin_kind: String::new(),
+            });
+        };
+        let parent = match args.parent {
+            Some(parent) => run_entity::Entity::find_by_id(parent.id)
+                .one(conn)
+                .await
+                .map_err(twin_db)?,
+            None => None,
+        };
+        let trigger = AgentRunTrigger::from_value(args.trigger).unwrap_or(AgentRunTrigger::Tick);
+        let resolved = dedicated::resolve_run_pin(
+            conn,
+            &dedicated::ResolvePinArgs {
+                issue: &issue,
+                parent: parent.as_ref(),
+                pod_id,
+                fresh_session: args.fresh_session,
+                creator_id: args.creator_id,
+                trigger,
+                pod_once: args.pod_once,
+                actor_id: args.actor_id,
+            },
+        )
+        .await
+        .map_err(twin_db)?;
+        let waiting_comment = match (resolved.pin_kind, resolved.runner.as_ref().map(|r| r.id)) {
+            ("dedicated", Some(runner_id)) => {
+                let runner = runner::Entity::find_by_id(runner_id)
+                    .one(conn)
+                    .await
+                    .map_err(twin_db)?;
+                let machine = match runner.as_ref().and_then(|r| r.dev_machine_id) {
+                    Some(machine_id) => dev_machine::Entity::find_by_id(machine_id)
+                        .one(conn)
+                        .await
+                        .map_err(twin_db)?,
+                    None => None,
+                };
+                let unavailable = runner.as_ref().is_some_and(|r| {
+                    dedicated::runner_is_offline(r, args.now)
+                        || dedicated::runner_paused_reason(r, machine.as_ref()).is_some()
+                });
+                if unavailable {
+                    Some(new_system_comment(
+                        issue.id,
+                        issue.project_id,
+                        issue.workspace_id,
+                        args.actor_id,
+                        dedicated::dedicated_waiting_comment_html(
+                            conn, issue.id, args.now, runner_id,
+                        )
+                        .await
+                        .map_err(twin_db)?,
+                        args.now,
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        Ok(PinOutcome {
+            refusal: None,
+            refusal_comment: None,
+            waiting_comment,
+            runner_id: resolved.runner.as_ref().map(|r| r.id),
+            pin_kind: resolved.pin_kind.to_owned(),
+        })
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        let conn = &self.conn;
+        crate::domain::issue_assignment::pod_once_started_comment(
+            conn, issue_id, pod_id, actor_id, now,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        use crate::domain::comments::{
+            insert_comment_row, insert_description_row, link_comment_description, CommentRows,
+        };
+        let empty_json = serde_json::json!({});
+        let rows = CommentRows {
+            id: comment.id,
+            description_id: comment.description_id,
+            created_at: comment.now,
+            updated_at: comment.now,
+            desc_created_at: comment.now,
+            desc_updated_at: comment.now,
+            workspace_id: comment.workspace_id,
+            project_id: comment.project_id,
+            issue_id: comment.issue_id,
+            actor_id: Some(comment.actor_id),
+            created_by: None,
+            updated_by: None,
+            deleted_at: None,
+            html: comment.comment_html.as_str(),
+            json: &empty_json,
+            stripped: comment.comment_stripped.as_str(),
+            desc_stripped: None,
+            access: "full",
+            speaker_type: "system",
+            speaker_label: "",
+            speaker_agent_run_id: None,
+            external_id: None,
+            external_source: None,
+            parent_id: None,
+            attachments: &[],
+            labels: &[],
+            edited_at: None,
+        };
+        insert_comment_row(&self.conn, &rows)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        insert_description_row(&self.conn, &rows)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        link_comment_description(&self.conn, rows.id, rows.description_id)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        execute(&self.conn, &orm::thread_clear(run_id)).await
+    }
+}
+
+/// The system comment DTO for one piece of `html`.
+fn new_system_comment(
+    issue_id: Uuid,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    actor_id: Uuid,
+    html: String,
+    now: chrono::DateTime<chrono::Utc>,
+) -> NewSystemComment {
+    NewSystemComment {
+        id: Uuid::new_v4(),
+        description_id: Uuid::new_v4(),
+        now,
+        project_id,
+        workspace_id,
+        issue_id,
+        actor_id,
+        comment_html: html.clone(),
+        comment_stripped: html,
+    }
 }
 
 impl FinalizeAgentRunSeam for SeaHandoffStore<'_> {
@@ -535,6 +749,7 @@ fn twin_map_run_view(row: &QueryResult) -> Result<RunView, CreationError> {
         pod_id: get(row, "pod_id")?,
         runner_id: get(row, "runner_id")?,
         pinned_runner_id: get(row, "pinned_runner_id")?,
+        pin_kind: get(row, "pin_kind")?,
         parent_run_id: get(row, "parent_run_id")?,
         work_item_id: get(row, "work_item_id")?,
         status: twin_map_status(status)?,
@@ -560,6 +775,7 @@ fn twin_map_issue(row: &QueryResult) -> Result<IssueView, CreationError> {
         parent_id: get(row, "parent_id")?,
         created_by_id: get(row, "created_by_id")?,
         assigned_pod_id: get(row, "assigned_pod_id")?,
+        assigned_runner_id: get(row, "assigned_runner_id")?,
         agent_executor: get(row, "agent_executor")?,
         git_work_branch: get(row, "git_work_branch")?,
         workpad: get(row, "workpad")?,
@@ -1306,6 +1522,7 @@ mod tests {
             created_by_id: uid(0x40),
             pod_id: uid(0x50),
             pinned_runner_id: None,
+            pin_kind: "locality".to_owned(),
             work_item_id: issue,
             parent_run_id: None,
             executor_kind: AgentExecutorKind::CloudAgent,

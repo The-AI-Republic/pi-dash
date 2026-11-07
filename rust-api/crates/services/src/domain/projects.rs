@@ -962,6 +962,7 @@ fn demo_project_row(id: Uuid, p: &DemoProject<'_>) -> projects::ActiveModel {
         agent_test_default_interval_seconds: Set(10800),
         agent_ticking_enabled: Set(true),
         default_agent_executor: Set(p.default_agent_executor.to_owned()),
+        dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
         ..Default::default()
     }
 }

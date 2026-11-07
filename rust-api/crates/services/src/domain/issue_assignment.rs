@@ -1178,17 +1178,303 @@ pub async fn clear_dedicated_runner(
 
 /// One system comment for a successful `pod_once` run (§23.3).
 ///
-/// Mirrors `_post_pod_once_started_comment` (`scheduling.py:1044-1067`):
-/// names the pod, the actor, and the dedicated runner the issue stays
-/// assigned to. Attributed to `actor_id`.
-pub async fn post_pod_once_started_comment(
+/// The §11.2 refusal comment text for one refused human run
+/// (`_post_dedicated_refusal_comment`, `scheduling.py:1003-1041`).
+pub async fn dedicated_refusal_comment_html(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    code: &'static str,
+) -> Result<String, sea_orm::DbErr> {
+    let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
+        return Ok(String::new());
+    };
+    let body = dedicated_refusal_body(db, &issue, code).await?;
+    let body_text = body
+        .pointer("/error")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let pod_name = match issue.assigned_pod_id {
+        Some(id) => pod::Entity::find_by_id(id)
+            .one(db)
+            .await?
+            .map(|p| p.name)
+            .unwrap_or_else(|| "the pod".to_owned()),
+        None => "the pod".to_owned(),
+    };
+    let options = if code == "assigned_runner_not_owner" {
+        format!(
+            "Run on my runner instead, or Run on any runner in {pod_name} once (sends “pin”: “pod_once”)."
+        )
+    } else {
+        format!(
+            "Run on any runner in {pod_name} once (sends “pin”: “pod_once”), or change the issue's runner."
+        )
+    };
+    Ok(format!(
+        "<p>No run started: {body_text}.</p><p>{options}</p>"
+    ))
+}
+
+/// The §9.4 waiting comment text for an automatic run queued behind an
+/// unavailable dedicated runner (`_post_dedicated_waiting_comment`,
+/// `scheduling.py:1070-1116`).
+pub async fn dedicated_waiting_comment_html(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    run_created_at: chrono::DateTime<Utc>,
+    runner_id: Uuid,
+) -> Result<String, sea_orm::DbErr> {
+    let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
+        return Ok(String::new());
+    };
+    let runner = match runner::Entity::find_by_id(runner_id).one(db).await? {
+        Some(runner) => runner,
+        None => return Ok(String::new()),
+    };
+    let machine = match runner.dev_machine_id {
+        Some(machine_id) => dev_machine::Entity::find_by_id(machine_id).one(db).await?,
+        None => None,
+    };
+    let pause = runner_paused_reason(&runner, machine.as_ref());
+    let pod_name = match issue.assigned_pod_id {
+        Some(id) => pod::Entity::find_by_id(id)
+            .one(db)
+            .await?
+            .map(|p| p.name)
+            .unwrap_or_else(|| "the pod".to_owned()),
+        None => "the pod".to_owned(),
+    };
+    let detail = match pause {
+        Some(reason) => refusal_pause_phrase(&reason).to_owned(),
+        None => {
+            if runner_is_offline(&runner, Utc::now()) {
+                let seen = runner
+                    .last_heartbeat_at
+                    .map(|t| t.format("%H:%M").to_string())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                format!("is offline (last seen {seen})")
+            } else {
+                "is unavailable".to_owned()
+            }
+        }
+    };
+    let expires_at = run_created_at + chrono::Duration::seconds(dedicated_max_age_secs());
+    let expires = format!(
+        " If it has not started by {} (12 hours), it fails and automatic runs on this issue stop.",
+        expires_at.format("%H:%M")
+    );
+    Ok(format!(
+        "<p>Queued for runner <strong>{}</strong>, which {}. The run starts when it reconnects.{} To run it elsewhere, cancel it and use <strong>Run on any runner in {} once</strong>, or change the issue's runner.</p>",
+        runner.name, detail, expires, pod_name
+    ))
+}
+
+/// The §23.3 `pod_once` started-comment DTO (Django
+/// `_post_pod_once_started_comment`, `scheduling.py:1044-1067`).
+pub async fn pod_once_started_comment(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    pod_id: Uuid,
+    actor_id: Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<crate::orchestration::creation::NewSystemComment, sea_orm::DbErr> {
+    let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
+        return Err(sea_orm::DbErr::RecordNotFound("issue".to_owned()));
+    };
+    let pod_name = pod::Entity::find_by_id(pod_id)
+        .one(db)
+        .await?
+        .map(|p| p.name)
+        .unwrap_or_else(|| "the pod".to_owned());
+    let html = pod_once_started_comment_html(db, issue_id, &pod_name, actor_id).await?;
+    Ok(crate::orchestration::creation::NewSystemComment {
+        id: Uuid::new_v4(),
+        description_id: Uuid::new_v4(),
+        now,
+        project_id: issue.project_id,
+        workspace_id: issue.workspace_id,
+        issue_id: issue.id,
+        actor_id,
+        comment_html: html.clone(),
+        comment_stripped: html,
+    })
+}
+
+/// One dedicated-pin decision over any SeaORM connection — the shared
+/// `CreationSeam::dedicated_pin` body (§9.1 + §11.2/§23.3): refusal
+/// (with its §11.2 system comment), then the pin resolution, and the
+/// §9.4 waiting comment when the run is created behind an unavailable
+/// dedicated runner. `waiting_actor` is who the waiting comment is
+/// attributed to (Django always uses the agent system user; the
+/// project-move seam cannot create the bot).
+pub async fn flight_pin(
+    db: &impl ConnectionTrait,
+    args: &crate::orchestration::creation::DedicatedPinArgs<'_>,
+    waiting_actor: Uuid,
+) -> Result<crate::orchestration::creation::PinOutcome, sea_orm::DbErr> {
+    use crate::orchestration::creation::{NewSystemComment, PinOutcome};
+    use pidash_db::entity::{agent_run as run_entity, dev_machine, issues, runner};
+    use sea_orm::EntityTrait;
+    let Some(issue) = issues::Entity::find_by_id(args.issue_id).one(db).await? else {
+        return Err(sea_orm::DbErr::RecordNotFound("issue".to_owned()));
+    };
+    let human = pidash_types::runner_runs::enums::AgentRunTrigger::from_value(args.trigger)
+        .map(|trigger| pidash_types::runner_runs::enums::HUMAN_TRIGGERS.contains(&trigger))
+        .unwrap_or(false);
+    let refusal = dedicated_run_refusal(db, &issue, human, args.creator_id, args.pod_once).await?;
+    let actor_id = args.actor_id;
+    let mk_comment = |html: String| NewSystemComment {
+        id: Uuid::new_v4(),
+        description_id: Uuid::new_v4(),
+        now: args.now,
+        project_id: issue.project_id,
+        workspace_id: issue.workspace_id,
+        issue_id: issue.id,
+        actor_id,
+        comment_html: html.clone(),
+        comment_stripped: html,
+    };
+    if let Some(code) = refusal {
+        let html = dedicated_refusal_comment_html(db, issue.id, code).await?;
+        return Ok(PinOutcome {
+            refusal: Some(code),
+            refusal_comment: Some(mk_comment(html)),
+            waiting_comment: None,
+            runner_id: None,
+            pin_kind: String::new(),
+        });
+    }
+    let Some(pod_id) = args.pod_id else {
+        return Ok(PinOutcome {
+            refusal: None,
+            refusal_comment: None,
+            waiting_comment: None,
+            runner_id: None,
+            pin_kind: String::new(),
+        });
+    };
+    let parent = match args.parent {
+        Some(parent) => run_entity::Entity::find_by_id(parent.id).one(db).await?,
+        None => None,
+    };
+    let trigger = pidash_types::runner_runs::enums::AgentRunTrigger::from_value(args.trigger)
+        .unwrap_or(pidash_types::runner_runs::enums::AgentRunTrigger::Tick);
+    let resolved = resolve_run_pin(
+        db,
+        &ResolvePinArgs {
+            issue: &issue,
+            parent: parent.as_ref(),
+            pod_id,
+            fresh_session: args.fresh_session,
+            creator_id: args.creator_id,
+            trigger,
+            pod_once: args.pod_once,
+            actor_id: args.actor_id,
+        },
+    )
+    .await?;
+    let waiting_comment = match (resolved.pin_kind, resolved.runner.as_ref().map(|r| r.id)) {
+        ("dedicated", Some(runner_id)) => {
+            let runner = runner::Entity::find_by_id(runner_id).one(db).await?;
+            let machine = match runner.as_ref().and_then(|r| r.dev_machine_id) {
+                Some(machine_id) => dev_machine::Entity::find_by_id(machine_id).one(db).await?,
+                None => None,
+            };
+            let unavailable = runner.as_ref().is_some_and(|r| {
+                runner_is_offline(r, args.now)
+                    || runner_paused_reason(r, machine.as_ref()).is_some()
+            });
+            if unavailable {
+                let html =
+                    dedicated_waiting_comment_html(db, issue.id, args.now, runner_id).await?;
+                let _ = waiting_actor;
+                Some(NewSystemComment {
+                    id: Uuid::new_v4(),
+                    description_id: Uuid::new_v4(),
+                    now: args.now,
+                    project_id: issue.project_id,
+                    workspace_id: issue.workspace_id,
+                    issue_id: issue.id,
+                    actor_id: waiting_actor,
+                    comment_html: html.clone(),
+                    comment_stripped: html,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    Ok(PinOutcome {
+        refusal: None,
+        refusal_comment: None,
+        waiting_comment,
+        runner_id: resolved.runner.as_ref().map(|r| r.id),
+        pin_kind: resolved.pin_kind.to_owned(),
+    })
+}
+
+/// One §11.2/§23.3 system comment row (the shared `insert_system_comment`
+/// body), over any SeaORM connection.
+pub async fn system_comment_row(
+    db: &impl ConnectionTrait,
+    comment: &crate::orchestration::creation::NewSystemComment,
+) -> Result<(), sea_orm::DbErr> {
+    use crate::domain::comments::{
+        insert_comment_row, insert_description_row, link_comment_description, CommentRows,
+    };
+    let empty_json = serde_json::json!({});
+    let rows = CommentRows {
+        id: comment.id,
+        description_id: comment.description_id,
+        created_at: comment.now,
+        updated_at: comment.now,
+        desc_created_at: comment.now,
+        desc_updated_at: comment.now,
+        workspace_id: comment.workspace_id,
+        project_id: comment.project_id,
+        issue_id: comment.issue_id,
+        actor_id: Some(comment.actor_id),
+        created_by: None,
+        updated_by: None,
+        deleted_at: None,
+        html: comment.comment_html.as_str(),
+        json: &empty_json,
+        stripped: comment.comment_stripped.as_str(),
+        desc_stripped: None,
+        access: "full",
+        speaker_type: "system",
+        speaker_label: "",
+        speaker_agent_run_id: None,
+        external_id: None,
+        external_source: None,
+        parent_id: None,
+        attachments: &[],
+        labels: &[],
+        edited_at: None,
+    };
+    insert_comment_row(db, &rows)
+        .await
+        .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+    insert_description_row(db, &rows)
+        .await
+        .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+    link_comment_description(db, rows.id, rows.description_id)
+        .await
+        .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+    Ok(())
+}
+
+/// The §23.3 `pod_once` started-comment text.
+pub async fn pod_once_started_comment_html(
     db: &impl ConnectionTrait,
     issue_id: Uuid,
     pod_name: &str,
     actor_id: Uuid,
-) -> Result<(), sea_orm::DbErr> {
+) -> Result<String, sea_orm::DbErr> {
     let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
-        return Ok(());
+        return Ok(String::new());
     };
     let runner_name = match issue.assigned_runner_id {
         Some(id) => runner::Entity::find_by_id(id)
@@ -1203,9 +1489,24 @@ pub async fn post_pod_once_started_comment(
         Some(user) if !user.username.is_empty() => user.username,
         _ => "a member".to_owned(),
     };
-    let body = format!(
+    Ok(format!(
         "<p>Run started on any runner in pod <strong>{pod_name}</strong> by {actor_name}, for this run only. The issue stays assigned to <strong>{runner_name}</strong>.</p>"
-    );
+    ))
+}
+
+/// Mirrors `_post_pod_once_started_comment` (`scheduling.py:1044-1067`):
+/// names the pod, the actor, and the dedicated runner the issue stays
+/// assigned to. Attributed to `actor_id`.
+pub async fn post_pod_once_started_comment(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    pod_name: &str,
+    actor_id: Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
+        return Ok(());
+    };
+    let body = pod_once_started_comment_html(db, issue_id, pod_name, actor_id).await?;
     let now = Utc::now();
     let comment = issue_comments::ActiveModel {
         id: sea_orm::Set(Uuid::new_v4()),
@@ -1776,7 +2077,7 @@ async fn apply_fall_back(
             return Ok(false);
         };
         crate::runner_sessions::pod_match::pod_has_runner_for_issue_principal(
-            db, pod_id, issue.id, creator, human,
+            db, pod_id, issue.id, creator, human, false,
         )
         .await
     };
@@ -1977,6 +2278,12 @@ mod tests {
             engine_paused_by_owner: false,
             engine_auto_pause_reason: String::new(),
             engine_team_runs: false,
+            engine_sign_in_state: String::new(),
+            engine_credential_expires_at: None,
+            engine_state: serde_json::json!({}),
+            engine_state_reported_at: None,
+            merged_into_id: None,
+            merge_result: serde_json::json!({}),
         }
     }
 
