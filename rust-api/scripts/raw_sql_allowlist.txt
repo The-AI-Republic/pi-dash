@@ -161,8 +161,6 @@ crates/services/src/operations/issues.rs 18
 crates/services/src/operations/pull_requests.rs 1
 crates/services/src/operations/relations.rs 6
 crates/services/src/ops/boot.rs 1
-crates/services/src/read/comment.rs 5
-crates/services/src/read/issues.rs 7
 crates/services/src/read/pr_links.rs 3
 crates/services/src/read/projects.rs 1
 crates/services/src/read/search.rs 1
