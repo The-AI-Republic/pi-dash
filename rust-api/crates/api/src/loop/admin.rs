@@ -844,7 +844,8 @@ async fn detail_job(
     let Some(row) = fetch_job(pool, &job_id).await? else {
         return Err(Denial::NotFound);
     };
-    let stats = queries::fetch_job_stats(pool, job_id, Utc::now() - chrono::Duration::hours(24))
+    let db = pidash_db::sea_orm_connection(pool);
+    let stats = queries::fetch_job_stats(&db, job_id, Utc::now() - chrono::Duration::hours(24))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut body = render_job(&row, None).map_err(Denial::from)?;

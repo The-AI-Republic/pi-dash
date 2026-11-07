@@ -261,15 +261,16 @@ fn settings_body(
 /// The three settings reads (`views.py:24-49`): master flag (absent row =
 /// enabled), off-job-id set, enabled jobs in display order.
 async fn read_settings(pool: &sqlx::PgPool, user_id: uuid::Uuid) -> Result<Value, Denial> {
-    let master = pidash_db::r#loop::queries::fetch_master_enabled(pool, user_id)
+    let db = pidash_db::sea_orm_connection(pool);
+    let master = pidash_db::r#loop::queries::fetch_master_enabled(&db, user_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let off: HashSet<uuid::Uuid> = pidash_db::r#loop::queries::fetch_off_job_ids(pool, user_id)
+    let off: HashSet<uuid::Uuid> = pidash_db::r#loop::queries::fetch_off_job_ids(&db, user_id)
         .await
         .map_err(|_| Denial::ServerError)?
         .into_iter()
         .collect();
-    let jobs = pidash_db::r#loop::queries::fetch_enabled_jobs(pool)
+    let jobs = pidash_db::r#loop::queries::fetch_enabled_jobs(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(settings_body(master, &off, &jobs))
