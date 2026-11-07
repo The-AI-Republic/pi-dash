@@ -504,10 +504,12 @@ fn states_stmt(slug: &str, user_id: uuid::Uuid) -> SelectStatement {
         (a("states"), states::Column::Name),
         (a("states"), states::Column::Color),
         (a("states"), states::Column::Group),
-        (a("states"), states::Column::Default),
         (a("states"), states::Column::Description),
         (a("states"), states::Column::Sequence),
     ])
+    // `default` arrives aliased as `is_default`: the row struct reads
+    // the field name (`FromQueryResult` ignores `column` attributes).
+    .expr_as(col("states", states::Column::Default), a("is_default"))
     .from_as(states::Entity, a("states"))
     .join_as(
         JoinType::InnerJoin,
@@ -542,7 +544,6 @@ struct StateListRow {
     name: String,
     color: String,
     group: String,
-    #[sea_orm(column = "default")]
     is_default: bool,
     description: String,
     sequence: f64,
@@ -642,13 +643,17 @@ fn estimates_stmt(slug: &str, ids: &[uuid::Uuid]) -> SelectStatement {
         (a("estimates"), estimates::Column::DeletedAt),
         (a("estimates"), estimates::Column::Name),
         (a("estimates"), estimates::Column::Description),
-        (a("estimates"), estimates::Column::Type),
         (a("estimates"), estimates::Column::LastUsed),
         (a("estimates"), estimates::Column::CreatedById),
         (a("estimates"), estimates::Column::UpdatedById),
         (a("estimates"), estimates::Column::ProjectId),
         (a("estimates"), estimates::Column::WorkspaceId),
     ])
+    // `type` arrives aliased as `estimate_type` (see `states_stmt`).
+    .expr_as(
+        col("estimates", estimates::Column::Type),
+        a("estimate_type"),
+    )
     .from_as(estimates::Entity, a("estimates"))
     .and_where(col("estimates", estimates::Column::Id).is_in(ids.to_vec()))
     .and_where(
@@ -657,7 +662,6 @@ fn estimates_stmt(slug: &str, ids: &[uuid::Uuid]) -> SelectStatement {
     )
     .and_where(col("estimates", estimates::Column::DeletedAt).is_null())
     .order_by((a("estimates"), estimates::Column::Name), Order::Asc);
-    // Rename the `type` output so the struct field reads cleanly.
     stmt
 }
 
@@ -696,7 +700,6 @@ struct EstimateListRow {
     deleted_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     name: String,
     description: String,
-    #[sea_orm(column = "type")]
     estimate_type: String,
     last_used: bool,
     created_by_id: Option<uuid::Uuid>,
@@ -1686,29 +1689,86 @@ mod tests {
     }
 
     /// Built statements carry the ported scopes, joins, annotations
-    /// and orders (no database; sea-query text pins).
+    /// and orders (no database; sea-query text pins). The pins are
+    /// discriminating: order directions, triage predicates, count
+    /// operands (`s.group` for grouped cycle counts, the links for
+    /// totals), `DISTINCT` presence/absence, deleted guards, and the
+    /// aliased output names the `FromQueryResult` rows decode by.
     #[test]
     fn built_statements_carry_ported_fragments() {
         let user = uuid::Uuid::parse_str("72ff6e6b-58bd-4aef-9a25-50f1cfb6f4e9").unwrap();
         let labels = sql_text(&labels_stmt("acme", user));
         assert!(labels.contains("INNER JOIN"), "{labels}");
-        assert!(labels.contains("ORDER BY"), "{labels}");
-        assert!(labels.contains("created_at"), "{labels}");
+        assert!(labels.contains("\"pm\""), "{labels}");
+        assert!(labels.contains("\"pm\".\"member_id\""), "{labels}");
+        assert!(labels.contains("\"pm\".\"is_active\" = TRUE"), "{labels}");
+        assert!(
+            labels.contains("\"projects\".\"archived_at\" IS NULL"),
+            "{labels}"
+        );
+        assert!(
+            labels.contains("\"labels\".\"deleted_at\" IS NULL"),
+            "{labels}"
+        );
+        assert!(
+            labels.contains("ORDER BY \"labels\".\"created_at\" DESC"),
+            "{labels}"
+        );
 
         let states = sql_text(&states_stmt("acme", user));
         assert!(states.contains("INNER JOIN"), "{states}");
-        assert!(states.contains("ORDER BY"), "{states}");
-        assert!(states.contains("sequence"), "{states}");
+        assert!(
+            states.contains("\"states\".\"is_triage\" = FALSE"),
+            "{states}"
+        );
+        assert!(
+            states.contains("\"states\".\"group\" <> 'triage'"),
+            "{states}"
+        );
+        assert!(
+            states.contains("\"states\".\"deleted_at\" IS NULL"),
+            "{states}"
+        );
+        // `FromQueryResult` decodes by output name: the `default`
+        // column must arrive aliased as `is_default`.
+        assert!(states.contains("AS \"is_default\""), "{states}");
+        assert!(
+            states.contains("ORDER BY \"states\".\"sequence\" ASC"),
+            "{states}"
+        );
 
         let ids = sql_text(&estimate_ids_stmt("acme"));
-        assert!(ids.contains("estimate_id"), "{ids}");
+        assert!(
+            ids.contains("\"projects\".\"estimate_id\" IS NOT NULL"),
+            "{ids}"
+        );
+        assert!(ids.contains("\"projects\".\"deleted_at\" IS NULL"), "{ids}");
+        // Ported bug: Q1 has no member scoping.
+        assert!(!ids.contains("member_id"), "{ids}");
 
         let ids = vec![uuid::Uuid::parse_str("95845993-b07e-4300-a896-a4e252d94459").unwrap()];
         let estimates = sql_text(&estimates_stmt("acme", &ids));
-        assert!(estimates.contains("ORDER BY"), "{estimates}");
+        assert!(
+            estimates.contains("\"estimates\".\"deleted_at\" IS NULL"),
+            "{estimates}"
+        );
+        assert!(estimates.contains("IN ("), "{estimates}");
+        // Same decode rule as `is_default`: `type` arrives aliased.
+        assert!(estimates.contains("AS \"estimate_type\""), "{estimates}");
+        assert!(
+            estimates.contains("ORDER BY \"estimates\".\"name\" ASC"),
+            "{estimates}"
+        );
 
         let points = sql_text(&estimate_points_stmt(&ids));
-        assert!(points.contains("ORDER BY"), "{points}");
+        assert!(
+            points.contains("\"estimate_points\".\"deleted_at\" IS NULL"),
+            "{points}"
+        );
+        assert!(
+            points.contains("ORDER BY \"estimate_points\".\"value\" ASC"),
+            "{points}"
+        );
 
         let cycles = sql_text(&cycles_stmt("acme"));
         for alias in [
@@ -1721,8 +1781,18 @@ mod tests {
         ] {
             assert!(cycles.contains(alias), "{cycles}");
         }
-        assert!(cycles.contains("GROUP BY"), "{cycles}");
-        assert!(cycles.contains("ORDER BY"), "{cycles}");
+        assert!(cycles.contains("LEFT JOIN"), "{cycles}");
+        // Total counts the link; grouped counts `s.group` (ported
+        // asymmetry); no DISTINCT anywhere (contrast modules).
+        assert!(cycles.contains("THEN \"ic\".\"id\" END"), "{cycles}");
+        assert!(cycles.contains("\"s\".\"group\" = 'completed'"), "{cycles}");
+        assert!(cycles.contains("\"i\".\"deleted_at\" IS NULL"), "{cycles}");
+        assert!(!cycles.contains("COUNT(DISTINCT"), "{cycles}");
+        assert!(cycles.contains("GROUP BY \"cycles\".\"id\""), "{cycles}");
+        assert!(
+            cycles.contains("ORDER BY \"cycles\".\"created_at\" DESC"),
+            "{cycles}"
+        );
 
         let modules = sql_text(&modules_stmt("acme"));
         for alias in [
@@ -1735,7 +1805,205 @@ mod tests {
         ] {
             assert!(modules.contains(alias), "{modules}");
         }
-        assert!(modules.contains("GROUP BY"), "{modules}");
-        assert!(modules.contains("ORDER BY"), "{modules}");
+        assert!(modules.contains("LEFT JOIN"), "{modules}");
+        assert!(modules.contains("COUNT(DISTINCT"), "{modules}");
+        assert!(modules.contains("THEN \"mi\".\"id\" END"), "{modules}");
+        // Ported asymmetry: module counts carry no `issues.deleted_at` guard.
+        assert!(!modules.contains("\"i\".\"deleted_at\""), "{modules}");
+        assert!(modules.contains("GROUP BY \"modules\".\"id\""), "{modules}");
+        assert!(
+            modules.contains("ORDER BY \"modules\".\"created_at\" DESC"),
+            "{modules}"
+        );
+    }
+
+    /// Decode + counts live replay: execute every list statement
+    /// against a scratch `DATABASE_URL` (temp tables, skipped when
+    /// unset) and assert the decoded rows match Django semantics.
+    /// Covers the `is_default`/`estimate_type` alias decode (the
+    /// `FromQueryResult` names) and the cycle/module count asymmetry.
+    #[tokio::test]
+    async fn live_lists_decode_and_counts() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        create_lists_tables(&pool).await;
+        seed_lists(&pool).await;
+        let user = uuid::Uuid::parse_str("10000000-0000-0000-0000-0000000000bb").unwrap();
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+
+        // Labels: newest first, soft-deleted out.
+        let rows = query_built::<LabelListRow>(&db, &labels_stmt("acme", user))
+            .await
+            .unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["L1", "L2"], "labels");
+
+        // States: triage-group and is_triage rows out, sequence ASC;
+        // `is_default` decodes from the aliased `default` column.
+        let rows = query_built::<StateListRow>(&db, &states_stmt("acme", user))
+            .await
+            .unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["S1", "S2", "S5"], "states");
+        assert!(rows[0].is_default, "states default decodes");
+
+        // Estimates: Q1 chains into Q2, name ASC, `type` decodes;
+        // points keep value (text) order.
+        let ids: Vec<uuid::Uuid> = query_built::<EstimateIdRow>(&db, &estimate_ids_stmt("acme"))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.estimate_id)
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        let mut wanted = vec![
+            uuid::Uuid::parse_str("10000000-0000-0000-0000-0000000000e1").unwrap(),
+            uuid::Uuid::parse_str("10000000-0000-0000-0000-0000000000e2").unwrap(),
+        ];
+        wanted.sort();
+        assert_eq!(sorted, wanted, "estimate Q1 ids");
+        let rows = query_built::<EstimateListRow>(&db, &estimates_stmt("acme", &ids))
+            .await
+            .unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["A", "B"], "estimates");
+        assert_eq!(rows[1].estimate_type, "points", "estimates type decodes");
+        let points = query_built::<EstimatePointListRow>(&db, &estimate_points_stmt(&ids))
+            .await
+            .unwrap();
+        let values: Vec<&str> = points.iter().map(|r| r.value.as_str()).collect();
+        assert_eq!(values, vec!["10", "2"], "points");
+
+        // Cycles: the deleted-issue link does not count
+        // (`issues.deleted_at` guard): total 3, started 2, completed 1.
+        let rows = query_built::<CycleListRow>(&db, &cycles_stmt("acme"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let counts = &rows[0];
+        assert_eq!(
+            (
+                counts.total_issues,
+                counts.started_issues,
+                counts.completed_issues,
+                counts.cancelled_issues,
+                counts.unstarted_issues,
+                counts.backlog_issues,
+            ),
+            (3, 2, 1, 0, 0, 0),
+            "cycles counts"
+        );
+
+        // Modules: same seed, no deleted-issue guard: total 4, started 3.
+        let rows = query_built::<ModuleListRow>(&db, &modules_stmt("acme"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let counts = &rows[0];
+        assert_eq!(
+            (
+                counts.total_issues,
+                counts.started_issues,
+                counts.completed_issues,
+                counts.cancelled_issues,
+                counts.unstarted_issues,
+                counts.backlog_issues,
+            ),
+            (4, 3, 1, 0, 0, 0),
+            "modules counts"
+        );
+
+        assert_eq!(
+            fetch_workspace_role(&pool, "acme", &user).await.unwrap(),
+            Some(20)
+        );
+        assert_eq!(actor_timezone(&pool, &user).await.unwrap(), chrono_tz::UTC);
+    }
+
+    async fn scratch_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    async fn create_lists_tables(pool: &sqlx::PgPool) {
+        // Minimal column sets for the statements under test; temp
+        // tables vanish with the single pooled connection.
+        for ddl in [
+            "CREATE TEMP TABLE IF NOT EXISTS workspaces (id uuid PRIMARY KEY, slug text)",
+            "CREATE TEMP TABLE IF NOT EXISTS users (id uuid PRIMARY KEY, user_timezone text, is_bot boolean)",
+            "CREATE TEMP TABLE IF NOT EXISTS projects (id uuid PRIMARY KEY, workspace_id uuid, estimate_id uuid, archived_at timestamptz, deleted_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS project_members (id uuid PRIMARY KEY, project_id uuid, member_id uuid, is_active boolean, deleted_at timestamptz, workspace_id uuid)",
+            "CREATE TEMP TABLE IF NOT EXISTS workspace_members (id uuid PRIMARY KEY, workspace_id uuid, member_id uuid, role smallint, is_active boolean, deleted_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS labels (id uuid PRIMARY KEY, parent_id uuid, name text, color text, project_id uuid, workspace_id uuid, sort_order float8, created_at timestamptz, deleted_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS states (id uuid PRIMARY KEY, project_id uuid, workspace_id uuid, name text, color text, \"group\" text, \"default\" boolean, description text, sequence float8, is_triage boolean, deleted_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS estimates (id uuid PRIMARY KEY, created_at timestamptz, updated_at timestamptz, deleted_at timestamptz, name text, description text, type text, last_used boolean, created_by_id uuid, updated_by_id uuid, project_id uuid, workspace_id uuid)",
+            "CREATE TEMP TABLE IF NOT EXISTS estimate_points (id uuid PRIMARY KEY, created_at timestamptz, updated_at timestamptz, deleted_at timestamptz, key int, description text, value text, created_by_id uuid, updated_by_id uuid, project_id uuid, workspace_id uuid, estimate_id uuid)",
+            "CREATE TEMP TABLE IF NOT EXISTS cycles (id uuid PRIMARY KEY, workspace_id uuid, project_id uuid, name text, description text, start_date timestamptz, end_date timestamptz, owned_by_id uuid, view_props jsonb, sort_order float8, external_source text, external_id text, progress_snapshot jsonb, logo_props jsonb, archived_at timestamptz, deleted_at timestamptz, created_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS cycle_issues (id uuid PRIMARY KEY, cycle_id uuid, issue_id uuid, deleted_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS issues (id uuid PRIMARY KEY, state_id uuid, archived_at date, is_draft boolean, deleted_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS modules (id uuid PRIMARY KEY, workspace_id uuid, project_id uuid, name text, description text, description_text jsonb, description_html jsonb, start_date date, target_date date, status text, lead_id uuid, view_props jsonb, sort_order float8, external_source text, external_id text, logo_props jsonb, created_at timestamptz, updated_at timestamptz, archived_at timestamptz, deleted_at timestamptz)",
+            "CREATE TEMP TABLE IF NOT EXISTS module_issues (id uuid PRIMARY KEY, module_id uuid, issue_id uuid, deleted_at timestamptz)",
+        ] {
+            sqlx::query(ddl).execute(pool).await.expect("temp table");
+        }
+    }
+
+    async fn seed_lists(pool: &sqlx::PgPool) {
+        for seed in [
+            "INSERT INTO workspaces (id, slug) VALUES ('10000000-0000-0000-0000-0000000000aa','acme')",
+            "INSERT INTO users (id, user_timezone, is_bot) VALUES ('10000000-0000-0000-0000-0000000000bb','UTC',false)",
+            "INSERT INTO projects (id, workspace_id, estimate_id) VALUES ('10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','10000000-0000-0000-0000-0000000000e1')",
+            // Archived project still feeds Q1 (no archived filter there).
+            "INSERT INTO projects (id, workspace_id, estimate_id, archived_at) VALUES ('10000000-0000-0000-0000-0000000000dd','10000000-0000-0000-0000-0000000000aa','10000000-0000-0000-0000-0000000000e2','2026-01-01T00:00:00Z')",
+            "INSERT INTO project_members (id, project_id, member_id, is_active, workspace_id) VALUES (gen_random_uuid(),'10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000bb',true,'10000000-0000-0000-0000-0000000000aa')",
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active) VALUES (gen_random_uuid(),'10000000-0000-0000-0000-0000000000aa','10000000-0000-0000-0000-0000000000bb',20,true)",
+            "INSERT INTO labels (id, name, color, project_id, workspace_id, sort_order, created_at) VALUES ('20000000-0000-0000-0000-000000000001','L2','red','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa',1,'2026-01-01T00:00:00Z')",
+            "INSERT INTO labels (id, name, color, project_id, workspace_id, sort_order, created_at) VALUES ('20000000-0000-0000-0000-000000000002','L1','blue','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa',1,'2026-02-01T00:00:00Z')",
+            "INSERT INTO labels (id, name, color, project_id, workspace_id, sort_order, created_at, deleted_at) VALUES ('20000000-0000-0000-0000-000000000003','Ldel','x','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa',1,'2026-03-01T00:00:00Z','2026-03-02T00:00:00Z')",
+            "INSERT INTO states (id, project_id, workspace_id, name, color, \"group\", \"default\", description, sequence, is_triage) VALUES ('30000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','S1','c','backlog',true,'',10,false)",
+            "INSERT INTO states (id, project_id, workspace_id, name, color, \"group\", \"default\", description, sequence, is_triage) VALUES ('30000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','S2','c','started',false,'',20,false)",
+            "INSERT INTO states (id, project_id, workspace_id, name, color, \"group\", \"default\", description, sequence, is_triage) VALUES ('30000000-0000-0000-0000-000000000003','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','S3','c','triage',false,'',30,false)",
+            "INSERT INTO states (id, project_id, workspace_id, name, color, \"group\", \"default\", description, sequence, is_triage) VALUES ('30000000-0000-0000-0000-000000000004','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','S4','c','backlog',false,'',5,true)",
+            "INSERT INTO states (id, project_id, workspace_id, name, color, \"group\", \"default\", description, sequence, is_triage) VALUES ('30000000-0000-0000-0000-000000000005','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','S5','c','completed',false,'',40,false)",
+            "INSERT INTO estimates (id, created_at, updated_at, name, description, type, last_used, project_id, workspace_id) VALUES ('10000000-0000-0000-0000-0000000000e1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','B','','points',false,'10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa')",
+            "INSERT INTO estimates (id, created_at, updated_at, name, description, type, last_used, project_id, workspace_id) VALUES ('10000000-0000-0000-0000-0000000000e2','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','A','','points',false,'10000000-0000-0000-0000-0000000000dd','10000000-0000-0000-0000-0000000000aa')",
+            "INSERT INTO estimate_points (id, created_at, updated_at, key, description, value, project_id, workspace_id, estimate_id) VALUES ('40000000-0000-0000-0000-000000000001','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',2,'','2','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','10000000-0000-0000-0000-0000000000e1')",
+            "INSERT INTO estimate_points (id, created_at, updated_at, key, description, value, project_id, workspace_id, estimate_id) VALUES ('40000000-0000-0000-0000-000000000002','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',10,'','10','10000000-0000-0000-0000-0000000000cc','10000000-0000-0000-0000-0000000000aa','10000000-0000-0000-0000-0000000000e1')",
+            "INSERT INTO issues (id, state_id, is_draft) VALUES ('50000000-0000-0000-0000-000000000001','30000000-0000-0000-0000-000000000002',false)",
+            "INSERT INTO issues (id, state_id, is_draft) VALUES ('50000000-0000-0000-0000-000000000002','30000000-0000-0000-0000-000000000005',false)",
+            "INSERT INTO issues (id, state_id, is_draft) VALUES ('50000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000002',true)",
+            "INSERT INTO issues (id, state_id, is_draft, deleted_at) VALUES ('50000000-0000-0000-0000-000000000004','30000000-0000-0000-0000-000000000002',false,'2026-01-05T00:00:00Z')",
+            "INSERT INTO issues (id, state_id, is_draft, archived_at) VALUES ('50000000-0000-0000-0000-000000000005','30000000-0000-0000-0000-000000000002',false,'2026-01-06')",
+            "INSERT INTO cycles (id, workspace_id, project_id, name, description, owned_by_id, view_props, sort_order, progress_snapshot, logo_props, created_at) VALUES ('60000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-0000000000aa','10000000-0000-0000-0000-0000000000cc','C1','','10000000-0000-0000-0000-0000000000bb','{}'::jsonb,1,'{}'::jsonb,'{}'::jsonb,'2026-01-01T00:00:00Z')",
+            "INSERT INTO modules (id, workspace_id, project_id, name, description, status, view_props, sort_order, logo_props, created_at, updated_at) VALUES ('70000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-0000000000aa','10000000-0000-0000-0000-0000000000cc','M1','','planned','{}'::jsonb,1,'{}'::jsonb,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            "INSERT INTO cycle_issues (id, cycle_id, issue_id) VALUES ('80000000-0000-0000-0000-000000000001','60000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000001')",
+            "INSERT INTO cycle_issues (id, cycle_id, issue_id) VALUES ('80000000-0000-0000-0000-000000000002','60000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000001')",
+            "INSERT INTO cycle_issues (id, cycle_id, issue_id) VALUES ('80000000-0000-0000-0000-000000000003','60000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000002')",
+            "INSERT INTO cycle_issues (id, cycle_id, issue_id) VALUES ('80000000-0000-0000-0000-000000000004','60000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000003')",
+            "INSERT INTO cycle_issues (id, cycle_id, issue_id) VALUES ('80000000-0000-0000-0000-000000000005','60000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000004')",
+            "INSERT INTO cycle_issues (id, cycle_id, issue_id) VALUES ('80000000-0000-0000-0000-000000000006','60000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000005')",
+            "INSERT INTO cycle_issues (id, cycle_id, issue_id, deleted_at) VALUES ('80000000-0000-0000-0000-000000000007','60000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000001','2026-01-03T00:00:00Z')",
+            "INSERT INTO module_issues (id, module_id, issue_id) VALUES ('90000000-0000-0000-0000-000000000001','70000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000001')",
+            "INSERT INTO module_issues (id, module_id, issue_id) VALUES ('90000000-0000-0000-0000-000000000002','70000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000001')",
+            "INSERT INTO module_issues (id, module_id, issue_id) VALUES ('90000000-0000-0000-0000-000000000003','70000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000002')",
+            "INSERT INTO module_issues (id, module_id, issue_id) VALUES ('90000000-0000-0000-0000-000000000004','70000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000003')",
+            "INSERT INTO module_issues (id, module_id, issue_id) VALUES ('90000000-0000-0000-0000-000000000005','70000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000004')",
+            "INSERT INTO module_issues (id, module_id, issue_id) VALUES ('90000000-0000-0000-0000-000000000006','70000000-0000-0000-0000-000000000001','50000000-0000-0000-0000-000000000005')",
+        ] {
+            sqlx::query(seed).execute(pool).await.expect("seed");
+        }
     }
 }
