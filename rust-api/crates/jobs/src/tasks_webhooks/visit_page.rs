@@ -337,13 +337,17 @@ type DriverResult<T> = Result<T, DriverFailure>;
 
 /// `Workspace.objects.get(slug=slug)`: the default manager soft-filters,
 /// `get` needs exactly one row.
-async fn workspace_id_by_slug(pool: &PgPool, slug: &str) -> DriverResult<Uuid> {
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let rows: Vec<Uuid> = workspaces::Entity::find()
+fn workspace_id_query(slug: &str) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
         .select_only()
         .column(workspaces::Column::Id)
         .filter(workspaces::Column::Slug.eq(slug))
         .filter(workspaces::Column::DeletedAt.is_null())
+}
+
+async fn workspace_id_by_slug(pool: &PgPool, slug: &str) -> DriverResult<Uuid> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<Uuid> = workspace_id_query(slug)
         .into_tuple::<Uuid>()
         .all(&db)
         .await
@@ -476,14 +480,21 @@ async fn live_visit_count(pool: &PgPool, user_id: &str, workspace_id: Uuid) -> D
         DriverFailure::Log(format!("recent-visit count: invalid user_id {user_id}"))
     })?;
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let count = user_recent_visits::Entity::find()
-        .filter(user_recent_visits::Column::UserId.eq(user_id))
-        .filter(user_recent_visits::Column::WorkspaceId.eq(workspace_id))
-        .filter(user_recent_visits::Column::DeletedAt.is_null())
+    let count = live_visit_query(user_id, workspace_id)
         .count(&db)
         .await
         .map_err(|error| DriverFailure::Log(format!("recent-visit count: {}", into_sqlx(error))))?;
     Ok(count as i64)
+}
+
+/// The live-visit count (`user_recent_visits` filtered on user +
+/// workspace, soft-deleted rows excluded). Shared by the count and the
+/// eviction-victim lookups so the scope cannot drift between them.
+fn live_visit_query(user_id: Uuid, workspace_id: Uuid) -> Select<user_recent_visits::Entity> {
+    user_recent_visits::Entity::find()
+        .filter(user_recent_visits::Column::UserId.eq(user_id))
+        .filter(user_recent_visits::Column::WorkspaceId.eq(workspace_id))
+        .filter(user_recent_visits::Column::DeletedAt.is_null())
 }
 
 /// Eviction (`:39-44` + QUIRK-3): oldest live row by `created_at`, then
@@ -496,12 +507,9 @@ async fn evict_oldest(pool: &PgPool, user_id: &str, workspace_id: Uuid) -> Drive
         DriverFailure::Log(format!("recent-visit victim: invalid user_id {user_id}"))
     })?;
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let victim: Option<Uuid> = user_recent_visits::Entity::find()
+    let victim: Option<Uuid> = live_visit_query(user_id, workspace_id)
         .select_only()
         .column(user_recent_visits::Column::Id)
-        .filter(user_recent_visits::Column::UserId.eq(user_id))
-        .filter(user_recent_visits::Column::WorkspaceId.eq(workspace_id))
-        .filter(user_recent_visits::Column::DeletedAt.is_null())
         .order_by_asc(user_recent_visits::Column::CreatedAt)
         .limit(1)
         .into_tuple::<Uuid>()
@@ -645,6 +653,26 @@ async fn run_recent_visited(pool: &PgPool, args: RecentVisitedArgs) -> DriverRes
     .await
 }
 
+/// The page lookup (`Page.objects.get(pk=page_id)`): soft-deleted pages
+/// miss, exactly as the default manager renders it.
+fn page_workspace_query(page_id: Uuid) -> Select<pages::Entity> {
+    pages::Entity::find_by_id(page_id)
+        .select_only()
+        .column(pages::Column::WorkspaceId)
+        .filter(pages::Column::DeletedAt.is_null())
+}
+
+/// The logs-exists probe (`EXISTS(... deleted_at IS NULL)`): one live
+/// log row is enough.
+fn page_logs_exist_query(page_id: Uuid) -> Select<page_logs::Entity> {
+    page_logs::Entity::find()
+        .select_only()
+        .column(page_logs::Column::Id)
+        .filter(page_logs::Column::PageId.eq(page_id))
+        .filter(page_logs::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
 async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> DriverResult<()> {
     // `Page.objects.get(pk=page_id)`: an unparseable pk is a
     // `ValidationError` (logged); a missing row is `DoesNotExist`
@@ -654,10 +682,7 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
         .parse()
         .map_err(|_| DriverFailure::Log("page_transaction: invalid page_id".to_owned()))?;
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let page_workspace: Option<Uuid> = pages::Entity::find_by_id(page_id)
-        .select_only()
-        .column(pages::Column::WorkspaceId)
-        .filter(pages::Column::DeletedAt.is_null())
+    let page_workspace: Option<Uuid> = page_workspace_query(page_id)
         .into_tuple::<Uuid>()
         .one(&db)
         .await
@@ -671,12 +696,7 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
         return Err(DriverFailure::Quiet);
     };
 
-    let has_existing_logs: bool = page_logs::Entity::find()
-        .select_only()
-        .column(page_logs::Column::Id)
-        .filter(page_logs::Column::PageId.eq(page_id))
-        .filter(page_logs::Column::DeletedAt.is_null())
-        .limit(1)
+    let has_existing_logs: bool = page_logs_exist_query(page_id)
         .one(&db)
         .await
         .map_err(|error| {
@@ -988,6 +1008,50 @@ mod tests {
             !with_project.contains("\"project_id\" IS NULL"),
             "{with_project}"
         );
+    }
+
+    // The remaining find builders pin their soft-delete scope and the
+    // eviction ordering (`ORDER BY created_at ASC LIMIT 1`).
+    #[test]
+    fn find_builders_pin_soft_scope_and_victim_order() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let ws = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("valid uuid");
+        let user = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").expect("valid uuid");
+        let workspace_sql = workspace_id_query("ws-slug")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(workspace_sql.contains("\"workspaces\""), "{workspace_sql}");
+        assert!(workspace_sql.contains("\"slug\""), "{workspace_sql}");
+        assert!(
+            workspace_sql.contains("\"deleted_at\" IS NULL"),
+            "{workspace_sql}"
+        );
+        let live_sql = live_visit_query(user, ws)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(live_sql.contains("\"user_recent_visits\""), "{live_sql}");
+        assert!(live_sql.contains("\"user_id\""), "{live_sql}");
+        assert!(live_sql.contains("\"deleted_at\" IS NULL"), "{live_sql}");
+        let victim_sql = live_visit_query(user, ws)
+            .select_only()
+            .column(user_recent_visits::Column::Id)
+            .order_by_asc(user_recent_visits::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(victim_sql.contains("\"created_at\" ASC"), "{victim_sql}");
+        assert!(victim_sql.contains("LIMIT 1"), "{victim_sql}");
+        let page_sql = page_workspace_query(user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(page_sql.contains("\"pages\""), "{page_sql}");
+        assert!(page_sql.contains("\"deleted_at\" IS NULL"), "{page_sql}");
+        let logs_sql = page_logs_exist_query(user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(logs_sql.contains("\"page_logs\""), "{logs_sql}");
+        assert!(logs_sql.contains("\"deleted_at\" IS NULL"), "{logs_sql}");
+        assert!(logs_sql.contains("LIMIT 1"), "{logs_sql}");
     }
 
     #[test]

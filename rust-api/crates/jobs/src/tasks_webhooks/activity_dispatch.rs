@@ -2388,6 +2388,118 @@ mod tests {
         );
     }
 
+    // Snapshot builders pin their joins, soft-delete scope and the
+    // latest-activity ordering (`ORDER BY created_at DESC LIMIT 1`).
+    #[test]
+    fn estimate_and_latest_statements_pin_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let estimate_sql =
+            estimate_points_statement(&[id]).to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(
+            estimate_sql.contains("\"estimate_points\""),
+            "{estimate_sql}"
+        );
+        assert!(estimate_sql.contains("\"estimates\""), "{estimate_sql}");
+        assert!(estimate_sql.contains("\"value\""), "{estimate_sql}");
+        assert!(estimate_sql.contains("\"estimate_type\""), "{estimate_sql}");
+        assert!(
+            estimate_sql.contains("\"deleted_at\" IS NULL"),
+            "{estimate_sql}"
+        );
+        let latest_sql = latest_activity_query(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(latest_sql.contains("\"issue_activities\""), "{latest_sql}");
+        assert!(latest_sql.contains("\"issue_id\""), "{latest_sql}");
+        assert!(latest_sql.contains("\"created_at\" DESC"), "{latest_sql}");
+        assert!(latest_sql.contains("LIMIT 1"), "{latest_sql}");
+        // No soft-delete scope on the latest-activity lookup (the old
+        // FIND_LATEST_ACTIVITY_SQL had none): a soft-deleted row is still
+        // the latest activity.
+        assert!(!latest_sql.contains("deleted_at"), "{latest_sql}");
+    }
+
+    // The inline bulk-snapshot shapes (fetch_cycles, fetch_existing_issues,
+    // the IssueFlatRow fetch and the create-issue assignee fetch) pin
+    // their columns and soft-delete scope the same way the state/user
+    // shapes above do (PIDASHCONV-1278 pattern kept in tests).
+    #[test]
+    fn snapshot_shapes_pin_soft_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let cycle_sql = cycles::Entity::find()
+            .select_only()
+            .columns([cycles::Column::Id, cycles::Column::Name])
+            .filter(cycles::Column::Id.is_in([id]))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(cycle_sql.contains("\"cycles\""), "{cycle_sql}");
+        assert!(cycle_sql.contains("\"deleted_at\" IS NULL"), "{cycle_sql}");
+        let module_sql = modules::Entity::find()
+            .select_only()
+            .columns([modules::Column::Id, modules::Column::Name])
+            .filter(modules::Column::Id.is_in([id]))
+            .filter(modules::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(module_sql.contains("\"modules\""), "{module_sql}");
+        assert!(
+            module_sql.contains("\"deleted_at\" IS NULL"),
+            "{module_sql}"
+        );
+        let existing_sql = issues::Entity::find()
+            .select_only()
+            .column(issues::Column::Id)
+            .filter(issues::Column::Id.is_in([id]))
+            .filter(issues::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(existing_sql.contains("\"issues\""), "{existing_sql}");
+        assert!(
+            existing_sql.contains("\"deleted_at\" IS NULL"),
+            "{existing_sql}"
+        );
+        // The IssueFlatSerializer projection has NO soft-delete scope
+        // (the serializer follows the FK onto whatever row is there).
+        let flat_sql = issues::Entity::find()
+            .select_only()
+            .columns([
+                issues::Column::Id,
+                issues::Column::Name,
+                issues::Column::DescriptionJson,
+                issues::Column::DescriptionHtml,
+                issues::Column::Priority,
+                issues::Column::ComplexityScore,
+                issues::Column::StartDate,
+                issues::Column::TargetDate,
+                issues::Column::SequenceId,
+                issues::Column::SortOrder,
+                issues::Column::IsDraft,
+            ])
+            .filter(issues::Column::Id.is_in([id]))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(flat_sql.contains("\"issues\""), "{flat_sql}");
+        assert!(flat_sql.contains("\"description_json\""), "{flat_sql}");
+        assert!(
+            !flat_sql.contains("deleted_at"),
+            "flat projection must not soften: {flat_sql}"
+        );
+        // The create-issue assignee fetch has no soft-delete scope either.
+        let assignee_sql = users::Entity::find()
+            .select_only()
+            .columns([users::Column::Id, users::Column::DisplayName])
+            .filter(users::Column::Id.is_in([id]))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            !assignee_sql.contains("deleted_at"),
+            "assignee fetch must not soften: {assignee_sql}"
+        );
+    }
+
     // FX-ACT-03 · DRF datetime rendering.
     #[test]
     fn datetimes_render_drf_iso() {
