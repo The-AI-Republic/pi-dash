@@ -408,7 +408,7 @@ pub struct SyncScanRow {
 pub fn sync_scan_query(sync_id: Uuid) -> Select<github_repository_syncs::Entity> {
     github_repository_syncs::Entity::find()
         .select_only()
-        .column(github_repository_syncs::Column::Id)
+        .column_as(github_repository_syncs::Column::Id, "sync_id")
         .column(github_repository_syncs::Column::ProjectId)
         .column(github_repository_syncs::Column::WorkspaceId)
         .column(github_repository_syncs::Column::ActorId)
@@ -426,6 +426,21 @@ pub fn sync_scan_query(sync_id: Uuid) -> Select<github_repository_syncs::Entity>
         .filter(github_repository_syncs::Column::Id.eq(sync_id))
         .filter(github_repository_syncs::Column::DeletedAt.is_null())
         .limit(1)
+}
+
+/// Sort-order seed (`Issue.save`, `issue.py:331-335`): max sort_order over
+/// live siblings in the resolved state (`IS NOT DISTINCT FROM` semantics:
+/// `Some` → `= id`, `None` → `IS NULL`).
+pub fn max_sort_query(project_id: Uuid, state_id: Option<Uuid>) -> Select<issues::Entity> {
+    let base = issues::Entity::find()
+        .select_only()
+        .column_as(issues::Column::SortOrder.max(), "largest")
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null());
+    match state_id {
+        Some(id) => base.filter(issues::Column::StateId.eq(id)),
+        None => base.filter(issues::Column::StateId.is_null()),
+    }
 }
 
 /// The project workspace for the create path (`ProjectBaseModel.save`,
@@ -569,17 +584,20 @@ pub struct CompletionRow {
 pub fn completion_lookup_query(sync_id: Uuid) -> Select<github_issue_syncs::Entity> {
     github_issue_syncs::Entity::find()
         .select_only()
-        .column(github_issue_syncs::Column::Id)
-        .column(github_issue_syncs::Column::RepoIssueId)
-        .column(github_issue_syncs::Column::Metadata)
-        .column(github_repository_syncs::Column::Id)
-        .column(github_repository_syncs::Column::WorkspaceIntegrationId)
+        .column_as(github_issue_syncs::Column::Id, "sync_id")
+        .column_as(github_issue_syncs::Column::RepoIssueId, "sync_repo_issue_id")
+        .column_as(github_issue_syncs::Column::Metadata, "sync_metadata")
+        .column_as(github_repository_syncs::Column::Id, "repo_sync_id")
+        .column_as(
+            github_repository_syncs::Column::WorkspaceIntegrationId,
+            "repo_sync_integration_id",
+        )
         .column_as(github_repositories::Column::Owner, "repo_owner")
         .column_as(github_repositories::Column::Name, "repo_name")
         .column_as(workspace_integrations::Column::Config, "integration_config")
-        .column(issues::Column::Id)
-        .column(issues::Column::ProjectId)
-        .column(workspaces::Column::Slug)
+        .column_as(issues::Column::Id, "issue_id")
+        .column_as(issues::Column::ProjectId, "issue_project_id")
+        .column_as(workspaces::Column::Slug, "workspace_slug")
         .join(
             JoinType::InnerJoin,
             github_issue_syncs::Relation::GithubRepositorySyncs.def(),
@@ -1042,12 +1060,7 @@ async fn create_issue(
         .map_err(db_error)?
         .flatten();
     let sequence_id = max_sequence.map(|largest| largest + 1).unwrap_or(1);
-    let max_sort: Option<f64> = issues::Entity::find()
-        .select_only()
-        .column_as(issues::Column::SortOrder.max(), "largest")
-        .filter(issues::Column::ProjectId.eq(scan.project_id))
-        .filter(issues::Column::StateId.eq(state_id))
-        .filter(issues::Column::DeletedAt.is_null())
+    let max_sort: Option<f64> = max_sort_query(scan.project_id, state_id)
         .into_tuple()
         .one(db)
         .await
@@ -2822,6 +2835,7 @@ mod tests {
         // No tombstone filter on the joined tables (Django
         // `select_related` semantics); only the base row is scoped.
         assert_eq!(scan.matches("\"deleted_at\" IS NULL").count(), 1);
+        assert!(scan.contains("AS \"sync_id\""), "{scan}");
 
         let lookup = built(issue_lookup_query(pid, "7"));
         assert!(lookup.contains("external_source"));
@@ -2839,6 +2853,14 @@ mod tests {
             assert!(completion.contains(table), "{table}");
         }
         assert_eq!(completion.matches("\"deleted_at\" IS NULL").count(), 1);
+        assert!(completion.contains("AS \"sync_id\""), "{completion}");
+        assert!(completion.contains("AS \"sync_repo_issue_id\""), "{completion}");
+        assert!(completion.contains("AS \"sync_metadata\""), "{completion}");
+        assert!(completion.contains("AS \"repo_sync_id\""), "{completion}");
+        assert!(completion.contains("AS \"repo_sync_integration_id\""), "{completion}");
+        assert!(completion.contains("AS \"issue_id\""), "{completion}");
+        assert!(completion.contains("AS \"issue_project_id\""), "{completion}");
+        assert!(completion.contains("AS \"workspace_slug\""), "{completion}");
 
         // The prior-state snapshot is deliberately UNSCOPED
         // (`Issue.all_objects`, a plain Manager): soft-deleted rows still
@@ -2847,6 +2869,11 @@ mod tests {
         let state = built(issue_state_query(pid));
         assert!(!state.contains("\"deleted_at\" IS NULL"));
         assert!(built(reconcile_list_query(pid)).contains("repository_sync_id"));
+        let none_sql = built(max_sort_query(pid, None));
+        assert!(none_sql.contains("\"state_id\" IS NULL"), "{none_sql}");
+        assert!(!none_sql.contains("= NULL"), "{none_sql}");
+        let some_sql = built(max_sort_query(pid, Some(pid)));
+        assert!(some_sql.contains("\"state_id\" ="), "{some_sql}");
     }
 
     // Write shapes match the ORM calls: the `save(update_fields=[…])`

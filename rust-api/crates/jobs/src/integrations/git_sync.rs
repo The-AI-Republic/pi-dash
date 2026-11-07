@@ -686,7 +686,7 @@ pub struct BindingScanRow {
 pub fn binding_scan_query(binding_id: Uuid) -> Select<git_repository_bindings::Entity> {
     git_repository_bindings::Entity::find()
         .select_only()
-        .column(git_repository_bindings::Column::Id)
+        .column_as(git_repository_bindings::Column::Id, "binding_id")
         .column(git_repository_bindings::Column::ProjectId)
         .column(git_repository_bindings::Column::WorkspaceId)
         .column(git_repository_bindings::Column::ActorId)
@@ -767,6 +767,21 @@ pub fn save_state_query(prefer_default: bool, project_id: Uuid) -> Select<states
 /// `Pod.objects.filter(project_id, is_default=True).first()` — live rows
 /// only (`PodManager`), Meta ordering `(-is_default, created_at)` which is
 /// `created_at ASC` once every candidate is default.
+/// Sort-order seed (`Issue.save`, `issue.py:331-335`): max sort_order over
+/// live siblings in the resolved state (`IS NOT DISTINCT FROM` semantics:
+/// `Some` → `= id`, `None` → `IS NULL`).
+pub fn max_sort_query(project_id: Uuid, state_id: Option<Uuid>) -> Select<issues::Entity> {
+    let base = issues::Entity::find()
+        .select_only()
+        .column_as(issues::Column::SortOrder.max(), "largest")
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null());
+    match state_id {
+        Some(id) => base.filter(issues::Column::StateId.eq(id)),
+        None => base.filter(issues::Column::StateId.is_null()),
+    }
+}
+
 pub fn default_pod_query(project_id: Uuid) -> Select<pod::Entity> {
     pod::Entity::find()
         .select_only()
@@ -880,10 +895,10 @@ pub struct CompletionRow {
 pub fn completion_lookup_query(sync_id: Uuid) -> Select<git_issue_syncs::Entity> {
     git_issue_syncs::Entity::find()
         .select_only()
-        .column(git_issue_syncs::Column::Id)
-        .column(git_issue_syncs::Column::ExternalIid)
-        .column(git_issue_syncs::Column::Metadata)
-        .column(git_repository_bindings::Column::Id)
+        .column_as(git_issue_syncs::Column::Id, "sync_id")
+        .column_as(git_issue_syncs::Column::ExternalIid, "sync_external_iid")
+        .column_as(git_issue_syncs::Column::Metadata, "sync_metadata")
+        .column_as(git_repository_bindings::Column::Id, "binding_id")
         .column_as(git_repositories::Column::Provider, "repo_provider")
         .column_as(git_repositories::Column::ExternalId, "repo_external_id")
         .column_as(git_repositories::Column::Namespace, "repo_namespace")
@@ -904,9 +919,9 @@ pub fn completion_lookup_query(sync_id: Uuid) -> Select<git_issue_syncs::Entity>
             git_provider_accounts::Column::CredentialConfig,
             "account_credential_config",
         )
-        .column(issues::Column::Id)
-        .column(issues::Column::ProjectId)
-        .column(pidash_db::entity::workspaces::Column::Slug)
+        .column_as(issues::Column::Id, "issue_id")
+        .column_as(issues::Column::ProjectId, "issue_project_id")
+        .column_as(pidash_db::entity::workspaces::Column::Slug, "workspace_slug")
         .join(
             JoinType::InnerJoin,
             git_issue_syncs::Relation::GitRepositoryBindings.def(),
@@ -1946,12 +1961,7 @@ async fn create_issue(
         .map_err(db_error)?
         .flatten();
     let sequence_id = max_sequence.map(|largest| largest + 1).unwrap_or(1);
-    let max_sort: Option<f64> = issues::Entity::find()
-        .select_only()
-        .column_as(issues::Column::SortOrder.max(), "largest")
-        .filter(issues::Column::ProjectId.eq(scan.project_id))
-        .filter(issues::Column::StateId.eq(state_id))
-        .filter(issues::Column::DeletedAt.is_null())
+    let max_sort: Option<f64> = max_sort_query(scan.project_id, state_id)
         .into_tuple()
         .one(db)
         .await
@@ -3995,6 +4005,9 @@ mod tests {
             !scan.contains("\"git_provider_accounts\".\"deleted_at\" IS NULL"),
             "{scan}"
         );
+        // Decode aliases: BindingScanRow decodes by name.
+        assert!(scan.contains("AS \"binding_id\""), "{scan}");
+        assert!(scan.contains("AS \"account_id\""), "{scan}");
         // State queries exclude the triage group and order by sequence.
         for prefer in [true, false] {
             for build in [
@@ -4049,6 +4062,26 @@ mod tests {
         assert_builds(&completion);
         assert_eq!(completion.matches("INNER JOIN").count(), 5);
         assert!(completion.contains("workspaces"), "{completion}");
+        assert!(completion.contains("AS \"sync_id\""), "{completion}");
+        assert!(completion.contains("AS \"sync_external_iid\""), "{completion}");
+        assert!(completion.contains("AS \"sync_metadata\""), "{completion}");
+        assert!(completion.contains("AS \"binding_id\""), "{completion}");
+        assert!(completion.contains("AS \"issue_id\""), "{completion}");
+        assert!(completion.contains("AS \"issue_project_id\""), "{completion}");
+        assert!(completion.contains("AS \"workspace_slug\""), "{completion}");
+        // No duplicate bare `id` aliases: every `id` output is aliased.
+        assert!(!completion.contains("\"git_issue_syncs\".\"id\", \"git_repository_bindings\".\"id\""), "{completion}");
+        // Max sort: IS NOT DISTINCT FROM semantics.
+        let none_sql = max_sort_query(proj, None)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(none_sql.contains("\"state_id\" IS NULL"), "{none_sql}");
+        assert!(!none_sql.contains("= NULL"), "{none_sql}");
+        let some_sql = max_sort_query(proj, Some(proj))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(some_sql.contains("\"state_id\" ="), "{some_sql}");
+        assert!(!some_sql.contains("IS NULL\"") || some_sql.contains("\"state_id\" ="), "{some_sql}");
     }
 
     // Write shapes: full-row creates with application defaults; updates
