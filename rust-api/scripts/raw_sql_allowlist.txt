@@ -11,7 +11,6 @@ crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
 crates/api/src/app_cycles/handlers_analytics.rs 12
 crates/api/src/app_cycles/handlers_favorites.rs 5
 crates/api/src/app_cycles/handlers_progress.rs 6
-crates/api/src/app_issues/mod.rs 2
 crates/api/src/app_modules/handlers_archive.rs 5
 crates/api/src/app_modules/handlers_module_issues.rs 10
 crates/api/src/app_modules/handlers_module_links.rs 16
@@ -44,7 +43,6 @@ crates/api/src/license/handlers_admin.rs 20
 crates/api/src/license/handlers_config_workspace.rs 8
 crates/api/src/license/handlers_instance.rs 11
 crates/api/src/license/mod.rs 3
-crates/api/src/middleware/session.rs 5
 crates/api/src/runner_enroll/delete_cmds.rs 1
 crates/api/src/runner_enroll/teardown.rs 10
 crates/api/src/runner_sessions/machine.rs 9
@@ -56,12 +54,9 @@ crates/api/src/space/issues.rs 5
 crates/api/src/space/project_meta.rs 3
 crates/api/src/space/social.rs 15
 crates/api/src/turn/tools_local_store.rs 2
-crates/api/src/v1_openapi/mod.rs 1
 crates/api/src/v1_work_items/handlers_pr_links.rs 38
-crates/compat/src/db.rs 1
 crates/db/src/app_intake/queries.rs 14
 crates/db/src/config/accessor.rs 1
-crates/db/src/entity/issue_hooks.rs 5
 crates/db/src/filterset.rs 6
 crates/db/src/license/queries.rs 13
 crates/db/src/ops/instance.rs 5
@@ -84,7 +79,6 @@ crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
 crates/services/src/dispatch/execution.rs 7
 crates/services/src/domain/projects.rs 66
-crates/services/src/integrations/github_client.rs 9
 crates/services/src/operations/comments.rs 3
 crates/services/src/operations/issues.rs 18
 crates/services/src/operations/pull_requests.rs 1

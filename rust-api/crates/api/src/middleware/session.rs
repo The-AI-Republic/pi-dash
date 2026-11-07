@@ -242,43 +242,29 @@ impl PgSessionStore {
         Self { pool }
     }
 
-    /// The row lookup the Django `SessionStore` issues.
-    pub const LOAD_SQL: &'static str =
-        "SELECT session_data, EXTRACT(EPOCH FROM expire_date)::BIGINT FROM sessions WHERE session_key = $1";
-
-    /// The `get_user` probes behind [`SessionStore::load_user`].
-    pub const USER_SQL: &'static str = "SELECT password, is_active FROM users WHERE id = $1";
-
-    const DELETE_SQL: &'static str = "DELETE FROM sessions WHERE session_key = $1";
-
-    const INSERT_SQL: &'static str =
-        "INSERT INTO sessions (session_key, session_data, expire_date, user_id, device_info) \
-         VALUES ($1, $2, to_timestamp($3::DOUBLE PRECISION), $4, $5) \
-         ON CONFLICT (session_key) DO NOTHING";
-
-    const UPDATE_SQL: &'static str =
-        "UPDATE sessions SET session_data = $2, expire_date = to_timestamp($3::DOUBLE PRECISION), \
-         user_id = $4, device_info = $5 WHERE session_key = $1";
+    fn db(&self) -> sea_orm::DatabaseConnection {
+        pidash_db::pool::sea_orm_connection(&self.pool)
+    }
 }
 
 impl SessionStore for PgSessionStore {
     fn load(&self, key: String) -> BoxFuture<Option<StoredSession>> {
-        let pool = self.pool.clone();
+        let db = self.db();
         Box::pin(async move {
-            let row: Option<(String, i64)> = sqlx::query_as(Self::LOAD_SQL)
-                .bind(&key)
-                .fetch_optional(&pool)
+            use sea_orm::EntityTrait as _;
+            let model = pidash_db::entity::sessions::Entity::find_by_id(key)
+                .one(&db)
                 .await
                 .map_err(|e| StoreError::Other(e.to_string()))?;
-            Ok(row.map(|(session_data, expire_date_unix)| StoredSession {
-                session_data,
-                expire_date_unix,
+            Ok(model.map(|model| StoredSession {
+                session_data: model.session_data,
+                expire_date_unix: model.expire_date.timestamp(),
             }))
         })
     }
 
     fn save(&self, row: SessionRow) -> BoxFuture<String> {
-        let pool = self.pool.clone();
+        let db = self.db();
         Box::pin(async move {
             if let Some(key) = row.key.clone() {
                 // Django's `save()` with an existing key is `force_update`:
@@ -288,39 +274,45 @@ impl SessionStore for PgSessionStore {
                 // insert (PIDASHCONV-1304). Any database error on this
                 // update is `UpdateError` too (`db.py` `except
                 // DatabaseError` with `must_create=False`).
-                let updated = sqlx::query(Self::UPDATE_SQL)
-                    .bind(&key)
-                    .bind(&row.session_data)
-                    .bind(row.expire_date_unix as f64)
-                    .bind(&row.user_id)
-                    .bind(&row.device_info)
-                    .execute(&pool)
+                use sea_orm::ActiveModelTrait as _;
+                let model = pidash_db::entity::sessions::ActiveModel {
+                    session_key: sea_orm::ActiveValue::Unchanged(key.clone()),
+                    session_data: sea_orm::Set(row.session_data.clone()),
+                    expire_date: sea_orm::Set(expire_date_of(row.expire_date_unix)),
+                    user_id: sea_orm::Set(row.user_id.clone()),
+                    device_info: sea_orm::Set(row.device_info.clone()),
+                };
+                model
+                    .update(&db)
                     .await
-                    .map_err(|_| StoreError::UpdateMiss)?
-                    .rows_affected();
-                if updated > 0 {
-                    return Ok(key);
-                }
-                return Err(StoreError::UpdateMiss);
+                    .map(|_| key)
+                    .map_err(|_| StoreError::UpdateMiss)
+            } else {
+                insert_new(&db, &row).await
             }
-            insert_new(&pool, &row).await
         })
     }
 
     fn load_user(&self, user_id: String) -> BoxFuture<Option<SessionUser>> {
-        let pool = self.pool.clone();
+        let db = self.db();
         Box::pin(async move {
             // `users.id` is a UUID primary key. A non-UUID session value
             // is anonymous, like a missing row (`ModelBackend.get_user`).
             let Ok(id) = user_id.parse::<uuid::Uuid>() else {
                 return Ok(None);
             };
-            let row: Option<(String, bool)> = sqlx::query_as(Self::USER_SQL)
-                .bind(id)
-                .fetch_optional(&pool)
+            use sea_orm::{EntityTrait as _, QuerySelect as _};
+            let user = pidash_db::entity::users::Entity::find_by_id(id)
+                .select_only()
+                .columns([
+                    pidash_db::entity::users::Column::Password,
+                    pidash_db::entity::users::Column::IsActive,
+                ])
+                .into_tuple::<(String, bool)>()
+                .one(&db)
                 .await
                 .map_err(|e| StoreError::Other(e.to_string()))?;
-            Ok(row.map(|(password, is_active)| SessionUser {
+            Ok(user.map(|(password, is_active)| SessionUser {
                 password,
                 is_active,
             }))
@@ -328,11 +320,11 @@ impl SessionStore for PgSessionStore {
     }
 
     fn delete(&self, key: String) -> BoxFuture<()> {
-        let pool = self.pool.clone();
+        let db = self.db();
         Box::pin(async move {
-            sqlx::query(Self::DELETE_SQL)
-                .bind(key)
-                .execute(&pool)
+            use sea_orm::EntityTrait as _;
+            pidash_db::entity::sessions::Entity::delete_by_id(key)
+                .exec(&db)
                 .await
                 .map_err(|e| StoreError::Other(e.to_string()))?;
             Ok(())
@@ -340,22 +332,43 @@ impl SessionStore for PgSessionStore {
     }
 }
 
-async fn insert_new(pool: &sqlx::PgPool, row: &SessionRow) -> Result<String, StoreError> {
+/// `to_timestamp($3::DOUBLE PRECISION)` as a tz-aware instant: whole
+/// seconds in, the same instant out (`expire_date_unix` is i64, the old
+/// bind cast it to double — identical at whole-second precision).
+fn expire_date_of(unix: i64) -> chrono::DateTime<chrono::FixedOffset> {
+    chrono::DateTime::from_timestamp(unix, 0)
+        .map(|utc| utc.fixed_offset())
+        .unwrap_or_default()
+}
+
+async fn insert_new(
+    db: &sea_orm::DatabaseConnection,
+    row: &SessionRow,
+) -> Result<String, StoreError> {
+    use sea_orm::{EntityTrait as _, TryInsertResult};
     // Fresh keys loop until unused, like `_get_new_session_key`.
     loop {
         let key = generate_session_key();
-        let inserted = sqlx::query(PgSessionStore::INSERT_SQL)
-            .bind(&key)
-            .bind(&row.session_data)
-            .bind(row.expire_date_unix as f64)
-            .bind(&row.user_id)
-            .bind(&row.device_info)
-            .execute(pool)
+        let model = pidash_db::entity::sessions::ActiveModel {
+            session_key: sea_orm::Set(key.clone()),
+            session_data: sea_orm::Set(row.session_data.clone()),
+            expire_date: sea_orm::Set(expire_date_of(row.expire_date_unix)),
+            user_id: sea_orm::Set(row.user_id.clone()),
+            device_info: sea_orm::Set(row.device_info.clone()),
+        };
+        match pidash_db::entity::sessions::Entity::insert(model)
+            .on_conflict_do_nothing()
+            .exec(db)
             .await
-            .map_err(|e| StoreError::Other(e.to_string()))?
-            .rows_affected();
-        if inserted > 0 {
-            return Ok(key);
+        {
+            Ok(TryInsertResult::Inserted(_)) => return Ok(key),
+            Ok(TryInsertResult::Conflicted) => {}
+            Ok(TryInsertResult::Empty) => {
+                return Err(StoreError::Other(
+                    "session insert had no columns".to_string(),
+                ))
+            }
+            Err(e) => return Err(StoreError::Other(e.to_string())),
         }
     }
 }
@@ -1779,20 +1792,35 @@ mod tests {
     }
 
     #[test]
-    fn pg_load_sql_matches_django_lookup() {
+    fn pg_load_matches_django_lookup() {
         // The exact lookup the Django SessionStore issues: row by primary
         // key, payload plus expiry. Pinned so schema drift shows up here.
-        assert_eq!(
-            PgSessionStore::LOAD_SQL,
-            "SELECT session_data, EXTRACT(EPOCH FROM expire_date)::BIGINT FROM sessions WHERE session_key = $1"
+        use sea_orm::{DbBackend, EntityTrait as _, QueryTrait as _};
+        let sql = pidash_db::entity::sessions::Entity::find_by_id("k")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("\"session_data\"")
+                && sql.contains("\"expire_date\"")
+                && sql.contains("\"session_key\" = 'k'"),
+            "load shape: {sql}"
         );
     }
 
     #[test]
-    fn pg_user_sql_loads_password_and_active() {
+    fn pg_user_loads_password_and_active() {
+        use sea_orm::{DbBackend, EntityTrait as _, QuerySelect as _, QueryTrait as _};
+        let sql = pidash_db::entity::users::Entity::find_by_id(uuid::Uuid::nil())
+            .select_only()
+            .columns([
+                pidash_db::entity::users::Column::Password,
+                pidash_db::entity::users::Column::IsActive,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
         assert_eq!(
-            PgSessionStore::USER_SQL,
-            "SELECT password, is_active FROM users WHERE id = $1"
+            sql,
+            "SELECT \"users\".\"password\", \"users\".\"is_active\" FROM \"users\" WHERE \"users\".\"id\" = '00000000-0000-0000-0000-000000000000'"
         );
     }
 
@@ -2372,6 +2400,50 @@ mod tests {
             .execute(&pool)
             .await
             .expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn pg_store_round_trip_load_user_and_delete() {
+        // Live-db: the SeaORM store round-trips a row (save → load →
+        // delete) and the `get_user` probe reads password/is_active.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let store = PgSessionStore::new(pool.clone());
+        // A miss loads nothing and deletes cleanly.
+        let missing = format!("pidash74-missing-{}", now_unix());
+        assert!(store.load(missing.clone()).await.expect("miss").is_none());
+        store.delete(missing.clone()).await.expect("delete miss");
+        assert!(store
+            .load_user("not-a-uuid".to_string())
+            .await
+            .expect("anon")
+            .is_none());
+        assert!(store
+            .load_user("11111111-1111-4111-8111-111111111111".to_string())
+            .await
+            .expect("no user")
+            .is_none());
+        // Keyless save inserts, then load reads the row back.
+        let key = store
+            .save(SessionRow {
+                key: None,
+                session_data: "signed-74".to_string(),
+                expire_date_unix: 4_100_000_000,
+                user_id: None,
+                device_info: None,
+            })
+            .await
+            .expect("insert");
+        let loaded = store.load(key.clone()).await.expect("load").expect("row");
+        assert_eq!(loaded.session_data, "signed-74");
+        assert_eq!(loaded.expire_date_unix, 4_100_000_000);
+        store.delete(key.clone()).await.expect("delete");
+        assert!(store.load(key).await.expect("gone").is_none());
     }
 
     #[tokio::test]
