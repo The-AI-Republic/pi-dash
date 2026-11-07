@@ -27,7 +27,7 @@
 // Both modes also refuse a hand-written route above the marked block that
 // shadows a migrated entry (NEWFRONT-953): Caddy routes to the first match,
 // so a legacy predecessor would silently keep serving the old app.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,10 +37,14 @@ const root = resolve(join(here, "..", "..", ".."));
 const LIST = join(root, "apps", "web_new", "migrated-routes.json");
 const CADDY_CE = join(root, "apps", "proxy", "Caddyfile.ce");
 const CADDY_AIO = join(root, "apps", "proxy", "Caddyfile.aio.ce");
+// web_new's Vite public dir: copied verbatim to the site root of the build.
+const PUBLIC_DIR = join(root, "apps", "web_new", "public");
 
 // Upstream name the web_new service will be known by (Docker convention,
 // mirroring `web:3000`).
 const WEB_NEW_UPSTREAM = "web_new:3000";
+// The old app's upstream, the CE catch-all below the generated block.
+const WEB_UPSTREAM = "web:3000";
 
 const MARK_BEGIN =
   "BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)";
@@ -50,6 +54,8 @@ const CE_ANCHOR = "\treverse_proxy /* web:3000";
 const AIO_ANCHOR = "    handle_path /* {";
 
 const EMPTY_NOTE = "(none — the list is empty, so every path routes to the old app)";
+const ASSET_NOTE =
+  "web_new's bundles (/assets/) and public files (apps/web_new/public/): web_new first, then the old app.";
 
 const VARIABLE_SEGMENT = /^\{([A-Za-z][A-Za-z0-9]*)\}$/;
 const RESERVED_ENTRY = /^[a-z0-9][a-z0-9-]*$/;
@@ -211,10 +217,84 @@ function matcherBlock(route, indent) {
 }
 
 /**
+ * True when the generated block must route /assets/*: some, but not all,
+ * paths are migrated. Both apps build their hashed bundles into /assets/,
+ * so without this route a web_new page shell would load the old app's
+ * catch-all for its bundles and render blank. With nothing
+ * migrated the old app owns /assets/*; with the catch-all web_new does.
+ */
+function needsAssetRoute(entries) {
+  return entries.length > 0 && !entries.includes("/");
+}
+
+/**
+ * Proxy path matchers for web_new's public files, derived from its Vite
+ * public dir so a new file cannot regress. Vite copies the dir to
+ * the site root, so a top-level file is served at `/<name>` and a top-level
+ * directory at `/<name>/*`. Dotfiles are skipped; `assets` is already routed.
+ */
+export function publicPathsOf(publicDir = PUBLIC_DIR) {
+  const paths = [];
+  const entries = readdirSync(publicDir, { withFileTypes: true }).toSorted((a, b) => (a.name < b.name ? -1 : 1));
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name === "assets") continue;
+    if (/[\s{}*]/.test(entry.name)) throw new Error(`${publicDir}: unroutable public entry name: ${entry.name}`);
+    paths.push(entry.isDirectory() ? `/${entry.name}/*` : `/${entry.name}`);
+  }
+  return paths;
+}
+
+/** Every path web_new serves as a static file: bundles plus public files. */
+function staticPaths(publicPaths) {
+  return ["/assets/*", ...publicPaths];
+}
+
+/**
+ * CE static route: web_new first; its nginx answers a real 404 for a file
+ * it does not have, and the proxy then retries the old app.
+ */
+export function buildCeAssetLines(publicPaths = []) {
+  return [
+    `\t# ${ASSET_NOTE}`,
+    `\t@web_new_static path ${staticPaths(publicPaths).join(" ")}`,
+    `\treverse_proxy @web_new_static ${WEB_NEW_UPSTREAM} {`,
+    "\t\t@web_new_static_missing status 404",
+    "\t\thandle_response @web_new_static_missing {",
+    `\t\t\treverse_proxy ${WEB_UPSTREAM}`,
+    "\t\t}",
+    "\t}",
+  ];
+}
+
+/**
+ * AIO static route: serve the file from web_new's static root when it
+ * exists there; otherwise fall through to the old app's static root.
+ */
+export function buildAioAssetLines(publicPaths = []) {
+  return [
+    `    # ${ASSET_NOTE}`,
+    "    @web_new_static {",
+    `        path ${staticPaths(publicPaths).join(" ")}`,
+    "        file {",
+    "            root /app/web_new",
+    "        }",
+    "    }",
+    "    handle @web_new_static {",
+    "        root * /app/web_new",
+    // file_server knows no .webmanifest type and the AIO image ships no
+    // mime table, so the manifest would go out with no Content-Type.
+    "        @web_new_webmanifest path *.webmanifest",
+    "        header @web_new_webmanifest Content-Type application/manifest+json",
+    "        file_server",
+    "    }",
+  ];
+}
+
+/**
  * Route lines for the CE Caddyfile (tab-indented, matcher style). The block
  * sits above the old app's catch-all; earlier handlers win.
  */
-export function buildCeLines(entries, reservedTopLevel = []) {
+export function buildCeLines(entries, reservedTopLevel = [], publicPaths = []) {
   if (entries.length === 0) return [`\t# ${EMPTY_NOTE}`];
   const lines = [];
   for (const route of routableEntries(entries, reservedTopLevel)) {
@@ -230,11 +310,12 @@ export function buildCeLines(entries, reservedTopLevel = []) {
     lines.push(...matcherBlock(route, "\t"));
     lines.push(`\treverse_proxy ${route.name} ${WEB_NEW_UPSTREAM}`);
   }
+  if (needsAssetRoute(entries)) lines.push(...buildCeAssetLines(publicPaths));
   return lines;
 }
 
 /** Route lines for the AIO Caddyfile (4-space indent, handle style). */
-export function buildAioLines(entries, reservedTopLevel = []) {
+export function buildAioLines(entries, reservedTopLevel = [], publicPaths = []) {
   if (entries.length === 0) return [`    # ${EMPTY_NOTE}`];
   const serve = (indent, matcher) => [
     `${indent}handle ${matcher} {`,
@@ -260,6 +341,7 @@ export function buildAioLines(entries, reservedTopLevel = []) {
     // and stripping the workspace segment would break the SPA's own routes.
     lines.push(...serve("    ", route.name));
   }
+  if (needsAssetRoute(entries)) lines.push(...buildAioAssetLines(publicPaths));
   return lines;
 }
 
@@ -359,13 +441,14 @@ export function findShadowingRoutes(text, entries) {
 }
 
 function parseArgs(argv) {
-  const opts = { check: false, list: LIST, ce: CADDY_CE, aio: CADDY_AIO };
+  const opts = { check: false, list: LIST, ce: CADDY_CE, aio: CADDY_AIO, publicDir: PUBLIC_DIR };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--check") opts.check = true;
     else if (arg === "--list") opts.list = resolve(root, argv[(i += 1)]);
     else if (arg === "--caddy-ce") opts.ce = resolve(root, argv[(i += 1)]);
     else if (arg === "--caddy-aio") opts.aio = resolve(root, argv[(i += 1)]);
+    else if (arg === "--public") opts.publicDir = resolve(root, argv[(i += 1)]);
     else throw new Error(`unknown argument: ${arg}`);
   }
   return opts;
@@ -374,6 +457,7 @@ function parseArgs(argv) {
 export function main(argv) {
   const opts = parseArgs(argv);
   const { entries, reservedTopLevel } = loadEntries(opts.list);
+  const publicPaths = publicPathsOf(opts.publicDir);
   const shadows = [
     ...findShadowingRoutes(readFileSync(opts.ce, "utf8"), entries).map((finding) => ({ file: opts.ce, ...finding })),
     ...findShadowingRoutes(readFileSync(opts.aio, "utf8"), entries).map((finding) => ({
@@ -392,8 +476,10 @@ export function main(argv) {
       `legacy proxy route(s) shadow the generated web_new block (Caddy routes to the first match). Remove the hand-written line, or move it below the \`# ${MARK_END}\` line so the generated route wins:\n${details}`
     );
   }
-  const ce = syncFile(opts.ce, CE_ANCHOR, "\t", buildCeLines(entries, reservedTopLevel), { check: opts.check });
-  const aio = syncFile(opts.aio, AIO_ANCHOR, "    ", buildAioLines(entries, reservedTopLevel), {
+  const ce = syncFile(opts.ce, CE_ANCHOR, "\t", buildCeLines(entries, reservedTopLevel, publicPaths), {
+    check: opts.check,
+  });
+  const aio = syncFile(opts.aio, AIO_ANCHOR, "    ", buildAioLines(entries, reservedTopLevel, publicPaths), {
     check: opts.check,
   });
   if (opts.check) {
