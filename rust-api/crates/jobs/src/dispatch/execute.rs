@@ -3818,25 +3818,41 @@ mod tests {
     #[test]
     fn sql_shapes_carry_ordering_limits_and_locks() {
         let claim = render_select(claim_run_query(Uuid::new_v4()));
-        assert!(claim.contains("FOR UPDATE"));
-        assert!(claim.contains("users"));
-        assert!(claim.contains("created_at"));
+        assert!(claim.contains("INNER JOIN \"users\""));
+        assert!(!claim.contains("LEFT JOIN \"users\""));
+        assert!(claim.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE"));
+        assert!(claim.contains("\"agent_run\".\"status\" = 'queued'"));
         let push = render_update(claim_push_lease_update(Uuid::new_v4(), Utc::now()));
-        assert!(push.contains("lease_expires_at"));
+        assert!(push.contains("\"lease_expires_at\""));
+        assert!(!push.contains("dispatch_attempts"));
         let mark = render_update(claim_mark_running_update(Uuid::new_v4(), Utc::now()));
-        assert!(mark.contains("running"));
+        assert!(mark.contains("\"status\" = 'running'"));
+        assert!(mark.contains("\"lease_expires_at\" = NULL"));
         let ctx = render_select(run_context_query(Uuid::new_v4()));
-        assert!(ctx.contains("issues"));
-        assert!(ctx.contains("pod"));
+        assert!(ctx.contains("INNER JOIN \"users\""));
+        assert!(ctx.contains("INNER JOIN \"workspaces\""));
+        assert!(ctx.contains("INNER JOIN \"pod\""));
+        assert!(ctx.contains("LEFT JOIN \"issues\""));
+        assert!(ctx.contains("LEFT JOIN \"scheduler_bindings\""));
+        assert!(ctx.contains("AS \"creator_is_active\""));
+        assert!(ctx.contains("AS \"workspace_slug\""));
         let expired = render_select(scan_expired_ids_query(Utc::now(), 50));
-        assert!(expired.contains("created_at"));
+        assert!(expired.contains("\"agent_run\".\"created_at\" <"));
+        assert!(expired.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 50"));
         let workspaces = render_select(scan_workspace_ids_query(Utc::now(), 50));
-        assert!(workspaces.contains("GROUP BY"));
-        assert!(workspaces.contains("lease_expires_at"));
+        assert!(workspaces.contains("MIN(\"created_at\") AS \"min_created_at\""));
+        assert!(workspaces.contains("GROUP BY \"agent_run\".\"workspace_id\""));
+        assert!(workspaces.contains("ORDER BY \"min_created_at\" ASC LIMIT 50"));
+        assert!(workspaces.contains(
+            "(\"agent_run\".\"lease_expires_at\" IS NULL OR \"agent_run\".\"lease_expires_at\" <="
+        ));
         let sweep = render_select(sweep_rows_query(Utc::now(), 50));
-        assert!(sweep.contains("running"));
+        assert!(sweep.contains("\"agent_run\".\"status\" = 'running'"));
+        assert!(sweep.contains("\"agent_run\".\"started_at\" <"));
+        assert!(sweep.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 50"));
         let expire = render_select(expire_ids_query(Utc::now()));
-        assert!(expire.contains("500"));
+        assert!(expire.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
+        assert!(expire.contains("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 500"));
         assert_eq!(EXPIRE_BATCH_CAP, 500);
     }
 
@@ -3845,6 +3861,9 @@ mod tests {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        if url.is_empty() {
+            return;
+        }
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)

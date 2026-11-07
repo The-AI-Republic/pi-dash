@@ -1165,10 +1165,14 @@ mod tests {
     fn due_set_skips_locked_oldest_first() {
         let sql = due_select();
         assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
-        assert!(sql.contains("ORDER BY"));
-        assert!(sql.contains("created_at"));
-        assert!(sql.contains("LIMIT"));
-        assert!(sql.contains("lease_expires_at"));
+        assert!(sql.contains("SELECT \"agent_run\".\"id\" FROM \"agent_run\""));
+        assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'cloud_agent'"));
+        assert!(sql.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(sql.contains(
+            "(\"agent_run\".\"lease_expires_at\" IS NULL OR \"agent_run\".\"lease_expires_at\" <="
+        ));
+        assert!(sql
+            .contains("ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 3 FOR UPDATE SKIP LOCKED"));
     }
 
     #[tokio::test]
@@ -1176,6 +1180,9 @@ mod tests {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        if url.is_empty() {
+            return;
+        }
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&url)
@@ -1225,8 +1232,8 @@ mod tests {
     #[test]
     fn lease_bumps_attempts_on_queued_rows_only() {
         let sql = render_update(lease_run_update(Uuid::new_v4(), Utc::now()));
-        assert!(sql.contains("dispatch_attempts"));
-        assert!(sql.contains("queued"));
+        assert!(sql.contains("\"dispatch_attempts\" = \"agent_run\".\"dispatch_attempts\" + 1"));
+        assert!(sql.contains("AND \"agent_run\".\"status\" = 'queued'"));
     }
 
     #[test]
@@ -1245,8 +1252,11 @@ mod tests {
     fn counts_scope_cloud_and_time() {
         let offered = render_select(offered_count_query(Uuid::new_v4(), Utc::now()));
         let running = render_select(running_cloud_count_query(Uuid::new_v4()));
-        assert!(offered.contains("lease_expires_at"));
-        assert!(running.contains("running"));
+        assert!(offered.contains("\"agent_run\".\"executor_kind\" = 'cloud_agent'"));
+        assert!(offered.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(offered.contains("\"agent_run\".\"lease_expires_at\" >"));
+        assert!(running.contains("\"agent_run\".\"executor_kind\" = 'cloud_agent'"));
+        assert!(running.contains("\"agent_run\".\"status\" = 'running'"));
         assert!(QUEUED_CLOUD_COUNT_SQL.contains("status = 'queued'"));
         for sql in [QUEUED_CLOUD_COUNT_SQL, &running, &offered] {
             assert!(sql.contains("cloud_agent"));
@@ -1256,9 +1266,10 @@ mod tests {
     #[test]
     fn event_statements_match_create_sites() {
         let marker = render_select(event_marker_exists_query(Uuid::new_v4()));
-        assert!(marker.contains("events_truncated"));
+        assert!(marker.contains("\"agent_run_event\".\"kind\" = 'events_truncated'"));
+        assert!(marker.contains("LIMIT 1"));
         let max = render_select(event_max_seq_query(Uuid::new_v4()));
-        assert!(max.contains("seq"));
+        assert!(max.contains("ORDER BY \"agent_run_event\".\"seq\" DESC LIMIT 1"));
     }
 
     #[test]
