@@ -150,6 +150,11 @@ class IssueSerializer(BaseSerializer):
         ),
     )
 
+    # Dedicated runner detail (design §14.2, H-6): shown to everyone who
+    # can see the issue. The bare ``assigned_runner`` FK rides the model
+    # field via ``Meta.exclude`` below, mirroring ``assigned_pod``.
+    assigned_runner_detail = serializers.SerializerMethodField()
+
     class Meta:
         model = Issue
         read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at"]
@@ -190,8 +195,20 @@ class IssueSerializer(BaseSerializer):
         # Runner is the only executor (built_engine_as_runner §6): translate
         # ``managed_runner`` / ``cloud_agent`` from older clients to
         # ``local_runner``, pod-level.
-        from pi_dash.runner.services.issue_assignment import normalize_issue_executor
+        from pi_dash.runner.services.issue_assignment import (
+            normalize_issue_executor,
+            validate_execution_target,
+        )
 
+        # Requester for the E1/E7 checks (design §7.1).
+        user = self.context.get("user")
+        if user is None and self.context.get("request") is not None:
+            user = getattr(self.context["request"], "user", None)
+        if user is None:
+            user = getattr(self.instance, "created_by", None) if self.instance else None
+        # E2 on create reads the context project (no issue yet).
+        project_id = self.instance.project_id if self.instance is not None else self.context.get("project_id")
+        validate_execution_target(data, issue=self.instance, user=user, project_id=project_id)
         normalize_issue_executor(data, instance=self.instance)
 
         # ``assigned_pod`` is the pod this issue's agent runs dispatch to. It is
@@ -375,6 +392,21 @@ class IssueSerializer(BaseSerializer):
             except IntegrityError:
                 pass
 
+        if "assigned_runner" in validated_data:
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+            actor = self.context.get("user")
+            if actor is None and self.context.get("request") is not None:
+                actor = getattr(self.context["request"], "user", None)
+            apply_execution_target(
+                issue,
+                new_runner=issue.assigned_runner,
+                actor=actor or issue.created_by,
+                decided_by=dj_timezone.now(),
+            )
+
         return issue
 
     def update(self, instance, validated_data):
@@ -431,7 +463,35 @@ class IssueSerializer(BaseSerializer):
 
         # Time updation occues even when other related models are updated
         instance.updated_at = timezone.now()
-        return super().update(instance, validated_data)
+        result = super().update(instance, validated_data)
+        if "assigned_runner" in validated_data:
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+            actor = self.context.get("user")
+            if actor is None and self.context.get("request") is not None:
+                actor = getattr(self.context["request"], "user", None)
+            apply_execution_target(
+                result,
+                new_runner=result.assigned_runner,
+                actor=actor or result.created_by,
+                decided_by=dj_timezone.now(),
+            )
+        elif "assigned_pod" in validated_data:
+            # §13.1: the issue's pod changed with no runner in the request —
+            # the dedicated assignment clears (the old pod's runner can no
+            # longer serve it).
+            if result.assigned_runner_id is not None:
+                from pi_dash.runner.services.issue_assignment import clear_dedicated_runner
+
+                clear_dedicated_runner(
+                    result,
+                    reason="pod changed",
+                    actor=self.context.get("user") or result.created_by,
+                    decided_by=None,
+                )
+        return result
 
     def get_url(self, obj):
         return issue_web_url(
@@ -439,6 +499,16 @@ class IssueSerializer(BaseSerializer):
             obj.project.identifier if obj.project_id else None,
             obj.sequence_id,
         )
+
+    def get_assigned_runner_detail(self, obj):
+        from pi_dash.runner.services.issue_assignment import assigned_runner_detail
+
+        runner = getattr(obj, "assigned_runner", None)
+        if runner is None and getattr(obj, "assigned_runner_id", None):
+            from pi_dash.runner.models import Runner
+
+            runner = Runner.objects.filter(pk=obj.assigned_runner_id).first()
+        return assigned_runner_detail(runner)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
