@@ -36,7 +36,6 @@ use axum::Router;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -44,9 +43,10 @@ use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_db::entity::{
     issue_views, project_members, projects, user_favorites, workspace_members, workspaces,
 };
+use sea_orm::sea_query::{Alias, Expr, Func, Query as SeaQuery, SelectStatement, SimpleExpr};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, JoinType, QueryFilter,
-    QuerySelect, RelationTrait, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
+    IntoActiveModel, JoinType, QueryFilter, QuerySelect, RelationTrait, Set,
 };
 
 use pidash_compat::response::json_response;
@@ -526,37 +526,55 @@ fn parse_pk(raw: &str) -> Option<uuid::Uuid> {
 // View row fetching + shaping
 // ---------------------------------------------------------------------------
 
-/// Fetch view rows as JSON maps each, via `row_to_json` (the app_issues
-/// precedent): numbers, strings, bools, nulls, arrays and objects splice
-/// verbatim downstream; only the datetime / float keys are re-rendered by
-/// the caller.
+/// Fetch view rows as JSON maps each, via `row_to_json` (the app_issues /
+/// app_workspace precedent): numbers, strings, bools, nulls, arrays and
+/// objects splice verbatim downstream; only the datetime / float keys are
+/// re-rendered by the caller. The statement is built by the `queries_views`
+/// sea-query builders and executed through SeaORM, decoded by name.
 async fn fetch_view_rows(
     pool: &sqlx::PgPool,
-    inner_sql: &str,
-    slug: &str,
-    project_id: Option<&uuid::Uuid>,
-    user_id: &uuid::Uuid,
+    inner: &SelectStatement,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
-    let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner_sql}) AS __r");
-    let mut query = sqlx::query(&sql).bind(slug);
-    if let Some(project_id) = project_id {
-        query = query.bind(project_id);
+    let mut wrapper = SeaQuery::select();
+    wrapper
+        .expr_as(
+            SimpleExpr::from(
+                Func::cust(Alias::new("row_to_json")).arg(Expr::col(Alias::new("__r"))),
+            )
+            .cast_as(Alias::new("text")),
+            Alias::new("__row"),
+        )
+        .from_subquery(inner.clone(), Alias::new("__r"));
+    #[derive(sea_orm::FromQueryResult)]
+    struct JsonRow {
+        __row: String,
     }
-    query = query.bind(user_id);
-    let rows = query
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&wrapper))
         .await
         .map_err(|_| Denial::ServerError)?;
     let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-        let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
+    for row in &rows {
+        let decoded = JsonRow::from_query_result(row, "").map_err(|_| Denial::ServerError)?;
+        let value: Value = serde_json::from_str(&decoded.__row).map_err(|_| Denial::ServerError)?;
         match value {
             Value::Object(map) => out.push(map),
             _ => return Err(Denial::ServerError),
         }
     }
     Ok(out)
+}
+
+/// One row or none from a built list statement: a miss is `None`, and a
+/// pk-filtered read that somehow returns more than one row is a 500 (the
+/// `fetch_optional` contract the raw reads carried).
+fn single_row(rows: Vec<Map<String, Value>>) -> Result<Option<Map<String, Value>>, Denial> {
+    match rows.len() {
+        0 => Ok(None),
+        1 => Ok(rows.into_iter().next()),
+        _ => Err(Denial::ServerError),
+    }
 }
 
 /// Render one `row_to_json` datetime: `null` stays `null`, otherwise the
@@ -2294,14 +2312,10 @@ async fn workspace_list(
     // (generic 500). The contract suite only sends the default.
     let order_by =
         crate::app_issues::query_last(&query, "order_by").unwrap_or("-created_at".to_owned());
-    let order_sql = resolve_view_order(&order_by)?;
-    let sql = queries_views::workspace_view_list_sql(&order_sql);
-    let sql = if guest_scoped {
-        push_and(&sql, "v.owned_by_id = ($2)")
-    } else {
-        sql
-    };
-    let rows = fetch_view_rows(&pool, &sql, &slug, None, &user_id).await?;
+    let order = resolve_view_order(&order_by)?;
+    let stmt =
+        queries_views::workspace_view_list_stmt(&slug, user_id, Some(order), guest_scoped, None);
+    let rows = fetch_view_rows(&pool, &stmt).await?;
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
@@ -2313,23 +2327,13 @@ async fn workspace_list(
     Ok(json_response(StatusCode::OK, out))
 }
 
-/// Append an `AND` condition to a builder statement that already ends in
-/// `ORDER BY ...`: the condition splices before the ordering, never after
-/// it (a trailing `AND` past `ORDER BY` is a syntax error → 500).
-fn push_and(sql: &str, condition: &str) -> String {
-    match sql.rfind(" ORDER BY ") {
-        Some(index) => format!("{} AND {}{}", &sql[..index], condition, &sql[index..]),
-        None => format!("{sql} AND {condition}"),
-    }
-}
-
-/// Resolve a workspace-list `order_by` param to an `ORDER BY` fragment.
+/// Resolve a workspace-list `order_by` param to a [`queries_views::ViewOrder`].
 /// Django splices the param verbatim as a field path: concrete columns
 /// and FK names (ordered by their id column) resolve; relation
 /// traversals and unknown names raise `FieldError`, which answers the
-/// generic 500. Only identifier-safe keys interpolate, so non-matching
-/// input can only fail closed — never inject.
-fn resolve_view_order(raw: &str) -> Result<String, Denial> {
+/// generic 500. Only identifier-safe keys reach the statement, so
+/// non-matching input can only fail closed — never inject.
+fn resolve_view_order(raw: &str) -> Result<queries_views::ViewOrder, Denial> {
     let descending = raw.starts_with('-');
     let key = raw.trim_start_matches('-');
     if key.is_empty()
@@ -2340,21 +2344,17 @@ fn resolve_view_order(raw: &str) -> Result<String, Denial> {
         return Err(Denial::ServerError);
     }
     let column = match key {
-        "owned_by" => "v.owned_by_id".to_owned(),
-        "workspace" => "v.workspace_id".to_owned(),
-        "project" => "v.project_id".to_owned(),
-        "created_by" => "v.created_by_id".to_owned(),
-        "updated_by" => "v.updated_by_id".to_owned(),
+        "owned_by" => "owned_by_id".to_owned(),
+        "workspace" => "workspace_id".to_owned(),
+        "project" => "project_id".to_owned(),
+        "created_by" => "created_by_id".to_owned(),
+        "updated_by" => "updated_by_id".to_owned(),
         known if pidash_db::app_views_search::models::issue_view::COLUMNS.contains(&known) => {
-            format!("v.{known}")
+            known.to_owned()
         }
         _ => return Err(Denial::ServerError),
     };
-    Ok(if descending {
-        format!("{column} DESC")
-    } else {
-        format!("{column} ASC")
-    })
+    Ok(queries_views::ViewOrder { column, descending })
 }
 
 /// `POST /api/workspaces/<slug>/views/`: the DRF default create (no role
@@ -2409,29 +2409,11 @@ async fn fetch_workspace_view(
     pk: &uuid::Uuid,
 ) -> Result<Option<Map<String, Value>>, Denial> {
     // The queryset filters (`workspace__slug`, `project__isnull`,
-    // owner-or-public) apply to the read, like `get_queryset`.
-    let sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM ({} AND v.id = $3 AND v.deleted_at IS NULL) AS __r",
-        queries_views::workspace_view_list_sql("v.created_at DESC")
-            .trim_end_matches(" ORDER BY v.created_at DESC"),
-    );
-    let row: Option<(String,)> = sqlx::query_as(&sql)
-        .bind(slug)
-        .bind(user_id)
-        .bind(pk)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    match row {
-        None => Ok(None),
-        Some((text,)) => {
-            let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-            match value {
-                Value::Object(map) => Ok(Some(map)),
-                _ => Err(Denial::ServerError),
-            }
-        }
-    }
+    // owner-or-public) apply to the read, like `get_queryset`; the
+    // unordered list statement carries the pk constraint.
+    let stmt = queries_views::workspace_view_list_stmt(slug, user_id, None, false, Some(*pk));
+    let rows = fetch_view_rows(pool, &stmt).await?;
+    single_row(rows)
 }
 
 /// `GET /api/workspaces/<slug>/views/<pk>/` (`:102-112`): no decorator —
@@ -2739,15 +2721,16 @@ async fn project_list(
     // `Project.objects.get` raises before the guest narrowing when the
     // project row is gone.
     let project = project_row(&pool, &project_id).await?;
-    let sql = queries_views::project_view_list_sql();
-    let sql =
-        if permissions::project_view_list_guest_scoped(&member, project.guest_view_all_features) {
-            push_and(&sql, "v.owned_by_id = ($3)")
-        } else {
-            sql
-        };
+    let stmt = queries_views::project_view_list_stmt(
+        &slug,
+        project_id,
+        user_id,
+        permissions::project_view_list_guest_scoped(&member, project.guest_view_all_features),
+        true,
+        None,
+    );
     let _ = crate::app_issues::query_last(&query, "fields");
-    let rows = fetch_view_rows(&pool, &sql, &slug, Some(&project_id), &user_id).await?;
+    let rows = fetch_view_rows(&pool, &stmt).await?;
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
@@ -2815,8 +2798,8 @@ async fn project_create(
     Ok(json_response(StatusCode::CREATED, rendered))
 }
 
-/// Annotated project-view read for retrieve/PUT: the queryset SQL plus a
-/// pk constraint, `is_favorite` included.
+/// Annotated project-view read for retrieve/PUT: the queryset statement
+/// plus a pk constraint, `is_favorite` included.
 async fn fetch_project_view(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2824,29 +2807,10 @@ async fn fetch_project_view(
     user_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<Option<Map<String, Value>>, Denial> {
-    let sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM ({} AND v.id = $4 AND v.deleted_at IS NULL) AS __r",
-        queries_views::project_view_list_sql()
-            .trim_end_matches(" ORDER BY is_favorite DESC, v.name ASC"),
-    );
-    let row: Option<(String,)> = sqlx::query_as(&sql)
-        .bind(slug)
-        .bind(project_id)
-        .bind(user_id)
-        .bind(pk)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    match row {
-        None => Ok(None),
-        Some((text,)) => {
-            let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-            match value {
-                Value::Object(map) => Ok(Some(map)),
-                _ => Err(Denial::ServerError),
-            }
-        }
-    }
+    let stmt =
+        queries_views::project_view_list_stmt(slug, *project_id, *user_id, false, false, Some(*pk));
+    let rows = fetch_view_rows(pool, &stmt).await?;
+    single_row(rows)
 }
 
 /// `GET .../views/<pk>/` (`:308-344` on main): PROJECT ADMIN/MEMBER/GUEST
@@ -3817,7 +3781,8 @@ async fn view_issues_list(
 
 #[cfg(test)]
 mod pidashconv_736_tests {
-    use super::normalize_resolve_identifier;
+    use super::{normalize_resolve_identifier, queries_views};
+    use serde_json::Value;
 
     #[test]
     fn seaorm_statement_shapes_pin_view_lookups() {
@@ -3870,6 +3835,184 @@ mod pidashconv_736_tests {
             .to_string();
         assert!(sql.contains("WHERE"), "fetch by id: {sql}");
         assert!(sql.contains("deleted_at"), "fetch scope: {sql}");
+    }
+
+    #[test]
+    fn view_list_statement_shapes_pin_fetch() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let uid = uuid::Uuid::new_v4();
+        // List form carries the ordering; fetch form (pk, no order) does not.
+        let list = queries_views::workspace_view_list_stmt(
+            "acme",
+            uid,
+            Some(queries_views::ViewOrder {
+                column: "created_at".to_owned(),
+                descending: true,
+            }),
+            false,
+            None,
+        );
+        let sql = list.to_string(PostgresQueryBuilder);
+        assert!(sql.contains("DISTINCT"), "distinct: {sql}");
+        assert!(sql.contains("ORDER BY"), "list orders: {sql}");
+        assert!(sql.contains("created_at"), "order column: {sql}");
+        let fetch = queries_views::workspace_view_list_stmt(
+            "acme",
+            uid,
+            None,
+            false,
+            Some(uuid::Uuid::new_v4()),
+        );
+        let sql = fetch.to_string(PostgresQueryBuilder);
+        assert!(!sql.contains("ORDER BY"), "fetch unordered: {sql}");
+        // Guest narrowing and the project exists annotation.
+        let guest = queries_views::workspace_view_list_stmt("acme", uid, None, true, None);
+        let sql = guest.to_string(PostgresQueryBuilder);
+        assert!(
+            sql.matches("owned_by_id").count() >= 2,
+            "guest narrows: {sql}"
+        );
+        let project = queries_views::project_view_list_stmt(
+            "acme",
+            uuid::Uuid::new_v4(),
+            uid,
+            false,
+            true,
+            None,
+        );
+        let sql = project.to_string(PostgresQueryBuilder);
+        assert!(sql.contains("EXISTS"), "is_favorite annotation: {sql}");
+        assert!(sql.contains("ORDER BY"), "project list orders: {sql}");
+    }
+
+    #[tokio::test]
+    async fn live_view_list_fetch() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issue_views",
+            "workspaces",
+            "projects",
+            "project_members",
+            "user_favorites",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        // The 731 scratch predates the `anchor` column (NEWFRONT-972, Django
+        // `view.py:70`); the TEMP copy gains it so the live statements run
+        // against the current model shape. Session-local only.
+        sqlx::query("ALTER TABLE pg_temp.issue_views ADD COLUMN IF NOT EXISTS anchor varchar(255)")
+            .execute(&pool)
+            .await
+            .expect("add anchor");
+        let (ws, proj, user_a, user_b) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let (view_a, view_b, view_c) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug, deleted_at) VALUES ('{ws}', 'acme_live', NULL)"),
+            format!("INSERT INTO projects (id, workspace_id, identifier, deleted_at, archived_at) VALUES ('{proj}', '{ws}', 'ACM', NULL, NULL)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user_a}', true, NULL)"),
+            format!("INSERT INTO issue_views (id, workspace_id, project_id, name, access, owned_by_id, is_locked, sort_order, deleted_at) VALUES ('{view_a}', '{ws}', NULL, 'ws-view-a', 2, '{user_a}', false, 1.0, NULL)"),
+            format!("INSERT INTO issue_views (id, workspace_id, project_id, name, access, owned_by_id, is_locked, sort_order, deleted_at) VALUES ('{view_b}', '{ws}', NULL, 'ws-view-b', 1, '{user_b}', false, 2.0, NULL)"),
+            format!("INSERT INTO issue_views (id, workspace_id, project_id, name, access, owned_by_id, is_locked, sort_order, deleted_at) VALUES ('{view_c}', '{ws}', '{proj}', 'proj-view', 1, '{user_b}', false, 3.0, NULL)"),
+            format!("INSERT INTO user_favorites (id, workspace_id, project_id, user_id, entity_identifier, entity_type, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user_a}', '{view_c}', 'view', NULL)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // Workspace list: owned private + other's public row are visible.
+        let stmt = queries_views::workspace_view_list_stmt(
+            "acme_live",
+            user_a,
+            Some(queries_views::ViewOrder {
+                column: "created_at".to_owned(),
+                descending: true,
+            }),
+            false,
+            None,
+        );
+        let rows = super::fetch_view_rows(&pool, &stmt)
+            .await
+            .expect("workspace list");
+        let names: Vec<&str> = rows
+            .iter()
+            .map(|row| row.get("name").and_then(Value::as_str).unwrap_or("?"))
+            .collect();
+        assert_eq!(names.len(), 2, "owner + public rows: {names:?}");
+        assert!(names.contains(&"ws-view-a"), "owned: {names:?}");
+        assert!(names.contains(&"ws-view-b"), "public: {names:?}");
+        // Guest narrowing keeps only the actor's own rows.
+        let guest = queries_views::workspace_view_list_stmt("acme_live", user_a, None, true, None);
+        let rows = super::fetch_view_rows(&pool, &guest)
+            .await
+            .expect("guest list");
+        assert_eq!(rows.len(), 1, "guest sees own only: {rows:?}");
+        assert_eq!(
+            rows[0].get("name").and_then(Value::as_str),
+            Some("ws-view-a")
+        );
+        // Workspace retrieve reads one row by pk; a stranger misses.
+        let row = super::fetch_workspace_view(&pool, "acme_live", user_a, &view_a)
+            .await
+            .expect("retrieve")
+            .expect("found");
+        assert_eq!(
+            row.get("id").and_then(Value::as_str).unwrap_or("?"),
+            view_a.to_string()
+        );
+        assert!(
+            super::fetch_workspace_view(&pool, "acme_live", user_b, &view_a)
+                .await
+                .expect("stranger")
+                .is_none(),
+            "private row of another user is invisible"
+        );
+        assert!(
+            super::fetch_workspace_view(&pool, "acme_live", user_a, &uuid::Uuid::new_v4())
+                .await
+                .expect("missing")
+                .is_none(),
+            "unknown pk reads none"
+        );
+        // Project list carries the is_favorite annotation.
+        let project =
+            queries_views::project_view_list_stmt("acme_live", proj, user_a, false, true, None);
+        let rows = super::fetch_view_rows(&pool, &project)
+            .await
+            .expect("project list");
+        assert_eq!(rows.len(), 1, "project rows: {rows:?}");
+        assert_eq!(
+            rows[0].get("is_favorite").and_then(Value::as_bool),
+            Some(true)
+        );
+        let row = super::fetch_project_view(&pool, "acme_live", &proj, &user_a, &view_c)
+            .await
+            .expect("project retrieve")
+            .expect("found");
+        assert_eq!(
+            row.get("is_favorite").and_then(Value::as_bool),
+            Some(true),
+            "retrieve keeps the annotation"
+        );
     }
 
     #[test]
