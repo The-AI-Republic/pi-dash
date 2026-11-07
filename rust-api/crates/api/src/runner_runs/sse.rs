@@ -25,9 +25,12 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde_json::Value;
 use uuid::Uuid;
 
+use pidash_db::entity::agent_chat_event;
+use pidash_db::pool::sea_orm_connection;
 use pidash_services::runner_runs::chat::{dumps_value, serialize_event_json, EventParts};
 use pidash_types::runner_runs::consts::event_channel;
 
@@ -57,7 +60,30 @@ const HEARTBEAT_SECS: u64 = 15;
 const POLL_SECS: u64 = 1;
 
 /// Replay row: `id, message_id, seq, kind, payload::text, created_at`.
-type ReplayRow = (i64, Option<Uuid>, i32, String, String, DateTime<Utc>);
+type ReplayRow = (i64, Option<Uuid>, i32, String, Value, DateTime<Utc>);
+
+/// The replay rows (`chat.py:815-818`): the session's events with
+/// `seq > after`, ordered, uncapped.
+pub fn replay_select(
+    session_id: Uuid,
+    after: i64,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<ReplayRow>> {
+    use agent_chat_event::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::MessageId,
+            Column::Seq,
+            Column::Kind,
+            Column::Payload,
+            Column::CreatedAt,
+        ])
+        .filter(Column::SessionId.eq(session_id))
+        .filter(Column::Seq.gt(after))
+        .order_by_asc(Column::Seq)
+        .into_tuple::<ReplayRow>()
+}
 
 /// `after` cursor (`chat.py:800-804`): `GET.after or Last-Event-ID or
 /// "0"` — empty strings fall through to the next source — then
@@ -236,14 +262,9 @@ pub async fn chat_event_stream(
 
     // Replay (`chat.py:815-818`): `seq > after`, ordered, uncapped.
     // A replay failure truncates like any streaming failure.
-    let rows: Vec<ReplayRow> = match sqlx::query_as(
-        r#"SELECT "id", "message_id", "seq", "kind", "payload"::text, "created_at"
-           FROM "agent_chat_event" WHERE "session_id" = $1 AND "seq" > $2 ORDER BY "seq" ASC"#,
-    )
-    .bind(session_id)
-    .bind(after)
-    .fetch_all(&pool)
-    .await
+    let rows: Vec<ReplayRow> = match replay_select(session_id, after)
+        .all(&sea_orm_connection(&pool))
+        .await
     {
         Ok(rows) => rows,
         Err(error) => {
@@ -255,9 +276,8 @@ pub async fn chat_event_stream(
     let session_str = session_id.to_string();
     let mut prefix = String::new();
     let mut last_seq = after;
-    for (id, message_id, seq, kind, payload_text, created_at) in &rows {
-        let payload: Value = serde_json::from_str(payload_text).unwrap_or(Value::Null);
-        let payload_json = dumps_value(&payload);
+    for (id, message_id, seq, kind, payload, created_at) in &rows {
+        let payload_json = dumps_value(payload);
         let message_str = message_id.map(|id| id.to_string());
         let created = py_iso(created_at);
         let data = serialize_event_json(&EventParts {

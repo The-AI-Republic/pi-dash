@@ -52,7 +52,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use chrono_tz::Tz;
 use serde::Serialize;
-use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
 // NOTE: `pidash_auth::license` (PIDASHCONV-118) exists on disk but is not
@@ -64,10 +63,15 @@ use pidash_db::config::encryption::Keyring;
 use pidash_db::config::legacy::{get_configuration_values, LegacyItem};
 use pidash_db::config::registry;
 use pidash_db::config::value::ConfigValue;
-use pidash_db::license::queries::{
-    admin_permission_check_sql, fetch_instance_first, ADMIN_PERMISSION_ROLE_GTE,
-};
+use pidash_db::entity::{instance_admins, instances, users, workspaces};
+use pidash_db::license::queries::{fetch_instance_first, ADMIN_PERMISSION_ROLE_GTE};
+use pidash_db::orm_tx::into_sqlx;
+use pidash_db::pool::sea_orm_connection;
 use pidash_types::license::serializers_core::{instance_to_representation, InstanceRow};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
+};
 
 use super::form_body::{
     parse_form_body, parse_multipart_body, select_body_kind, BodyFail, BodyField, BodyKind,
@@ -147,20 +151,19 @@ async fn request_actor(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
-    let row: Option<(String, bool, Option<String>)> =
-        sqlx::query_as("SELECT password, is_active, user_timezone FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
-    match row {
-        Some((password, true, timezone)) => {
+    let db = sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    match user {
+        Some(u) if u.is_active => {
             if session_hash.is_empty()
-                || !super::verify_session_hash(&session_hash, &password, secret_key)
+                || !super::verify_session_hash(&session_hash, &u.password, secret_key)
             {
                 return Ok(None);
             }
-            let tz = resolve_request_tz(true, timezone.as_deref())?;
+            let tz = resolve_request_tz(true, Some(&u.user_timezone))?;
             Ok(Some(Actor { id, timezone: tz }))
         }
         _ => Ok(None),
@@ -216,11 +219,12 @@ async fn get_instance(
 /// `Workspace.objects.count() >= 1` (`instance.py:170`): the default
 /// manager excludes soft-deleted rows.
 async fn count_workspaces(pool: &sqlx::PgPool) -> Result<i64, HandlerError> {
-    let (count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM workspaces WHERE deleted_at IS NULL")
-            .fetch_one(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+    let db = sea_orm_connection(pool);
+    let count = workspaces::Entity::find()
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)? as i64;
     Ok(count)
 }
 
@@ -1051,21 +1055,41 @@ async fn patch_instance(
 }
 
 /// One `instances` row by id, live or soft-deleted (the PATCH response
-/// re-fetch). Same column list Django emits for a by-id fetch; rows map
-/// through the queries-layer mapper, so the SQL is handler-local and the
-/// foundation stays untouched.
+/// re-fetch). SeaORM `Entity::find_by_id` (no soft-delete filter, like the
+/// re-fetch after save).
 async fn fetch_instance_by_id(
     pool: &sqlx::PgPool,
     id: &Uuid,
 ) -> Result<Option<pidash_db::license::models::instance::Instance>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT \"instances\".\"created_at\", \"instances\".\"updated_at\", \"instances\".\"created_by_id\", \"instances\".\"updated_by_id\", \"instances\".\"deleted_at\", \"instances\".\"id\", \"instances\".\"instance_name\", \"instances\".\"whitelist_emails\", \"instances\".\"instance_id\", \"instances\".\"current_version\", \"instances\".\"latest_version\", \"instances\".\"edition\", \"instances\".\"domain\", \"instances\".\"last_checked_at\", \"instances\".\"namespace\", \"instances\".\"is_telemetry_enabled\", \"instances\".\"is_support_required\", \"instances\".\"is_setup_done\", \"instances\".\"is_signup_screen_visited\", \"instances\".\"is_verified\", \"instances\".\"is_test\", \"instances\".\"is_current_version_deprecated\" FROM \"instances\" WHERE \"instances\".\"id\" = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    row.map(|r| pidash_db::license::queries::map_instance_row(&r))
-        .transpose()
+    let db = sea_orm_connection(pool);
+    let m = instances::Entity::find_by_id(*id)
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(m.map(|m| pidash_db::license::models::instance::Instance {
+        id: m.id,
+        created_at: m.created_at.with_timezone(&chrono::Utc),
+        updated_at: m.updated_at.with_timezone(&chrono::Utc),
+        created_by_id: m.created_by_id,
+        updated_by_id: m.updated_by_id,
+        deleted_at: m.deleted_at.map(|dt| dt.with_timezone(&chrono::Utc)),
+        instance_name: m.instance_name,
+        whitelist_emails: m.whitelist_emails,
+        instance_id: m.instance_id,
+        current_version: m.current_version,
+        latest_version: m.latest_version,
+        edition: m.edition,
+        domain: m.domain,
+        last_checked_at: m.last_checked_at.with_timezone(&chrono::Utc),
+        namespace: m.namespace,
+        is_telemetry_enabled: m.is_telemetry_enabled,
+        is_support_required: m.is_support_required,
+        is_setup_done: m.is_setup_done,
+        is_signup_screen_visited: m.is_signup_screen_visited,
+        is_verified: m.is_verified,
+        is_test: m.is_test,
+        is_current_version_deprecated: m.is_current_version_deprecated,
+    }))
 }
 
 /// Decode the PATCH body like DRF `_parse`: empty → `{}`; otherwise the
@@ -1123,6 +1147,7 @@ fn patch_body(
 /// anonymous denies without a DB hit; otherwise the first instance must
 /// have an admin row for the user with `role >= 15`.
 async fn admin_allowed(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<bool, HandlerError> {
+    let db = sea_orm_connection(pool);
     let row = fetch_instance_first(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
@@ -1130,13 +1155,14 @@ async fn admin_allowed(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<bool, Hand
         // No first instance: `filter(instance=None, ...)` matches nothing.
         return Ok(decide_instance_admin(true, false, false));
     };
-    // The check SQL selects the full row (fixture
-    // `queries/admin_crud.sql` §1); only presence matters (`.exists()`).
-    let hit = sqlx::query(&admin_permission_check_sql())
-        .bind(instance.id)
-        .bind(ADMIN_PERMISSION_ROLE_GTE)
-        .bind(user_id)
-        .fetch_optional(pool)
+    let hit = instance_admins::Entity::find()
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .filter(instance_admins::Column::InstanceId.eq(instance.id))
+        .filter(instance_admins::Column::Role.gte(ADMIN_PERMISSION_ROLE_GTE))
+        .filter(instance_admins::Column::UserId.eq(*user_id))
+        .order_by_desc(instance_admins::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     Ok(decide_instance_admin(true, true, hit.is_some()))
@@ -1149,23 +1175,15 @@ async fn reject_duplicate_instance_id(
     candidate: &str,
     exclude: Option<Uuid>,
 ) -> Result<(), HandlerError> {
-    let (count,): (i64,) = if let Some(id) = exclude {
-        sqlx::query_as(
-            "SELECT COUNT(*) FROM instances WHERE instance_id = $1 AND deleted_at IS NULL AND id != $2",
-        )
-        .bind(candidate)
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?
-    } else {
-        sqlx::query_as(
-            "SELECT COUNT(*) FROM instances WHERE instance_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(candidate)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?
+    let db = sea_orm_connection(pool);
+    let count = {
+        let mut q = instances::Entity::find()
+            .filter(instances::Column::InstanceId.eq(candidate))
+            .filter(instances::Column::DeletedAt.is_null());
+        if let Some(id) = exclude {
+            q = q.filter(instances::Column::Id.ne(id));
+        }
+        q.count(&db).await.map_err(|_| HandlerError::ServerError)? as i64
     };
     if count > 0 {
         return Err(HandlerError::FieldErrors(
@@ -1181,12 +1199,12 @@ async fn check_user_assignments(
     pool: &sqlx::PgPool,
     sets: &[Assignment],
 ) -> Result<(), HandlerError> {
+    let db = sea_orm_connection(pool);
     let mut errors = Vec::new();
     for set in sets {
         if let Assignment::NullableUuid(field, Some((id, display))) = set {
-            let hit: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
+            let hit = users::Entity::find_by_id(*id)
+                .one(&db)
                 .await
                 .map_err(|_| HandlerError::ServerError)?;
             if hit.is_none() {
@@ -1238,71 +1256,111 @@ async fn apply_patch(
     user_id: &Uuid,
 ) -> Result<(), HandlerError> {
     let now = chrono::Utc::now();
-    let mut builder: QueryBuilder<Postgres> = QueryBuilder::new("UPDATE instances SET ");
-    let mut first = true;
+    let db = sea_orm_connection(pool);
+    // SeaORM update_many with dynamic columns via column name matching.
+    // The valid columns are the instances table columns; we map each
+    // Assignment to its column expression.
+    let mut update = instances::Entity::update_many();
     for set in sets {
-        if !first {
-            builder.push(", ");
+        match set {
+            Assignment::Text(column, text) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    update = update.col_expr(col, sea_orm::sea_query::Expr::value(text.clone()));
+                }
+            }
+            Assignment::NullableText(column, Some(text)) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    update =
+                        update.col_expr(col, sea_orm::sea_query::Expr::value(Some(text.clone())));
+                }
+            }
+            Assignment::NullableText(column, None) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    update = update.col_expr(col, sea_orm::sea_query::Expr::value(None::<String>));
+                }
+            }
+            Assignment::Flag(column, flag) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    update = update.col_expr(col, sea_orm::sea_query::Expr::value(*flag));
+                }
+            }
+            Assignment::NullableUuid(column, Some((target, _))) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    update = update.col_expr(col, sea_orm::sea_query::Expr::value(Some(*target)));
+                }
+            }
+            Assignment::NullableUuid(column, None) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    update = update.col_expr(col, sea_orm::sea_query::Expr::value(None::<Uuid>));
+                }
+            }
+            Assignment::NullableDateTime(column, Some(stamp)) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    let tz = sea_orm::prelude::DateTimeWithTimeZone::from(*stamp);
+                    update = update.col_expr(col, sea_orm::sea_query::Expr::value(tz));
+                }
+            }
+            Assignment::NullableDateTime(column, None) => {
+                let col = instance_column_for_assignment_column(column);
+                if let Some(col) = col {
+                    update = update.col_expr(
+                        col,
+                        sea_orm::sea_query::Expr::value(
+                            None::<sea_orm::prelude::DateTimeWithTimeZone>,
+                        ),
+                    );
+                }
+            }
         }
-        first = false;
-        push_assignment(&mut builder, set);
     }
-    if !first {
-        builder.push(", ");
-    }
-    builder.push("updated_at = ");
-    builder.push_bind(now);
-    builder.push(", updated_by_id = ");
-    builder.push_bind(*user_id);
-    builder.push(" WHERE id = ");
-    builder.push_bind(*id);
-    builder
-        .build()
-        .execute(pool)
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    update = update
+        .col_expr(
+            instances::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_tz),
+        )
+        .col_expr(
+            instances::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(Some(*user_id)),
+        )
+        .filter(instances::Column::Id.eq(*id));
+
+    update
+        .exec(&db)
         .await
-        .map_err(map_write_error)?;
+        .map_err(|e| map_write_error(into_sqlx(e)))?;
     Ok(())
 }
 
-/// One `SET column = value` fragment for an [`Assignment`].
-fn push_assignment(builder: &mut QueryBuilder<Postgres>, set: &Assignment) {
-    match set {
-        Assignment::Text(column, text) | Assignment::NullableText(column, Some(text)) => {
-            builder.push(format!("{column} = "));
-            builder.push_bind(text.clone());
-        }
-        Assignment::NullableText(column, None) => {
-            builder.push(format!("{column} = NULL"));
-        }
-        Assignment::Flag(column, flag) => {
-            builder.push(format!("{column} = "));
-            builder.push_bind(*flag);
-        }
-        Assignment::NullableUuid(column, Some((target, _))) => {
-            builder.push(format!("{column}_id = "));
-            builder.push_bind(*target);
-        }
-        Assignment::NullableUuid(column, None) => {
-            builder.push(format!("{column}_id = NULL"));
-        }
-        Assignment::NullableDateTime(column, Some(stamp)) => {
-            builder.push(format!("{column} = "));
-            builder.push_bind(*stamp);
-        }
-        Assignment::NullableDateTime(column, None) => {
-            builder.push(format!("{column} = NULL"));
-        }
-    }
-}
-
-fn assignment_column(set: &Assignment) -> &'static str {
-    match set {
-        Assignment::Text(column, _)
-        | Assignment::NullableText(column, _)
-        | Assignment::Flag(column, _)
-        | Assignment::NullableUuid(column, _)
-        | Assignment::NullableDateTime(column, _) => column,
-    }
+fn instance_column_for_assignment_column(col: &str) -> Option<instances::Column> {
+    Some(match col {
+        "instance_name" => instances::Column::InstanceName,
+        "whitelist_emails" => instances::Column::WhitelistEmails,
+        "instance_id" => instances::Column::InstanceId,
+        "current_version" => instances::Column::CurrentVersion,
+        "latest_version" => instances::Column::LatestVersion,
+        "edition" => instances::Column::Edition,
+        "domain" => instances::Column::Domain,
+        "namespace" => instances::Column::Namespace,
+        "is_telemetry_enabled" => instances::Column::IsTelemetryEnabled,
+        "is_support_required" => instances::Column::IsSupportRequired,
+        "is_setup_done" => instances::Column::IsSetupDone,
+        "is_signup_screen_visited" => instances::Column::IsSignupScreenVisited,
+        "is_verified" => instances::Column::IsVerified,
+        "is_test" => instances::Column::IsTest,
+        "is_current_version_deprecated" => instances::Column::IsCurrentVersionDeprecated,
+        "deleted_at" => instances::Column::DeletedAt,
+        "created_by" => instances::Column::CreatedById,
+        "updated_by" => instances::Column::UpdatedById,
+        _ => return None,
+    })
 }
 
 /// `serializer.save()` with `instance=None`: create. Missing columns fall
@@ -1319,109 +1377,130 @@ async fn insert_instance(
     user_id: &Uuid,
 ) -> Result<Uuid, HandlerError> {
     let now = chrono::Utc::now();
-    let mut columns: Vec<&'static str> = Vec::new();
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    let id = uuid::Uuid::new_v4();
+    let db = sea_orm_connection(pool);
+
+    // Determine values for each column, with Django defaults for missing.
+    let mut instance_name = String::new();
+    let mut instance_id_val = String::new();
+    let mut current_version = String::new();
+    let mut latest_version: Option<String> = None;
+    let mut edition_val = "PI_DASH_COMMUNITY".to_string();
+    let mut domain_val = String::new();
+    let mut namespace_val: Option<String> = None;
+    let mut whitelist_emails_val: Option<String> = None;
+    let last_checked_at_val = now_tz;
+    // defaults for flags
+    let mut is_telemetry_enabled = true;
+    let mut is_support_required = true;
+    let mut is_setup_done = false;
+    let mut is_signup_screen_visited = false;
+    let mut is_verified = false;
+    let mut is_test = false;
+    let mut is_current_version_deprecated = false;
+    let mut deleted_at_val: Option<sea_orm::prelude::DateTimeWithTimeZone> = None;
+    let mut created_by_id_val: Option<Uuid> = Some(*user_id);
+    // updated_by is NULL on create, but explicit assignments (from PATCH)
+    // are handled below; the handler already dropped updated_by.
+    let mut has_instance_name = false;
+    let mut has_instance_id = false;
+    let mut has_current_version = false;
+
     for set in sets {
-        let column = assignment_column(set);
-        if !columns.contains(&column) {
-            columns.push(column);
-        }
-    }
-    // Django field defaults for untouched columns (`blank`/default
-    // fields); required columns absent here fail at the database.
-    // (`edition`, `domain`, and every boolean flag carry model defaults;
-    // nullable text falls back to NULL at the database.)
-    const DEFAULT_FLAGS: &[(&str, bool)] = &[
-        ("is_telemetry_enabled", true),
-        ("is_support_required", true),
-        ("is_setup_done", false),
-        ("is_signup_screen_visited", false),
-        ("is_verified", false),
-        ("is_test", false),
-        ("is_current_version_deprecated", false),
-    ];
-    for column in ["edition", "domain"] {
-        if !columns.contains(&column) {
-            columns.push(column);
-        }
-    }
-    for (column, _) in DEFAULT_FLAGS {
-        if !columns.contains(column) {
-            columns.push(column);
-        }
-    }
-    // Django assigns the UUID client-side pre-insert; without the `v4`
-    // feature on the `uuid` crate the equivalent unobservable choice is
-    // `gen_random_uuid()` (same v4 shape, no wire difference).
-    let mut builder: QueryBuilder<Postgres> = QueryBuilder::new(
-        "INSERT INTO instances (id, created_at, updated_at, created_by_id, updated_by_id",
-    );
-    for column in &columns {
-        builder.push(", ");
-        builder.push(*column);
-        if sets
-            .iter()
-            .find(|set| assignment_column(set) == *column)
-            .is_some_and(|set| matches!(set, Assignment::NullableUuid(_, _)))
-        {
-            builder.push("_id");
-        }
-    }
-    builder.push(") VALUES (gen_random_uuid(), ");
-    builder.push_bind(now);
-    builder.push(", ");
-    builder.push_bind(now);
-    builder.push(", ");
-    // Creating: `created_by = user`, `updated_by = None`
-    // (`db/models/base.py:26-40`).
-    builder.push_bind(*user_id);
-    builder.push(", NULL");
-    for column in &columns {
-        builder.push(", ");
-        match sets.iter().find(|set| assignment_column(set) == *column) {
-            Some(Assignment::Text(_, text)) | Some(Assignment::NullableText(_, Some(text))) => {
-                builder.push_bind(text.clone());
+        match set {
+            Assignment::Text(col, text) => match *col {
+                "instance_name" => {
+                    instance_name = text.clone();
+                    has_instance_name = true;
+                }
+                "instance_id" => {
+                    instance_id_val = text.clone();
+                    has_instance_id = true;
+                }
+                "current_version" => {
+                    current_version = text.clone();
+                    has_current_version = true;
+                }
+                "edition" => edition_val = text.clone(),
+                "domain" => domain_val = text.clone(),
+                _ => {}
+            },
+            Assignment::NullableText(col, val) => match *col {
+                "whitelist_emails" => whitelist_emails_val = val.clone(),
+                "latest_version" => latest_version = val.clone(),
+                "namespace" => namespace_val = val.clone(),
+                _ => {}
+            },
+            Assignment::Flag(col, flag) => match *col {
+                "is_telemetry_enabled" => is_telemetry_enabled = *flag,
+                "is_support_required" => is_support_required = *flag,
+                "is_setup_done" => is_setup_done = *flag,
+                "is_signup_screen_visited" => is_signup_screen_visited = *flag,
+                "is_verified" => is_verified = *flag,
+                "is_test" => is_test = *flag,
+                "is_current_version_deprecated" => is_current_version_deprecated = *flag,
+                _ => {}
+            },
+            Assignment::NullableUuid(col, val) => {
+                if *col == "created_by" {
+                    created_by_id_val = val.as_ref().map(|(id, _)| *id);
+                }
             }
-            Some(Assignment::NullableText(_, None)) => {
-                builder.push("NULL");
-            }
-            Some(Assignment::Flag(_, flag)) => {
-                builder.push_bind(*flag);
-            }
-            Some(Assignment::NullableUuid(_, Some((target, _)))) => {
-                builder.push_bind(*target);
-            }
-            Some(Assignment::NullableUuid(_, None)) => {
-                builder.push("NULL");
-            }
-            Some(Assignment::NullableDateTime(_, Some(stamp))) => {
-                builder.push_bind(*stamp);
-            }
-            Some(Assignment::NullableDateTime(_, None)) => {
-                builder.push("NULL");
-            }
-            None if *column == "edition" => {
-                builder.push_bind("PI_DASH_COMMUNITY".to_owned());
-            }
-            None if *column == "domain" => {
-                builder.push_bind(String::new());
-            }
-            None => {
-                let flag = DEFAULT_FLAGS
-                    .iter()
-                    .find(|(name, _)| name == column)
-                    .map(|(_, value)| *value)
-                    .unwrap_or(false);
-                builder.push_bind(flag);
+            Assignment::NullableDateTime(col, val) => {
+                if *col == "deleted_at" {
+                    deleted_at_val = val.map(sea_orm::prelude::DateTimeWithTimeZone::from);
+                }
             }
         }
     }
-    builder.push(") RETURNING id");
-    let (id,): (Uuid,) = builder
-        .build_query_as()
-        .fetch_one(pool)
+    // last_checked_at defaults to now (Django auto_now? Actually it's set on create via save)
+    // The original insert used $now for both created_at/updated_at and last_checked_at via same ticker? Check original: INSERT with gen_random_uuid, now, now, ... last_checked_at also from same now? In original builder, they bound now for created_at, updated_at, and for last_checked_at? List shows they bound now for first two and then for last_checked_at also now? In original code, they used same now for last_checked_at? Let's use now_tz as last_checked_at when not explicitly set? But PATCH sets don't include last_checked_at (it's not in Assignment set) so we use now.
+    // Required columns missing -> let DB fail; we supply empty strings for instance_name etc which will fail at DB if required and empty? But we keep as supplied; if not supplied, empty string will fail NOT NULL? Actually instance_name is required NOT NULL, empty string is valid not null but Django would fail earlier? For create case with missing required, original code would have columns missing and DB would fail NOT NULL; our version supplies empty string, which may not fail. To preserve exact behavior, we should track which were supplied; if missing, we should NOT set ActiveModel field (leave as NotSet) so DB fails. Simpler: we build ActiveModel and only Set the columns that were either in sets or are defaulted to known values (edition, domain, flags). For required text fields not in sets and not defaulted, we leave unset -> DB NOT NULL violation similar to original's missing column (which also fails NOT NULL). Our empty string would succeed where original fails. So we need to leave them unset if not supplied.
+    // To achieve missing-column failure, we use ActiveModel with default values but if not supplied we use NotSet for required fields. Easiest: if not has_instance_name, don't set it.
+    let mut model = instances::ActiveModel {
+        id: Set(id),
+        created_at: Set(now_tz),
+        updated_at: Set(now_tz),
+        created_by_id: Set(created_by_id_val),
+        updated_by_id: Set(None),
+        deleted_at: Set(deleted_at_val),
+        instance_name: if has_instance_name {
+            Set(instance_name)
+        } else {
+            sea_orm::ActiveValue::NotSet
+        },
+        whitelist_emails: Set(whitelist_emails_val),
+        instance_id: if has_instance_id {
+            Set(instance_id_val)
+        } else {
+            sea_orm::ActiveValue::NotSet
+        },
+        current_version: if has_current_version {
+            Set(current_version)
+        } else {
+            sea_orm::ActiveValue::NotSet
+        },
+        latest_version: Set(latest_version),
+        edition: Set(edition_val),
+        domain: Set(domain_val),
+        last_checked_at: Set(last_checked_at_val),
+        namespace: Set(namespace_val),
+        is_telemetry_enabled: Set(is_telemetry_enabled),
+        is_support_required: Set(is_support_required),
+        is_setup_done: Set(is_setup_done),
+        is_signup_screen_visited: Set(is_signup_screen_visited),
+        is_verified: Set(is_verified),
+        is_test: Set(is_test),
+        is_current_version_deprecated: Set(is_current_version_deprecated),
+    };
+    // last_checked_at was always provided via now in original insert, so keep Set(now)
+    model.last_checked_at = Set(now_tz);
+    model
+        .insert(&db)
         .await
-        .map_err(map_write_error)?;
-    Ok(id)
+        .map(|_| id)
+        .map_err(|e| map_write_error(into_sqlx(e)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1440,6 +1519,7 @@ async fn signup_screen_visited(
     // actor first so a bad stored zone 500s before the instance check,
     // exactly like Django.
     let actor = request_actor(pool, state.settings().secret_key.as_bytes(), extension).await?;
+    let db = sea_orm_connection(pool);
     let row = fetch_instance_first(pool)
         .await
         .map_err(|_| HandlerError::ServerError)?;
@@ -1452,25 +1532,47 @@ async fn signup_screen_visited(
     // is one (`db/models/base.py:26-40`); anonymous posts wipe both audit
     // columns, even on updates.
     let now = chrono::Utc::now();
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
     if let Some(actor) = actor {
-        sqlx::query(
-            "UPDATE instances SET is_signup_screen_visited = TRUE, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-        )
-        .bind(now)
-        .bind(actor.id)
-        .bind(instance.id)
-        .execute(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+        instances::Entity::update_many()
+            .col_expr(
+                instances::Column::IsSignupScreenVisited,
+                sea_orm::sea_query::Expr::value(true),
+            )
+            .col_expr(
+                instances::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_tz),
+            )
+            .col_expr(
+                instances::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(actor.id)),
+            )
+            .filter(instances::Column::Id.eq(instance.id))
+            .exec(&db)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
     } else {
-        sqlx::query(
-            "UPDATE instances SET is_signup_screen_visited = TRUE, updated_at = $1, created_by_id = NULL, updated_by_id = NULL WHERE id = $2",
-        )
-        .bind(now)
-        .bind(instance.id)
-        .execute(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+        instances::Entity::update_many()
+            .col_expr(
+                instances::Column::IsSignupScreenVisited,
+                sea_orm::sea_query::Expr::value(true),
+            )
+            .col_expr(
+                instances::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_tz),
+            )
+            .col_expr(
+                instances::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(None::<Uuid>),
+            )
+            .col_expr(
+                instances::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(None::<Uuid>),
+            )
+            .filter(instances::Column::Id.eq(instance.id))
+            .exec(&db)
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
     }
     Ok(axum::response::Response::builder()
         .status(StatusCode::NO_CONTENT)

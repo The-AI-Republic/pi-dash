@@ -10,7 +10,8 @@
 //! Wiring only, no new logic: auth through
 //! [`crate::license::resolve_actor`] (Django-session `request.user`),
 //! shapes from `pidash_services::app_workspace::ser_user` (PIDASHCONV-603),
-//! SQL from `...::queries_user` (PIDASHCONV-612), throttle specs + header
+//! SeaORM reads plus the covered-table saves in
+//! `pidash_services::domain::user_saves`, throttle specs + header
 //! bytes from [`super::gates`] (PIDASHCONV-613), publishers from
 //! `...::tasks` (PIDASHCONV-614), `User.save()` semantics from
 //! `...::models_user::user` (PIDASHCONV-607). Fixture:
@@ -102,9 +103,19 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use std::net::SocketAddr;
 
+use pidash_db::entity::{
+    file_assets, instance_admins, instances, project_members as pm_entity, sessions, users,
+    workspace_member_invites, workspace_members, workspaces,
+};
 use pidash_services::app_workspace::{models_user, queries_user, ser_extras, ser_user, tasks};
 use pidash_services::auth_session::{guards as throttle_kernel, shapes as auth_shapes};
+use pidash_services::domain::user_saves;
 use pidash_services::read::{self, AssetRow, ProfileRow};
+use sea_orm::sea_query::{CaseStatement, Expr, ExprTrait, Func};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Select,
+};
 
 use super::gates;
 use crate::middleware::SessionHandle;
@@ -283,40 +294,6 @@ fn write_denial(error: sqlx::Error) -> Denial {
     }
 }
 
-/// Convert a [`queries_user`] `:named` statement to sqlx `$n`
-/// placeholders. Numbering follows `params` order; a `:name` only
-/// matches when followed by a non-identifier byte. (Local copy —
-// sibling handler issues never fork a shared helper.)
-pub fn positional(sql: &str, params: &[&str]) -> String {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b':' {
-            let mut j = i + 1;
-            while j < bytes.len() && is_ident_byte(bytes[j]) {
-                j += 1;
-            }
-            if j > i + 1 {
-                let name = &sql[i + 1..j];
-                if let Some(position) = params.iter().position(|candidate| *candidate == name) {
-                    out.push('$');
-                    out.push_str(&(position + 1).to_string());
-                    i = j;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn is_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
 /// `request.data.get("email", "").strip().lower()`
 /// (`user/base.py:144,183`).
 fn normalize_email(value: &str) -> String {
@@ -324,13 +301,14 @@ fn normalize_email(value: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Rows (`sqlx::FromRow` maps by column name; extra columns ignored)
+// Rows
 // ---------------------------------------------------------------------------
 
 /// One `users` row: every `UserSerializer` wire column plus the two
-/// asset FK ids and the `User.save()` inputs (`db/models/user.py:56-126`
-/// + `AbstractBaseUser.last_login`).
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+/// asset FK ids and the `User.save()` inputs
+/// (`db/models/user.py:56-126` + `AbstractBaseUser.last_login`).
+/// `password` is never rendered, never compared here.
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserRow {
     pub id: uuid::Uuid,
     pub last_login: Option<DateTime<Utc>>,
@@ -373,27 +351,61 @@ pub struct UserRow {
     pub masked_at: Option<DateTime<Utc>>,
 }
 
-/// Columns for the user reads, `UserSerializer` wire order
-/// (`ser_user::USER_WIRE_FIELDS`) with the asset FK ids folded in.
-/// `password` is never selected (never rendered, never compared here).
-const USER_ROW_COLUMNS: &str = "id, last_login, username, mobile_number, email, display_name, \
-    first_name, last_name, avatar, avatar_asset_id, cover_image, cover_image_asset_id, \
-    date_joined, created_at, updated_at, last_location, created_location, is_superuser, \
-    is_managed, is_password_expired, is_active, is_staff, is_email_verified, \
-    is_password_autoset, is_password_reset_required, token, last_active, last_login_time, \
-    last_logout_time, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
-    token_updated_at, is_bot, bot_type, user_timezone, is_email_valid, masked_at";
+impl From<users::Model> for UserRow {
+    fn from(model: users::Model) -> Self {
+        Self {
+            id: model.id,
+            last_login: model.last_login.map(|dt| dt.with_timezone(&Utc)),
+            username: model.username,
+            mobile_number: model.mobile_number,
+            email: model.email,
+            display_name: model.display_name,
+            first_name: model.first_name,
+            last_name: model.last_name,
+            avatar: model.avatar,
+            avatar_asset_id: model.avatar_asset_id,
+            cover_image: model.cover_image,
+            cover_image_asset_id: model.cover_image_asset_id,
+            date_joined: model.date_joined.with_timezone(&Utc),
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            last_location: model.last_location,
+            created_location: model.created_location,
+            is_superuser: model.is_superuser,
+            is_managed: model.is_managed,
+            is_password_expired: model.is_password_expired,
+            is_active: model.is_active,
+            is_staff: model.is_staff,
+            is_email_verified: model.is_email_verified,
+            is_password_autoset: model.is_password_autoset,
+            is_password_reset_required: model.is_password_reset_required,
+            token: model.token,
+            last_active: model.last_active.map(|dt| dt.with_timezone(&Utc)),
+            last_login_time: model.last_login_time.map(|dt| dt.with_timezone(&Utc)),
+            last_logout_time: model.last_logout_time.map(|dt| dt.with_timezone(&Utc)),
+            last_login_ip: model.last_login_ip,
+            last_logout_ip: model.last_logout_ip,
+            last_login_medium: model.last_login_medium,
+            last_login_uagent: model.last_login_uagent,
+            token_updated_at: model.token_updated_at.map(|dt| dt.with_timezone(&Utc)),
+            is_bot: model.is_bot,
+            bot_type: model.bot_type,
+            user_timezone: model.user_timezone,
+            is_email_valid: model.is_email_valid,
+            masked_at: model.masked_at.map(|dt| dt.with_timezone(&Utc)),
+        }
+    }
+}
 
 /// `User.objects.get(pk=...)`: `users` carries no `deleted_at`, so the
 /// lookup is unscoped. A miss is [`Denial::ObjectNotFound`].
 async fn fetch_user(pool: &PgPool, user_id: uuid::Uuid) -> Result<UserRow, Denial> {
-    let sql = format!("SELECT {USER_ROW_COLUMNS} FROM users WHERE users.id = $1");
-    sqlx::query_as(&sql)
-        .bind(user_id)
-        .fetch_optional(pool)
+    let model = users::Entity::find_by_id(user_id)
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await
         .map_err(|_| Denial::ServerError)?
-        .ok_or(Denial::ObjectNotFound)
+        .ok_or(Denial::ObjectNotFound)?;
+    Ok(UserRow::from(model))
 }
 
 /// One `profiles` row for the identity paths: the pk plus
@@ -410,9 +422,8 @@ async fn fetch_profile(pool: &PgPool, user_id: uuid::Uuid) -> Result<ProfileRow,
 }
 
 /// One `workspaces` row for the settings branches: the re-fetch /
-/// fallback columns decoded out of the fixture `SELECT workspaces.*`
-/// statements (extra columns ignored).
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+/// fallback columns, decoded by name.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct SettingsWorkspaceRow {
     pub id: uuid::Uuid,
     pub slug: String,
@@ -420,9 +431,8 @@ pub struct SettingsWorkspaceRow {
     pub logo_asset_id: Option<uuid::Uuid>,
 }
 
-/// One `instances` row for `Instance.first`: the pk decoded out of
-/// the fixture `SELECT instances.*` statement.
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+/// One `instances` row for `Instance.first`: the pk.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct InstanceRow {
     pub id: uuid::Uuid,
 }
@@ -458,13 +468,15 @@ async fn render_asset_url(pool: &PgPool, asset: &AssetRow) -> Result<Option<Stri
         let Some(workspace_id) = asset.workspace_id else {
             return Err(Denial::ServerError);
         };
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT slug FROM workspaces WHERE workspaces.id = $1")
-                .bind(workspace_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
-        Some(row.ok_or(Denial::ObjectNotFound)?.0)
+        let slug: Option<String> = workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.eq(workspace_id))
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        Some(slug.ok_or(Denial::ObjectNotFound)?)
     } else {
         None
     };
@@ -513,15 +525,272 @@ async fn resolve_cover_image_url(
 }
 
 /// One deactivate-scan row: the pk plus the two annotations. The
-/// executed statement is the full `GROUP BY` scan
-/// (`queries_user::project_deactivate_scan_sql` /
-/// `workspace_deactivate_scan_sql`); the remaining columns decode past
-/// this struct untouched.
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+/// executed statement is the full `GROUP BY` scan (see
+/// [`project_deactivate_scan_query`] / [`workspace_deactivate_scan_query`]);
+/// the remaining columns decode past this struct untouched.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct DeactivateScanRow {
     pub id: uuid::Uuid,
     pub other_admin_exists: i64,
     pub total_members: i64,
+}
+
+/// `ROLE.ADMIN.value` (`app/permissions/base.py:14`) — the `role=20`
+/// literal inside the deactivate `When` clauses.
+const ROLE_ADMIN: i16 = 20;
+
+/// The last-workspace membership check (`user.py:104-110`):
+/// `.filter(pk=last_workspace_id, workspace_member__member=...,
+/// workspace_member__is_active=True).exists()`. Ported bug 2: the
+/// joined `workspace_members` rows carry NO `deleted_at IS NULL`
+/// guard — cross-FK filters never apply the related model's manager.
+/// Only the base `workspaces.deleted_at IS NULL` applies.
+fn last_workspace_exists_query(
+    user_id: uuid::Uuid,
+    ws_id: uuid::Uuid,
+) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Relation::WorkspaceMembers.def(),
+        )
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Id.eq(ws_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+}
+
+/// The last-workspace fetch (`user.py:111-115`, newest first) and the
+/// fallback (`user.py:127-131`, earliest created): the same join
+/// shape, `LIMIT 1` through `.into_model(..).one()`.
+fn last_workspace_row_query(
+    user_id: uuid::Uuid,
+    ws_id: Option<uuid::Uuid>,
+    newest_first: bool,
+) -> Select<workspaces::Entity> {
+    let query = workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Slug,
+            workspaces::Column::Name,
+            workspaces::Column::LogoAssetId,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Relation::WorkspaceMembers.def(),
+        )
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true));
+    let query = match ws_id {
+        Some(ws_id) => query.filter(workspaces::Column::Id.eq(ws_id)),
+        None => query,
+    };
+    if newest_first {
+        query.order_by_desc(workspaces::Column::CreatedAt)
+    } else {
+        query.order_by_asc(workspaces::Column::CreatedAt)
+    }
+}
+
+/// Availability check (`:129`, re-checked finally at `:225`):
+/// `User.objects.filter(email=new_email).exclude(id=user.id).exists()`.
+/// `users` has no soft-delete scope.
+fn email_availability_query(email: &str, user_id: uuid::Uuid) -> Select<users::Entity> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Email.eq(email))
+        .filter(users::Column::Id.ne(user_id))
+}
+
+/// `InstanceAdmin.objects.filter(instance=instance,
+/// user=request.user).exists()` (`base.py:89`). A missing `Instance`
+/// row binds the `instance_id IS NULL` arm (`:89`).
+fn instance_admin_exists_query(
+    user_id: uuid::Uuid,
+    instance_id: Option<uuid::Uuid>,
+) -> Select<instance_admins::Entity> {
+    let query = instance_admins::Entity::find()
+        .select_only()
+        .column(instance_admins::Column::Id)
+        .filter(instance_admins::Column::UserId.eq(user_id))
+        .filter(instance_admins::Column::DeletedAt.is_null());
+    match instance_id {
+        Some(id) => query.filter(instance_admins::Column::InstanceId.eq(id)),
+        None => query.filter(instance_admins::Column::InstanceId.is_null()),
+    }
+}
+
+/// `Instance.objects.first()` (`base.py:88`): soft-delete scope,
+/// default `-created_at` ordering, `LIMIT 1` through
+/// `.into_model(..).one()`.
+fn instance_first_query() -> Select<instances::Entity> {
+    instances::Entity::find()
+        .select_only()
+        .column(instances::Column::Id)
+        .filter(instances::Column::DeletedAt.is_null())
+        .order_by_desc(instances::Column::CreatedAt)
+}
+
+/// The sole-admin annotation expression (`:267-273`, `:288-294`):
+/// `Count(Case(When(Q(role=20, is_active=True) & ~Q(member=user),
+/// then=1), default=0))`. `nullable_member` selects the `IS NOT NULL`
+/// inside the negation: `ProjectMember.member` is nullable so Django
+/// renders `NOT (member_id = :user AND member_id IS NOT NULL)`;
+/// `WorkspaceMember.member` is NOT NULL so the guard is omitted.
+fn other_admin_exists_case(
+    is_active: Expr,
+    role: Expr,
+    member: Expr,
+    user_id: uuid::Uuid,
+    nullable_member: bool,
+) -> sea_orm::sea_query::SimpleExpr {
+    let negated = if nullable_member {
+        member
+            .clone()
+            .eq(user_id)
+            .and(member.clone().is_not_null())
+            .not()
+    } else {
+        member.clone().eq(user_id).not()
+    };
+    let when = is_active.and(role.eq(ROLE_ADMIN)).and(negated);
+    Func::count(
+        CaseStatement::new()
+            .case(when, Expr::val(1))
+            .finally(Expr::val(0)),
+    )
+    .into()
+}
+
+/// Project sole-admin annotation scan (`:266-275`): `GROUP BY` every
+/// selected column, no `ORDER BY` (ported bug 4 — vacuous guard,
+/// every row collects). WHERE: member + active + manager scope.
+fn project_deactivate_scan_query(user_id: uuid::Uuid) -> Select<pm_entity::Entity> {
+    use pidash_db::entity::project_members as pm;
+    let annotations = other_admin_exists_case(
+        Expr::col((pm::Entity, pm::Column::IsActive)),
+        Expr::col((pm::Entity, pm::Column::Role)),
+        Expr::col((pm::Entity, pm::Column::MemberId)),
+        user_id,
+        true,
+    );
+    pm::Entity::find()
+        .select_only()
+        .columns([
+            pm::Column::CreatedAt,
+            pm::Column::UpdatedAt,
+            pm::Column::CreatedById,
+            pm::Column::UpdatedById,
+            pm::Column::DeletedAt,
+            pm::Column::Id,
+            pm::Column::ProjectId,
+            pm::Column::WorkspaceId,
+            pm::Column::MemberId,
+            pm::Column::Comment,
+            pm::Column::Role,
+            pm::Column::ViewProps,
+            pm::Column::DefaultProps,
+            pm::Column::Preferences,
+            pm::Column::SortOrder,
+            pm::Column::IsActive,
+        ])
+        .expr_as(annotations, "other_admin_exists")
+        .expr_as(
+            Func::count(Expr::col((pm::Entity, pm::Column::Id))),
+            "total_members",
+        )
+        .filter(pm::Column::MemberId.eq(user_id))
+        .filter(pm::Column::IsActive.eq(true))
+        .filter(pm::Column::DeletedAt.is_null())
+        .group_by(pm::Column::CreatedAt)
+        .group_by(pm::Column::UpdatedAt)
+        .group_by(pm::Column::CreatedById)
+        .group_by(pm::Column::UpdatedById)
+        .group_by(pm::Column::DeletedAt)
+        .group_by(pm::Column::Id)
+        .group_by(pm::Column::ProjectId)
+        .group_by(pm::Column::WorkspaceId)
+        .group_by(pm::Column::MemberId)
+        .group_by(pm::Column::Comment)
+        .group_by(pm::Column::Role)
+        .group_by(pm::Column::ViewProps)
+        .group_by(pm::Column::DefaultProps)
+        .group_by(pm::Column::Preferences)
+        .group_by(pm::Column::SortOrder)
+        .group_by(pm::Column::IsActive)
+}
+
+/// Workspace sole-admin annotation scan (`:287-296`): same shape over
+/// `workspace_members` (non-nullable `member_id`, so no `IS NOT NULL`
+/// inside the negation).
+fn workspace_deactivate_scan_query(user_id: uuid::Uuid) -> Select<workspace_members::Entity> {
+    let annotations = other_admin_exists_case(
+        Expr::col((
+            workspace_members::Entity,
+            workspace_members::Column::IsActive,
+        )),
+        Expr::col((workspace_members::Entity, workspace_members::Column::Role)),
+        Expr::col((
+            workspace_members::Entity,
+            workspace_members::Column::MemberId,
+        )),
+        user_id,
+        false,
+    );
+    workspace_members::Entity::find()
+        .select_only()
+        .columns([
+            workspace_members::Column::CreatedAt,
+            workspace_members::Column::UpdatedAt,
+            workspace_members::Column::CreatedById,
+            workspace_members::Column::UpdatedById,
+            workspace_members::Column::DeletedAt,
+            workspace_members::Column::Id,
+            workspace_members::Column::WorkspaceId,
+            workspace_members::Column::MemberId,
+            workspace_members::Column::Role,
+            workspace_members::Column::CompanyRole,
+            workspace_members::Column::ViewProps,
+            workspace_members::Column::DefaultProps,
+            workspace_members::Column::IssueProps,
+            workspace_members::Column::IsActive,
+            workspace_members::Column::GettingStartedChecklist,
+            workspace_members::Column::Tips,
+            workspace_members::Column::ExploredFeatures,
+        ])
+        .expr_as(annotations, "other_admin_exists")
+        .expr_as(
+            Func::count(Expr::col((
+                workspace_members::Entity,
+                workspace_members::Column::Id,
+            ))),
+            "total_members",
+        )
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .group_by(workspace_members::Column::CreatedAt)
+        .group_by(workspace_members::Column::UpdatedAt)
+        .group_by(workspace_members::Column::CreatedById)
+        .group_by(workspace_members::Column::UpdatedById)
+        .group_by(workspace_members::Column::DeletedAt)
+        .group_by(workspace_members::Column::Id)
+        .group_by(workspace_members::Column::WorkspaceId)
+        .group_by(workspace_members::Column::MemberId)
+        .group_by(workspace_members::Column::Role)
+        .group_by(workspace_members::Column::CompanyRole)
+        .group_by(workspace_members::Column::ViewProps)
+        .group_by(workspace_members::Column::DefaultProps)
+        .group_by(workspace_members::Column::IssueProps)
+        .group_by(workspace_members::Column::IsActive)
+        .group_by(workspace_members::Column::GettingStartedChecklist)
+        .group_by(workspace_members::Column::Tips)
+        .group_by(workspace_members::Column::ExploredFeatures)
 }
 
 // ---------------------------------------------------------------------------
@@ -1400,13 +1669,15 @@ async fn validate_asset_pk(
         },
         Err(outcome) => return Err(outcome),
     };
-    let exists: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM file_assets WHERE file_assets.id = $1 AND file_assets.deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Err(PkOutcome::ServerError))?;
+    let exists: Option<uuid::Uuid> = file_assets::Entity::find()
+        .select_only()
+        .column(file_assets::Column::Id)
+        .filter(file_assets::Column::Id.eq(id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Err(PkOutcome::ServerError))?;
     if exists.is_none() {
         let shown = match value {
             Value::String(raw) => raw.clone(),
@@ -1979,19 +2250,18 @@ async fn enqueue_emit(pool: &PgPool, task: &str, args: Vec<Value>) {
 // ---------------------------------------------------------------------------
 
 /// `logout(request)` (`user/base.py:241,355`): delete the presented
-/// session row ([`queries_user::session_flush_sql`]) and `clear()` the
-/// live session, so the session middleware emits the delete-cookie +
-/// `Vary: Cookie` exactly like Django's `process_response`.
+/// session row and `clear()` the live session, so the session
+/// middleware emits the delete-cookie + `Vary: Cookie` exactly like
+/// Django's `process_response`.
 async fn logout(pool: &PgPool, extension: &Option<Extension<SessionHandle>>) -> Result<(), Denial> {
     let key = extension
         .as_ref()
         .map(|Extension(handle)| handle.snapshot().key)
         .unwrap_or(None);
     if let Some(key) = key {
-        let sql = positional(&queries_user::session_flush_sql(), &["key"]);
-        sqlx::query(&sql)
-            .bind(key)
-            .execute(pool)
+        sessions::Entity::delete_many()
+            .filter(sessions::Column::SessionKey.eq(key))
+            .exec(&pidash_db::pool::sea_orm_connection(pool))
             .await
             .map_err(|_| Denial::ServerError)?;
     }
@@ -2024,22 +2294,23 @@ async fn validate_new_email(
             "New email must be different from current email".to_owned(),
         ));
     }
-    let sql = positional(
-        &queries_user::email_availability_exists_sql(),
-        &["email", "user"],
-    );
-    let taken: Option<(i32,)> = sqlx::query_as(&sql)
-        .bind(new_email)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if taken.is_some() {
+    if email_taken(pool, new_email, user_id).await? {
         return Err(Denial::BadError(
             "An account with this email already exists".to_owned(),
         ));
     }
     Ok(())
+}
+
+/// Whether another user already owns `email` (the availability
+/// exists-check, `user.py:129`).
+async fn email_taken(pool: &PgPool, email: &str, user_id: uuid::Uuid) -> Result<bool, Denial> {
+    let taken: Option<uuid::Uuid> = email_availability_query(email, user_id)
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(taken.is_some())
 }
 
 /// `request.data.get(key, "")` for the email endpoints: the body must
@@ -2098,42 +2369,6 @@ fn derive_save(
         token_updated_at,
         is_staff: user_model::save_is_staff(is_superuser, is_staff),
     })
-}
-
-/// Invite-count statement, positional. `email_none` renders the
-/// Django `filter(email=None)` `IS NULL` arm (no bind).
-fn invite_count_statement(email_none: bool) -> String {
-    let sql = positional(&queries_user::invite_count_sql(), &["email"]);
-    if email_none {
-        sql.replace(
-            "workspace_member_invites.email = $1",
-            "workspace_member_invites.email IS NULL",
-        )
-    } else {
-        sql
-    }
-}
-
-/// Instance-admin exists statement, positional. `instance_none`
-/// renders the `instance_id IS NULL` arm and renumbers the surviving
-/// user predicate to `$1`.
-fn instance_admin_exists_statement(instance_none: bool) -> String {
-    let sql = positional(
-        &queries_user::instance_admin_exists_sql(),
-        &["instance", "user"],
-    );
-    if instance_none {
-        sql.replace(
-            "instance_admins.instance_id = $1",
-            "instance_admins.instance_id IS NULL",
-        )
-        .replace(
-            "instance_admins.user_id = $2",
-            "instance_admins.user_id = $1",
-        )
-    } else {
-        sql
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2207,27 +2442,19 @@ pub async fn me_settings(
     };
     // Invite count (`user.py:99`, no `accepted` filter — bug 1). A
     // `None` email renders `IS NULL`, like Django's `filter(email=None)`.
-    let invites: Option<(i64,)> = match row.email.as_deref() {
-        Some(email) => {
-            let count_sql = invite_count_statement(false);
-            match sqlx::query_as(&count_sql)
-                .bind(email)
-                .fetch_optional(pool)
-                .await
-            {
-                Ok(count) => count,
-                Err(_) => return Denial::ServerError.into_response(),
-            }
-        }
-        None => {
-            let null_sql = invite_count_statement(true);
-            match sqlx::query_as(&null_sql).fetch_optional(pool).await {
-                Ok(count) => count,
-                Err(_) => return Denial::ServerError.into_response(),
-            }
-        }
+    let invite_query = workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::DeletedAt.is_null());
+    let invite_query = match row.email.as_deref() {
+        Some(email) => invite_query.filter(workspace_member_invites::Column::Email.eq(email)),
+        None => invite_query.filter(workspace_member_invites::Column::Email.is_null()),
     };
-    let invites = invites.map(|row| row.0).unwrap_or(0);
+    let invites = match invite_query
+        .count(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+    {
+        Ok(count) => count as i64,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let profile = match fetch_profile(pool, actor.id).await {
         Ok(profile) => profile,
         Err(denial) => return denial.into_response(),
@@ -2237,27 +2464,24 @@ pub async fn me_settings(
     let mut last_workspace: Option<ser_user::MeSettingsLastWorkspace<'_>> = None;
     let mut last_strings: Option<(String, String, String, String)> = None;
     if let Some(last_id) = profile.last_workspace_id {
-        let check_sql = positional(&queries_user::last_workspace_exists_sql(), &["ws", "user"]);
-        let member: Option<(i32,)> = match sqlx::query_as(&check_sql)
-            .bind(last_id)
-            .bind(actor.id)
-            .fetch_optional(pool)
+        let member: Option<uuid::Uuid> = match last_workspace_exists_query(actor.id, last_id)
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(pool))
             .await
         {
             Ok(member) => member,
             Err(_) => return Denial::ServerError.into_response(),
         };
         if member.is_some() {
-            let fetch_sql = positional(&queries_user::last_workspace_fetch_sql(), &["ws", "user"]);
-            let workspace: Option<SettingsWorkspaceRow> = match sqlx::query_as(&fetch_sql)
-                .bind(last_id)
-                .bind(actor.id)
-                .fetch_optional(pool)
-                .await
-            {
-                Ok(workspace) => workspace,
-                Err(_) => return Denial::ServerError.into_response(),
-            };
+            let workspace: Option<SettingsWorkspaceRow> =
+                match last_workspace_row_query(actor.id, Some(last_id), true)
+                    .into_model::<SettingsWorkspaceRow>()
+                    .one(&pidash_db::pool::sea_orm_connection(pool))
+                    .await
+                {
+                    Ok(workspace) => workspace,
+                    Err(_) => return Denial::ServerError.into_response(),
+                };
             // The `.first()` miss after a passing `.exists()` is the
             // `AttributeError` 500 (`user.py:116` dereferences first).
             let Some(workspace) = workspace else {
@@ -2289,15 +2513,15 @@ pub async fn me_settings(
     // the last-workspace branch hit, Python returns without touching
     // the earliest-created membership.
     let fallback_strings: Option<(String, String)> = if last_strings.is_none() {
-        let fallback_sql = positional(&queries_user::fallback_workspace_sql(), &["user"]);
-        let fallback: Option<SettingsWorkspaceRow> = match sqlx::query_as(&fallback_sql)
-            .bind(actor.id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(fallback) => fallback,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
+        let fallback: Option<SettingsWorkspaceRow> =
+            match last_workspace_row_query(actor.id, None, false)
+                .into_model::<SettingsWorkspaceRow>()
+                .one(&pidash_db::pool::sea_orm_connection(pool))
+                .await
+            {
+                Ok(fallback) => fallback,
+                Err(_) => return Denial::ServerError.into_response(),
+            };
         fallback.map(|row| (row.id.to_string(), row.slug))
     } else {
         None
@@ -2342,40 +2566,24 @@ pub async fn me_instance_admin(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let first_sql = positional(&queries_user::instance_first_sql(), &[]);
-    let instance: Option<InstanceRow> = match sqlx::query_as(&first_sql).fetch_optional(pool).await
+    let instance: Option<InstanceRow> = match instance_first_query()
+        .into_model::<InstanceRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
     {
         Ok(instance) => instance,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    // A missing `Instance` row binds `IS NULL` (`:89`); the surviving
-    // `$2` renumbers to `$1` since binds are positional by order.
-    let admin: Option<(i32,)> = match instance {
-        Some(row) => {
-            let id = row.id;
-            let exists_sql = instance_admin_exists_statement(false);
-            match sqlx::query_as(&exists_sql)
-                .bind(id)
-                .bind(actor.id)
-                .fetch_optional(pool)
-                .await
-            {
-                Ok(admin) => admin,
-                Err(_) => return Denial::ServerError.into_response(),
-            }
-        }
-        None => {
-            let null_sql = instance_admin_exists_statement(true);
-            match sqlx::query_as(&null_sql)
-                .bind(actor.id)
-                .fetch_optional(pool)
-                .await
-            {
-                Ok(admin) => admin,
-                Err(_) => return Denial::ServerError.into_response(),
-            }
-        }
-    };
+    // A missing `Instance` row binds `IS NULL` (`:89`).
+    let admin: Option<uuid::Uuid> =
+        match instance_admin_exists_query(actor.id, instance.map(|row| row.id))
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(pool))
+            .await
+        {
+            Ok(admin) => admin,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
     let mut body = Map::new();
     body.insert("is_instance_admin".to_owned(), Value::Bool(admin.is_some()));
     (StatusCode::OK, Json(Value::Object(body))).into_response()
@@ -2476,7 +2684,8 @@ pub async fn me_partial_update(
         is_staff: derived.is_staff,
         updated_at: now,
     };
-    let update = identity::save_me_profile(pool, row.id, &save).await;
+    let update =
+        identity::save_me_profile(&pidash_db::pool::sea_orm_connection(pool), row.id, &save).await;
     if let Err(error) = update {
         return write_denial(error).into_response();
     }
@@ -2687,20 +2896,11 @@ pub async fn email_update(
         }
     }
     // Final availability re-check (`:225-229`), then the save.
-    let recheck_sql = positional(
-        &queries_user::email_availability_exists_sql(),
-        &["email", "user"],
-    );
-    let taken: Option<(i32,)> = match sqlx::query_as(&recheck_sql)
-        .bind(&new_email)
-        .bind(actor.id)
-        .fetch_optional(pool)
-        .await
-    {
+    let taken = match email_taken(pool, &new_email, actor.id).await {
         Ok(taken) => taken,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    if taken.is_some() {
+    if taken {
         return json_response(StatusCode::BAD_REQUEST, EMAIL_TAKEN_BODY);
     }
     let old_email = row.email.clone();
@@ -2717,19 +2917,22 @@ pub async fn email_update(
         Ok(derived) => derived,
         Err(denial) => return denial.into_response(),
     };
-    // `email_save_sql` carries the changed columns; the `User.save()`
-    // side effects (display-name fill, token regen, staff) extend it.
-    let save_sql = email_save_statement();
-    if let Err(error) = sqlx::query(&save_sql)
-        .bind(&derived.email)
-        .bind(now)
-        .bind(actor.id)
-        .bind(&derived.display_name)
-        .bind(&derived.token)
-        .bind(derived.token_updated_at)
-        .bind(derived.is_staff)
-        .execute(pool)
-        .await
+    // The save carries the changed columns plus the `User.save()`
+    // side effects (display-name fill, token regen, staff).
+    let save = user_saves::UserSaveFields {
+        display_name: &derived.display_name,
+        token: &derived.token,
+        token_updated_at: derived.token_updated_at,
+        is_staff: derived.is_staff,
+    };
+    if let Err(error) = user_saves::save_email(
+        &pidash_db::pool::sea_orm_connection(pool),
+        actor.id,
+        &derived.email,
+        now,
+        &save,
+    )
+    .await
     {
         return write_denial(error).into_response();
     }
@@ -2768,17 +2971,6 @@ pub async fn email_update(
         Err(denial) => return denial.into_response(),
     };
     (StatusCode::OK, Json(rendered.render_me())).into_response()
-}
-
-/// Email-save statement, positional: [`queries_user::email_save_sql`]
-/// plus the `User.save()` side-effect columns. Binds in order:
-/// `$1` email, `$2` now, `$3` pk, `$4` display name, `$5` token, `$6`
-/// token updated at, `$7` staff.
-fn email_save_statement() -> String {
-    positional(&queries_user::email_save_sql(), &["email", "now", "pk"]).replace(
-        "SET email = $1, is_email_verified = FALSE, updated_at = $2",
-        "SET email = $1, is_email_verified = FALSE, updated_at = $2, display_name = $4, token = $5, token_updated_at = $6, is_staff = $7",
-    )
 }
 
 /// `cache.get`: `None` for a missing key; `Err` for a dead/missing
@@ -2822,46 +3014,40 @@ fn encode_random_password() -> String {
     pidash_auth::password::hash_password(&raw, &password_salt(), 600_000)
 }
 
-/// Bulk-deactivate statement for one pk chunk: the builder's `IN
-/// (:pks)` expands to a positional list. An empty chunk issues no
-/// statement (the caller skips it). Workspace rows only — the
-/// project arm moved to `domain::projects::members`.
-fn bulk_deactivate_statement(chunk_len: usize) -> String {
-    let placeholders: Vec<String> = (1..=chunk_len).map(|n| format!("${n}")).collect();
-    queries_user::workspace_bulk_deactivate_sql().replace(
-        "workspace_members.id IN (:pks)",
-        &format!("workspace_members.id IN ({})", placeholders.join(", ")),
-    )
-}
-
-/// Invite-purge statement for a `None` email, positional: the
-/// builder with the email predicate rewritten to `IS NULL` (binds
-/// `$1` now only).
-fn invite_purge_statement() -> String {
-    positional(
-        &queries_user::deactivate_invite_purge_sql().replace(
-            "workspace_member_invites.email = :email",
-            "workspace_member_invites.email IS NULL",
-        ),
-        &["now"],
-    )
-}
-
 /// Run the bulk deactivation in `batch_size=100` chunks (bug 5: no
-/// `updated_at`, no `deleted_at` filter, pk-direct).
+/// `updated_at`, no `deleted_at` filter, pk-direct). Workspace rows
+/// only — the project arm moved to `domain::projects::members`.
 async fn bulk_deactivate(pool: &PgPool, ids: &[uuid::Uuid]) -> Result<(), Denial> {
-    for chunk in ids.chunks(queries_user::BULK_DEACTIVATE_BATCH_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let sql = bulk_deactivate_statement(chunk.len());
-        let mut query = sqlx::query(&sql);
-        for id in chunk {
-            query = query.bind(*id);
-        }
-        query.execute(pool).await.map_err(|_| Denial::ServerError)?;
-    }
-    Ok(())
+    user_saves::bulk_deactivate_workspace_members(&pidash_db::pool::sea_orm_connection(pool), ids)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// `WorkspaceMemberInvite.objects.filter(email=user.email).delete()`
+/// — a soft `deleted_at` stamp (`QuerySet.delete()` on a soft-delete
+/// model; a `None` email renders `IS NULL`, like Django's
+/// `filter(email=None)`). An integrity violation answers the
+/// payload-invalid 400 through [`write_denial`].
+async fn invite_purge(
+    pool: &PgPool,
+    email: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(), Denial> {
+    let purge = workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::DeletedAt,
+            Expr::value(sea_orm::entity::prelude::DateTimeWithTimeZone::from(now)),
+        )
+        .filter(workspace_member_invites::Column::DeletedAt.is_null());
+    let purge = match email {
+        Some(email) => purge.filter(workspace_member_invites::Column::Email.eq(email)),
+        None => purge.filter(workspace_member_invites::Column::Email.is_null()),
+    };
+    purge
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map(|_| ())
+        .map_err(|error| write_denial(pidash_db::orm_tx::into_sqlx(error)))
 }
 
 /// `HostSettings` over the resolved F-03 URLs (the `auth_session`
@@ -2876,22 +3062,6 @@ fn host_settings(settings: &pidash_db::config::Settings) -> auth_shapes::HostSet
         admin_base_path: Some(urls.admin_base_path.as_str()),
         space_base_path: Some(urls.space_base_path.as_str()),
     }
-}
-
-/// Deactivate user-save statement, positional:
-/// [`queries_user::deactivate_user_save_sql`] plus the `User.save()`
-/// side-effect columns. Binds in order: `$1` hash, `$2` ip, `$3` now,
-/// `$4` pk, `$5` email, `$6` display name, `$7` token, `$8` token
-/// updated at, `$9` staff.
-fn deactivate_user_save_statement() -> String {
-    positional(
-        &queries_user::deactivate_user_save_sql(),
-        &["hash", "ip", "now", "pk"],
-    )
-    .replace(
-        "SET password = $1, is_password_autoset = TRUE, is_active = FALSE, last_logout_ip = $2, last_logout_time = $3, updated_at = $3",
-        "SET password = $1, is_password_autoset = TRUE, is_active = FALSE, last_logout_ip = $2, last_logout_time = $3, updated_at = $3, email = $5, display_name = $6, token = $7, token_updated_at = $8, is_staff = $9",
-    )
 }
 
 /// `DELETE /api/users/me/` (`user/base.py:252-357`): the instance-admin
@@ -2917,13 +3087,13 @@ pub async fn me_deactivate(
         Err(denial) => return denial.into_response(),
     };
     // Instance-admin guard (`:257-261`, user-only — no instance predicate).
-    let guard_sql = positional(
-        &queries_user::deactivate_instance_admin_guard_sql(),
-        &["user"],
-    );
-    let guarded: Option<(i32,)> = match sqlx::query_as(&guard_sql)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let guarded: Option<uuid::Uuid> = match instance_admins::Entity::find()
+        .select_only()
+        .column(instance_admins::Column::Id)
+        .filter(instance_admins::Column::UserId.eq(actor.id))
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await
     {
         Ok(guarded) => guarded,
@@ -2935,10 +3105,9 @@ pub async fn me_deactivate(
     // Sole-admin scans (`:266-306`): the loop evaluates the condition
     // per row even though the vacuous annotations make the 400s
     // unreachable (bug 4).
-    let project_sql = positional(&queries_user::project_deactivate_scan_sql(), &["user"]);
-    let projects: Vec<DeactivateScanRow> = match sqlx::query_as(&project_sql)
-        .bind(actor.id)
-        .fetch_all(pool)
+    let projects: Vec<DeactivateScanRow> = match project_deactivate_scan_query(actor.id)
+        .into_model::<DeactivateScanRow>()
+        .all(&pidash_db::pool::sea_orm_connection(pool))
         .await
     {
         Ok(projects) => projects,
@@ -2952,10 +3121,9 @@ pub async fn me_deactivate(
             return json_response(StatusCode::BAD_REQUEST, DEACTIVATE_SOLE_PROJECT_ADMIN_BODY);
         }
     }
-    let workspace_sql = positional(&queries_user::workspace_deactivate_scan_sql(), &["user"]);
-    let workspaces: Vec<DeactivateScanRow> = match sqlx::query_as(&workspace_sql)
-        .bind(actor.id)
-        .fetch_all(pool)
+    let workspaces: Vec<DeactivateScanRow> = match workspace_deactivate_scan_query(actor.id)
+        .into_model::<DeactivateScanRow>()
+        .all(&pidash_db::pool::sea_orm_connection(pool))
         .await
     {
         Ok(workspaces) => workspaces,
@@ -2972,9 +3140,10 @@ pub async fn me_deactivate(
             );
         }
     }
-    if let Err(denial) = project_members::deactivate_many(pool, &project_ids)
-        .await
-        .map_err(|_| Denial::ServerError)
+    if let Err(denial) =
+        project_members::deactivate_many(&pidash_db::pool::sea_orm_connection(pool), &project_ids)
+            .await
+            .map_err(|_| Denial::ServerError)
     {
         return denial.into_response();
     }
@@ -2985,35 +3154,18 @@ pub async fn me_deactivate(
     // Django samples per statement, but the stamps are unobservable
     // through the 204).
     let now = Utc::now();
-    // Invite purge (`:313`, soft `deleted_at` stamp — a `None` email
-    // renders `IS NULL`, like Django's `filter(email=None)`).
-    if let Some(email) = row.email.as_deref() {
-        let purge_sql = positional(
-            &queries_user::deactivate_invite_purge_sql(),
-            &["now", "email"],
-        );
-        if let Err(error) = sqlx::query(&purge_sql)
-            .bind(now)
-            .bind(email)
-            .execute(pool)
-            .await
-        {
-            return write_denial(error).into_response();
-        }
-    } else {
-        let null_sql = invite_purge_statement();
-        if let Err(error) = sqlx::query(&null_sql).bind(now).execute(pool).await {
-            return write_denial(error).into_response();
-        }
+    // Invite purge (`:313`, soft `deleted_at` stamp).
+    if let Err(denial) = invite_purge(pool, row.email.as_deref(), now).await {
+        return denial.into_response();
     }
     // Session purge (`:316`, hard delete, UUID-as-text — bug 11).
-    let session_purge_sql = positional(&queries_user::deactivate_session_purge_sql(), &["user"]);
-    if let Err(error) = sqlx::query(&session_purge_sql)
-        .bind(actor.id.to_string())
-        .execute(pool)
+    if let Err(error) = sessions::Entity::delete_many()
+        .filter(sessions::Column::UserId.eq(actor.id.to_string()))
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
         .await
+        .map_err(|error| write_denial(pidash_db::orm_tx::into_sqlx(error)))
     {
-        return write_denial(error).into_response();
+        return error.into_response();
     }
     // Profile reset (`:319-339`; a miss is the 404).
     let profile = match fetch_profile(pool, actor.id).await {
@@ -3022,16 +3174,13 @@ pub async fn me_deactivate(
     };
     let step: Value =
         serde_json::from_str(queries_user::ONBOARDING_RESET_JSON).expect("static reset json");
-    let profile_reset_sql = positional(
-        &queries_user::deactivate_profile_reset_sql(),
-        &["step_json", "now", "pk"],
-    );
-    if let Err(error) = sqlx::query(&profile_reset_sql)
-        .bind(step)
-        .bind(now)
-        .bind(profile.id)
-        .execute(pool)
-        .await
+    if let Err(error) = user_saves::deactivate_profile_reset(
+        &pidash_db::pool::sea_orm_connection(pool),
+        profile.id,
+        &step,
+        now,
+    )
+    .await
     {
         return write_denial(error).into_response();
     }
@@ -3053,21 +3202,22 @@ pub async fn me_deactivate(
         Err(denial) => return denial.into_response(),
     };
     let password_hash = encode_random_password();
-    // The builder lists the semantically-changed columns; the
-    // `User.save()` side effects extend it (`$5`-`$9`).
-    let user_save_sql = deactivate_user_save_statement();
-    if let Err(error) = sqlx::query(&user_save_sql)
-        .bind(&password_hash)
-        .bind(ip.as_deref())
-        .bind(now)
-        .bind(actor.id)
-        .bind(&derived.email)
-        .bind(&derived.display_name)
-        .bind(&derived.token)
-        .bind(derived.token_updated_at)
-        .bind(derived.is_staff)
-        .execute(pool)
-        .await
+    let save = user_saves::UserSaveFields {
+        display_name: &derived.display_name,
+        token: &derived.token,
+        token_updated_at: derived.token_updated_at,
+        is_staff: derived.is_staff,
+    };
+    if let Err(error) = user_saves::deactivate_user_save(
+        &pidash_db::pool::sea_orm_connection(pool),
+        actor.id,
+        &derived.email,
+        &password_hash,
+        ip.as_deref(),
+        now,
+        &save,
+    )
+    .await
     {
         return write_denial(error).into_response();
     }
@@ -3176,19 +3326,20 @@ fn profile_flag_value(value: &Value) -> Result<Option<bool>, Denial> {
 async fn write_profile_flag(
     pool: &PgPool,
     profile_id: uuid::Uuid,
-    sql: &str,
+    flag: user_saves::ProfileFlag,
     value: &Value,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    let flag = profile_flag_value(value)?;
-    sqlx::query(sql)
-        .bind(flag)
-        .bind(now)
-        .bind(profile_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
-        .map_err(write_denial)
+    let coerced = profile_flag_value(value)?;
+    user_saves::patch_profile_flag(
+        &pidash_db::pool::sea_orm_connection(pool),
+        profile_id,
+        flag,
+        coerced,
+        now,
+    )
+    .await
+    .map_err(write_denial)
 }
 
 /// Shared onboard/tour PATCH (`user/base.py:373-389`):
@@ -3223,13 +3374,12 @@ async fn profile_flag_patch(
         Ok(profile) => profile,
         Err(denial) => return denial.into_response(),
     };
-    let builder = if flag == "is_onboarded" {
-        queries_user::onboard_patch_sql()
+    let column = if flag == "is_onboarded" {
+        user_saves::ProfileFlag::Onboarded
     } else {
-        queries_user::tour_patch_sql()
+        user_saves::ProfileFlag::TourCompleted
     };
-    let sql = positional(&builder, &["value", "now", "pk"]);
-    if let Err(denial) = write_profile_flag(pool, profile.id, &sql, &value, Utc::now()).await {
+    if let Err(denial) = write_profile_flag(pool, profile.id, column, &value, Utc::now()).await {
         return denial.into_response();
     }
     json_response(StatusCode::OK, UPDATED_BODY)
@@ -3659,67 +3809,381 @@ mod tests {
         );
     }
 
-    // -- Statements ------------------------------------------------------------
+    // -- SeaORM statement shapes (no database) --------------------------------
+
+    use sea_orm::{DbBackend, QueryTrait};
 
     #[test]
-    fn positional_numbers_params_in_order() {
-        assert_eq!(positional(":a :b :a", &["a", "b"]), "$1 $2 $1");
-        assert_eq!(positional("x:y :now2", &["now"]), "x:y :now2");
-    }
-
-    #[test]
-    fn nullable_predicate_statements_render_is_null() {
-        let count_some = invite_count_statement(false);
-        assert!(count_some.contains("workspace_member_invites.email = $1"));
-        // The email arm is `= $1`, not `IS NULL` (the base statement
-        // legitimately keeps its `deleted_at IS NULL` soft-delete
-        // scope from `queries_user::invite_count_sql`).
-        assert!(!count_some.contains("workspace_member_invites.email IS NULL"));
-        let count_none = invite_count_statement(true);
-        assert!(count_none.contains("workspace_member_invites.email IS NULL"));
-        assert!(!count_none.contains("$1"));
-
-        let exists_some = instance_admin_exists_statement(false);
-        assert!(exists_some.contains("instance_admins.instance_id = $1"));
-        assert!(exists_some.contains("instance_admins.user_id = $2"));
-        let exists_none = instance_admin_exists_statement(true);
-        assert!(exists_none.contains("instance_admins.instance_id IS NULL"));
-        assert!(exists_none.contains("instance_admins.user_id = $1"));
-        assert!(!exists_none.contains("$2"));
-
-        let purge_none = invite_purge_statement();
-        assert!(purge_none.contains("workspace_member_invites.email IS NULL"));
-        assert!(purge_none.contains("deleted_at = $1"));
-        assert!(!purge_none.contains("$2"));
-    }
-
-    #[test]
-    fn extended_save_statements_bind_save_side_effects() {
-        let email = email_save_statement();
-        assert!(email.contains("display_name = $4"));
-        assert!(email.contains("token = $5"));
-        assert!(email.contains("token_updated_at = $6"));
-        assert!(email.contains("is_staff = $7"));
-        assert!(email.contains("WHERE id = $3"));
-
-        let deactivate = deactivate_user_save_statement();
-        assert!(deactivate.contains("email = $5"));
-        assert!(deactivate.contains("display_name = $6"));
-        assert!(deactivate.contains("token = $7"));
-        assert!(deactivate.contains("token_updated_at = $8"));
-        assert!(deactivate.contains("is_staff = $9"));
-        assert!(deactivate.contains("WHERE id = $4"));
-    }
-
-    #[test]
-    fn bulk_statement_expands_one_placeholder_per_id() {
-        assert_eq!(
-            bulk_deactivate_statement(1),
-            "UPDATE workspace_members SET is_active = FALSE WHERE workspace_members.id IN ($1)"
+    fn last_workspace_queries_pin_join_scope_and_order() {
+        let user = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid");
+        let ws = uuid::Uuid::parse_str("22222222-3333-4444-5555-666666666666").expect("uuid");
+        let exists = last_workspace_exists_query(user, ws)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            exists.contains(r#"INNER JOIN "workspace_members" ON "workspaces"."id" = "workspace_members"."workspace_id""#),
+            "{exists}"
         );
-        let wide = bulk_deactivate_statement(100);
-        assert!(wide.contains("$100"));
-        assert!(!wide.contains("$101"));
+        assert!(
+            exists.contains(r#""workspaces"."deleted_at" IS NULL"#),
+            "{exists}"
+        );
+        assert!(
+            exists.contains(&format!(r#""workspaces"."id" = '{ws}'"#)),
+            "{exists}"
+        );
+        assert!(
+            exists.contains(&format!(r#""workspace_members"."member_id" = '{user}'"#)),
+            "{exists}"
+        );
+        assert!(
+            exists.contains(r#""workspace_members"."is_active" = TRUE"#),
+            "{exists}"
+        );
+        // Ported bug 2: the joined member table stays unscoped.
+        assert!(
+            !exists.contains(r#""workspace_members"."deleted_at""#),
+            "{exists}"
+        );
+        assert!(!exists.contains("ORDER BY"), "{exists}");
+
+        let fetch = last_workspace_row_query(user, Some(ws), true)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            fetch.contains(r#"ORDER BY "workspaces"."created_at" DESC"#),
+            "{fetch}"
+        );
+        assert!(!fetch.contains("LIMIT"), "{fetch}");
+        let fallback = last_workspace_row_query(user, None, false)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            fallback.contains(r#"ORDER BY "workspaces"."created_at" ASC"#),
+            "{fallback}"
+        );
+        assert!(!fallback.contains(&ws.to_string()), "{fallback}");
+    }
+
+    #[test]
+    fn deactivate_scans_group_by_every_column_without_order() {
+        let user = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid");
+        let projects = project_deactivate_scan_query(user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(projects.contains("COUNT((CASE WHEN ("), "{projects}");
+        assert!(
+            projects.contains(r#""project_members"."role" = 20"#),
+            "{projects}"
+        );
+        assert!(projects.contains(&format!(
+            r#""project_members"."member_id" = '{user}' AND "project_members"."member_id" IS NOT NULL"#
+        )), "{projects}");
+        assert!(
+            projects.contains(r#"ELSE 0 END)) AS "other_admin_exists""#),
+            "{projects}"
+        );
+        assert!(
+            projects.contains(r#"COUNT("project_members"."id") AS "total_members""#),
+            "{projects}"
+        );
+        let group_by = projects
+            .split("GROUP BY ")
+            .nth(1)
+            .expect("GROUP BY present");
+        assert_eq!(group_by.split(", ").count(), 16, "{projects}");
+        assert!(!projects.contains("ORDER BY"), "{projects}");
+
+        let workspaces = workspace_deactivate_scan_query(user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            workspaces.contains(r#""workspace_members"."role" = 20"#),
+            "{workspaces}"
+        );
+        assert!(
+            !workspaces.contains(r#""workspace_members"."member_id" IS NOT NULL"#),
+            "{workspaces}"
+        );
+        let group_by = workspaces
+            .split("GROUP BY ")
+            .nth(1)
+            .expect("GROUP BY present");
+        assert_eq!(group_by.split(", ").count(), 17, "{workspaces}");
+        assert!(!workspaces.contains("ORDER BY"), "{workspaces}");
+    }
+
+    #[test]
+    fn instance_queries_pin_null_arm_and_first_order() {
+        let user = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid");
+        let inst = uuid::Uuid::parse_str("22222222-3333-4444-5555-666666666666").expect("uuid");
+        let some = instance_admin_exists_query(user, Some(inst))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            some.contains(&format!(r#""instance_admins"."instance_id" = '{inst}'"#)),
+            "{some}"
+        );
+        assert!(
+            some.contains(&format!(r#""instance_admins"."user_id" = '{user}'"#)),
+            "{some}"
+        );
+        assert!(
+            some.contains(r#""instance_admins"."deleted_at" IS NULL"#),
+            "{some}"
+        );
+        let none = instance_admin_exists_query(user, None)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            none.contains(r#""instance_admins"."instance_id" IS NULL"#),
+            "{none}"
+        );
+        let first = instance_first_query()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            first.contains(r#""instances"."deleted_at" IS NULL"#),
+            "{first}"
+        );
+        assert!(
+            first.contains(r#"ORDER BY "instances"."created_at" DESC"#),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn email_availability_query_pins_exclude() {
+        let user = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid");
+        let sql = email_availability_query("n@x.io", user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""users"."email" = 'n@x.io'"#), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""users"."id" <> '{user}'"#)),
+            "{sql}"
+        );
+        assert!(!sql.contains("deleted_at"), "{sql}");
+    }
+
+    // -- Live reads -------------------------------------------------------------
+
+    async fn scratch_pool() -> Option<sqlx::PgPool> {
+        match std::env::var("DATABASE_URL") {
+            Ok(url) => Some(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .expect("connect to scratch DATABASE_URL"),
+            ),
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                None
+            }
+        }
+    }
+
+    async fn temp_table(pool: &sqlx::PgPool, table: &str) {
+        sqlx::query(&format!(
+            "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+        ))
+        .execute(pool)
+        .await
+        .expect("temp table");
+    }
+
+    fn live_uuid(tag: &str) -> uuid::Uuid {
+        uuid::Uuid::parse_str(&format!("11111111-2222-3333-4444-{tag}")).expect("fixed uuid")
+    }
+
+    /// Temp-table replay of the settings + instance-admin + scans reads:
+    /// fetch_user, invite count, last-workspace trio, instance trio,
+    /// availability, the deactivate scans and the asset-pk exists.
+    #[tokio::test]
+    async fn live_user_reads() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        for table in [
+            "users",
+            "workspaces",
+            "workspace_members",
+            "workspace_member_invites",
+            "instances",
+            "instance_admins",
+            "file_assets",
+            "project_members",
+        ] {
+            temp_table(&pool, table).await;
+        }
+        let (user, ws, member) = (
+            live_uuid("000000000001"),
+            live_uuid("aaaaaaaa0001"),
+            live_uuid("aaaaaaaa0002"),
+        );
+        sqlx::query(
+            "INSERT INTO users (id, username, email, display_name, first_name, last_name, \
+             avatar, created_at, updated_at, last_location, created_location, \
+             password, is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, is_password_reset_required, token, \
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
+             is_bot, user_timezone, is_email_valid, date_joined) \
+             VALUES ($1, 'ada', 'ada@x.io', 'Ada', 'Ada', 'L', '', now(), now(), '', '', \
+             'pbkdf2_sha256$600000$salt$hash', false, false, false, true, false, \
+             true, false, false, 'tok', '', '', 'email', '', false, 'UTC', false, now())",
+        )
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, slug, name, created_at) VALUES ($1, 'acme', 'Acme', now())",
+        )
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, is_active) \
+             VALUES ($1, $2, $3, true)",
+        )
+        .bind(member)
+        .bind(ws)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .expect("seed member");
+        sqlx::query(
+            "INSERT INTO workspace_member_invites (id, email, workspace_id) \
+             VALUES ($1, 'ada@x.io', $2)",
+        )
+        .bind(live_uuid("aaaaaaaa0003"))
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("seed invite");
+
+        let row = fetch_user(&pool, user).await.expect("fetch_user");
+        assert_eq!(row.username, "ada");
+        assert_eq!(row.email.as_deref(), Some("ada@x.io"));
+        assert!(matches!(
+            fetch_user(&pool, live_uuid("0000000000ff")).await,
+            Err(Denial::ObjectNotFound)
+        ));
+
+        let invite_query = workspace_member_invites::Entity::find()
+            .filter(workspace_member_invites::Column::Email.eq("ada@x.io"))
+            .filter(workspace_member_invites::Column::DeletedAt.is_null());
+        let count = invite_query
+            .count(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("invite count");
+        assert_eq!(count, 1);
+
+        let hit: Option<uuid::Uuid> = last_workspace_exists_query(user, ws)
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("exists");
+        assert_eq!(hit, Some(ws));
+        let row: Option<SettingsWorkspaceRow> = last_workspace_row_query(user, Some(ws), true)
+            .into_model::<SettingsWorkspaceRow>()
+            .one(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("fetch");
+        assert_eq!(row.map(|r| r.slug), Some("acme".to_owned()));
+        let row: Option<SettingsWorkspaceRow> = last_workspace_row_query(user, None, false)
+            .into_model::<SettingsWorkspaceRow>()
+            .one(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("fallback");
+        assert_eq!(row.map(|r| r.slug), Some("acme".to_owned()));
+
+        assert!(!email_taken(&pool, "ada@x.io", user)
+            .await
+            .expect("self excluded"));
+        let other = live_uuid("000000000002");
+        sqlx::query(
+            "INSERT INTO users (id, username, email, display_name, first_name, last_name, \
+             avatar, created_at, updated_at, last_location, created_location, \
+             password, is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, is_password_reset_required, token, \
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
+             is_bot, user_timezone, is_email_valid, date_joined) \
+             VALUES ($1, 'bob', 'bob@x.io', 'Bob', 'Bob', 'M', '', now(), now(), '', '', \
+             'pbkdf2_sha256$600000$salt$hash', false, false, false, true, false, \
+             true, false, false, 'tok', '', '', 'email', '', false, 'UTC', false, now())",
+        )
+        .bind(other)
+        .execute(&pool)
+        .await
+        .expect("seed other");
+        assert!(email_taken(&pool, "bob@x.io", user).await.expect("taken"));
+
+        let instance = live_uuid("aaaaaaaa0004");
+        sqlx::query("INSERT INTO instances (id) VALUES ($1)")
+            .bind(instance)
+            .execute(&pool)
+            .await
+            .expect("seed instance");
+        let found: Option<InstanceRow> = instance_first_query()
+            .into_model::<InstanceRow>()
+            .one(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("first");
+        assert_eq!(found.map(|r| r.id), Some(instance));
+        let admin: Option<uuid::Uuid> = instance_admin_exists_query(user, Some(instance))
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("admin");
+        assert!(admin.is_none());
+        let admin: Option<uuid::Uuid> = instance_admin_exists_query(user, None)
+            .into_tuple()
+            .one(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("admin null");
+        assert!(admin.is_none());
+
+        let pm_id = live_uuid("aaaaaaaa0005");
+        sqlx::query("INSERT INTO project_members (id, member_id, is_active) VALUES ($1, $2, true)")
+            .bind(pm_id)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .expect("seed pm");
+        let scans: Vec<DeactivateScanRow> = project_deactivate_scan_query(user)
+            .into_model::<DeactivateScanRow>()
+            .all(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("project scans");
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].id, pm_id);
+        assert_eq!(scans[0].other_admin_exists, 1);
+        assert_eq!(scans[0].total_members, 1);
+        let scans: Vec<DeactivateScanRow> = workspace_deactivate_scan_query(user)
+            .into_model::<DeactivateScanRow>()
+            .all(&pidash_db::pool::sea_orm_connection(&pool))
+            .await
+            .expect("workspace scans");
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].id, member);
+        assert_eq!(scans[0].other_admin_exists, 1);
+        assert_eq!(scans[0].total_members, 1);
+
+        let asset = live_uuid("aaaaaaaa0006");
+        sqlx::query("INSERT INTO file_assets (id) VALUES ($1)")
+            .bind(asset)
+            .execute(&pool)
+            .await
+            .expect("seed asset");
+        assert_eq!(
+            validate_asset_pk(&pool, &json!(asset.to_string()))
+                .await
+                .expect("asset exists"),
+            Some(asset)
+        );
     }
 
     // -- Email + token helpers --------------------------------------------------

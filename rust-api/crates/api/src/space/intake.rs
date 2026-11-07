@@ -2105,14 +2105,13 @@ async fn collection_create(
             // columns (`description=""`, `slug="triage"` from `save()`,
             // `is_triage=False`) are set here (foundation read-only).
             match pidash_services::domain::projects::states::add_triage(
-                pool,
+                &pidash_db::pool::sea_orm_connection(pool),
                 board.project_id,
                 board.workspace_id,
                 sequence,
                 actor.id,
                 now,
                 now,
-                pidash_services::domain::projects::states::TriageText::Short,
             )
             .await
             {

@@ -11,8 +11,9 @@
 //!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache]
 //!   (PIDASHCONV-1487), built by each fire handler from `REDIS_URL` —
 //!   the same buckets the HTTP plane and the Django worker use.
-//! * [`JobsMatcher`]: the single live [`PodRunnerMatcher`] shared
-//!   with api (SeaORM over the pool).
+//! * [`JobsMatcher`]: the live [`PodRunnerMatcher`]. Mirrors the api
+//!   crate's `LiveMatcher` arm for arm over the same services
+//!   [`guards`](pidash_services::runner_sessions::guards) helpers.
 //! * [`creator_universe`] + [`fetch_presence`]: the per-fire creator
 //!   universe (actor, issue creator, project lead, default assignee,
 //!   live assignees — the `handlers_actions::creator_universe` shape,
@@ -36,10 +37,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::assistant::models::has_secret;
+use pidash_db::entity::{assistant_user_llm_config, issues, projects};
+use pidash_db::orm_tx::into_sqlx;
+use pidash_db::pool::sea_orm_connection;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
 use pidash_services::dispatch::LlmProfile;
 use pidash_services::extensions::AssistantModelSeam;
@@ -124,12 +129,17 @@ pub(crate) async fn project_leads(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<(Option<Uuid>, Option<Uuid>), sqlx::Error> {
-    let row: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT "project_lead_id", "default_assignee_id" FROM "projects" WHERE "id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await?;
+    let conn = sea_orm_connection(pool);
+    let row: Option<(Option<Uuid>, Option<Uuid>)> = projects::Entity::find_by_id(project_id)
+        .select_only()
+        .columns([
+            projects::Column::ProjectLeadId,
+            projects::Column::DefaultAssigneeId,
+        ])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
     Ok(row.unwrap_or((None, None)))
 }
 
@@ -143,11 +153,14 @@ pub(crate) async fn creator_universe(
     actor_id: Option<Uuid>,
     issue_id: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let issue: Option<(Option<Uuid>, Option<Uuid>)> =
-        sqlx::query_as(r#"SELECT "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await?;
+    let conn = sea_orm_connection(pool);
+    let issue: Option<(Option<Uuid>, Option<Uuid>)> = issues::Entity::find_by_id(issue_id)
+        .select_only()
+        .columns([issues::Column::CreatedById, issues::Column::ProjectId])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
     let (issue_created_by_id, project_id) = match issue {
         Some((created_by_id, project_id)) => (created_by_id, project_id),
         None => (None, None),
@@ -156,6 +169,7 @@ pub(crate) async fn creator_universe(
         Some(project_id) => project_leads(pool, project_id).await?,
         None => (None, None),
     };
+    // raw-sql: awaits dispatch kernel (live assignee candidates with active/bot flags owned by orchestration dispatch).
     let assignees: Vec<(Uuid, bool, bool)> = sqlx::query_as(LIVE_ASSIGNEE_CANDIDATES_SQL)
         .bind(issue_id)
         .fetch_all(pool)
@@ -179,11 +193,18 @@ pub(crate) async fn fetch_presence(
     if user_ids.is_empty() {
         return Ok(presence);
     }
-    let rows: Vec<(Uuid, Option<Vec<u8>>)> =
-        sqlx::query_as(r#"SELECT "user_id", "api_key_encrypted" FROM "assistant_user_llm_config" WHERE "user_id" = ANY($1)"#)
-            .bind(user_ids)
-            .fetch_all(pool)
-            .await?;
+    let conn = sea_orm_connection(pool);
+    let rows: Vec<(Uuid, Option<Vec<u8>>)> = assistant_user_llm_config::Entity::find()
+        .filter(assistant_user_llm_config::Column::UserId.is_in(user_ids.to_vec()))
+        .select_only()
+        .columns([
+            assistant_user_llm_config::Column::UserId,
+            assistant_user_llm_config::Column::ApiKeyEncrypted,
+        ])
+        .into_tuple()
+        .all(&conn)
+        .await
+        .map_err(into_sqlx)?;
     for id in user_ids {
         presence.insert(*id, false);
     }
@@ -241,15 +262,6 @@ pub(crate) fn profile_fn(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Parse one statement with the Postgres dialect (the scan-suite
-    /// precedent): new SQL must at least parse offline.
-    fn parse(sql: &str) -> sqlparser::ast::Statement {
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
-            .expect("SQL parses")
-            .pop()
-            .expect("one statement")
-    }
 
     #[test]
     fn universe_orders_actor_first_deduped() {
@@ -366,19 +378,107 @@ mod tests {
     }
 
     #[test]
-    fn live_input_sql_parses() {
-        for sql in [
-            r#"SELECT "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#,
-            r#"SELECT "project_lead_id", "default_assignee_id" FROM "projects" WHERE "id" = $1"#,
-            r#"SELECT "user_id", "api_key_encrypted" FROM "assistant_user_llm_config" WHERE "user_id" = ANY($1)"#,
-            r#"SELECT "id", "name", "group" FROM "states" WHERE "deleted_at" IS NULL"#,
-            r#"SELECT "agent_executor", "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#,
-            r#"SELECT "default_agent_executor" FROM "projects" WHERE "id" = $1"#,
-        ] {
-            assert!(
-                matches!(parse(sql), sqlparser::ast::Statement::Query(_)),
-                "{sql}"
-            );
-        }
+    fn live_input_statements_pin_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let project_id = Uuid::from_u128(1);
+        let project_leads_sql = projects::Entity::find_by_id(project_id)
+            .select_only()
+            .columns([
+                projects::Column::ProjectLeadId,
+                projects::Column::DefaultAssigneeId,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            project_leads_sql.contains("\"projects\""),
+            "{project_leads_sql}"
+        );
+        assert!(
+            project_leads_sql.contains("\"project_lead_id\""),
+            "{project_leads_sql}"
+        );
+        assert!(
+            project_leads_sql.contains("\"default_assignee_id\""),
+            "{project_leads_sql}"
+        );
+
+        let issue_id = Uuid::from_u128(2);
+        let creator_sql = issues::Entity::find_by_id(issue_id)
+            .select_only()
+            .columns([issues::Column::CreatedById, issues::Column::ProjectId])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(creator_sql.contains("\"issues\""), "{creator_sql}");
+        assert!(creator_sql.contains("\"created_by_id\""), "{creator_sql}");
+        assert!(creator_sql.contains("\"project_id\""), "{creator_sql}");
+
+        let matcher_sql = issues::Entity::find_by_id(issue_id)
+            .select_only()
+            .columns([
+                issues::Column::AgentExecutor,
+                issues::Column::CreatedById,
+                issues::Column::ProjectId,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(matcher_sql.contains("\"agent_executor\""), "{matcher_sql}");
+
+        let default_exec_sql = projects::Entity::find_by_id(project_id)
+            .select_only()
+            .column(projects::Column::DefaultAgentExecutor)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            default_exec_sql.contains("\"default_agent_executor\""),
+            "{default_exec_sql}"
+        );
+
+        let presence_sql = assistant_user_llm_config::Entity::find()
+            .filter(assistant_user_llm_config::Column::UserId.is_in(vec![Uuid::from_u128(3)]))
+            .select_only()
+            .columns([
+                assistant_user_llm_config::Column::UserId,
+                assistant_user_llm_config::Column::ApiKeyEncrypted,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            presence_sql.contains("\"assistant_user_llm_config\""),
+            "{presence_sql}"
+        );
+        assert!(presence_sql.contains("\"user_id\""), "{presence_sql}");
+        assert!(presence_sql.contains("IN"), "{presence_sql}");
+    }
+
+    #[tokio::test]
+    async fn live_inputs_read_migrated_tables() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        // Missing rows narrow to empty without error.
+        let missing_project = Uuid::new_v4();
+        assert_eq!(
+            project_leads(&pool, missing_project)
+                .await
+                .expect("missing project"),
+            (None, None)
+        );
+        let empty = fetch_presence(&pool, &[]).await.expect("empty presence");
+        assert!(empty.is_empty());
+        let unknown = Uuid::new_v4();
+        let presence = fetch_presence(&pool, &[unknown])
+            .await
+            .expect("unknown presence");
+        assert_eq!(presence.get(&unknown), Some(&false));
+        let missing_universe = creator_universe(&pool, None, Uuid::new_v4())
+            .await
+            .expect("missing issue universe");
+        assert!(missing_universe.is_empty());
     }
 }

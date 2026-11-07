@@ -1288,9 +1288,14 @@ async fn sign_out(
         let now = Utc::now();
         let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
         let ip = forms::client_ip(forwarded, peer.as_deref());
-        identity::stamp_logout(pool, actor, ip.as_deref(), now)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        identity::stamp_logout(
+            &pidash_db::pool::sea_orm_connection(pool),
+            actor,
+            ip.as_deref(),
+            now,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
         // `logout()`: `Session.flush()` drops the presented row (this
         // route always reads the admin cookie); the middleware then
         // answers the cookie deletion because the session reads empty.
@@ -1773,7 +1778,7 @@ async fn apply_login_stamps(
 ) -> Result<(), Denial> {
     let rotated = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         *user_id,
         &identity::LoginStamps {
             // The license stamps never assign the medium (it keeps the
@@ -1818,7 +1823,7 @@ fn client_ip_ua(headers: &HeaderMap, peer: Option<&str>) -> (Option<String>, Opt
 /// `user_login` replay) so both success paths and that failure path
 /// match.
 async fn stamp_last_login(pool: &PgPool, user_id: &Uuid, now: DateTime<Utc>) -> Result<(), Denial> {
-    identity::stamp_last_login(pool, *user_id, now)
+    identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), *user_id, now)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2115,9 +2120,13 @@ async fn sign_in(State(state): State<AppState>, req: Request) -> Result<Response
                 if let Some(new_hash) =
                     pidash_auth::password::rehash_if_outdated(candidate, password_field)
                 {
-                    identity::rehash_password(pool, *id, &new_hash)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
+                    identity::rehash_password(
+                        &pidash_db::pool::sea_orm_connection(pool),
+                        *id,
+                        &new_hash,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
                     *password_field = new_hash;
                 }
             }

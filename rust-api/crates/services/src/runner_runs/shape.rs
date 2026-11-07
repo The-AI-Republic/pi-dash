@@ -1300,12 +1300,18 @@ mod tests {
             engine_paused_by_owner: false,
             engine_auto_pause_reason: "",
             engine_team_runs: false,
+            engine_sign_in_state: "never",
+            engine_credential_expires_at: None,
         };
         let runner = RunnerRow {
             id: "e39ef475-5212-4de8-a5d0-e5fe8fd01f7b",
             name: "r1",
             status: "online",
             host_label: "h",
+            is_engine: false,
+            engine_paused: false,
+            dispatch_paused: false,
+            machine_display_name: "h",
             provisioning: "manual",
             pod_dispatch: "pod_member",
             os: "linux",

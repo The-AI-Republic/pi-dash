@@ -102,6 +102,15 @@
   "Visibility": {
    "PRIVATE": 0,
    "type": "IntegerChoices (sole value)"
+  },
+  "EngineSignInState": {
+   "NEVER": "never",
+   "ACTIVE": "active",
+   "EXPIRING": "expiring",
+   "EXPIRED": "expired",
+   "SIGNED_OUT": "signed_out",
+   "REVOKED": "revoked",
+   "type": "TextChoices"
   }
  },
  "fixture_id": "D13-F1",
@@ -316,6 +325,43 @@
      "default": false,
      "name": "engine_team_runs",
      "type": "boolean"
+    },
+    {
+     "name": "engine_sign_in_state",
+     "type": "varchar(16)",
+     "choices": "EngineSignInState.choices",
+     "default": "'never'",
+     "max_length": 16
+    },
+    {
+     "name": "engine_credential_expires_at",
+     "type": "timestamptz",
+     "nullable": true
+    },
+    {
+     "name": "engine_state",
+     "type": "jsonb",
+     "blank": true,
+     "default": "{}"
+    },
+    {
+     "name": "engine_state_reported_at",
+     "type": "timestamptz",
+     "nullable": true
+    },
+    {
+     "name": "merged_into_id",
+     "type": "uuid FK",
+     "nullable": true,
+     "on_delete": "SET_NULL",
+     "related_name": "merged_from",
+     "to": "dev_machine.id"
+    },
+    {
+     "name": "merge_result",
+     "type": "jsonb",
+     "blank": true,
+     "default": "{}"
     },
     {
      "name": "last_seen_at",
@@ -767,10 +813,11 @@
    "runner_removed",
    "dev_machine_revoked",
    "self_revoked",
-   "user_revoke"
+   "user_revoke",
+   "dev_machine_merged"
   ],
   "REVOKE_REASON_MAX_LEN": 32,
-  "note": "frozenset at models.py:27-37; max len at :39. user_revoke is deliberately OUTSIDE the daemon synthesizer canonical set (cloud-only delete).",
+  "note": "frozenset at models.py:27-41; max len at :44. user_revoke is deliberately OUTSIDE the daemon synthesizer canonical set (cloud-only delete). dev_machine_merged is also outside the local-cleanup set (source daemon is gone).",
   "source": [
    "runner/models.py:27-39"
   ]

@@ -207,7 +207,9 @@ pub mod dev_machine {
     /// Default ordering (`Meta.ordering`, `:368`).
     pub const ORDERING: &[&str] = &["-last_seen_at", "-created_at"];
     /// Columns in Django field-definition order (`:338-364` plus the
-    /// engine-pause trio, migration `0034_engine_dispatch_fields`, #2903).
+    /// engine-pause trio, migration `0034_engine_dispatch_fields`, #2903,
+    /// and the #2910 machine-identity six, migration
+    /// `0036_engine_credential_machine_identity`).
     pub const COLUMNS: &[&str] = &[
         "id",
         "owner_id",
@@ -218,6 +220,12 @@ pub mod dev_machine {
         "engine_paused_by_owner",
         "engine_auto_pause_reason",
         "engine_team_runs",
+        "engine_sign_in_state",
+        "engine_credential_expires_at",
+        "engine_state",
+        "engine_state_reported_at",
+        "merged_into_id",
+        "merge_result",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -234,6 +242,12 @@ pub mod dev_machine {
         Some("false"),  // engine_paused_by_owner
         Some(""),       // engine_auto_pause_reason (EngineAutoPauseReason.NONE)
         Some("false"),  // engine_team_runs
+        Some("never"),  // engine_sign_in_state (EngineSignInState.NEVER)
+        None,           // engine_credential_expires_at
+        Some("{}"),     // engine_state (JSONField default=dict)
+        None,           // engine_state_reported_at
+        None,           // merged_into_id (SET_NULL)
+        Some("{}"),     // merge_result (JSONField default=dict)
         None,           // last_seen_at
         None,           // revoked_at
         None,           // created_at (auto_now_add)
@@ -736,14 +750,46 @@ pub mod enums {
         ("profile_unavailable", "Model profile unavailable"),
         ("engine_disabled", "Engine disabled on this instance"),
     ];
+    /// `EngineSignInState.NEVER` ("Never signed in", #2910).
+    pub const ENGINE_SIGN_IN_STATE_NEVER: &str = "never";
+    /// `EngineSignInState.ACTIVE` ("Signed in", #2910).
+    pub const ENGINE_SIGN_IN_STATE_ACTIVE: &str = "active";
+    /// `EngineSignInState.EXPIRING` ("Expiring soon", #2910).
+    pub const ENGINE_SIGN_IN_STATE_EXPIRING: &str = "expiring";
+    /// `EngineSignInState.EXPIRED` ("Expired", #2910).
+    pub const ENGINE_SIGN_IN_STATE_EXPIRED: &str = "expired";
+    /// `EngineSignInState.SIGNED_OUT` ("Signed out", #2910).
+    pub const ENGINE_SIGN_IN_STATE_SIGNED_OUT: &str = "signed_out";
+    /// `EngineSignInState.REVOKED` ("Revoked", #2910).
+    pub const ENGINE_SIGN_IN_STATE_REVOKED: &str = "revoked";
+    /// `EngineSignInState` values in declaration order.
+    pub const ENGINE_SIGN_IN_STATE_CHOICES: &[&str] = &[
+        "never",
+        "active",
+        "expiring",
+        "expired",
+        "signed_out",
+        "revoked",
+    ];
+    /// `EngineSignInState.choices`: `(value, label)` pairs.
+    pub const ENGINE_SIGN_IN_STATE_LABELS: &[(&str, &str)] = &[
+        ("never", "Never signed in"),
+        ("active", "Signed in"),
+        ("expiring", "Expiring soon"),
+        ("expired", "Expired"),
+        ("signed_out", "Signed out"),
+        ("revoked", "Revoked"),
+    ];
 }
 
-/// `KNOWN_REVOKE_REASONS` (`:27-37`) + `_REVOKE_REASON_MAX_LEN` (`:39`).
+/// `KNOWN_REVOKE_REASONS` (`:27-41`) + `_REVOKE_REASON_MAX_LEN` (`:44`).
 pub mod revoke_reasons {
-    /// Canonical `Runner.revoke` reason set (`:27-37`), in source-literal
+    /// Canonical `Runner.revoke` reason set (`:27-41`), in source-literal
     /// order (Python holds a `frozenset`, so order is cosmetic here).
     /// `user_revoke` is deliberately outside the daemon synthesizer's
     /// canonical set — it is the cloud-only delete reason.
+    /// `dev_machine_merged` is also outside the local-cleanup set (the
+    /// source daemon is gone).
     pub const KNOWN_REVOKE_REASONS: &[&str] = &[
         "manual_revoke",
         "membership_revoked",
@@ -752,8 +798,9 @@ pub mod revoke_reasons {
         "dev_machine_revoked",
         "self_revoked",
         "user_revoke",
+        "dev_machine_merged",
     ];
-    /// `_REVOKE_REASON_MAX_LEN` (`:39`): matches `RunnerSession` /
+    /// `_REVOKE_REASON_MAX_LEN` (`:44`): matches `RunnerSession` /
     /// `Runner.revoked_reason` `max_length`.
     pub const REVOKE_REASON_MAX_LEN: usize = 32;
 }
@@ -1127,6 +1174,20 @@ mod tests {
                 enums["EngineAutoPauseReason"][member].as_str().unwrap(),
                 value
             );
+        }
+        assert_eq!(
+            enums["EngineSignInState"]["type"].as_str().unwrap(),
+            "TextChoices"
+        );
+        for (member, value) in [
+            ("NEVER", enums::ENGINE_SIGN_IN_STATE_NEVER),
+            ("ACTIVE", enums::ENGINE_SIGN_IN_STATE_ACTIVE),
+            ("EXPIRING", enums::ENGINE_SIGN_IN_STATE_EXPIRING),
+            ("EXPIRED", enums::ENGINE_SIGN_IN_STATE_EXPIRED),
+            ("SIGNED_OUT", enums::ENGINE_SIGN_IN_STATE_SIGNED_OUT),
+            ("REVOKED", enums::ENGINE_SIGN_IN_STATE_REVOKED),
+        ] {
+            assert_eq!(enums["EngineSignInState"][member].as_str().unwrap(), value);
         }
         assert_eq!(enums["Visibility"]["PRIVATE"].as_i64().unwrap(), 0);
         assert_eq!(enums::VISIBILITY_PRIVATE, 0);

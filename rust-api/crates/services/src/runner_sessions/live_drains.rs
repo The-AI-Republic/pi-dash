@@ -58,8 +58,8 @@ use uuid::Uuid;
 
 use pidash_db::config::RunnerSettings;
 use pidash_db::entity::{agent_run, dev_machine, pod, runner};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
-use pidash_db::runner_sessions::models::runner_session::runner_session_from_row;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
 use pidash_db::runner_sessions::RunnerSession;
 
@@ -134,15 +134,12 @@ impl PubsubStore for PoolPubsubStore {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(pubsub_kernel::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(OutboxError::Db)?;
-        rows.iter()
-            .map(runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::Db)
+        pubsub_kernel::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| OutboxError::Db(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(

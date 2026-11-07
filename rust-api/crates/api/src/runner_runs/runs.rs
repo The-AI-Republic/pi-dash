@@ -50,16 +50,22 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+use sea_orm::sea_query::{Alias, Condition, Expr, Func, Query as SqlQuery, SelectStatement};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait, RelationTrait,
+};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::runner::{can_view_runner, RunnerFacts};
 use pidash_auth::permissions::ROLE_ADMIN;
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::agent_run;
-use pidash_db::runner_runs::event;
-use pidash_db::runner_runs::tool_call;
 use pidash_db::runner_runs::{AgentRun, AgentRunEvent, AgentRunToolCall};
 use pidash_services::runner_enroll::serializers::shapes::PodMiniRow;
 use pidash_services::runner_runs::finalization;
@@ -289,12 +295,13 @@ pub fn total_pages(total_count: i64, per_page: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// SQL builders (Django compiler shapes from the FX-RUN-08 `list.sql`,
-// `%s` → `$N`; joins/aliases mirror the fixture)
+// Statements (SeaORM builders; joins and predicates mirror the FX-RUN-08
+// `list.sql` capture)
 // ---------------------------------------------------------------------------
 
 /// `"agent_run"."<col>", ...` in [`agent_run::COLUMNS`] order: the
-/// positional run-image prefix every run-row query shares.
+/// positional run-image prefix the `app_scheduler` binding-runs list
+/// still spells out (it decodes with [`decode_run`]).
 pub fn run_select_list() -> String {
     agent_run::COLUMNS
         .iter()
@@ -303,268 +310,401 @@ pub fn run_select_list() -> String {
         .join(", ")
 }
 
-/// List joins: the involvement OR's three `LEFT OUTER` legs plus the
-/// `select_related("pod__project")` inner pair (`runs.py:157-182`).
-/// No `pod.deleted_at` filter: forward-FK joins never carry the related
-/// model's default-manager scope.
-pub const LIST_JOINS: &str = concat!(
-    r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") "#,
-    r#"LEFT OUTER JOIN "issues" ON ("agent_run"."work_item_id" = "issues"."id") "#,
-    r#"LEFT OUTER JOIN "issue_assignees" ON ("issues"."id" = "issue_assignees"."issue_id") "#,
-    r#"INNER JOIN "pod" ON ("agent_run"."pod_id" = "pod"."id") "#,
-    r#"INNER JOIN "projects" ON ("pod"."project_id" = "projects"."id")"#,
-);
+/// `agent_run.work_item_id -> issues.id` (trimmed from the entity).
+fn work_item_rel() -> sea_orm::RelationDef {
+    orm::agent_run::Entity::belongs_to(orm::issues::Entity)
+        .from(orm::agent_run::Column::WorkItemId)
+        .to(orm::issues::Column::Id)
+        .into()
+}
 
-/// List `WHERE`: member-workspace scope AND the five-clause involvement
-/// OR AND the private-runner gate (`runs.py:170-198`), then the optional
-/// workspace / project scopes (`:200-213`) and the scheduler-binding
-/// scope (`:215-232`). Params `$1..=$8` are the
-/// requester id (repeated); scope params follow in argument order, then
-/// `LIMIT` / `OFFSET` for the page query. `role = 20` is the admin
-/// literal (`ROLE_ADMIN`); the member subqueries carry no `is_active`
-/// filter (the view reads `WorkspaceMember.objects` directly — only the
-/// `is_workspace_member` / `workspace_role` helpers add it).
-pub fn list_where(
-    has_workspace_scope: bool,
-    has_project_scope: bool,
-    has_scheduler_binding_scope: bool,
-) -> String {
-    let mut next_param = 9;
-    let mut extra = String::new();
-    if has_workspace_scope {
-        extra.push_str(&format!(
-            r#" AND "agent_run"."workspace_id" = ${next_param}::uuid"#
-        ));
-        next_param += 1;
+/// `agent_run.pod_id -> pod.id` (trimmed from the entity).
+fn pod_rel() -> sea_orm::RelationDef {
+    orm::agent_run::Entity::belongs_to(orm::pod::Entity)
+        .from(orm::agent_run::Column::PodId)
+        .to(orm::pod::Column::Id)
+        .into()
+}
+
+/// `agent_run.scheduler_binding_id -> scheduler_bindings.id` (trimmed
+/// from the entity, which keeps only the `last_run_id` edge).
+fn scheduler_binding_rel() -> sea_orm::RelationDef {
+    orm::agent_run::Entity::belongs_to(orm::scheduler_bindings::Entity)
+        .from(orm::agent_run::Column::SchedulerBindingId)
+        .to(orm::scheduler_bindings::Column::Id)
+        .into()
+}
+
+/// The list scopes (`runs.py:200-232`): the raw `?workspace=` /
+/// `?project=` strings (cast to `uuid` by Postgres, so invalid text
+/// errors like Django's `ValidationError` — a 500 either way) and the
+/// pre-validated `?scheduler_binding=` id (bound as a UUID: no cast,
+/// which would 500 raw-but-valid text forms Django accepts).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListScopes {
+    pub workspace: Option<String>,
+    pub project: Option<String>,
+    pub scheduler_binding: Option<Uuid>,
+}
+
+/// The member-workspace subquery (`U0`): the requester's live
+/// memberships, admin-only when `admin_only` (`role = 20`). No
+/// `is_active` filter: the view reads `WorkspaceMember.objects`
+/// directly — only the `is_workspace_member` / `workspace_role` helpers
+/// add it.
+fn member_workspaces(actor_id: Uuid, admin_only: bool) -> SelectStatement {
+    use orm::workspace_members::{Column, Entity};
+    let mut query = SqlQuery::select();
+    query
+        .column((Entity, Column::WorkspaceId))
+        .from(Entity)
+        .and_where(Expr::col((Entity, Column::DeletedAt)).is_null())
+        .and_where(Expr::col((Entity, Column::MemberId)).eq(actor_id));
+    if admin_only {
+        query.and_where(Expr::col((Entity, Column::Role)).eq(ROLE_ADMIN as i16));
     }
-    if has_project_scope {
-        extra.push_str(&format!(r#" AND "pod"."project_id" = ${next_param}::uuid"#));
-        next_param += 1;
-    }
-    if has_scheduler_binding_scope {
-        // The value is pre-validated (`uuid.UUID`, `:223-231`) and bound
-        // as a UUID: no `::uuid` cast, which would 500 raw-but-valid
-        // text forms (`{...}`, `urn:uuid:...`) Django accepts.
-        extra.push_str(&format!(
-            r#" AND "agent_run"."scheduler_binding_id" = ${next_param}"#
-        ));
-    }
-    format!(
-        concat!(
-            r#"("agent_run"."workspace_id" IN "#,
-            r#"(SELECT U0."workspace_id" FROM "workspace_members" U0 "#,
-            r#"WHERE (U0."deleted_at" IS NULL AND U0."member_id" = $1)) "#,
-            r#"AND ("agent_run"."created_by_id" = $2 OR "runner"."owner_id" = $3 "#,
-            r#"OR "issues"."created_by_id" = $4 "#,
-            r#"OR ("issue_assignees"."assignee_id" = $5 AND "issue_assignees"."deleted_at" IS NULL) "#,
-            r#"OR "agent_run"."workspace_id" IN "#,
-            r#"(SELECT U0."workspace_id" FROM "workspace_members" U0 "#,
-            r#"WHERE (U0."deleted_at" IS NULL AND U0."member_id" = $6 AND U0."role" = 20))) "#,
-            r#"AND ("agent_run"."runner_id" IS NULL OR "runner"."owner_id" = $7 "#,
-            r#"OR "agent_run"."created_by_id" = $8){extra})"#,
-        ),
-        extra = extra,
-    )
+    query.take()
+}
+
+/// A raw scope string compared through a `uuid` cast, like Django's
+/// `filter(workspace_id=<str>)` over the ORM (`$N::uuid`).
+fn uuid_cast(raw: &str) -> sea_orm::sea_query::SimpleExpr {
+    Expr::val(raw.to_owned()).cast_as(Alias::new("uuid"))
+}
+
+/// The list `FROM` + `WHERE` (`runs.py:157-232`): the involvement OR's
+/// three `LEFT JOIN` legs plus the `select_related("pod__project")`
+/// inner pair (no `pod.deleted_at` filter: forward-FK joins never carry
+/// the related model's default-manager scope), then the
+/// member-workspace scope AND the five-clause involvement OR AND the
+/// private-runner gate, then the optional scopes.
+pub fn list_base_select(
+    actor_id: Uuid,
+    scopes: &ListScopes,
+) -> sea_orm::Select<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity, Relation};
+    let involvement = Condition::any()
+        .add(Column::CreatedById.eq(actor_id))
+        .add(orm::runner::Column::OwnerId.eq(actor_id))
+        .add(orm::issues::Column::CreatedById.eq(actor_id))
+        .add(
+            Condition::all()
+                .add(orm::issue_assignees::Column::AssigneeId.eq(actor_id))
+                .add(orm::issue_assignees::Column::DeletedAt.is_null()),
+        )
+        .add(Column::WorkspaceId.in_subquery(member_workspaces(actor_id, true)));
+    let private_runner_gate = Condition::any()
+        .add(Column::RunnerId.is_null())
+        .add(orm::runner::Column::OwnerId.eq(actor_id))
+        .add(Column::CreatedById.eq(actor_id));
+    Entity::find()
+        .join(JoinType::LeftJoin, Relation::Runner.def())
+        .join(JoinType::LeftJoin, work_item_rel())
+        .join(
+            JoinType::LeftJoin,
+            orm::issues::Relation::IssueAssignees.def(),
+        )
+        .join(JoinType::InnerJoin, pod_rel())
+        .join(JoinType::InnerJoin, orm::pod::Relation::Projects.def())
+        .filter(Column::WorkspaceId.in_subquery(member_workspaces(actor_id, false)))
+        .filter(involvement)
+        .filter(private_runner_gate)
+        .apply_if(scopes.workspace.as_deref(), |select, raw| {
+            select.filter(Expr::col((Entity, Column::WorkspaceId)).eq(uuid_cast(raw)))
+        })
+        .apply_if(scopes.project.as_deref(), |select, raw| {
+            select.filter(
+                Expr::col((orm::pod::Entity, orm::pod::Column::ProjectId)).eq(uuid_cast(raw)),
+            )
+        })
+        .apply_if(scopes.scheduler_binding, |select, binding_id| {
+            select.filter(Column::SchedulerBindingId.eq(binding_id))
+        })
 }
 
 /// List count (`runs.py:241`): Django counts `DISTINCT` full rows over
 /// the trimmed (LEFT-only) joins; `COUNT(DISTINCT id)` over the same
 /// `WHERE` is result-identical (`id` is the PK; the pod/project inner
-/// pair is 1:1 and fans nothing out). Binds: `$1..=$8` requester, then
-/// the raw scope strings in argument order (`::uuid` cast: invalid text
-/// errors like Django's `ValidationError`, a 500 either way), then the
-/// pre-validated binding UUID.
-pub fn list_count_sql(
-    has_workspace_scope: bool,
-    has_project_scope: bool,
-    has_scheduler_binding_scope: bool,
-) -> String {
-    format!(
-        r#"SELECT COUNT(DISTINCT "agent_run"."id") FROM "agent_run" {joins} WHERE {where_}"#,
-        joins = LIST_JOINS,
-        where_ = list_where(
-            has_workspace_scope,
-            has_project_scope,
-            has_scheduler_binding_scope
-        ),
-    )
+/// pair is 1:1 and fans nothing out).
+pub fn list_count_select(
+    actor_id: Uuid,
+    scopes: &ListScopes,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<i64>> {
+    use orm::agent_run::{Column, Entity};
+    list_base_select(actor_id, scopes)
+        .select_only()
+        .expr_as(
+            Func::count_distinct(Expr::col((Entity, Column::Id))),
+            "total_count",
+        )
+        .into_tuple::<i64>()
+}
+
+/// One list page row: the full run image plus the pod-mini columns.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct RunPageRow {
+    #[sea_orm(nested)]
+    pub run: orm::agent_run::Model,
+    pub mini_id: Uuid,
+    pub mini_name: String,
+    pub mini_is_default: bool,
+    pub mini_project_id: Uuid,
+    pub mini_project_identifier: String,
 }
 
 /// List page (`runs.py:240-244`): `DISTINCT` run image plus the pod-mini
-/// columns, `-created_at`, `LIMIT` / `OFFSET` bound last.
-pub fn list_page_sql(
-    has_workspace_scope: bool,
-    has_project_scope: bool,
-    has_scheduler_binding_scope: bool,
-) -> String {
-    let mut next_param = 9
-        + usize::from(has_workspace_scope)
-        + usize::from(has_project_scope)
-        + usize::from(has_scheduler_binding_scope);
-    let limit_param = next_param;
-    next_param += 1;
-    let offset_param = next_param;
-    format!(
-        concat!(
-            r#"SELECT DISTINCT {runs}, "pod"."id" AS "mini_id", "#,
-            r#""pod"."name" AS "mini_name", "#,
-            r#""pod"."is_default" AS "mini_is_default", "#,
-            r#""pod"."project_id" AS "mini_project_id", "#,
-            r#""projects"."identifier" AS "mini_project_identifier" "#,
-            r#"FROM "agent_run" {joins} WHERE {where_} "#,
-            r#"ORDER BY "agent_run"."created_at" DESC LIMIT ${limit} OFFSET ${offset}"#,
-        ),
-        runs = run_select_list(),
-        joins = LIST_JOINS,
-        where_ = list_where(
-            has_workspace_scope,
-            has_project_scope,
-            has_scheduler_binding_scope
-        ),
-        limit = limit_param,
-        offset = offset_param,
-    )
+/// columns, `-created_at`, `LIMIT` / `OFFSET`.
+pub fn list_page_select(
+    actor_id: Uuid,
+    scopes: &ListScopes,
+    limit: u64,
+    offset: u64,
+) -> sea_orm::Selector<sea_orm::SelectModel<RunPageRow>> {
+    use orm::agent_run::Column;
+    list_base_select(actor_id, scopes)
+        .distinct()
+        .column_as(orm::pod::Column::Id, "mini_id")
+        .column_as(orm::pod::Column::Name, "mini_name")
+        .column_as(orm::pod::Column::IsDefault, "mini_is_default")
+        .column_as(orm::pod::Column::ProjectId, "mini_project_id")
+        .column_as(orm::projects::Column::Identifier, "mini_project_identifier")
+        .order_by_desc(Column::CreatedAt)
+        .limit(limit)
+        .offset(offset)
+        .into_model::<RunPageRow>()
 }
 
 /// `prefetch_related("tool_calls")` (`runs.py:180`): one query, no
-/// `ORDER BY` (the model carries no `Meta.ordering`). Param: `$1` the
-/// page's run ids.
-pub fn tool_calls_for_runs_sql() -> String {
-    let columns = tool_call::COLUMNS
-        .iter()
-        .map(|column| format!(r#""agent_run_tool_call"."{column}""#))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        r#"SELECT {columns} FROM "agent_run_tool_call" WHERE "agent_run_tool_call"."agent_run_id" = ANY($1)"#,
-        columns = columns,
-    )
+/// `ORDER BY` (the model carries no `Meta.ordering`).
+pub fn tool_calls_for_runs_select(
+    run_ids: &[Uuid],
+) -> sea_orm::Select<orm::agent_run_tool_call::Entity> {
+    use orm::agent_run_tool_call::{Column, Entity};
+    Entity::find().filter(Column::AgentRunId.is_in(run_ids.iter().copied()))
+}
+
+/// Detail / cancel / release-pin lookup row: the run image plus the
+/// guard facts (`None` where a `LEFT JOIN` leg missed).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct GuardedRow {
+    #[sea_orm(nested)]
+    pub run: orm::agent_run::Model,
+    pub gate_runner_owner_id: Option<Uuid>,
+    pub gate_runner_visibility: Option<i16>,
+    pub gate_work_item_id: Option<Uuid>,
+    pub gate_work_item_created_by_id: Option<Uuid>,
+    pub gate_binding_id: Option<Uuid>,
+    pub gate_binding_project_id: Option<Uuid>,
 }
 
 /// Detail / cancel / release-pin lookup: the run image plus the guard
 /// facts (`select_related("runner", "work_item")` plus the binding join
 /// the detail view spells `scheduler_binding__scheduler`, `runs.py:567`).
-/// Param: `$1` the run id.
-pub fn run_detail_sql() -> String {
-    format!(
-        concat!(
-            r#"SELECT {runs}, "#,
-            r#""runner"."owner_id" AS "gate_runner_owner_id", "#,
-            r#""runner"."visibility" AS "gate_runner_visibility", "#,
-            r#""issues"."id" AS "gate_work_item_id", "#,
-            r#""issues"."created_by_id" AS "gate_work_item_created_by_id", "#,
-            r#""scheduler_bindings"."id" AS "gate_binding_id", "#,
-            r#""scheduler_bindings"."project_id" AS "gate_binding_project_id" "#,
-            r#"FROM "agent_run" "#,
-            r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") "#,
-            r#"LEFT OUTER JOIN "issues" ON ("agent_run"."work_item_id" = "issues"."id") "#,
-            // No `deleted_at` scope: the FK resolves through the base
-            // manager, so a soft-deleted binding still joins
-            // (`serializers.py:278-280`).
-            r#"LEFT OUTER JOIN "scheduler_bindings" ON ("agent_run"."scheduler_binding_id" = "scheduler_bindings"."id") "#,
-            r#"WHERE "agent_run"."id" = $1 LIMIT 1"#,
-        ),
-        runs = run_select_list(),
-    )
+/// No `deleted_at` scope on the binding leg: the FK resolves through the
+/// base manager, so a soft-deleted binding still joins
+/// (`serializers.py:278-280`).
+pub fn run_detail_select(run_id: Uuid) -> sea_orm::Selector<sea_orm::SelectModel<GuardedRow>> {
+    use orm::agent_run::{Column, Entity, Relation};
+    Entity::find()
+        .column_as(orm::runner::Column::OwnerId, "gate_runner_owner_id")
+        .column_as(orm::runner::Column::Visibility, "gate_runner_visibility")
+        .column_as(orm::issues::Column::Id, "gate_work_item_id")
+        .column_as(
+            orm::issues::Column::CreatedById,
+            "gate_work_item_created_by_id",
+        )
+        .column_as(orm::scheduler_bindings::Column::Id, "gate_binding_id")
+        .column_as(
+            orm::scheduler_bindings::Column::ProjectId,
+            "gate_binding_project_id",
+        )
+        .join(JoinType::LeftJoin, Relation::Runner.def())
+        .join(JoinType::LeftJoin, work_item_rel())
+        .join(JoinType::LeftJoin, scheduler_binding_rel())
+        .filter(Column::Id.eq(run_id))
+        .limit(1)
+        .into_model::<GuardedRow>()
 }
 
 /// `workspace_role` (`core/permissions.py:37-46`): the live active role,
-/// or no row. Params: `$1` workspace, `$2` member.
-pub fn membership_role_sql() -> String {
-    r#"SELECT "workspace_members"."role" FROM "workspace_members" WHERE ("workspace_members"."workspace_id" = $1 AND "workspace_members"."member_id" = $2 AND "workspace_members"."deleted_at" IS NULL AND "workspace_members"."is_active") LIMIT 1"#.to_owned()
+/// or no row.
+pub fn membership_role_select(
+    workspace_id: Uuid,
+    member_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<i16>> {
+    use orm::workspace_members::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::Role)
+        .filter(Column::WorkspaceId.eq(workspace_id))
+        .filter(Column::MemberId.eq(member_id))
+        .filter(Column::DeletedAt.is_null())
+        .filter(Column::IsActive.eq(true))
+        .limit(1)
+        .into_tuple::<i16>()
 }
 
 /// Live through-model assignee check (`runs.py:115`): the default
 /// manager excludes soft-deleted rows, so un-assignment withdraws the
-/// grant. Params: `$1` issue, `$2` assignee.
-pub fn live_assignee_exists_sql() -> String {
-    r#"SELECT EXISTS(SELECT 1 FROM "issue_assignees" WHERE ("issue_assignees"."issue_id" = $1 AND "issue_assignees"."assignee_id" = $2 AND "issue_assignees"."deleted_at" IS NULL))"#.to_owned()
+/// grant.
+pub fn live_assignee_select(
+    issue_id: Uuid,
+    assignee_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::issue_assignees::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::IssueId.eq(issue_id))
+        .filter(Column::AssigneeId.eq(assignee_id))
+        .filter(Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<Uuid>()
 }
 
 /// Binding-project standing (`runs.py:126-130`, PDASHOSS01-223):
 /// `ProjectMember.objects.filter(project_id, member, is_active)` — the
-/// default manager, so soft-deleted rows do not count. Params: `$1`
-/// project, `$2` member.
-pub fn scheduler_project_member_exists_sql() -> String {
-    r#"SELECT EXISTS(SELECT 1 FROM "project_members" WHERE ("project_members"."project_id" = $1 AND "project_members"."member_id" = $2 AND "project_members"."deleted_at" IS NULL AND "project_members"."is_active"))"#.to_owned()
+/// default manager, so soft-deleted rows do not count.
+pub fn scheduler_project_member_select(
+    project_id: Uuid,
+    member_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::project_members::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::ProjectId.eq(project_id))
+        .filter(Column::MemberId.eq(member_id))
+        .filter(Column::DeletedAt.is_null())
+        .filter(Column::IsActive.eq(true))
+        .limit(1)
+        .into_tuple::<Uuid>()
+}
+
+/// One `scheduler_binding_detail` row ([`binding_details_select`]).
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct BindingDetailRow {
+    pub id: Uuid,
+    pub scheduler_name: String,
+    pub scheduler_slug: String,
+    pub project_id: Option<Uuid>,
 }
 
 /// `scheduler_binding_detail` prefetch (`serializers.py:275-289`): one
 /// query for the page's bindings, mirroring
 /// `select_related("scheduler_binding__scheduler")`. Neither side
 /// carries a `deleted_at` scope (base-manager FKs on both legs), and the
-/// scheduler leg is an inner join (non-nullable FK). Param: `$1` the
-/// binding ids.
-pub fn binding_details_for_runs_sql() -> String {
-    r#"SELECT "scheduler_bindings"."id", "schedulers"."name", "schedulers"."slug", "scheduler_bindings"."project_id" FROM "scheduler_bindings" INNER JOIN "schedulers" ON ("scheduler_bindings"."scheduler_id" = "schedulers"."id") WHERE "scheduler_bindings"."id" = ANY($1)"#.to_owned()
+/// scheduler leg is an inner join (non-nullable FK).
+pub fn binding_details_select(
+    binding_ids: &[Uuid],
+) -> sea_orm::Selector<sea_orm::SelectModel<BindingDetailRow>> {
+    use orm::scheduler_bindings::{Column, Entity, Relation};
+    Entity::find()
+        .select_only()
+        .columns([Column::Id, Column::ProjectId])
+        .column_as(orm::schedulers::Column::Name, "scheduler_name")
+        .column_as(orm::schedulers::Column::Slug, "scheduler_slug")
+        .join(JoinType::InnerJoin, Relation::Schedulers.def())
+        .filter(Column::Id.is_in(binding_ids.iter().copied()))
+        .into_model::<BindingDetailRow>()
 }
 
 /// Issue lookup for the issue-bound arms (`Issue.all_objects`, no
-/// soft-delete scope, `runs.py:365/437/503`). Param: `$1` the issue id.
-pub fn issue_lookup_sql() -> String {
-    r#"SELECT "issues"."id", "issues"."workspace_id" FROM "issues" WHERE "issues"."id" = $1 LIMIT 1"#.to_owned()
+/// soft-delete scope, `runs.py:365/437/503`): `(id, workspace_id)`.
+pub fn issue_lookup_select(
+    issue_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, Uuid)>> {
+    use orm::issues::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .columns([Column::Id, Column::WorkspaceId])
+        .filter(Column::Id.eq(issue_id))
+        .limit(1)
+        .into_tuple::<(Uuid, Uuid)>()
+}
+
+/// One pod-mini row ([`pod_mini_select`]).
+#[derive(Debug, Clone, PartialEq, Eq, FromQueryResult)]
+pub struct PodMiniDbRow {
+    pub id: Uuid,
+    pub name: String,
+    pub is_default: bool,
+    pub project_id: Uuid,
+    pub project_identifier: String,
 }
 
 /// Pod-mini columns for one pod (`pod_detail`, no deleted scope —
-/// forward joins never filter). Param: `$1` the pod id.
-pub fn pod_mini_sql() -> String {
-    r#"SELECT "pod"."id", "pod"."name", "pod"."is_default", "pod"."project_id", "projects"."identifier" FROM "pod" INNER JOIN "projects" ON ("pod"."project_id" = "projects"."id") WHERE "pod"."id" = $1 LIMIT 1"#.to_owned()
+/// forward joins never filter).
+pub fn pod_mini_select(pod_id: Uuid) -> sea_orm::Selector<sea_orm::SelectModel<PodMiniDbRow>> {
+    use orm::pod::{Column, Entity, Relation};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::Name,
+            Column::IsDefault,
+            Column::ProjectId,
+        ])
+        .column_as(orm::projects::Column::Identifier, "project_identifier")
+        .join(JoinType::InnerJoin, Relation::Projects.def())
+        .filter(Column::Id.eq(pod_id))
+        .limit(1)
+        .into_model::<PodMiniDbRow>()
 }
 
 /// `include_events` (`runs.py:540`): `ORDER BY seq`, first 500.
-/// Param: `$1` the run id.
-pub fn run_events_sql() -> String {
-    let columns = event::COLUMNS
-        .iter()
-        .map(|column| format!(r#""agent_run_event"."{column}""#))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        r#"SELECT {columns} FROM "agent_run_event" WHERE "agent_run_event"."agent_run_id" = $1 ORDER BY "agent_run_event"."seq" ASC LIMIT 500"#,
-        columns = columns,
-    )
+pub fn run_events_select(run_id: Uuid) -> sea_orm::Select<orm::agent_run_event::Entity> {
+    use orm::agent_run_event::{Column, Entity};
+    Entity::find()
+        .filter(Column::AgentRunId.eq(run_id))
+        .order_by_asc(Column::Seq)
+        .limit(500)
 }
 
 /// Cloud fast-path stamp (`runs.py:562-564`): single-statement
-/// first-writer check. Params: `$1` now, `$2` reason, `$3` id,
-/// `$4` `running`.
-pub fn cloud_fast_stamp_sql() -> String {
-    r#"UPDATE "agent_run" SET "cancel_requested_at" = $1, "cancel_reason" = $2 WHERE ("agent_run"."id" = $3 AND "agent_run"."status" = $4 AND "agent_run"."cancel_requested_at" IS NULL)"#.to_owned()
+/// first-writer check.
+pub fn cloud_fast_stamp_statement(
+    now: chrono::DateTime<Utc>,
+    reason: &str,
+    run_id: Uuid,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::CancelRequestedAt, Expr::value(now))
+        .col_expr(Column::CancelReason, Expr::value(reason.to_owned()))
+        .filter(Column::Id.eq(run_id))
+        .filter(Column::Status.eq(AgentRunStatus::Running.value()))
+        .filter(Column::CancelRequestedAt.is_null())
 }
 
 /// Row lock for the cancel / release-pin branches
-/// (`select_for_update().filter(id).first()`, `runs.py:569/669`).
-/// Param: `$1` the run id.
-pub fn lock_run_sql() -> String {
-    format!(
-        r#"SELECT {runs} FROM "agent_run" WHERE "agent_run"."id" = $1 LIMIT 1 FOR UPDATE"#,
-        runs = run_select_list(),
-    )
+/// (`select_for_update().filter(id).first()`, `runs.py:569/669`): the
+/// full row.
+pub fn lock_run_select(run_id: Uuid) -> sea_orm::Select<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .filter(Column::Id.eq(run_id))
+        .limit(1)
+        .lock_exclusive()
 }
 
 /// Cloud-duplicate stamp (`locked.save(update_fields=[...])`,
-/// `runs.py:588-591`). Params: `$1` now, `$2` reason, `$3` id.
-pub fn cloud_dup_stamp_sql() -> String {
-    r#"UPDATE "agent_run" SET "cancel_requested_at" = $1, "cancel_reason" = $2 WHERE "agent_run"."id" = $3"#.to_owned()
+/// `runs.py:588-591`).
+pub fn cloud_dup_stamp_statement(
+    now: chrono::DateTime<Utc>,
+    reason: &str,
+    run_id: Uuid,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    Entity::update_many()
+        .col_expr(Column::CancelRequestedAt, Expr::value(now))
+        .col_expr(Column::CancelReason, Expr::value(reason.to_owned()))
+        .filter(Column::Id.eq(run_id))
 }
 
-/// Expected `SET` order for the cancel finalize (`finalize_agent_run`
-/// base four plus `runs.py:617-623` extras in dict order). The live
-/// bind below is positional; a mismatch fails loudly instead of
-/// binding wrong (the L6a sweeps precedent).
-pub const CANCEL_FINALIZE_COLUMNS: [&str; 7] = [
-    "status",
-    "ended_at",
-    "terminal_hooks_applied_at",
-    "terminal_capacity_released_at",
-    "cancel_requested_at",
-    "cancel_reason",
-    "error_details",
-];
-
 // ---------------------------------------------------------------------------
-// Row decoding (positional run image à la the L6a sweeps precedent: the
-// `SELECT` lists [`agent_run::COLUMNS`] first, extras decode by name)
+// Row decoding: entity models into the L2 rows (and the positional run
+// image the `app_scheduler` binding-runs list still decodes)
 // ---------------------------------------------------------------------------
 
 /// What can go wrong decoding a run row: transport, or a
@@ -584,7 +724,73 @@ impl From<sqlx::Error> for RowError {
     }
 }
 
+/// The L2 row off a SeaORM `agent_run` model: the choice columns parse
+/// to their enums (a model-violating value is [`RowError::Choice`], a
+/// 500), the trigger rides through raw, the datetimes come back as UTC.
+pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, RowError> {
+    let status = AgentRunStatus::from_value(&model.status).ok_or_else(|| RowError::Choice {
+        column: "status",
+        value: model.status.clone(),
+    })?;
+    let executor_kind =
+        AgentExecutorKind::from_value(&model.executor_kind).ok_or_else(|| RowError::Choice {
+            column: "executor_kind",
+            value: model.executor_kind.clone(),
+        })?;
+    let utc = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&Utc);
+    Ok(AgentRun {
+        id: model.id,
+        workspace_id: model.workspace_id,
+        owner_id: model.owner_id,
+        created_by_id: model.created_by_id,
+        pod_id: model.pod_id,
+        runner_id: model.runner_id,
+        pinned_runner_id: model.pinned_runner_id,
+        work_item_id: model.work_item_id,
+        scheduler_binding_id: model.scheduler_binding_id,
+        parent_run_id: model.parent_run_id,
+        status,
+        executor_kind,
+        dispatch_attempts: model.dispatch_attempts,
+        cancel_requested_at: model.cancel_requested_at.map(utc),
+        cancel_reason: model.cancel_reason,
+        tool_plan: model.tool_plan,
+        terminal_hooks_applied_at: model.terminal_hooks_applied_at.map(utc),
+        terminal_capacity_released_at: model.terminal_capacity_released_at.map(utc),
+        prompt: model.prompt,
+        // The trigger rides through unparsed: Django's `TextChoices`
+        // are choices-only (no DB check), so the stored value may sit
+        // outside the trigger enum (runner migration 0029) and every
+        // read path must tolerate it.
+        trigger: model.trigger,
+        prompt_manifest: model.prompt_manifest,
+        phase_kind: model.phase_kind,
+        run_config: model.run_config,
+        required_capabilities: model.required_capabilities,
+        thread_id: model.thread_id,
+        agent_metadata: model.agent_metadata,
+        lease_expires_at: model.lease_expires_at.map(utc),
+        done_payload: model.done_payload,
+        error_details: model.error_details,
+        // The generated column `COALESCE`s to `""`: never NULL on the
+        // real table.
+        refusal_category: model.refusal_category.unwrap_or_default(),
+        llm_model: model.llm_model,
+        usage: model.usage,
+        input_tokens: model.input_tokens,
+        output_tokens: model.output_tokens,
+        total_tokens: model.total_tokens,
+        created_at: utc(model.created_at),
+        assigned_at: model.assigned_at.map(utc),
+        started_at: model.started_at.map(utc),
+        ended_at: model.ended_at.map(utc),
+    })
+}
+
 /// Decode the 39-column run image at `base..base+39` into the L2 row.
+/// Kept for the `app_scheduler` binding-runs list, whose hand-written
+/// `SELECT` still opens with [`run_select_list`]; every reader here
+/// goes through [`run_from_model`].
 pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, RowError> {
     use sqlx::Row;
     let status: String = row.try_get(base + 10)?;
@@ -646,77 +852,45 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
     })
 }
 
-/// One tool-call row in [`tool_call::COLUMNS`] order.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ToolCallRecord {
-    pub id: Uuid,
-    pub agent_run_id: Uuid,
-    pub tool_call_id: String,
-    pub source: String,
-    pub server_key: String,
-    pub tool_name: String,
-    pub risk: String,
-    pub status: String,
-    pub request_fingerprint: String,
-    pub result_fingerprint: String,
-    pub idempotency_key_hash: String,
-    pub external_operation_id: String,
-    pub safe_replay_result: Option<Value>,
-    pub error_code: String,
-    pub prepared_at: DateTime<Utc>,
-    pub submitted_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
+/// The L2 tool-call row off a SeaORM model (the status parses to its
+/// enum; a model-violating value is [`RowError::Choice`]).
+pub(crate) fn tool_call_from_model(
+    model: orm::agent_run_tool_call::Model,
+) -> Result<AgentRunToolCall, RowError> {
+    let status = ToolCallStatus::from_value(&model.status).ok_or_else(|| RowError::Choice {
+        column: "tool_call.status",
+        value: model.status.clone(),
+    })?;
+    Ok(AgentRunToolCall {
+        id: model.id,
+        agent_run_id: model.agent_run_id,
+        tool_call_id: model.tool_call_id,
+        source: model.source,
+        server_key: model.server_key,
+        tool_name: model.tool_name,
+        risk: model.risk,
+        status,
+        request_fingerprint: model.request_fingerprint,
+        result_fingerprint: model.result_fingerprint,
+        idempotency_key_hash: model.idempotency_key_hash,
+        external_operation_id: model.external_operation_id,
+        safe_replay_result: model.safe_replay_result,
+        error_code: model.error_code,
+        prepared_at: model.prepared_at.with_timezone(&Utc),
+        submitted_at: model.submitted_at.map(|at| at.with_timezone(&Utc)),
+        completed_at: model.completed_at.map(|at| at.with_timezone(&Utc)),
+    })
 }
 
-impl ToolCallRecord {
-    pub fn into_tool_call(self) -> Result<AgentRunToolCall, RowError> {
-        let status = ToolCallStatus::from_value(&self.status).ok_or_else(|| RowError::Choice {
-            column: "tool_call.status",
-            value: self.status.clone(),
-        })?;
-        Ok(AgentRunToolCall {
-            id: self.id,
-            agent_run_id: self.agent_run_id,
-            tool_call_id: self.tool_call_id,
-            source: self.source,
-            server_key: self.server_key,
-            tool_name: self.tool_name,
-            risk: self.risk,
-            status,
-            request_fingerprint: self.request_fingerprint,
-            result_fingerprint: self.result_fingerprint,
-            idempotency_key_hash: self.idempotency_key_hash,
-            external_operation_id: self.external_operation_id,
-            safe_replay_result: self.safe_replay_result,
-            error_code: self.error_code,
-            prepared_at: self.prepared_at,
-            submitted_at: self.submitted_at,
-            completed_at: self.completed_at,
-        })
-    }
-}
-
-/// One run-event row in [`event::COLUMNS`] order.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct RunEventRecord {
-    pub id: i64,
-    pub agent_run_id: Uuid,
-    pub seq: i32,
-    pub kind: String,
-    pub payload: Value,
-    pub created_at: DateTime<Utc>,
-}
-
-impl RunEventRecord {
-    pub fn into_event(self) -> AgentRunEvent {
-        AgentRunEvent {
-            id: self.id,
-            agent_run_id: self.agent_run_id,
-            seq: self.seq,
-            kind: self.kind,
-            payload: self.payload,
-            created_at: self.created_at,
-        }
+/// The L2 run-event row off a SeaORM model.
+pub(crate) fn run_event_from_model(model: orm::agent_run_event::Model) -> AgentRunEvent {
+    AgentRunEvent {
+        id: model.id,
+        agent_run_id: model.agent_run_id,
+        seq: model.seq,
+        kind: model.kind,
+        payload: model.payload,
+        created_at: model.created_at.with_timezone(&Utc),
     }
 }
 
@@ -770,13 +944,11 @@ pub(crate) async fn workspace_role(
     workspace_id: Uuid,
     member_id: Uuid,
 ) -> Result<Option<i32>, Response> {
-    let row: Option<(i16,)> = sqlx::query_as(&membership_role_sql())
-        .bind(workspace_id)
-        .bind(member_id)
-        .fetch_optional(pool)
+    let role = membership_role_select(workspace_id, member_id)
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
-    Ok(row.map(|row| i32::from(row.0)))
+    Ok(role.map(i32::from))
 }
 
 /// Live through-model assignee row (`runs.py:115`).
@@ -786,13 +958,11 @@ async fn has_live_assignee(
     issue_id: Uuid,
     assignee_id: Uuid,
 ) -> Result<bool, Response> {
-    let exists: Option<bool> = sqlx::query_scalar(&live_assignee_exists_sql())
-        .bind(issue_id)
-        .bind(assignee_id)
-        .fetch_optional(pool)
+    let exists = live_assignee_select(issue_id, assignee_id)
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
-    Ok(exists.unwrap_or(false))
+    Ok(exists.is_some())
 }
 
 /// Active project membership row (`runs.py:126-130`, PDASHOSS01-223).
@@ -802,13 +972,25 @@ async fn has_scheduler_project_standing(
     project_id: Uuid,
     member_id: Uuid,
 ) -> Result<bool, Response> {
-    let exists: Option<bool> = sqlx::query_scalar(&scheduler_project_member_exists_sql())
-        .bind(project_id)
-        .bind(member_id)
-        .fetch_optional(pool)
+    let exists = scheduler_project_member_select(project_id, member_id)
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
-    Ok(exists.unwrap_or(false))
+    Ok(exists.is_some())
+}
+
+/// Issue lookup for the issue-bound arms (`Issue.all_objects`, no
+/// soft-delete scope): `(id, workspace_id)`, or `None`. Shared with the
+/// dispatch tails.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn issue_lookup(
+    pool: &PgPool,
+    issue_id: Uuid,
+) -> Result<Option<(Uuid, Uuid)>, Response> {
+    issue_lookup_select(issue_id)
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())
 }
 
 /// Collect the request body for parse-then-proxy handlers.
@@ -847,20 +1029,19 @@ impl PodMiniStrings {
 /// mirroring Django's `RelatedObjectDoesNotExist`).
 #[allow(clippy::result_large_err)]
 pub(crate) async fn pod_mini_for(pool: &PgPool, pod_id: Uuid) -> Result<PodMiniStrings, Response> {
-    let row: Option<(Uuid, String, bool, Uuid, String)> = sqlx::query_as(&pod_mini_sql())
-        .bind(pod_id)
-        .fetch_optional(pool)
+    let row = pod_mini_select(pod_id)
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
-    let Some((id, name, is_default, project, project_identifier)) = row else {
+    let Some(row) = row else {
         return Err(server_error());
     };
     Ok(PodMiniStrings {
-        id: id.to_string(),
-        name,
-        is_default,
-        project: project.to_string(),
-        project_identifier,
+        id: row.id.to_string(),
+        name: row.name,
+        is_default: row.is_default,
+        project: row.project_id.to_string(),
+        project_identifier: row.project_identifier,
     })
 }
 
@@ -907,21 +1088,19 @@ pub(crate) async fn binding_details_for_many(
     if binding_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows: Vec<(Uuid, String, String, Option<Uuid>)> =
-        sqlx::query_as(&binding_details_for_runs_sql())
-            .bind(binding_ids)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| server_error())?;
+    let rows = binding_details_select(binding_ids)
+        .all(&sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())?;
     let mut grouped: HashMap<Uuid, SchedulerBindingStrings> = HashMap::new();
-    for (id, scheduler_name, scheduler_slug, project_id) in rows {
+    for row in rows {
         grouped.insert(
-            id,
+            row.id,
             SchedulerBindingStrings {
-                id: id.to_string(),
-                scheduler_name,
-                scheduler_slug,
-                project_id: project_id.map(|project| project.to_string()),
+                id: row.id.to_string(),
+                scheduler_name: row.scheduler_name,
+                scheduler_slug: row.scheduler_slug,
+                project_id: row.project_id.map(|project| project.to_string()),
             },
         );
     }
@@ -959,15 +1138,14 @@ pub(crate) async fn tool_calls_for_many(
     if run_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let records: Vec<ToolCallRecord> = sqlx::query_as(&tool_calls_for_runs_sql())
-        .bind(run_ids)
-        .fetch_all(pool)
+    let records = tool_calls_for_runs_select(run_ids)
+        .all(&sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
     let mut grouped: HashMap<Uuid, Vec<AgentRunToolCall>> = HashMap::new();
     for record in records {
         let run_id = record.agent_run_id;
-        let call = record.into_tool_call()?;
+        let call = tool_call_from_model(record)?;
         grouped.entry(run_id).or_default().push(call);
     }
     Ok(grouped)
@@ -1041,8 +1219,6 @@ async fn list_runs_inner(
     let workspace_scope = query_last(&query, "workspace").filter(|value| !value.is_empty());
     let project_scope = query_last(&query, "project").filter(|value| !value.is_empty());
     // `if workspace_id:` / `if project_id:` — empty strings scope nothing.
-    let has_workspace_scope = workspace_scope.is_some();
-    let has_project_scope = project_scope.is_some();
     // `?scheduler_binding=` (`runs.py:221-232`): same truthiness gate,
     // then `uuid.UUID` or the 400 — never the ORM's 500.
     let scheduler_binding_scope =
@@ -1058,93 +1234,48 @@ async fn list_runs_inner(
                 }
             },
         };
-    let has_scheduler_binding_scope = scheduler_binding_scope.is_some();
 
-    let count_sql = list_count_sql(
-        has_workspace_scope,
-        has_project_scope,
-        has_scheduler_binding_scope,
-    );
-    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
-    for _ in 0..8 {
-        count_query = count_query.bind(actor.id);
-    }
-    if let Some(scope) = &workspace_scope {
-        count_query = count_query.bind(scope.as_str());
-    }
-    if let Some(scope) = &project_scope {
-        count_query = count_query.bind(scope.as_str());
-    }
-    if let Some(binding_id) = &scheduler_binding_scope {
-        count_query = count_query.bind(binding_id);
-    }
-    let total_count: i64 = match count_query.fetch_one(pool).await {
-        Ok(count) => count,
-        Err(_) => return server_error(),
+    let scopes = ListScopes {
+        workspace: workspace_scope,
+        project: project_scope,
+        scheduler_binding: scheduler_binding_scope,
+    };
+    let db = sea_orm_connection(pool);
+    let total_count: i64 = match list_count_select(actor.id, &scopes).one(&db).await {
+        Ok(Some(count)) => count,
+        Ok(None) | Err(_) => return server_error(),
     };
     let pages = total_pages(total_count, per_page);
     // `page` is unbounded (`max(1, huge)`); saturate the offset into
     // `i64` — a huge page reads an empty slice either way.
     let offset = i128::from(page - 1) * i128::from(per_page);
     let offset = offset.min(i128::from(i64::MAX)) as i64;
-
-    let page_sql = list_page_sql(
-        has_workspace_scope,
-        has_project_scope,
-        has_scheduler_binding_scope,
-    );
-    let mut page_query = sqlx::query(&page_sql);
-    for _ in 0..8 {
-        page_query = page_query.bind(actor.id);
-    }
-    if let Some(scope) = &workspace_scope {
-        page_query = page_query.bind(scope.as_str());
-    }
-    if let Some(scope) = &project_scope {
-        page_query = page_query.bind(scope.as_str());
-    }
-    if let Some(binding_id) = &scheduler_binding_scope {
-        page_query = page_query.bind(binding_id);
-    }
-    let rows = match page_query.bind(per_page).bind(offset).fetch_all(pool).await {
+    let rows = match list_page_select(
+        actor.id,
+        &scopes,
+        per_page.max(0) as u64,
+        offset.max(0) as u64,
+    )
+    .all(&db)
+    .await
+    {
         Ok(rows) => rows,
         Err(_) => return server_error(),
     };
     let mut runs: Vec<(AgentRun, PodMiniStrings)> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        use sqlx::Row;
-        let run = match decode_run(row, 0) {
+    for row in rows {
+        let run = match run_from_model(row.run) {
             Ok(run) => run,
             Err(error) => return error.into(),
-        };
-        let mini_id: Uuid = match row.try_get("mini_id") {
-            Ok(id) => id,
-            Err(_) => return server_error(),
-        };
-        let mini_name: String = match row.try_get("mini_name") {
-            Ok(name) => name,
-            Err(_) => return server_error(),
-        };
-        let mini_is_default: bool = match row.try_get("mini_is_default") {
-            Ok(flag) => flag,
-            Err(_) => return server_error(),
-        };
-        let mini_project_id: Uuid = match row.try_get("mini_project_id") {
-            Ok(id) => id,
-            Err(_) => return server_error(),
-        };
-        let mini_project_identifier: String = match row.try_get("mini_project_identifier") {
-            Ok(identifier) => identifier,
-            Err(_) => return server_error(),
         };
         runs.push((
             run,
             PodMiniStrings {
-                id: mini_id.to_string(),
-                name: mini_name,
-                is_default: mini_is_default,
-                project: mini_project_id.to_string(),
-                project_identifier: mini_project_identifier,
+                id: row.mini_id.to_string(),
+                name: row.mini_name,
+                is_default: row.mini_is_default,
+                project: row.mini_project_id.to_string(),
+                project_identifier: row.mini_project_identifier,
             },
         ));
     }
@@ -1288,41 +1419,21 @@ pub async fn fetch_guarded_run(
     pool: &PgPool,
     run_id: Uuid,
 ) -> Result<Option<GuardedRun>, Response> {
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&run_detail_sql())
-        .bind(run_id)
-        .fetch_optional(pool)
+    let row = run_detail_select(run_id)
+        .one(&sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let run = decode_run(&row, 0).map_err(Response::from)?;
-    let runner_owner_id: Option<Uuid> = row
-        .try_get("gate_runner_owner_id")
-        .map_err(|_| server_error())?;
-    let runner_visibility: Option<i16> = row
-        .try_get("gate_runner_visibility")
-        .map_err(|_| server_error())?;
-    let work_item_created_by_id: Option<Uuid> = row
-        .try_get("gate_work_item_created_by_id")
-        .map_err(|_| server_error())?;
-    let work_item_row_id: Option<Uuid> = row
-        .try_get("gate_work_item_id")
-        .map_err(|_| server_error())?;
-    let scheduler_binding_row_id: Option<Uuid> =
-        row.try_get("gate_binding_id").map_err(|_| server_error())?;
-    let scheduler_binding_project_id: Option<Uuid> = row
-        .try_get("gate_binding_project_id")
-        .map_err(|_| server_error())?;
     Ok(Some(GuardedRun {
-        run,
-        runner_owner_id,
-        runner_visibility,
-        work_item_created_by_id,
-        work_item_row_id,
-        scheduler_binding_row_id,
-        scheduler_binding_project_id,
+        run: run_from_model(row.run).map_err(Response::from)?,
+        runner_owner_id: row.gate_runner_owner_id,
+        runner_visibility: row.gate_runner_visibility,
+        work_item_created_by_id: row.gate_work_item_created_by_id,
+        work_item_row_id: row.gate_work_item_id,
+        scheduler_binding_row_id: row.gate_binding_id,
+        scheduler_binding_project_id: row.gate_binding_project_id,
     }))
 }
 
@@ -1388,9 +1499,8 @@ async fn run_detail_inner(
     };
     let mut payload = render_detail(&guarded.run, &pod, &tool_calls, binding.as_ref());
     if query_last(&query, "include_events").as_deref() == Some("1") {
-        let records: Vec<RunEventRecord> = match sqlx::query_as(&run_events_sql())
-            .bind(guarded.run.id)
-            .fetch_all(pool)
+        let records = match run_events_select(guarded.run.id)
+            .all(&sea_orm_connection(pool))
             .await
         {
             Ok(records) => records,
@@ -1399,7 +1509,7 @@ async fn run_detail_inner(
         let events: Vec<Value> = records
             .into_iter()
             .map(|record| {
-                let event = record.into_event();
+                let event = run_event_from_model(record);
                 let view = shape::run_event_to_representation(&event);
                 serde_json::to_value(&view).expect("serializable event view")
             })
@@ -1545,13 +1655,9 @@ async fn retick_inner(
         }
         WorkItemRef::Id(id) => id,
     };
-    let row: Option<(Uuid, Uuid)> = match sqlx::query_as(&issue_lookup_sql())
-        .bind(work_item_id)
-        .fetch_optional(pool)
-        .await
-    {
+    let row = match issue_lookup(pool, work_item_id).await {
         Ok(row) => row,
-        Err(_) => return server_error(),
+        Err(response) => return response,
     };
     let Some((_, workspace_id)) = row else {
         return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
@@ -1645,15 +1751,11 @@ async fn cancel_run_inner(
     if guarded.run.executor_kind == AgentExecutorKind::CloudAgent
         && guarded.run.status == AgentRunStatus::Running
     {
-        let stamped = sqlx::query(&cloud_fast_stamp_sql())
-            .bind(Utc::now())
-            .bind(reason.as_str())
-            .bind(run_id)
-            .bind(AgentRunStatus::Running.value())
-            .execute(pool)
+        let stamped = cloud_fast_stamp_statement(Utc::now(), &reason, run_id)
+            .exec(&sea_orm_connection(pool))
             .await;
         match stamped {
-            Ok(done) if done.rows_affected() == 1 => {
+            Ok(done) if done.rows_affected == 1 => {
                 return render_cancelled(pool, run_id, StatusCode::ACCEPTED).await;
             }
             Ok(_) => {}
@@ -1702,11 +1804,7 @@ async fn cancel_locked(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let row: Option<sqlx::postgres::PgRow> = match sqlx::query(&lock_run_sql())
-        .bind(run_id)
-        .fetch_optional(&mut *tx)
-        .await
-    {
+    let row = match lock_run_select(run_id).one(&TxConn::new(&mut tx)).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
@@ -1714,7 +1812,7 @@ async fn cancel_locked(
         let _ = tx.rollback().await;
         return not_found();
     };
-    let locked = match decode_run(&row, 0) {
+    let locked = match run_from_model(row) {
         Ok(run) => run,
         Err(error) => {
             let _ = tx.rollback().await;
@@ -1742,11 +1840,8 @@ async fn cancel_locked(
         // the worker's cancellation poll finalize. 200, never a send
         // (the status stays RUNNING).
         if locked.cancel_requested_at.is_none() {
-            let stamped = sqlx::query(&cloud_dup_stamp_sql())
-                .bind(Utc::now())
-                .bind(reason)
-                .bind(run_id)
-                .execute(&mut *tx)
+            let stamped = cloud_dup_stamp_statement(Utc::now(), reason, run_id)
+                .exec(&TxConn::new(&mut tx))
                 .await;
             if stamped.is_err() {
                 let _ = tx.rollback().await;
@@ -1798,20 +1893,17 @@ async fn cancel_locked(
 }
 
 /// `finalize_agent_run(locked.id, CANCELLED, updates)` for settle-cancel
-/// (`runs.py:615-624` + `finalization.py:48-86`): the nested `atomic()`
-/// is a savepoint elided into the caller's transaction (the L6a shape);
-/// the lock-miss arm is kept although the probe lock above already holds
-/// this row, and the return is ignored like the source ignores it.
+/// (`runs.py:615-624` + `finalization.py:48-86`) through the L4 SeaORM
+/// kernel: the nested `atomic()` is a savepoint elided into the
+/// caller's transaction (the L6a shape); the lock-miss arm is kept
+/// although the probe lock above already holds this row, and the
+/// return is ignored like the source ignores it.
 #[allow(clippy::result_large_err)]
 async fn finalize_cancelled(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     locked: &AgentRun,
     reason: &str,
 ) -> Result<(), Response> {
-    // `cancel_requested_at` samples its own `now()` at the call site
-    // (`runs.py:619`); `ended_at` samples another inside finalize
-    // (`finalization.py:52`). Two samples, like the source.
-    let requested_at = Utc::now();
     let values = finalization::plan_finalize_values(
         AgentRunStatus::Cancelled,
         &[
@@ -1822,17 +1914,8 @@ async fn finalize_cancelled(
         ],
     )
     .map_err(|_| server_error())?;
-    let columns: Vec<&str> = values.clauses.iter().map(|clause| clause.column).collect();
-    if columns.as_slice() != CANCEL_FINALIZE_COLUMNS {
-        return Err(server_error());
-    }
-    let lock_sql = finalization::lock_run_for_finalize_sql(false, false);
-    let mut lock = sqlx::query(&lock_sql).bind(locked.id);
-    for status in pidash_types::runner_runs::TERMINAL_RUN_STATUSES {
-        lock = lock.bind(status.value());
-    }
-    let found = lock
-        .fetch_optional(&mut **tx)
+    let conn = TxConn::new(&mut *tx);
+    let found = finalization::lock_run_for_finalize(&conn, locked.id, None, None)
         .await
         .map_err(|_| server_error())?;
     if found.is_none() {
@@ -1840,46 +1923,23 @@ async fn finalize_cancelled(
         // source ignores the `False` return and renders on.
         return Ok(());
     }
-    sqlx::query(&finalization::finalize_update_sql(&values))
-        .bind(AgentRunStatus::Cancelled.value())
-        .bind(Utc::now())
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(requested_at)
-        .bind(reason)
-        .bind(finalization::error_details_patch(&values))
-        .bind(locked.id)
-        .execute(&mut **tx)
+    // `cancel_requested_at` and `ended_at` share the statement's one
+    // `now` (the source samples `timezone.now()` twice, microseconds
+    // apart).
+    let now = Utc::now();
+    finalization::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
     if locked.executor_kind == AgentExecutorKind::CloudAgent {
-        let exists = sqlx::query_scalar::<_, i32>(finalization::terminal_event_exists_sql())
-            .bind(locked.id)
-            .bind("terminal")
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?;
-        if exists.is_none() {
-            let max_seq = sqlx::query_scalar::<_, i32>(finalization::terminal_event_max_seq_sql())
-                .bind(locked.id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
-            let plan = finalization::plan_terminal_event(
-                max_seq,
-                AgentRunStatus::Cancelled,
-                &finalization::finalize_error_code(&values),
-            );
-            sqlx::query(&finalization::terminal_event_insert_sql())
-                .bind(locked.id)
-                .bind(plan.seq)
-                .bind("terminal")
-                .bind(plan.payload)
-                .bind(Utc::now())
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
-        }
+        finalization::append_terminal_event_once(
+            &conn,
+            locked.id,
+            AgentRunStatus::Cancelled,
+            &finalization::finalize_error_code(&values),
+            now,
+        )
+        .await
+        .map_err(|_| server_error())?;
     }
     Ok(())
 }
@@ -1941,11 +2001,7 @@ async fn release_pin_inner(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let row: Option<sqlx::postgres::PgRow> = match sqlx::query(&lock_run_sql())
-        .bind(run_id)
-        .fetch_optional(&mut *tx)
-        .await
-    {
+    let row = match lock_run_select(run_id).one(&TxConn::new(&mut tx)).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
@@ -1953,7 +2009,7 @@ async fn release_pin_inner(
         let _ = tx.rollback().await;
         return not_found();
     };
-    let locked = match decode_run(&row, 0) {
+    let locked = match run_from_model(row) {
         Ok(run) => run,
         Err(error) => {
             let _ = tx.rollback().await;
@@ -1977,6 +2033,7 @@ async fn release_pin_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use serde_json::json;
 
     fn fx08() -> Value {
@@ -2205,84 +2262,171 @@ mod tests {
         }
     }
 
-    #[test]
-    fn list_where_numbers_params() {
-        let bare = list_where(false, false, false);
-        for param in ["$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8"] {
-            assert!(bare.contains(param), "bare has {param}");
-        }
-        assert!(!bare.contains("$9"));
-        assert!(bare.contains(r#"U0."role" = 20"#));
-        assert!(bare.contains("issue_assignees\".\"deleted_at\" IS NULL"));
-        let scoped = list_where(true, true, false);
-        assert!(scoped.contains(r#""agent_run"."workspace_id" = $9::uuid"#));
-        assert!(scoped.contains(r#""pod"."project_id" = $10::uuid"#));
-        let page = list_page_sql(true, true, false);
-        assert!(page.contains("LIMIT $11 OFFSET $12"));
-        assert!(page.contains("SELECT DISTINCT"));
-        let page_bare = list_page_sql(false, false, false);
-        assert!(page_bare.contains("LIMIT $9 OFFSET $10"));
-        let count = list_count_sql(false, false, false);
-        assert!(count.starts_with(r#"SELECT COUNT(DISTINCT "agent_run"."id")"#));
+    fn pg_selector<S: sea_orm::SelectorTrait>(selector: sea_orm::Selector<S>) -> String {
+        selector
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string()
     }
 
+    fn pg_select<E: sea_orm::EntityTrait>(select: sea_orm::Select<E>) -> String {
+        sea_orm::QueryTrait::build(&select, sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn pg_update<E: sea_orm::EntityTrait>(update: sea_orm::UpdateMany<E>) -> String {
+        sea_orm::QueryTrait::build(&update, sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    const LIST_JOINS: &str = "FROM \"agent_run\" \
+        LEFT JOIN \"runner\" ON \"agent_run\".\"runner_id\" = \"runner\".\"id\" \
+        LEFT JOIN \"issues\" ON \"agent_run\".\"work_item_id\" = \"issues\".\"id\" \
+        LEFT JOIN \"issue_assignees\" ON \"issues\".\"id\" = \"issue_assignees\".\"issue_id\" \
+        INNER JOIN \"pod\" ON \"agent_run\".\"pod_id\" = \"pod\".\"id\" \
+        INNER JOIN \"projects\" ON \"pod\".\"project_id\" = \"projects\".\"id\" WHERE ";
+
     #[test]
-    fn list_where_scopes_scheduler_binding_last() {
-        // The binding scope trails the workspace/project scopes
-        // (Django chains it third, `runs.py:221-232`) and binds a
-        // pre-validated UUID — no `::uuid` cast.
-        let scoped = list_where(true, true, true);
-        assert!(scoped.contains(r#""agent_run"."workspace_id" = $9::uuid"#));
-        assert!(scoped.contains(r#""pod"."project_id" = $10::uuid"#));
-        assert!(scoped.contains(r#""agent_run"."scheduler_binding_id" = $11"#));
-        assert!(!scoped.contains("scheduler_binding_id\" = $11::uuid"));
-        let page = list_page_sql(true, true, true);
-        assert!(page.contains("LIMIT $12 OFFSET $13"));
-        let page_binding_only = list_page_sql(false, false, true);
-        assert!(page_binding_only.contains("scheduler_binding_id\" = $9"));
-        assert!(page_binding_only.contains("LIMIT $10 OFFSET $11"));
-        let bare = list_where(false, false, false);
+    fn list_statement_shapes() {
+        let actor = Uuid::nil();
+        let bare = pg_selector(list_count_select(actor, &ListScopes::default()));
+        assert!(
+            bare.starts_with(&format!(
+                "SELECT COUNT(DISTINCT \"agent_run\".\"id\") AS \"total_count\" {LIST_JOINS}"
+            )),
+            "{bare}"
+        );
+        // The member-workspace scope, the five-clause involvement OR and
+        // the private-runner gate, in Django's order.
+        let member =
+            "\"agent_run\".\"workspace_id\" IN (SELECT \"workspace_members\".\"workspace_id\" \
+             FROM \"workspace_members\" WHERE \"workspace_members\".\"deleted_at\" IS NULL AND \
+             \"workspace_members\".\"member_id\" = '00000000-0000-0000-0000-000000000000')";
+        let admin =
+            "\"agent_run\".\"workspace_id\" IN (SELECT \"workspace_members\".\"workspace_id\" \
+             FROM \"workspace_members\" WHERE \"workspace_members\".\"deleted_at\" IS NULL AND \
+             \"workspace_members\".\"member_id\" = '00000000-0000-0000-0000-000000000000' AND \
+             \"workspace_members\".\"role\" = 20)";
+        assert!(bare.contains(&format!(
+            "{member} AND (\"agent_run\".\"created_by_id\" = '00000000-0000-0000-0000-000000000000' OR \
+             \"runner\".\"owner_id\" = '00000000-0000-0000-0000-000000000000' OR \
+             \"issues\".\"created_by_id\" = '00000000-0000-0000-0000-000000000000' OR \
+             (\"issue_assignees\".\"assignee_id\" = '00000000-0000-0000-0000-000000000000' AND \
+             \"issue_assignees\".\"deleted_at\" IS NULL) OR {admin}) AND \
+             (\"agent_run\".\"runner_id\" IS NULL OR \
+             \"runner\".\"owner_id\" = '00000000-0000-0000-0000-000000000000' OR \
+             \"agent_run\".\"created_by_id\" = '00000000-0000-0000-0000-000000000000')"
+        )), "{bare}");
         assert!(!bare.contains("scheduler_binding_id"));
+        // Scopes: raw strings go through a `uuid` cast; the binding scope
+        // binds the pre-validated id and trails the other two.
+        let scoped = pg_selector(list_count_select(
+            actor,
+            &ListScopes {
+                workspace: Some("ws".to_owned()),
+                project: Some("pr".to_owned()),
+                scheduler_binding: Some(Uuid::nil()),
+            },
+        ));
+        assert!(
+            scoped.ends_with(
+                " AND \"agent_run\".\"workspace_id\" = CAST('ws' AS uuid) AND \
+             \"pod\".\"project_id\" = CAST('pr' AS uuid) AND \
+             \"agent_run\".\"scheduler_binding_id\" = '00000000-0000-0000-0000-000000000000'"
+            ),
+            "{scoped}"
+        );
+        // The page: DISTINCT run image plus the pod-mini aliases,
+        // `-created_at`, LIMIT / OFFSET.
+        let page = pg_selector(list_page_select(actor, &ListScopes::default(), 25, 50));
+        assert!(
+            page.starts_with("SELECT DISTINCT \"agent_run\".\"id\", \"agent_run\".\"status\""),
+            "{page}"
+        );
+        assert!(
+            page.contains(
+                "\"pod\".\"id\" AS \"mini_id\", \"pod\".\"name\" AS \"mini_name\", \
+             \"pod\".\"is_default\" AS \"mini_is_default\", \"pod\".\"project_id\" AS \
+             \"mini_project_id\", \"projects\".\"identifier\" AS \"mini_project_identifier\" "
+            ),
+            "{page}"
+        );
+        assert!(
+            page.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 25 OFFSET 50"),
+            "{page}"
+        );
+        // Every output name is unique: the run image plus five aliases.
+        let list = page.strip_prefix("SELECT DISTINCT ").unwrap();
+        let list = &list[..list.find(" FROM ").unwrap()];
+        let mut names: Vec<&str> = list
+            .split(", ")
+            .map(|item| item.rsplit(['.', ' ']).next().unwrap().trim_matches('"'))
+            .collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total);
+        assert_eq!(total, agent_run::COLUMNS.len() + 5);
     }
 
     #[test]
-    fn scheduler_member_and_detail_sql_carry_no_binding_delete_scope() {
+    fn scheduler_member_and_detail_statements_carry_no_binding_delete_scope() {
         // The project-standing check is the default manager (live +
         // active rows only); the detail prefetch is the base manager
         // (no `deleted_at` scope on either leg).
-        let standing = scheduler_project_member_exists_sql();
-        assert!(standing.contains(r#""project_members"."project_id" = $1"#));
-        assert!(standing.contains(r#""project_members"."member_id" = $2"#));
-        assert!(standing.contains(r#""project_members"."deleted_at" IS NULL"#));
-        assert!(standing.contains(r#""project_members"."is_active"#));
-        let prefetch = binding_details_for_runs_sql();
+        let standing = pg_selector(scheduler_project_member_select(Uuid::nil(), Uuid::nil()));
+        assert!(standing.contains("\"project_members\".\"project_id\" = "));
+        assert!(standing.contains("\"project_members\".\"member_id\" = "));
+        assert!(standing.contains("\"project_members\".\"deleted_at\" IS NULL"));
+        assert!(standing.contains("\"project_members\".\"is_active\" = TRUE"));
+        assert!(standing.ends_with("LIMIT 1"));
+        let prefetch = pg_selector(binding_details_select(&[Uuid::nil()]));
         assert!(!prefetch.contains("deleted_at"));
-        assert!(prefetch.contains("INNER JOIN \"schedulers\""));
-        assert!(prefetch.contains("\"scheduler_bindings\".\"id\" = ANY($1)"));
+        assert!(prefetch.contains(
+            "INNER JOIN \"schedulers\" ON \"scheduler_bindings\".\"scheduler_id\" = \"schedulers\".\"id\""
+        ));
+        assert!(prefetch.contains("\"scheduler_bindings\".\"id\" IN ("));
         // The detail lookup joins the binding without a delete scope
         // and exposes row presence separately from the nullable
         // project column.
-        let detail = run_detail_sql();
-        assert!(detail.contains("gate_binding_id"));
-        assert!(detail.contains("gate_binding_project_id"));
+        let detail = pg_selector(run_detail_select(Uuid::nil()));
+        assert!(detail.contains("\"scheduler_bindings\".\"id\" AS \"gate_binding_id\""));
+        assert!(
+            detail.contains("\"scheduler_bindings\".\"project_id\" AS \"gate_binding_project_id\"")
+        );
         let join = detail
-            .split("LEFT OUTER JOIN \"scheduler_bindings\"")
+            .split("LEFT JOIN \"scheduler_bindings\"")
             .nth(1)
             .expect("binding join");
         assert!(!join.contains("deleted_at"));
+        assert!(
+            detail.ends_with(
+                "WHERE \"agent_run\".\"id\" = '00000000-0000-0000-0000-000000000000' LIMIT 1"
+            ),
+            "{detail}"
+        );
+        // The row lock is the full image, `LIMIT 1 FOR UPDATE`.
+        let lock = pg_select(lock_run_select(Uuid::nil()));
+        assert!(lock.ends_with(
+            "WHERE \"agent_run\".\"id\" = '00000000-0000-0000-0000-000000000000' LIMIT 1 FOR UPDATE"
+        ), "{lock}");
     }
 
     #[test]
-    fn run_select_list_covers_all_columns_once() {
-        let list = run_select_list();
-        assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 39);
-        assert!(list.starts_with(r#""agent_run"."id""#));
-        assert!(list.ends_with(r#""agent_run"."ended_at""#));
-    }
-
-    #[test]
-    fn cancel_finalize_columns_match_l4_plan() {
+    fn cancel_statement_shapes() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        assert_eq!(
+            pg_update(cloud_fast_stamp_statement(now, "r", Uuid::nil())),
+            "UPDATE \"agent_run\" SET \"cancel_requested_at\" = '2026-01-02 03:04:05.000000 +00:00', \
+             \"cancel_reason\" = 'r' WHERE \"agent_run\".\"id\" = \
+             '00000000-0000-0000-0000-000000000000' AND \"agent_run\".\"status\" = 'running' AND \
+             \"agent_run\".\"cancel_requested_at\" IS NULL"
+        );
+        assert_eq!(
+            pg_update(cloud_dup_stamp_statement(now, "r", Uuid::nil())),
+            "UPDATE \"agent_run\" SET \"cancel_requested_at\" = '2026-01-02 03:04:05.000000 +00:00', \
+             \"cancel_reason\" = 'r' WHERE \"agent_run\".\"id\" = \
+             '00000000-0000-0000-0000-000000000000'"
+        );
+        // The settle-cancel finalize: the L4 base four plus the
+        // `runs.py:617-623` extras, folded into one `error_details` merge.
         let values = finalization::plan_finalize_values(
             AgentRunStatus::Cancelled,
             &[
@@ -2293,10 +2437,31 @@ mod tests {
             ],
         )
         .expect("terminal");
-        let columns: Vec<&str> = values.clauses.iter().map(|clause| clause.column).collect();
-        assert_eq!(columns.as_slice(), CANCEL_FINALIZE_COLUMNS);
-        let sql = finalization::finalize_update_sql(&values);
-        assert!(sql.ends_with(r#"WHERE "agent_run"."id" = $8"#), "{sql}");
+        let sql = pg_update(
+            finalization::finalize_update_statement(&values, Uuid::nil(), now).expect("statement"),
+        );
+        assert!(
+            sql.starts_with(
+                "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \
+             \"ended_at\" = '2026-01-02 03:04:05.000000 +00:00', \"terminal_hooks_applied_at\" = NULL, \
+             \"terminal_capacity_released_at\" = NULL, \
+             \"cancel_requested_at\" = '2026-01-02 03:04:05.000000 +00:00', \"cancel_reason\" = 'r', \
+             \"error_details\" = "
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with("WHERE \"agent_run\".\"id\" = '00000000-0000-0000-0000-000000000000'")
+        );
+    }
+
+    #[test]
+    fn run_select_list_covers_all_columns_once() {
+        let list = run_select_list();
+        assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
+        assert_eq!(agent_run::COLUMNS.len(), 39);
+        assert!(list.starts_with(r#""agent_run"."id""#));
+        assert!(list.ends_with(r#""agent_run"."ended_at""#));
     }
 
     #[test]
@@ -2438,6 +2603,145 @@ mod tests {
             let run = decode_run(&row, 0).expect("unknown trigger decodes");
             assert_eq!(run.id, id);
             assert_eq!(run.trigger, trigger);
+            // The SeaORM path (the temp table shadows `agent_run` for
+            // this session) decodes the same raw trigger.
+            let model = lock_run_select(id)
+                .one(&TxConn::new(&mut tx))
+                .await
+                .expect("entity fetch")
+                .expect("row");
+            let run = run_from_model(model).expect("unknown trigger decodes");
+            assert_eq!(run.id, id);
+            assert_eq!(run.trigger, trigger);
+            assert_eq!(run.refusal_category, "");
         }
+    }
+
+    /// The list page and count over session temp copies of every joined
+    /// table: the involvement OR (creator grant), the pod-mini aliases
+    /// and the nested run image decode by name; the member-workspace
+    /// subquery scopes the set.
+    #[tokio::test]
+    async fn live_list_page_decodes_nested_run_image() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        for table in [
+            "agent_run",
+            "runner",
+            "issues",
+            "issue_assignees",
+            "pod",
+            "projects",
+            "workspace_members",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let actor = Uuid::new_v4();
+        let ws = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let other_run = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active,              created_at, updated_at, view_props, default_props, issue_props, explored_features,              getting_started_checklist, tips) VALUES ($1, $2, $3, 15, true, now(), now(), '{}',              '{}', '{}', '{}', '{}', '{}')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(ws)
+        .bind(actor)
+        .execute(&mut *tx)
+        .await
+        .expect("seed member");
+        sqlx::query(
+            "INSERT INTO projects (id, workspace_id, name, identifier, created_at, updated_at)              VALUES ($1, $2, 'P', 'PRJ', now(), now())",
+        )
+        .bind(project)
+        .bind(ws)
+        .execute(&mut *tx)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO pod (id, workspace_id, project_id, name, description, is_default,              created_at, updated_at) VALUES ($1, $2, $3, 'pod', '', true, now(), now())",
+        )
+        .bind(pod)
+        .bind(ws)
+        .bind(project)
+        .execute(&mut *tx)
+        .await
+        .expect("seed pod");
+        for (id, creator) in [(run_id, actor), (other_run, Uuid::new_v4())] {
+            sqlx::query(
+                "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, status,                  executor_kind, dispatch_attempts, cancel_reason, tool_plan, prompt, trigger,                  phase_kind, run_config, required_capabilities, thread_id, agent_metadata,                  error_details, llm_model, usage, created_at, refusal_category) VALUES ($1, $2,                  $3, $4, 'running', 'local_runner', 0, '', '{}', 'p', 'direct', 'work', '{}',                  '[]', 't', '{}', '{}', '', '{}', now(), '')",
+            )
+            .bind(id)
+            .bind(ws)
+            .bind(creator)
+            .bind(pod)
+            .execute(&mut *tx)
+            .await
+            .expect("seed run");
+        }
+        let conn = TxConn::new(&mut tx);
+        let scopes = ListScopes::default();
+        // The creator grant admits one of the two runs.
+        let total = list_count_select(actor, &scopes)
+            .one(&conn)
+            .await
+            .expect("count")
+            .expect("row");
+        assert_eq!(total, 1);
+        let rows = list_page_select(actor, &scopes, 25, 0)
+            .all(&conn)
+            .await
+            .expect("page");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.run.id, run_id);
+        assert_eq!(row.run.prompt, "p");
+        assert_eq!(row.mini_id, pod);
+        assert_eq!(row.mini_project_identifier, "PRJ");
+        assert!(row.mini_is_default);
+        // The project scope casts the raw string; the admin grant admits
+        // the other creator's run for a role-20 member.
+        let scoped = list_count_select(
+            actor,
+            &ListScopes {
+                project: Some(project.to_string()),
+                ..ListScopes::default()
+            },
+        )
+        .one(&conn)
+        .await
+        .expect("scoped count")
+        .expect("row");
+        assert_eq!(scoped, 1);
+        sqlx::query("UPDATE workspace_members SET role = 20")
+            .execute(&mut *tx)
+            .await
+            .expect("promote");
+        let conn = TxConn::new(&mut tx);
+        let admin_total = list_count_select(actor, &scopes)
+            .one(&conn)
+            .await
+            .expect("count")
+            .expect("row");
+        assert_eq!(admin_total, 2);
+        // The guarded detail: no runner / issue / binding rows → every
+        // gate column NULL, the run image intact.
+        let guarded = run_detail_select(other_run)
+            .one(&conn)
+            .await
+            .expect("detail")
+            .expect("row");
+        assert_eq!(guarded.run.id, other_run);
+        assert_eq!(guarded.gate_runner_owner_id, None);
+        assert_eq!(guarded.gate_work_item_id, None);
+        assert_eq!(guarded.gate_binding_id, None);
     }
 }

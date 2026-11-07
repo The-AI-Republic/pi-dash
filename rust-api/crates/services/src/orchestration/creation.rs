@@ -567,6 +567,822 @@ pub fn run_insert_returning_sql() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// SeaORM builders (the domain creation seam runs these; the SQL texts above
+// stay for the jobs-side stores until they migrate)
+// ---------------------------------------------------------------------------
+
+/// SeaORM statements mirroring the creation-flow and render-bundle SQL
+/// above, one per constant (named after it), decoded by name.
+pub mod orm {
+    use chrono::{DateTime, Utc};
+    use pidash_db::entity::{
+        agent_run as run, agent_run_event as event, dev_machine, git_code_review_links as reviews,
+        git_repositories as repos, git_repository_bindings as bindings,
+        issue_agent_ticker as ticker, issue_assignees, issue_comments as comments, issue_labels,
+        issue_relations as relations, issues, labels, pod, projects,
+        prompt_section_override as overrides, runner, states, users, workspaces,
+    };
+    use sea_orm::sea_query::extension::postgres::{PgBinOper, PgFunc};
+    use sea_orm::sea_query::{
+        Alias, Condition, Expr, Func, InsertStatement, JoinType, LockType, Order, Query,
+        SelectStatement, SimpleExpr, UpdateStatement,
+    };
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use super::{AgentRunStatus, NewAgentRun, ACTIVE_STATUSES, RUN_VIEW_COLUMNS};
+
+    fn alias(name: &str) -> Alias {
+        Alias::new(name)
+    }
+
+    /// `<table>.<column>` for an aliased table.
+    fn at(table: &str, column: impl sea_orm::sea_query::IntoIden + 'static) -> Expr {
+        Expr::col((alias(table), column))
+    }
+
+    /// The [`RUN_VIEW_COLUMNS`] projection as entity columns.
+    pub const RUN_VIEW: [run::Column; 18] = [
+        run::Column::Id,
+        run::Column::WorkspaceId,
+        run::Column::CreatedById,
+        run::Column::PodId,
+        run::Column::RunnerId,
+        run::Column::PinnedRunnerId,
+        run::Column::ParentRunId,
+        run::Column::WorkItemId,
+        run::Column::Status,
+        run::Column::Trigger,
+        run::Column::ExecutorKind,
+        run::Column::PhaseKind,
+        run::Column::RunConfig,
+        run::Column::ToolPlan,
+        run::Column::ErrorDetails,
+        run::Column::Prompt,
+        run::Column::PromptManifest,
+        run::Column::EndedAt,
+    ];
+
+    const _: () = assert!(RUN_VIEW.len() == RUN_VIEW_COLUMNS.len());
+
+    fn run_view() -> SelectStatement {
+        Query::select()
+            .columns(RUN_VIEW.map(|column| (run::Entity, column)))
+            .from(run::Entity)
+            .to_owned()
+    }
+
+    fn run_col(column: run::Column) -> Expr {
+        Expr::col((run::Entity, column))
+    }
+
+    /// [`super::ISSUE_SELECT_SQL`]: the consumed issue projection, no
+    /// scope.
+    pub fn issue_select(issue_id: Uuid) -> SelectStatement {
+        use issues::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::ProjectId,
+                C::StateId,
+                C::ParentId,
+                C::CreatedById,
+                C::AssignedPodId,
+                C::AgentExecutor,
+                C::GitWorkBranch,
+                C::Workpad,
+                C::Name,
+                C::DescriptionStripped,
+                C::Priority,
+                C::SequenceId,
+                C::TargetDate,
+            ])
+            .from(issues::Entity)
+            .and_where(Expr::col(C::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::PROJECT_SELECT_SQL`]: the consumed project projection.
+    pub fn project_select(project_id: Uuid) -> SelectStatement {
+        use projects::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::Identifier,
+                C::Name,
+                C::Description,
+                C::RepoUrl,
+                C::BaseBranch,
+                C::DefaultAgentExecutor,
+                C::ProjectLeadId,
+                C::DefaultAssigneeId,
+                C::AgentDefaultMaxTicks,
+                C::AgentDefaultIntervalSeconds,
+                C::AgentReviewDefaultIntervalSeconds,
+                C::AgentTestDefaultIntervalSeconds,
+            ])
+            .from(projects::Entity)
+            .and_where(Expr::col(C::Id).eq(project_id))
+            .to_owned()
+    }
+
+    /// [`super::STATE_SELECT_SQL`]: `id`, `name`, `group`.
+    pub fn state_select(state_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                states::Column::Id,
+                states::Column::Name,
+                states::Column::Group,
+            ])
+            .from(states::Entity)
+            .and_where(Expr::col(states::Column::Id).eq(state_id))
+            .to_owned()
+    }
+
+    /// [`super::latest_prior_run_sql`]: the newest run on the item.
+    pub fn latest_prior_run_select(issue_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .order_by(run::Column::CreatedAt, Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::active_run_sql`]: the newest active run on the item.
+    pub fn active_run_select(issue_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(
+                run_col(run::Column::Status)
+                    .is_in(ACTIVE_STATUSES.iter().map(|status| status.value())),
+            )
+            .order_by(run::Column::CreatedAt, Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::run_select_sql`]: one run, unlocked.
+    pub fn run_select(run_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::run_lock_sql`]: one run, `FOR UPDATE OF agent_run`.
+    pub fn run_lock_select(run_id: Uuid) -> SelectStatement {
+        run_select(run_id)
+            .lock_with_tables(LockType::Update, [run::Entity])
+            .to_owned()
+    }
+
+    /// [`super::finalize_lock_sql`]: the still non-terminal run,
+    /// `FOR UPDATE OF agent_run`.
+    pub fn finalize_lock_select(run_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .and_where(
+                run_col(run::Column::Status).is_not_in(
+                    [
+                        AgentRunStatus::Completed,
+                        AgentRunStatus::Failed,
+                        AgentRunStatus::Cancelled,
+                        AgentRunStatus::Blocked,
+                        AgentRunStatus::Refused,
+                    ]
+                    .iter()
+                    .map(|status| status.value()),
+                ),
+            )
+            .lock_with_tables(LockType::Update, [run::Entity])
+            .to_owned()
+    }
+
+    /// [`super::finalize_update_sql`]: `failed`, the end stamp, the
+    /// terminal NULLs, and the `error_details` merge: drop the patch's
+    /// keys from the stored object (a non-object counts as `{}`), then
+    /// add its non-null values (`jsonb_strip_nulls`, applied here to the
+    /// flat patch).
+    pub fn finalize_update(
+        run_id: Uuid,
+        ended_at: DateTime<Utc>,
+        patch: &Value,
+    ) -> UpdateStatement {
+        let stored = Expr::case(
+            Expr::expr(Func::cust(alias("jsonb_typeof")).arg(run_col(run::Column::ErrorDetails)))
+                .eq("object"),
+            run_col(run::Column::ErrorDetails),
+        )
+        .finally(Expr::val(serde_json::json!({})));
+        let mut merged: SimpleExpr = stored.into();
+        let mut kept = serde_json::Map::new();
+        if let Some(object) = patch.as_object() {
+            for (key, value) in object {
+                merged = Expr::expr(merged).sub(Expr::val(key.as_str()));
+                if !value.is_null() {
+                    kept.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        let merged =
+            Expr::expr(merged).binary(PgBinOper::Concatenate, Expr::val(Value::Object(kept)));
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::Status, "failed")
+            .value(run::Column::EndedAt, ended_at)
+            .value(run::Column::TerminalHooksAppliedAt, None::<DateTime<Utc>>)
+            .value(
+                run::Column::TerminalCapacityReleasedAt,
+                None::<DateTime<Utc>>,
+            )
+            .value(run::Column::ErrorDetails, merged)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::RUNNER_SELECT_SQL`]: the parent's runner, with the
+    /// #2903 engine columns (`provisioning`, `pod_dispatch`,
+    /// `dev_machine_id`) so seam twins can populate `RunnerView`.
+    pub fn runner_select(runner_id: Uuid) -> SelectStatement {
+        use runner::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::PodId,
+                C::Status,
+                C::LastHeartbeatAt,
+                C::PausedAt,
+                C::Provisioning,
+                C::PodDispatch,
+                C::DevMachineId,
+            ])
+            .from(runner::Entity)
+            .and_where(Expr::col(C::Id).eq(runner_id))
+            .to_owned()
+    }
+
+    /// The engine-pause columns of one dev machine (`#2903` pause state).
+    pub fn dev_machine_select(machine_id: Uuid) -> SelectStatement {
+        use pidash_db::entity::dev_machine::Column as C;
+        Query::select()
+            .columns([C::EnginePausedByOwner, C::EngineAutoPauseReason])
+            .from(dev_machine::Entity)
+            .and_where(Expr::col(C::Id).eq(machine_id))
+            .to_owned()
+    }
+
+    /// [`super::ASSIGNED_POD_SELECT_SQL`]: a live pod by id.
+    pub fn assigned_pod_select(pod_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([pod::Column::Id, pod::Column::ProjectId])
+            .from(pod::Entity)
+            .and_where(Expr::col(pod::Column::Id).eq(pod_id))
+            .and_where(Expr::col(pod::Column::DeletedAt).is_null())
+            .to_owned()
+    }
+
+    /// [`super::DEFAULT_POD_SELECT_SQL`]: the first live default pod by id.
+    pub fn default_pod_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([pod::Column::Id, pod::Column::ProjectId])
+            .from(pod::Entity)
+            .and_where(Expr::col(pod::Column::ProjectId).eq(project_id))
+            .and_where(Expr::col(pod::Column::IsDefault).into())
+            .and_where(Expr::col(pod::Column::DeletedAt).is_null())
+            .order_by(pod::Column::Id, Order::Asc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::TICKER_RESUME_SELECT_SQL`]: the ticker's resume pointer.
+    pub fn ticker_resume_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(ticker::Column::ResumeParentRunId)
+            .from(ticker::Entity)
+            .and_where(Expr::col(ticker::Column::IssueId).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::WORK_ITEM_ID_SELECT_SQL`]: a run's work item.
+    pub fn work_item_id_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(run::Column::WorkItemId)
+            .from(run::Entity)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::ISSUE_LOCK_SQL`]: `Issue.all_objects` row lock, no scope.
+    pub fn issue_lock_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((issues::Entity, issues::Column::Id))
+            .from(issues::Entity)
+            .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(issue_id))
+            .lock_with_tables(LockType::Update, [issues::Entity])
+            .to_owned()
+    }
+
+    /// [`super::USER_FLAGS_SELECT_SQL`]: `is_active`, `is_bot`.
+    pub fn user_flags_select(user_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([users::Column::IsActive, users::Column::IsBot])
+            .from(users::Entity)
+            .and_where(Expr::col(users::Column::Id).eq(user_id))
+            .to_owned()
+    }
+
+    /// [`super::run_insert_returning_sql`]: every non-generated column
+    /// (the fixed literals as values), `RETURNING` the run view.
+    pub fn run_insert(row: &NewAgentRun) -> InsertStatement {
+        use run::Column as C;
+        let none_uuid = || Expr::value(None::<Uuid>);
+        let none_at = || Expr::value(None::<DateTime<Utc>>);
+        let none_json = || Expr::value(None::<Value>);
+        Query::insert()
+            .into_table(run::Entity)
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::OwnerId,
+                C::CreatedById,
+                C::PodId,
+                C::RunnerId,
+                C::PinnedRunnerId,
+                C::WorkItemId,
+                C::SchedulerBindingId,
+                C::ParentRunId,
+                C::Status,
+                C::ExecutorKind,
+                C::DispatchAttempts,
+                C::CancelRequestedAt,
+                C::CancelReason,
+                C::ToolPlan,
+                C::TerminalHooksAppliedAt,
+                C::TerminalCapacityReleasedAt,
+                C::Prompt,
+                C::Trigger,
+                C::PromptManifest,
+                C::PhaseKind,
+                C::RunConfig,
+                C::RequiredCapabilities,
+                C::ThreadId,
+                C::AgentMetadata,
+                C::LeaseExpiresAt,
+                C::DonePayload,
+                C::ErrorDetails,
+                C::LlmModel,
+                C::Usage,
+                C::CreatedAt,
+                C::AssignedAt,
+                C::StartedAt,
+                C::EndedAt,
+            ])
+            .values_panic([
+                Expr::value(row.id),
+                Expr::value(row.workspace_id),
+                none_uuid(),
+                Expr::value(row.created_by_id),
+                Expr::value(row.pod_id),
+                none_uuid(),
+                Expr::value(row.pinned_runner_id),
+                Expr::value(row.work_item_id),
+                none_uuid(),
+                Expr::value(row.parent_run_id),
+                Expr::value(super::STATUS_QUEUED),
+                Expr::value(row.executor_kind.value()),
+                Expr::value(0_i32),
+                none_at(),
+                Expr::value(""),
+                Expr::value(row.tool_plan.clone()),
+                none_at(),
+                none_at(),
+                Expr::value(""),
+                Expr::value(row.trigger.as_str()),
+                none_json(),
+                Expr::value(row.phase_kind.as_str()),
+                Expr::value(row.run_config.clone()),
+                Expr::value(serde_json::json!([])),
+                Expr::value(""),
+                Expr::value(serde_json::json!({})),
+                none_at(),
+                none_json(),
+                Expr::value(row.error_details.clone()),
+                Expr::value(""),
+                Expr::value(serde_json::json!({})),
+                Expr::value(row.now),
+                none_at(),
+                none_at(),
+                none_at(),
+            ])
+            .returning(Query::returning().columns(RUN_VIEW))
+            .to_owned()
+    }
+
+    /// [`super::PROMPT_UPDATE_SQL`].
+    pub fn prompt_update(run_id: Uuid, prompt: &str, manifest: &Value) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::Prompt, prompt)
+            .value(run::Column::PromptManifest, manifest.clone())
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::RUN_CONFIG_UPDATE_SQL`].
+    pub fn run_config_update(run_id: Uuid, config: &Value) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::RunConfig, config.clone())
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::TERMINAL_EVENT_EXISTS_SQL`]: output name `exists`.
+    pub fn terminal_event_exists_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(
+                Expr::exists(
+                    Query::select()
+                        .expr(Expr::val(1))
+                        .from(event::Entity)
+                        .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
+                        .and_where(Expr::col(event::Column::Kind).eq("terminal"))
+                        .to_owned(),
+                ),
+                alias("exists"),
+            )
+            .to_owned()
+    }
+
+    /// [`super::TERMINAL_EVENT_SEQ_SQL`]: `COALESCE(MAX(seq), 0) + 1`,
+    /// output name `seq` (int4, as `MAX(int4) + 1` is).
+    pub fn terminal_event_seq_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(
+                Expr::expr(Func::coalesce([
+                    Expr::col(event::Column::Seq).max(),
+                    Expr::val(0_i32).into(),
+                ]))
+                .add(1_i32),
+                alias("seq"),
+            )
+            .from(event::Entity)
+            .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::TERMINAL_EVENT_INSERT_SQL`].
+    pub fn terminal_event_insert(
+        run_id: Uuid,
+        seq: i32,
+        payload: &Value,
+        now: DateTime<Utc>,
+    ) -> InsertStatement {
+        Query::insert()
+            .into_table(event::Entity)
+            .columns([
+                event::Column::AgentRunId,
+                event::Column::Seq,
+                event::Column::Kind,
+                event::Column::Payload,
+                event::Column::CreatedAt,
+            ])
+            .values_panic([
+                Expr::value(run_id),
+                Expr::value(seq),
+                Expr::value("terminal"),
+                Expr::value(payload.clone()),
+                Expr::value(now),
+            ])
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_LABELS_SQL`]: label names through the link table
+    /// (link rows unfiltered), live labels, newest label first.
+    pub fn bundle_labels_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((alias("l"), labels::Column::Name))
+            .from_as(issue_labels::Entity, alias("il"))
+            .join_as(
+                JoinType::InnerJoin,
+                labels::Entity,
+                alias("l"),
+                at("l", labels::Column::Id).equals((alias("il"), issue_labels::Column::LabelId)),
+            )
+            .and_where(at("il", issue_labels::Column::IssueId).eq(issue_id))
+            .and_where(at("l", labels::Column::DeletedAt).is_null())
+            .order_by((alias("l"), labels::Column::CreatedAt), Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_ASSIGNEES_SQL`]: `display_name`, `email`, link rows
+    /// unfiltered, newest user first.
+    pub fn bundle_assignees_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("u"), users::Column::DisplayName),
+                (alias("u"), users::Column::Email),
+            ])
+            .from_as(issue_assignees::Entity, alias("ia"))
+            .join_as(
+                JoinType::InnerJoin,
+                users::Entity,
+                alias("u"),
+                at("u", users::Column::Id)
+                    .equals((alias("ia"), issue_assignees::Column::AssigneeId)),
+            )
+            .and_where(at("ia", issue_assignees::Column::IssueId).eq(issue_id))
+            .order_by((alias("u"), users::Column::CreatedAt), Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PROJECT_STATES_SQL`]: live non-triage states by
+    /// `sequence`.
+    pub fn bundle_project_states_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                states::Column::Name,
+                states::Column::Group,
+                states::Column::Description,
+            ])
+            .from(states::Entity)
+            .and_where(Expr::col(states::Column::ProjectId).eq(project_id))
+            .and_where(Expr::col(states::Column::DeletedAt).is_null())
+            .and_where(Expr::col(states::Column::Group).ne("triage"))
+            .order_by(states::Column::Sequence, Order::Asc)
+            .to_owned()
+    }
+
+    /// `issues i JOIN projects p LEFT JOIN states s`, projecting
+    /// `id`, `name`, `sequence_id`, `identifier`, `state_name`.
+    fn issue_refs() -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("i"), issues::Column::Id),
+                (alias("i"), issues::Column::Name),
+                (alias("i"), issues::Column::SequenceId),
+            ])
+            .column((alias("p"), projects::Column::Identifier))
+            .expr_as(at("s", states::Column::Name), alias("state_name"))
+            .from_as(issues::Entity, alias("i"))
+            .join_as(
+                JoinType::InnerJoin,
+                projects::Entity,
+                alias("p"),
+                at("p", projects::Column::Id).equals((alias("i"), issues::Column::ProjectId)),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                states::Entity,
+                alias("s"),
+                at("s", states::Column::Id).equals((alias("i"), issues::Column::StateId)),
+            )
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_CHILDREN_SQL`]: live, non-triage (a NULL group
+    /// drops, as `s.group != 'triage'` does), unarchived, non-draft
+    /// children, oldest first.
+    pub fn bundle_children_select(issue_id: Uuid) -> SelectStatement {
+        issue_refs()
+            .and_where(at("i", issues::Column::ParentId).eq(issue_id))
+            .and_where(at("i", issues::Column::DeletedAt).is_null())
+            .and_where(at("s", states::Column::Group).ne("triage"))
+            .and_where(at("i", issues::Column::ArchivedAt).is_null())
+            .and_where(at("p", projects::Column::ArchivedAt).is_null())
+            .and_where(at("i", issues::Column::IsDraft).not())
+            .order_by((alias("i"), issues::Column::CreatedAt), Order::Asc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_RELATIONS_SQL`]: live relation rows either way,
+    /// newest first.
+    pub fn bundle_relations_select(issue_id: Uuid) -> SelectStatement {
+        use relations::Column as C;
+        Query::select()
+            .columns([C::IssueId, C::RelatedIssueId, C::RelationType])
+            .from(relations::Entity)
+            .cond_where(
+                Condition::any()
+                    .add(Expr::col(C::IssueId).eq(issue_id))
+                    .add(Expr::col(C::RelatedIssueId).eq(issue_id)),
+            )
+            .and_where(Expr::col(C::DeletedAt).is_null())
+            .order_by(C::CreatedAt, Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_RELATION_TARGETS_SQL`]: the live targets, plus
+    /// `state_group`.
+    pub fn bundle_relation_targets_select(ids: &[Uuid]) -> SelectStatement {
+        issue_refs()
+            .expr_as(at("s", states::Column::Group), alias("state_group"))
+            .and_where(at("i", issues::Column::Id).is_in(ids.iter().copied()))
+            .and_where(at("i", issues::Column::DeletedAt).is_null())
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_COMMENTS_SQL`]: live, unfolded comments with the
+    /// actor (LEFT join), chronological.
+    pub fn bundle_comments_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("c"), comments::Column::CommentStripped),
+                (alias("c"), comments::Column::SpeakerType),
+                (alias("c"), comments::Column::SpeakerLabel),
+                (alias("c"), comments::Column::SpeakerAgentRunId),
+                (alias("c"), comments::Column::CreatedAt),
+            ])
+            .columns([
+                (alias("u"), users::Column::DisplayName),
+                (alias("u"), users::Column::Email),
+                (alias("u"), users::Column::Username),
+                (alias("u"), users::Column::IsBot),
+            ])
+            .from_as(comments::Entity, alias("c"))
+            .join_as(
+                JoinType::LeftJoin,
+                users::Entity,
+                alias("u"),
+                at("u", users::Column::Id).equals((alias("c"), comments::Column::ActorId)),
+            )
+            .and_where(at("c", comments::Column::IssueId).eq(issue_id))
+            .and_where(at("c", comments::Column::DeletedAt).is_null())
+            // `labels @> ARRAY['fold']` is `'fold' = ANY(labels)`.
+            .and_where(
+                Expr::val("fold")
+                    .eq(PgFunc::any(at("c", comments::Column::Labels)))
+                    .not(),
+            )
+            .order_by((alias("c"), comments::Column::CreatedAt), Order::Asc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_CODE_REVIEWS_SQL`]: live review links, newest first.
+    pub fn bundle_code_reviews_select(issue_id: Uuid) -> SelectStatement {
+        use reviews::Column as C;
+        Query::select()
+            .columns([
+                C::Url,
+                C::Title,
+                C::State,
+                C::Merged,
+                C::Draft,
+                C::Provider,
+                C::ExternalIid,
+            ])
+            .from(reviews::Entity)
+            .and_where(Expr::col(C::IssueId).eq(issue_id))
+            .and_where(Expr::col(C::DeletedAt).is_null())
+            .order_by(C::CreatedAt, Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_REMOTE_SQL`]: the oldest live binding's live repo.
+    pub fn bundle_remote_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("r"), repos::Column::Provider),
+                (alias("r"), repos::Column::HostUrl),
+                (alias("r"), repos::Column::FullName),
+            ])
+            .from_as(bindings::Entity, alias("b"))
+            .join_as(
+                JoinType::InnerJoin,
+                repos::Entity,
+                alias("r"),
+                at("r", repos::Column::Id).equals((alias("b"), bindings::Column::RepositoryId)),
+            )
+            .and_where(at("b", bindings::Column::ProjectId).eq(project_id))
+            .and_where(at("b", bindings::Column::DeletedAt).is_null())
+            .and_where(at("r", repos::Column::DeletedAt).is_null())
+            .order_by((alias("b"), bindings::Column::CreatedAt), Order::Asc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_ANCESTOR_HOP_SQL`]: one plain FK hop.
+    pub fn bundle_ancestor_hop_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                issues::Column::Name,
+                issues::Column::ProjectId,
+                issues::Column::ParentId,
+            ])
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PROJECT_IDENTIFIER_SQL`].
+    pub fn bundle_project_identifier_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(projects::Column::Identifier)
+            .from(projects::Entity)
+            .and_where(Expr::col(projects::Column::Id).eq(project_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_SEQUENCE_SQL`].
+    pub fn bundle_sequence_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(issues::Column::SequenceId)
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PARENT_COLS_SQL`]: the parent's columns plus its
+    /// live comment count (output name `comments_count`).
+    pub fn bundle_parent_cols_select(parent_id: Uuid) -> SelectStatement {
+        let count = Query::select()
+            .expr(Expr::col((alias("c"), comments::Column::Id)).count())
+            .from_as(comments::Entity, alias("c"))
+            .and_where(at("c", comments::Column::IssueId).equals((alias("i"), issues::Column::Id)))
+            .and_where(at("c", comments::Column::DeletedAt).is_null())
+            .to_owned();
+        Query::select()
+            .columns([
+                (alias("i"), issues::Column::Name),
+                (alias("i"), issues::Column::StateId),
+                (alias("i"), issues::Column::GitWorkBranch),
+            ])
+            .expr_as(
+                SimpleExpr::SubQuery(None, Box::new(count.into_sub_query_statement())),
+                alias("comments_count"),
+            )
+            .from_as(issues::Entity, alias("i"))
+            .and_where(at("i", issues::Column::Id).eq(parent_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PARENT_DESCRIPTION_SQL`].
+    pub fn bundle_parent_description_select(parent_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(issues::Column::DescriptionStripped)
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(parent_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PRIOR_RUN_COUNT_SQL`]: output name `n`.
+    pub fn bundle_prior_run_count_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(Expr::col(run::Column::Id).count(), alias("n"))
+            .from(run::Entity)
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(run_col(run::Column::Id).ne(run_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_TICKER_SQL`].
+    pub fn bundle_ticker_select(issue_id: Uuid) -> SelectStatement {
+        use ticker::Column as C;
+        Query::select()
+            .columns([C::Used, C::Waited, C::Granted, C::Enabled])
+            .from(ticker::Entity)
+            .and_where(Expr::col(C::IssueId).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_DONE_PAYLOAD_SQL`].
+    pub fn bundle_done_payload_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(run::Column::DonePayload)
+            .from(run::Entity)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_OVERRIDES_SQL`]: active workspace rows plus the
+    /// user's (`user_id = NULL` never matches).
+    pub fn bundle_overrides_select(workspace_id: Uuid, user_id: Option<Uuid>) -> SelectStatement {
+        use overrides::Column as C;
+        Query::select()
+            .columns([C::SectionKey, C::Body, C::Version, C::UserId])
+            .from(overrides::Entity)
+            .and_where(Expr::col(C::IsActive).into())
+            .and_where(Expr::col(C::WorkspaceId).eq(workspace_id))
+            .cond_where(
+                Condition::any()
+                    .add(Expr::col(C::UserId).is_null())
+                    .add(Expr::col(C::UserId).eq(user_id)),
+            )
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_WORKSPACE_SQL`].
+    pub fn bundle_workspace_select(workspace_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([workspaces::Column::Slug, workspaces::Column::Name])
+            .from(workspaces::Entity)
+            .and_where(Expr::col(workspaces::Column::Id).eq(workspace_id))
+            .to_owned()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Row views (plain data over the SQL above)
 // ---------------------------------------------------------------------------
 
@@ -2241,6 +3057,208 @@ mod tests {
             Value::Array(items) => Value::Array(items.iter().map(jsonb_normalize).collect()),
             scalar => scalar.clone(),
         }
+    }
+
+    /// The [`orm`] builders, rendered without a database: aliased
+    /// joins (`AS`), INNER vs LEFT, the scopes, orderings, lock forms
+    /// and the output names the seam decodes by.
+    #[test]
+    fn orm_statement_shapes() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let render =
+            |select: sea_orm::sea_query::SelectStatement| select.to_string(PostgresQueryBuilder);
+        let id = uid(0x01);
+
+        let labels = render(orm::bundle_labels_select(id));
+        assert!(labels.contains("FROM \"issue_labels\" AS \"il\" INNER JOIN \"labels\" AS \"l\" ON \"l\".\"id\" = \"il\".\"label_id\""), "{labels}");
+        assert!(labels.contains("\"l\".\"deleted_at\" IS NULL"), "{labels}");
+        assert!(
+            labels.ends_with("ORDER BY \"l\".\"created_at\" DESC"),
+            "{labels}"
+        );
+        assert!(
+            !labels.contains("\"il\".\"deleted_at\""),
+            "link rows unfiltered: {labels}"
+        );
+
+        let assignees = render(orm::bundle_assignees_select(id));
+        assert!(
+            assignees
+                .contains("INNER JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"ia\".\"assignee_id\""),
+            "{assignees}"
+        );
+        assert!(
+            assignees.ends_with("ORDER BY \"u\".\"created_at\" DESC"),
+            "{assignees}"
+        );
+
+        let children = render(orm::bundle_children_select(id));
+        assert!(children.contains("FROM \"issues\" AS \"i\" INNER JOIN \"projects\" AS \"p\" ON \"p\".\"id\" = \"i\".\"project_id\" LEFT JOIN \"states\" AS \"s\" ON \"s\".\"id\" = \"i\".\"state_id\""), "{children}");
+        assert!(
+            children.contains("\"s\".\"name\" AS \"state_name\""),
+            "{children}"
+        );
+        for guard in [
+            "\"i\".\"deleted_at\" IS NULL",
+            "\"s\".\"group\" <> 'triage'",
+            "\"i\".\"archived_at\" IS NULL",
+            "\"p\".\"archived_at\" IS NULL",
+            "NOT \"i\".\"is_draft\"",
+        ] {
+            assert!(children.contains(guard), "{guard}: {children}");
+        }
+        assert!(
+            children.ends_with("ORDER BY \"i\".\"created_at\" ASC"),
+            "{children}"
+        );
+
+        let targets = render(orm::bundle_relation_targets_select(&[id, uid(0x02)]));
+        assert!(
+            targets.contains("\"s\".\"group\" AS \"state_group\""),
+            "{targets}"
+        );
+        assert!(targets.contains("\"i\".\"id\" IN ("), "{targets}");
+        assert!(
+            !targets.contains("archived_at"),
+            "targets keep archived rows: {targets}"
+        );
+
+        let comments = render(orm::bundle_comments_select(id));
+        assert!(comments.contains("FROM \"issue_comments\" AS \"c\" LEFT JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"c\".\"actor_id\""), "{comments}");
+        assert!(
+            comments.contains("NOT 'fold' = ANY(\"c\".\"labels\")"),
+            "{comments}"
+        );
+        assert!(
+            comments.ends_with("ORDER BY \"c\".\"created_at\" ASC"),
+            "{comments}"
+        );
+
+        let remote = render(orm::bundle_remote_select(id));
+        assert!(remote.contains("FROM \"git_repository_bindings\" AS \"b\" INNER JOIN \"git_repositories\" AS \"r\" ON \"r\".\"id\" = \"b\".\"repository_id\""), "{remote}");
+        assert!(
+            remote.ends_with("ORDER BY \"b\".\"created_at\" ASC LIMIT 1"),
+            "{remote}"
+        );
+
+        let parent = render(orm::bundle_parent_cols_select(id));
+        assert!(parent.contains("(SELECT COUNT(\"c\".\"id\") FROM \"issue_comments\" AS \"c\" WHERE \"c\".\"issue_id\" = \"i\".\"id\" AND \"c\".\"deleted_at\" IS NULL) AS \"comments_count\""), "{parent}");
+
+        let overrides = render(orm::bundle_overrides_select(id, None));
+        assert!(
+            overrides.contains("\"is_active\" AND \"workspace_id\" = "),
+            "{overrides}"
+        );
+        assert!(
+            overrides.contains("(\"user_id\" IS NULL OR \"user_id\" = NULL)"),
+            "{overrides}"
+        );
+
+        // Run reads: the view projection, newest first, the active set,
+        // and `FOR UPDATE OF "agent_run"` on the lock forms only.
+        let latest = render(orm::latest_prior_run_select(id));
+        assert!(
+            latest.ends_with("ORDER BY \"created_at\" DESC LIMIT 1"),
+            "{latest}"
+        );
+        assert!(!latest.contains("FOR UPDATE"), "{latest}");
+        let active = render(orm::active_run_select(id));
+        for status in ACTIVE_STATUSES {
+            assert!(
+                active.contains(&format!("'{}'", status.value())),
+                "{status:?}: {active}"
+            );
+        }
+        let lock = render(orm::run_lock_select(id));
+        assert!(lock.ends_with("FOR UPDATE OF \"agent_run\""), "{lock}");
+        let finalize = render(orm::finalize_lock_select(id));
+        assert!(finalize.contains("\"agent_run\".\"status\" NOT IN ('completed', 'failed', 'cancelled', 'blocked', 'refused')"), "{finalize}");
+        assert!(
+            finalize.ends_with("FOR UPDATE OF \"agent_run\""),
+            "{finalize}"
+        );
+        let issue_lock = render(orm::issue_lock_select(id));
+        assert!(
+            issue_lock.ends_with("FOR UPDATE OF \"issues\""),
+            "{issue_lock}"
+        );
+        assert!(
+            !issue_lock.contains("deleted_at"),
+            "all_objects: {issue_lock}"
+        );
+        let default_pod = render(orm::default_pod_select(id));
+        assert!(
+            default_pod
+                .contains("\"is_default\" AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC LIMIT 1"),
+            "{default_pod}"
+        );
+        for (column, name) in RUN_VIEW_COLUMNS.iter().zip(orm::RUN_VIEW.iter()) {
+            assert_eq!(
+                *column,
+                sea_orm::Iden::to_string(name),
+                "RUN_VIEW column order matches RUN_VIEW_COLUMNS"
+            );
+        }
+
+        // Writes: the finalize merge keeps the stored object (reset when
+        // not one), drops the patch's keys, adds its non-null values.
+        let merge = orm::finalize_update(id, now(), &finalize_error_details_patch("c", ""))
+            .to_string(PostgresQueryBuilder);
+        assert!(merge.contains("\"status\" = 'failed'"), "{merge}");
+        assert!(
+            merge.contains(
+                "\"terminal_hooks_applied_at\" = NULL, \"terminal_capacity_released_at\" = NULL"
+            ),
+            "{merge}"
+        );
+        assert!(merge.contains("(CASE WHEN (jsonb_typeof(\"agent_run\".\"error_details\") = 'object') THEN \"agent_run\".\"error_details\" ELSE '{}' END) - 'code' - 'message') || E'{"), "{merge}");
+        let insert = orm::run_insert(&NewAgentRun {
+            id,
+            workspace_id: uid(0x10),
+            created_by_id: uid(0x40),
+            pod_id: uid(0x50),
+            pinned_runner_id: None,
+            work_item_id: uid(0x02),
+            parent_run_id: None,
+            executor_kind: AgentExecutorKind::CloudAgent,
+            error_details: json!({}),
+            tool_plan: json!({}),
+            trigger: "direct".to_owned(),
+            phase_kind: String::new(),
+            run_config: json!({}),
+            now: now(),
+        })
+        .to_string(PostgresQueryBuilder);
+        assert!(insert.starts_with("INSERT INTO \"agent_run\" (\"id\", \"workspace_id\", \"owner_id\", \"created_by_id\""), "{insert}");
+        assert!(
+            insert.contains("'queued', 'cloud_agent', 0, NULL, ''"),
+            "{insert}"
+        );
+        assert!(
+            insert.ends_with(&format!(
+                "RETURNING {}",
+                RUN_VIEW_COLUMNS
+                    .iter()
+                    .map(|column| format!("\"{column}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            "{insert}"
+        );
+        let seq = render(orm::terminal_event_seq_select(id));
+        assert!(
+            seq.contains("COALESCE(MAX(\"seq\"), 0) + 1 AS \"seq\""),
+            "{seq}"
+        );
+        let exists = render(orm::terminal_event_exists_select(id));
+        assert!(
+            exists.contains("EXISTS(SELECT 1 FROM \"agent_run_event\" WHERE"),
+            "{exists}"
+        );
+        assert!(
+            exists.contains("\"kind\" = 'terminal') AS \"exists\""),
+            "{exists}"
+        );
     }
 
     fn issue_view() -> IssueView {

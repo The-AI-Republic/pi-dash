@@ -32,6 +32,7 @@
 //! `post_failure_comment` sections).
 
 use pidash_db::app_pages::strip::{django_strip_tags, ml_strip_tags};
+use pidash_db::entity as orm;
 use pidash_db::runner_runs::agent_run;
 use pidash_types::runner_runs::{
     enrich_run_error, merge_usage, AgentRunStatus, RefusalCategory, RunnerInfo,
@@ -801,6 +802,302 @@ pub fn plan_failure_comment(error: &str, run_id: Uuid) -> Option<CommentPlan> {
         )
     };
     Some(CommentPlan::failure(html, run_id))
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM lifecycle kernel
+// ---------------------------------------------------------------------------
+//
+// The statements above as SeaORM / sea-query builders for the executing
+// drivers (`pidash_db::orm_tx::TxConn` over the endpoint transaction, or
+// a pool connection). Same predicates, locks, ordering and `LIMIT`s as
+// the text twins; each read projects only the columns its planner
+// consumes (the full-row `select_related` fetches carry nothing else
+// into the plans).
+
+/// `_matching_live_state` ([`live_state_by_runner_sql`]): the usage and
+/// model snapshot for the run on this runner, `LIMIT 1`, no ordering.
+pub fn live_state_usage_select(
+    runner_id: Uuid,
+    run_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Value, Option<String>)>> {
+    use orm::runner_live_state::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    Entity::find()
+        .select_only()
+        .columns([Column::Usage, Column::LlmModel])
+        .filter(Column::ObservedRunId.eq(run_id))
+        .filter(Column::RunnerId.eq(runner_id))
+        .limit(1)
+        .into_tuple::<(Value, Option<String>)>()
+}
+
+/// Run [`live_state_usage_select`]: the snapshot facts, or `None` when
+/// the runner recorded none for this run.
+pub async fn live_state_usage_facts(
+    db: &impl sea_orm::ConnectionTrait,
+    runner_id: Uuid,
+    run_id: Uuid,
+) -> Result<Option<LiveStateUsageFacts>, sea_orm::DbErr> {
+    Ok(live_state_usage_select(runner_id, run_id)
+        .one(db)
+        .await?
+        .map(|(usage, llm_model)| LiveStateUsageFacts { usage, llm_model }))
+}
+
+/// Pause lock ([`lock_run_for_pause_sql`]): the run by id + runner,
+/// neither terminal nor `CANCEL_REQUESTED`, `ORDER BY created_at DESC
+/// LIMIT 1 FOR UPDATE`; reads the id and the stored `done_payload`.
+pub fn lock_run_for_pause_select(
+    run_id: Uuid,
+    runner_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, Option<Value>)>> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    Entity::find()
+        .select_only()
+        .columns([Column::Id, Column::DonePayload])
+        .filter(Column::Id.eq(run_id))
+        .filter(Column::RunnerId.eq(runner_id))
+        .filter(
+            Column::Status.is_not_in(
+                pidash_types::runner_runs::TERMINAL_RUN_STATUSES
+                    .iter()
+                    .map(AgentRunStatus::value),
+            ),
+        )
+        .filter(Column::Status.ne(AgentRunStatus::CancelRequested.value()))
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .lock_exclusive()
+        .into_tuple::<(Uuid, Option<Value>)>()
+}
+
+/// Run [`lock_run_for_pause_select`]: `(id, stored done_payload)`, or
+/// `None` on a lost race.
+pub async fn lock_run_for_pause(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+    runner_id: Uuid,
+) -> Result<Option<(Uuid, Option<Value>)>, sea_orm::DbErr> {
+    lock_run_for_pause_select(run_id, runner_id).one(db).await
+}
+
+/// Pause `UPDATE` ([`pause_update_sql`]): `status`, the merged
+/// `done_payload`, then `usage` / `llm_model` when the plan carries
+/// them.
+pub fn pause_update_statement(
+    plan: &PauseUpdatePlan,
+    run_id: Uuid,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let mut update = Entity::update_many()
+        .col_expr(
+            Column::Status,
+            Expr::value(AgentRunStatus::PausedAwaitingInput.value()),
+        )
+        .col_expr(Column::DonePayload, Expr::value(plan.done_payload.clone()));
+    if let Some(usage) = &plan.usage {
+        update = update.col_expr(Column::Usage, Expr::value(usage.clone()));
+    }
+    if let Some(model) = &plan.llm_model {
+        update = update.col_expr(Column::LlmModel, Expr::value(model.clone()));
+    }
+    update.filter(Column::Id.eq(run_id))
+}
+
+/// Run [`pause_update_statement`]; returns the rows written.
+pub async fn pause_update(
+    db: &impl sea_orm::ConnectionTrait,
+    plan: &PauseUpdatePlan,
+    run_id: Uuid,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(pause_update_statement(plan, run_id)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// The failure-comment re-read ([`failure_reread_sql`]): the run's work
+/// item plus the joined issue's id / project / workspace (`None` without
+/// an issue row — `LEFT JOIN`). The `projects` leg Django adds is a
+/// primary-key join nothing reads.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct FailureRereadRow {
+    pub work_item_id: Option<Uuid>,
+    pub issue_id: Option<Uuid>,
+    pub issue_project_id: Option<Uuid>,
+    pub issue_workspace_id: Option<Uuid>,
+}
+
+/// `agent_run.work_item_id -> issues.id` (trimmed from the entity).
+fn work_item_rel() -> sea_orm::RelationDef {
+    use sea_orm::EntityTrait;
+    orm::agent_run::Entity::belongs_to(orm::issues::Entity)
+        .from(orm::agent_run::Column::WorkItemId)
+        .to(orm::issues::Column::Id)
+        .into()
+}
+
+/// Failure re-read ([`failure_reread_sql`]): run `LEFT JOIN issues`,
+/// `ORDER BY created_at DESC LIMIT 1`.
+pub fn failure_reread_select(
+    run_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<FailureRereadRow>> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect};
+    Entity::find()
+        .select_only()
+        .column(Column::WorkItemId)
+        .column_as(orm::issues::Column::Id, "issue_id")
+        .column_as(orm::issues::Column::ProjectId, "issue_project_id")
+        .column_as(orm::issues::Column::WorkspaceId, "issue_workspace_id")
+        .join(JoinType::LeftJoin, work_item_rel())
+        .filter(Column::Id.eq(run_id))
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .into_model::<FailureRereadRow>()
+}
+
+/// Run [`failure_reread_select`].
+pub async fn failure_reread(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+) -> Result<Option<FailureRereadRow>, sea_orm::DbErr> {
+    failure_reread_select(run_id).one(db).await
+}
+
+/// Pending-entry ticker lookup ([`ticker_pending_entry_sql`]): the live,
+/// enabled, pending ticker of the issue, `LIMIT 1`, no ordering.
+pub fn ticker_pending_entry_select(
+    issue_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::issue_agent_ticker::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::DeletedAt.is_null())
+        .filter(Column::Enabled.eq(true))
+        .filter(Column::IssueId.eq(issue_id))
+        .filter(Column::PendingEntry.eq(true))
+        .limit(1)
+        .into_tuple::<Uuid>()
+}
+
+/// Run [`ticker_pending_entry_select`].
+pub async fn ticker_pending_entry(
+    db: &impl sea_orm::ConnectionTrait,
+    issue_id: Uuid,
+) -> Result<Option<Uuid>, sea_orm::DbErr> {
+    ticker_pending_entry_select(issue_id).one(db).await
+}
+
+/// Failure-comment dedupe probe ([`comment_dedupe_exists_sql`]): a live
+/// comment by this speaker run on the issue, `LIMIT 1`.
+pub fn comment_dedupe_select(
+    issue_id: Uuid,
+    speaker_run_id: Uuid,
+    speaker: CommentSpeaker,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::issue_comments::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::DeletedAt.is_null())
+        .filter(Column::IssueId.eq(issue_id))
+        .filter(Column::SpeakerAgentRunId.eq(speaker_run_id))
+        .filter(Column::SpeakerType.eq(speaker.value()))
+        .limit(1)
+        .into_tuple::<Uuid>()
+}
+
+/// Run [`comment_dedupe_select`]: whether such a comment exists.
+pub async fn comment_dedupe_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    issue_id: Uuid,
+    speaker_run_id: Uuid,
+    speaker: CommentSpeaker,
+) -> Result<bool, sea_orm::DbErr> {
+    Ok(comment_dedupe_select(issue_id, speaker_run_id, speaker)
+        .one(db)
+        .await?
+        .is_some())
+}
+
+/// Parent thread clear ([`parent_thread_clear_sql`]): `thread_id = ''`
+/// on the parent row.
+pub fn parent_thread_clear_statement(
+    parent_id: Uuid,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::ThreadId, Expr::value(String::new()))
+        .filter(Column::Id.eq(parent_id))
+}
+
+/// Run [`parent_thread_clear_statement`]; returns the rows written.
+pub async fn parent_thread_clear(
+    db: &impl sea_orm::ConnectionTrait,
+    parent_id: Uuid,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(parent_thread_clear_statement(parent_id)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// Requeue `UPDATE` ([`requeue_update_sql`]): `QUEUED`, runner /
+/// pinned runner / `assigned_at` cleared.
+pub fn requeue_update_statement(run_id: Uuid) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::{Expr, Keyword, SimpleExpr};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(AgentRunStatus::Queued.value()))
+        .col_expr(Column::RunnerId, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::PinnedRunnerId, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::AssignedAt, SimpleExpr::Keyword(Keyword::Null))
+        .filter(Column::Id.eq(run_id))
+}
+
+/// Run [`requeue_update_statement`]; returns the rows written.
+pub async fn requeue_update(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(requeue_update_statement(run_id)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// Runner `BUSY` flip ([`runner_busy_update_sql`]): single-column
+/// update, no timestamp touch.
+pub fn runner_busy_update_statement(runner_id: Uuid) -> sea_orm::UpdateMany<orm::runner::Entity> {
+    use orm::runner::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value("busy"))
+        .filter(Column::Id.eq(runner_id))
+}
+
+/// Run [`runner_busy_update_statement`]; zero rows are fine (a queryset
+/// `update`).
+pub async fn runner_busy_update(
+    db: &impl sea_orm::ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(runner_busy_update_statement(runner_id)
+        .exec(db)
+        .await?
+        .rows_affected)
 }
 
 #[cfg(test)]
@@ -1909,5 +2206,258 @@ mod tests {
                 "read column {column} selected"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Live kernel round trips (session temp tables, rolled back)
+    // ------------------------------------------------------------------
+
+    /// A one-connection pool on the scratch `DATABASE_URL`, or `None`
+    /// (skip) without one.
+    async fn temp_table_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        Some(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .expect("connect to scratch DATABASE_URL"),
+        )
+    }
+
+    /// Session temp copies that shadow the real tables for this
+    /// transaction (no constraints, no foreign keys, no generated
+    /// columns: the test seeds what the entities decode).
+    async fn temp_tables(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, tables: &[&str]) {
+        for table in tables {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut **tx)
+            .await
+            .expect("temp table");
+        }
+    }
+
+    /// Seed one `agent_run` row with every NOT NULL column the entity
+    /// decodes (the executor, status, runner, work item, parent and
+    /// `error_details` vary per test).
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_run(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: Uuid,
+        status: &str,
+        executor_kind: &str,
+        runner_id: Option<Uuid>,
+        work_item_id: Option<Uuid>,
+        parent_run_id: Option<Uuid>,
+        scheduler_binding_id: Option<Uuid>,
+        pod_id: Uuid,
+        error_details: Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, runner_id, \
+             work_item_id, parent_run_id, scheduler_binding_id, status, executor_kind, \
+             dispatch_attempts, cancel_reason, tool_plan, prompt, trigger, phase_kind, \
+             run_config, required_capabilities, thread_id, agent_metadata, error_details, \
+             llm_model, usage, created_at, done_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
+             $9, $10, 0, '', '{}', '', 'direct', 'work', '{}', '[]', 'thread', '{}', $11, '', \
+             '{}', now(), NULL)",
+        )
+        .bind(id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(pod_id)
+        .bind(runner_id)
+        .bind(work_item_id)
+        .bind(parent_run_id)
+        .bind(scheduler_binding_id)
+        .bind(status)
+        .bind(executor_kind)
+        .bind(error_details)
+        .execute(&mut **tx)
+        .await
+        .expect("seed run");
+    }
+
+    /// The lifecycle kernel on temp tables: the live-state snapshot, the
+    /// pause lock + update, the failure re-read through the issue join,
+    /// the ticker and comment probes, the requeue pair and the runner
+    /// flip.
+    #[tokio::test]
+    async fn live_pause_requeue_and_hook_reads() {
+        let Some(pool) = temp_table_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        temp_tables(
+            &mut tx,
+            &[
+                "agent_run",
+                "runner",
+                "runner_live_state",
+                "issues",
+                "issue_agent_ticker",
+                "issue_comments",
+            ],
+        )
+        .await;
+        let run = Uuid::new_v4();
+        let parent = Uuid::new_v4();
+        let runner = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let ticker = Uuid::new_v4();
+        let pod_id = Uuid::new_v4();
+        seed_run(
+            &mut tx,
+            parent,
+            "running",
+            "local_runner",
+            Some(runner),
+            None,
+            None,
+            None,
+            pod_id,
+            serde_json::json!({}),
+        )
+        .await;
+        sqlx::query("UPDATE agent_run SET thread_id = 'parent-thread' WHERE id = $1")
+            .bind(parent)
+            .execute(&mut *tx)
+            .await
+            .expect("parent thread");
+        seed_run(
+            &mut tx,
+            run,
+            "running",
+            "local_runner",
+            Some(runner),
+            Some(issue),
+            Some(parent),
+            None,
+            pod_id,
+            serde_json::json!({}),
+        )
+        .await;
+        sqlx::query("INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) VALUES ($1, 'r', '{}', 'online', 'linux', 'x64', '1', 1, now(), now(), $2, $3, $4, 'h', '', '', 0, '', 1, '', '', '', 0, '{}', 'manual')")
+            .bind(runner).bind(Uuid::new_v4()).bind(workspace).bind(pod_id)
+            .execute(&mut *tx).await.expect("seed runner");
+        sqlx::query("INSERT INTO runner_live_state (runner_id, observed_run_id, usage, llm_model, updated_at) VALUES ($1, $2, '{\"input\": 3}', 'gpt', now())")
+            .bind(runner).bind(run)
+            .execute(&mut *tx).await.expect("seed live state");
+        sqlx::query("INSERT INTO issues (id, created_at, updated_at, name, project_id, workspace_id) VALUES ($1, now(), now(), 'i', $2, $3)")
+            .bind(issue).bind(project).bind(workspace)
+            .execute(&mut *tx).await.expect("seed issue");
+        sqlx::query("INSERT INTO issue_agent_ticker (id, issue_id, enabled, pending_entry, created_at, updated_at) VALUES ($1, $2, true, true, now(), now())")
+            .bind(ticker).bind(issue)
+            .execute(&mut *tx).await.expect("seed ticker");
+        sqlx::query("INSERT INTO issue_comments (id, issue_id, speaker_agent_run_id, speaker_type, created_at, updated_at, project_id, workspace_id, comment_stripped, comment_html, comment_json, access, speaker_label, attachments, labels) VALUES ($1, $2, $3, 'system', now(), now(), $4, $5, '', '', '{}', 'INTERNAL', '', '{}', '{}')")
+            .bind(Uuid::new_v4()).bind(issue).bind(run).bind(project).bind(workspace)
+            .execute(&mut *tx).await.expect("seed comment");
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        assert_eq!(
+            live_state_usage_facts(&conn, runner, run)
+                .await
+                .expect("live"),
+            Some(LiveStateUsageFacts {
+                usage: serde_json::json!({"input": 3}),
+                llm_model: Some("gpt".to_owned()),
+            })
+        );
+        assert_eq!(
+            live_state_usage_facts(&conn, Uuid::new_v4(), run)
+                .await
+                .expect("live"),
+            None
+        );
+        // The pause lock: id + runner must match.
+        assert!(lock_run_for_pause(&conn, run, Uuid::new_v4())
+            .await
+            .expect("pause lock")
+            .is_none());
+        let (locked_id, stored) = lock_run_for_pause(&conn, run, runner)
+            .await
+            .expect("pause lock")
+            .expect("row");
+        assert_eq!(locked_id, run);
+        assert_eq!(stored, None);
+        let plan = plan_pause_update(
+            &Value::Null,
+            &serde_json::json!({"question": "q"}),
+            &Value::Null,
+            &serde_json::json!("claude"),
+            None,
+        );
+        assert_eq!(pause_update(&conn, &plan, run).await.expect("pause"), 1);
+        {
+            use sea_orm::EntityTrait;
+            let row = orm::agent_run::Entity::find_by_id(run)
+                .one(&conn)
+                .await
+                .expect("reread")
+                .expect("row");
+            assert_eq!(row.status, "paused_awaiting_input");
+            assert_eq!(row.done_payload, Some(serde_json::json!({"question": "q"})));
+            assert_eq!(row.llm_model, "claude");
+        }
+        // Paused rows no longer lock for pause... but still requeue.
+        let reread = failure_reread(&conn, run)
+            .await
+            .expect("reread")
+            .expect("row");
+        assert_eq!(
+            reread,
+            FailureRereadRow {
+                work_item_id: Some(issue),
+                issue_id: Some(issue),
+                issue_project_id: Some(project),
+                issue_workspace_id: Some(workspace),
+            }
+        );
+        assert_eq!(
+            ticker_pending_entry(&conn, issue).await.expect("ticker"),
+            Some(ticker)
+        );
+        assert!(
+            comment_dedupe_exists(&conn, issue, run, CommentSpeaker::System)
+                .await
+                .expect("dedupe")
+        );
+        assert!(
+            !comment_dedupe_exists(&conn, issue, run, CommentSpeaker::Human)
+                .await
+                .expect("dedupe")
+        );
+        assert_eq!(parent_thread_clear(&conn, parent).await.expect("clear"), 1);
+        assert_eq!(requeue_update(&conn, run).await.expect("requeue"), 1);
+        assert_eq!(runner_busy_update(&conn, runner).await.expect("busy"), 1);
+        {
+            use sea_orm::EntityTrait;
+            let row = orm::agent_run::Entity::find_by_id(run)
+                .one(&conn)
+                .await
+                .expect("reread")
+                .expect("row");
+            assert_eq!(row.status, "queued");
+            assert_eq!(row.runner_id, None);
+            let parent_row = orm::agent_run::Entity::find_by_id(parent)
+                .one(&conn)
+                .await
+                .expect("parent")
+                .expect("row");
+            assert_eq!(parent_row.thread_id, "");
+            let runner_row = orm::runner::Entity::find_by_id(runner)
+                .one(&conn)
+                .await
+                .expect("runner")
+                .expect("row");
+            assert_eq!(runner_row.status, "busy");
+        }
+        tx.rollback().await.expect("rollback");
     }
 }

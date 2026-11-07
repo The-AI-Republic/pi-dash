@@ -88,14 +88,24 @@ use axum::routing::get;
 use axum::Router;
 use chrono::{DateTime, Datelike, NaiveDate, SubsecRound, Utc};
 use chrono_tz::Tz;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    accounts, issue_activities, issue_assignees, issues, profiles, projects, states, users,
+    workspaces,
+};
+use pidash_db::orm_tx::TxConn;
 use pidash_services::app_workspace::queries_core as core_q;
 use pidash_services::app_workspace::queries_profile as profile_q;
 use pidash_services::app_workspace::queries_user as user_q;
 use pidash_services::app_workspace::ser_account_token as ser;
 use pidash_services::user_settings::SettingsSchema;
+use sea_orm::sea_query::{Alias, BinOper, Condition, Expr, ExprTrait, Func};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
+};
 
 use crate::middleware::SessionHandle;
 use crate::serializer::render_datetime_in;
@@ -258,12 +268,15 @@ async fn request_actor(
         Some(id) => id,
         None => return Ok(None),
     };
-    let row: Option<(bool, Option<String>)> =
-        sqlx::query_as("SELECT is_active, user_timezone FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(bool, Option<String>)> = users::Entity::find()
+        .select_only()
+        .columns([users::Column::IsActive, users::Column::UserTimezone])
+        .filter(users::Column::Id.eq(id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     match row {
         Some((true, timezone)) => {
             // `TimezoneMixin.initial`: `timezone.activate(
@@ -1268,46 +1281,26 @@ struct DbAccount {
 }
 
 impl DbAccount {
-    fn get(row: &sqlx::postgres::PgRow) -> Result<Self, HandlerError> {
-        Ok(Self {
-            id: row.try_get("id").map_err(|_| HandlerError::ServerError)?,
-            created_at: row
-                .try_get("created_at")
-                .map_err(|_| HandlerError::ServerError)?,
-            updated_at: row
-                .try_get("updated_at")
-                .map_err(|_| HandlerError::ServerError)?,
-            provider_account_id: row
-                .try_get("provider_account_id")
-                .map_err(|_| HandlerError::ServerError)?,
-            provider: row
-                .try_get("provider")
-                .map_err(|_| HandlerError::ServerError)?,
-            access_token: row
-                .try_get("access_token")
-                .map_err(|_| HandlerError::ServerError)?,
-            access_token_expired_at: row
-                .try_get("access_token_expired_at")
-                .map_err(|_| HandlerError::ServerError)?,
-            refresh_token: row
-                .try_get("refresh_token")
-                .map_err(|_| HandlerError::ServerError)?,
-            refresh_token_expired_at: row
-                .try_get("refresh_token_expired_at")
-                .map_err(|_| HandlerError::ServerError)?,
-            last_connected_at: row
-                .try_get("last_connected_at")
-                .map_err(|_| HandlerError::ServerError)?,
-            id_token: row
-                .try_get("id_token")
-                .map_err(|_| HandlerError::ServerError)?,
-            metadata: row
-                .try_get("metadata")
-                .map_err(|_| HandlerError::ServerError)?,
-            user_id: row
-                .try_get("user_id")
-                .map_err(|_| HandlerError::ServerError)?,
-        })
+    fn from_model(model: accounts::Model) -> Self {
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            provider_account_id: model.provider_account_id,
+            provider: model.provider,
+            access_token: model.access_token,
+            access_token_expired_at: model
+                .access_token_expired_at
+                .map(|value| value.with_timezone(&Utc)),
+            refresh_token: model.refresh_token,
+            refresh_token_expired_at: model
+                .refresh_token_expired_at
+                .map(|value| value.with_timezone(&Utc)),
+            last_connected_at: model.last_connected_at.with_timezone(&Utc),
+            id_token: model.id_token,
+            metadata: model.metadata,
+            user_id: model.user_id,
+        }
     }
 }
 
@@ -1382,95 +1375,39 @@ struct DbProfile {
 }
 
 impl DbProfile {
-    fn get(row: &sqlx::postgres::PgRow) -> Result<Self, HandlerError> {
-        Ok(Self {
-            id: row.try_get("id").map_err(|_| HandlerError::ServerError)?,
-            created_at: row
-                .try_get("created_at")
-                .map_err(|_| HandlerError::ServerError)?,
-            updated_at: row
-                .try_get("updated_at")
-                .map_err(|_| HandlerError::ServerError)?,
-            user_id: row
-                .try_get("user_id")
-                .map_err(|_| HandlerError::ServerError)?,
-            theme: row
-                .try_get("theme")
-                .map_err(|_| HandlerError::ServerError)?,
-            is_app_rail_docked: row
-                .try_get("is_app_rail_docked")
-                .map_err(|_| HandlerError::ServerError)?,
-            is_tour_completed: row
-                .try_get("is_tour_completed")
-                .map_err(|_| HandlerError::ServerError)?,
-            onboarding_step: row
-                .try_get("onboarding_step")
-                .map_err(|_| HandlerError::ServerError)?,
-            use_case: row
-                .try_get("use_case")
-                .map_err(|_| HandlerError::ServerError)?,
-            role: row.try_get("role").map_err(|_| HandlerError::ServerError)?,
-            is_onboarded: row
-                .try_get("is_onboarded")
-                .map_err(|_| HandlerError::ServerError)?,
-            last_workspace_id: row
-                .try_get("last_workspace_id")
-                .map_err(|_| HandlerError::ServerError)?,
-            billing_address_country: row
-                .try_get("billing_address_country")
-                .map_err(|_| HandlerError::ServerError)?,
-            billing_address: row
-                .try_get("billing_address")
-                .map_err(|_| HandlerError::ServerError)?,
-            has_billing_address: row
-                .try_get("has_billing_address")
-                .map_err(|_| HandlerError::ServerError)?,
-            company_name: row
-                .try_get("company_name")
-                .map_err(|_| HandlerError::ServerError)?,
-            notification_view_mode: row
-                .try_get("notification_view_mode")
-                .map_err(|_| HandlerError::ServerError)?,
-            is_smooth_cursor_enabled: row
-                .try_get("is_smooth_cursor_enabled")
-                .map_err(|_| HandlerError::ServerError)?,
-            is_mobile_onboarded: row
-                .try_get("is_mobile_onboarded")
-                .map_err(|_| HandlerError::ServerError)?,
-            mobile_onboarding_step: row
-                .try_get("mobile_onboarding_step")
-                .map_err(|_| HandlerError::ServerError)?,
-            mobile_timezone_auto_set: row
-                .try_get("mobile_timezone_auto_set")
-                .map_err(|_| HandlerError::ServerError)?,
-            language: row
-                .try_get("language")
-                .map_err(|_| HandlerError::ServerError)?,
-            start_of_the_week: row
-                .try_get("start_of_the_week")
-                .map_err(|_| HandlerError::ServerError)?,
-            goals: row
-                .try_get("goals")
-                .map_err(|_| HandlerError::ServerError)?,
-            background_color: row
-                .try_get("background_color")
-                .map_err(|_| HandlerError::ServerError)?,
-            is_navigation_tour_completed: row
-                .try_get("is_navigation_tour_completed")
-                .map_err(|_| HandlerError::ServerError)?,
-            has_marketing_email_consent: row
-                .try_get("has_marketing_email_consent")
-                .map_err(|_| HandlerError::ServerError)?,
-            is_subscribed_to_changelog: row
-                .try_get("is_subscribed_to_changelog")
-                .map_err(|_| HandlerError::ServerError)?,
-            product_tour: row
-                .try_get("product_tour")
-                .map_err(|_| HandlerError::ServerError)?,
-            settings: row
-                .try_get("settings")
-                .map_err(|_| HandlerError::ServerError)?,
-        })
+    fn from_model(model: profiles::Model) -> Self {
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            user_id: model.user_id,
+            theme: model.theme,
+            is_app_rail_docked: model.is_app_rail_docked,
+            is_tour_completed: model.is_tour_completed,
+            onboarding_step: model.onboarding_step,
+            use_case: model.use_case,
+            role: model.role,
+            is_onboarded: model.is_onboarded,
+            last_workspace_id: model.last_workspace_id,
+            billing_address_country: model.billing_address_country,
+            billing_address: model.billing_address,
+            has_billing_address: model.has_billing_address,
+            company_name: model.company_name,
+            notification_view_mode: model.notification_view_mode,
+            is_smooth_cursor_enabled: model.is_smooth_cursor_enabled,
+            is_mobile_onboarded: model.is_mobile_onboarded,
+            mobile_onboarding_step: model.mobile_onboarding_step,
+            mobile_timezone_auto_set: model.mobile_timezone_auto_set,
+            language: model.language,
+            start_of_the_week: model.start_of_the_week,
+            goals: model.goals,
+            background_color: model.background_color,
+            is_navigation_tour_completed: model.is_navigation_tour_completed,
+            has_marketing_email_consent: model.has_marketing_email_consent,
+            is_subscribed_to_changelog: model.is_subscribed_to_changelog,
+            product_tour: model.product_tour,
+            settings: model.settings,
+        }
     }
 
     /// Apply validated PATCH writes (`ModelSerializer.update` assigns
@@ -1607,15 +1544,16 @@ async fn list_accounts(
     let actor = request_actor(pool, extension)
         .await?
         .ok_or(HandlerError::Unauthorized)?;
-    let sql = number_placeholders(&user_q::account_list_sql(), &["user"]);
-    let rows = sqlx::query(&sql)
-        .bind(actor.id)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = accounts::Entity::find()
+        .filter(accounts::Column::UserId.eq(actor.id))
+        .order_by_desc(accounts::Column::CreatedAt)
+        .all(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let mut items = Vec::with_capacity(rows.len());
-    for row in &rows {
-        items.push(render_account(&DbAccount::get(row)?, &actor.timezone));
+    for row in rows {
+        items.push(render_account(&DbAccount::from_model(row), &actor.timezone));
     }
     Ok(json_response(
         StatusCode::OK,
@@ -1649,11 +1587,11 @@ async fn get_account_inner(
     let actor = request_actor(pool, extension)
         .await?
         .ok_or(HandlerError::Unauthorized)?;
-    let sql = number_placeholders(&user_q::account_detail_sql(), &["pk", "user"]);
-    let row = sqlx::query(&sql)
-        .bind(pk)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = accounts::Entity::find()
+        .filter(accounts::Column::Id.eq(pk))
+        .filter(accounts::Column::UserId.eq(actor.id))
+        .one(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let Some(row) = row else {
@@ -1661,7 +1599,7 @@ async fn get_account_inner(
     };
     Ok(json_response(
         StatusCode::OK,
-        render_account(&DbAccount::get(&row)?, &actor.timezone).to_string(),
+        render_account(&DbAccount::from_model(row), &actor.timezone).to_string(),
     ))
 }
 
@@ -1692,17 +1630,18 @@ async fn delete_account_inner(
     let actor = request_actor(pool, extension)
         .await?
         .ok_or(HandlerError::Unauthorized)?;
-    let lookup = number_placeholders(&user_q::account_detail_sql(), &["pk", "user"]);
-    let row = sqlx::query(&lookup)
-        .bind(pk)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = accounts::Entity::find()
+        .filter(accounts::Column::Id.eq(pk))
+        .filter(accounts::Column::UserId.eq(actor.id))
+        .one(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     if row.is_none() {
         return Err(HandlerError::NotFound);
     }
     let delete = number_placeholders(&user_q::account_hard_delete_sql(), &["pk"]);
+    // raw-sql: domain-covered table write; the domain builder owns the statement.
     sqlx::query(&delete)
         .bind(pk)
         .execute(pool)
@@ -1726,16 +1665,16 @@ async fn get_profile(
     let actor = request_actor(pool, extension)
         .await?
         .ok_or(HandlerError::Unauthorized)?;
-    let sql = number_placeholders(&user_q::profile_by_user_sql(), &["user"]);
-    let row = sqlx::query(&sql)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = profiles::Entity::find()
+        .filter(profiles::Column::UserId.eq(actor.id))
+        .one(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let Some(row) = row else {
         return Err(HandlerError::NotFound);
     };
-    let body = render_profile(&DbProfile::get(&row)?, &actor.timezone).to_string();
+    let body = render_profile(&DbProfile::from_model(row), &actor.timezone).to_string();
     let headers = super::gates::headers_for("GET", "users/me/profile/");
     let mut response = json_response(StatusCode::OK, body);
     if let Some(cache_control) = headers.cache_control {
@@ -1783,17 +1722,20 @@ async fn patch_profile(
         None
     };
     let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
-    let lock = number_placeholders(&user_q::profile_lock_sql(), &["user"]);
-    let row = sqlx::query(&lock)
-        .bind(actor.id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    let row = {
+        let conn = TxConn::new(&mut tx);
+        profiles::Entity::find()
+            .filter(profiles::Column::UserId.eq(actor.id))
+            .lock_exclusive()
+            .one(&conn)
+            .await
+            .map_err(|_| HandlerError::ServerError)?
+    };
     let Some(row) = row else {
         tx.rollback().await.map_err(|_| HandlerError::ServerError)?;
         return Err(HandlerError::NotFound);
     };
-    let mut profile = DbProfile::get(&row)?;
+    let mut profile = DbProfile::from_model(row);
     let sets = match validate_partial(object) {
         Ok(sets) => sets,
         Err(errors) => {
@@ -1807,6 +1749,7 @@ async fn patch_profile(
     }
     profile.updated_at = patch_now();
     let save = number_placeholders(&user_q::profile_full_save_sql(), &profile_save_order());
+    // raw-sql: domain-covered table write; the domain builder owns the statement.
     bind_profile_save(sqlx::query(&save), &profile)
         .execute(&mut *tx)
         .await
@@ -1894,6 +1837,264 @@ fn local_today() -> NaiveDate {
     chrono::Local::now().date_naive()
 }
 
+/// `EXTRACT(part FROM expr)` as `date_part('part', expr)` (same values;
+/// `date_part` returns `double precision`, `EXTRACT` `numeric` — after
+/// the integer casts below, identical).
+fn date_part(
+    part: &str,
+    expr: impl Into<sea_orm::sea_query::SimpleExpr>,
+) -> sea_orm::sea_query::SimpleExpr {
+    Func::cust("date_part")
+        .arg(Expr::val(part))
+        .arg(expr.into())
+        .into()
+}
+
+fn zoned(
+    column: impl Into<sea_orm::sea_query::SimpleExpr>,
+    tz_name: &str,
+) -> sea_orm::sea_query::SimpleExpr {
+    column.binary(
+        BinOper::Custom("AT TIME ZONE"),
+        Expr::val(tz_name.to_owned()),
+    )
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ActivityGraphRow {
+    created_date: NaiveDate,
+    activity_count: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct CompletedGraphRow {
+    week: i32,
+    completed_count: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct WeekInMonthRow {
+    week_in_month: i32,
+    completed_count: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct StateDistributionRow {
+    state_group: Option<String>,
+    state_count: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct IssueValuesRow {
+    id: Uuid,
+    name: String,
+    workspace_slug: String,
+    project_id: Uuid,
+    value_date: NaiveDate,
+}
+
+/// The `issue_objects` scope + tenant predicate shared by the dashboard
+/// issue counts and lists (`queries_core::issue_manager_where_sql` +
+/// `issue_tenant_where_sql`). The `states` LEFT JOIN keeps NULL-state
+/// rows through the `IS NOT NULL` guard.
+fn dashboard_tenant(user_id: Uuid, slug: &str) -> Condition {
+    Condition::all()
+        .add(issues::Column::DeletedAt.is_null())
+        .add(
+            Condition::all()
+                .add(states::Column::Group.eq("triage"))
+                .add(states::Column::Group.is_not_null())
+                .not(),
+        )
+        .add(issues::Column::ArchivedAt.is_null())
+        .add(projects::Column::ArchivedAt.is_null())
+        .add(issues::Column::IsDraft.eq(false))
+        .add(issue_assignees::Column::AssigneeId.eq(user_id))
+        .add(workspaces::Column::Slug.eq(slug))
+}
+
+fn dashboard_issues_select() -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::IssueAssignees.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+}
+
+fn activity_graph_select(
+    user_id: Uuid,
+    slug: &str,
+    cutoff: NaiveDate,
+    tz_name: &str,
+) -> sea_orm::Select<issue_activities::Entity> {
+    let created = Expr::col((
+        issue_activities::Entity,
+        issue_activities::Column::CreatedAt,
+    ));
+    let created_date = created.clone().cast_as(Alias::new("date"));
+    issue_activities::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_activities::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .expr_as(created_date.clone(), "created_date")
+        .expr_as(Func::count(created_date.clone()), "activity_count")
+        .filter(issue_activities::Column::ActorId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_activities::Column::DeletedAt.is_null())
+        .filter(
+            zoned(created, tz_name)
+                .cast_as(Alias::new("date"))
+                .gte(Expr::val(cutoff)),
+        )
+        .group_by(created_date)
+        .order_by_asc(Expr::col(Alias::new("created_date")))
+}
+
+fn completed_graph_select(
+    user_id: Uuid,
+    slug: &str,
+    month: i64,
+    tz_name: &str,
+) -> sea_orm::Select<issues::Entity> {
+    let completed = Expr::col((issues::Entity, issues::Column::CompletedAt));
+    let completed_zoned = zoned(completed.clone(), tz_name);
+    let week_part = date_part("week", completed_zoned.clone());
+    let month_part = date_part("month", completed_zoned);
+    let week_expr = week_part.clone().cast_as(Alias::new("integer")).modulo(4);
+    issues::Entity::find()
+        .join(JoinType::InnerJoin, issues::Relation::IssueAssignees.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .select_only()
+        .expr_as(week_expr.clone(), "week")
+        .expr_as(Func::count(week_part), "completed_count")
+        .filter(issue_assignees::Column::AssigneeId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::CompletedAt.is_not_null())
+        .filter(month_part.eq(Expr::val(month)))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(
+            Condition::all()
+                .add(
+                    Condition::all()
+                        .add(states::Column::Group.eq("triage"))
+                        .add(states::Column::Group.is_not_null())
+                        .not(),
+                )
+                .add(issues::Column::ArchivedAt.is_null())
+                .add(projects::Column::ArchivedAt.is_null())
+                .add(issues::Column::IsDraft.eq(false)),
+        )
+        .group_by(Expr::col(Alias::new("week")))
+        .order_by_asc(Expr::col(Alias::new("week")))
+}
+
+fn dashboard_q1_select(
+    user_id: Uuid,
+    slug: &str,
+    from_date: NaiveDate,
+    tz_name: &str,
+) -> sea_orm::Select<issue_activities::Entity> {
+    let created = Expr::col((
+        issue_activities::Entity,
+        issue_activities::Column::CreatedAt,
+    ));
+    let created_date = created.clone().cast_as(Alias::new("date"));
+    issue_activities::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_activities::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .expr_as(created_date.clone(), "created_date")
+        .expr_as(Func::count(created_date.clone()), "activity_count")
+        .filter(issue_activities::Column::ActorId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_activities::Column::DeletedAt.is_null())
+        .filter(
+            zoned(created, tz_name)
+                .cast_as(Alias::new("date"))
+                .gte(Expr::val(from_date)),
+        )
+        .group_by(created_date)
+        .order_by_asc(Expr::col(Alias::new("created_date")))
+}
+
+fn dashboard_q2_select(
+    user_id: Uuid,
+    slug: &str,
+    month: i64,
+    tz_name: &str,
+) -> sea_orm::Select<issues::Entity> {
+    let completed = Expr::col((issues::Entity, issues::Column::CompletedAt));
+    let completed_zoned = zoned(completed.clone(), tz_name);
+    let day_part = date_part("day", completed_zoned);
+    let week_in_month = day_part.sub(1).div(7).add(1).cast_as(Alias::new("integer"));
+    let month_part = date_part("month", zoned(completed, tz_name));
+    dashboard_issues_select()
+        .select_only()
+        .expr_as(week_in_month.clone(), "week_in_month")
+        .expr_as(
+            Func::count(Expr::col((issues::Entity, issues::Column::Id))),
+            "completed_count",
+        )
+        .filter(dashboard_tenant(user_id, slug))
+        .filter(issues::Column::CompletedAt.is_not_null())
+        .filter(month_part.eq(Expr::val(month)))
+        .group_by(Expr::col(Alias::new("week_in_month")))
+        .order_by_asc(Expr::col(Alias::new("week_in_month")))
+}
+
+fn dashboard_state_select(user_id: Uuid, slug: &str) -> sea_orm::Select<issues::Entity> {
+    dashboard_issues_select()
+        .select_only()
+        .column_as(states::Column::Group, "state_group")
+        .expr_as(
+            Func::count(Expr::col((states::Entity, states::Column::Group))),
+            "state_count",
+        )
+        .filter(dashboard_tenant(user_id, slug))
+        .group_by(Expr::col((states::Entity, states::Column::Group)))
+        .order_by_asc(Expr::col((states::Entity, states::Column::Group)))
+}
+
+fn dashboard_values_select(
+    user_id: Uuid,
+    slug: &str,
+    today: NaiveDate,
+    overdue: bool,
+) -> sea_orm::Select<issues::Entity> {
+    let mut select = dashboard_issues_select();
+    select = select
+        .select_only()
+        .column(issues::Column::Id)
+        .column(issues::Column::Name)
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .column(issues::Column::ProjectId)
+        .column_as(
+            if overdue {
+                issues::Column::TargetDate
+            } else {
+                issues::Column::StartDate
+            },
+            "value_date",
+        )
+        .filter(dashboard_tenant(user_id, slug))
+        .filter(open_groups_condition())
+        .filter(issues::Column::CompletedAt.is_null());
+    if overdue {
+        select = select
+            .filter(Expr::col((issues::Entity, issues::Column::TargetDate)).lt(Expr::val(today)));
+    } else {
+        select = select
+            .filter(Expr::col((issues::Entity, issues::Column::StartDate)).gte(Expr::val(today)));
+    }
+    select.order_by_desc(issues::Column::CreatedAt)
+}
+
 /// `UserActivityGraphEndpoint.get` (`:524-539`): per-day activity
 /// counts for the caller over the trailing 6 months.
 async fn activity_graph(
@@ -1917,19 +2118,17 @@ async fn activity_graph_inner(
         .await?
         .ok_or(HandlerError::Unauthorized)?;
     let cutoff = profile_q::months_ago(local_today(), profile_q::ACTIVITY_GRAPH_MONTHS);
-    let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(&profile_q::activity_graph_sql())
-        .bind(actor.id)
-        .bind(slug)
-        .bind(cutoff)
-        .bind(actor.tz_name.as_str())
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = activity_graph_select(actor.id, slug, cutoff, &actor.tz_name)
+        .into_model::<ActivityGraphRow>()
+        .all(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let mut items = Vec::with_capacity(rows.len());
-    for (created_date, activity_count) in rows {
+    for row in rows {
         items.push(serde_json::json!({
-            "created_date": created_date.to_string(),
-            "activity_count": activity_count,
+            "created_date": row.created_date.to_string(),
+            "activity_count": row.activity_count,
         }));
     }
     Ok(json_response(
@@ -1966,19 +2165,17 @@ async fn completed_graph_inner(
         .ok_or(HandlerError::Unauthorized)?;
     let month = profile_q::parse_month_param(query_last(raw_query, "month").as_deref())
         .map_err(|_| HandlerError::ServerError)?;
-    let rows: Vec<(i32, i64)> = sqlx::query_as(&profile_q::completed_graph_sql())
-        .bind(actor.id)
-        .bind(slug)
-        .bind(month)
-        .bind(actor.tz_name.as_str())
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = completed_graph_select(actor.id, slug, month, &actor.tz_name)
+        .into_model::<CompletedGraphRow>()
+        .all(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     let mut items = Vec::with_capacity(rows.len());
-    for (week, completed_count) in rows {
+    for row in rows {
         items.push(serde_json::json!({
-            "week": week,
-            "completed_count": completed_count,
+            "week": row.week,
+            "completed_count": row.completed_count,
         }));
     }
     Ok(json_response(
@@ -1991,64 +2188,65 @@ async fn completed_graph_inner(
 // UserWorkspaceDashboardEndpoint (workspace/base.py:262-348)
 // ---------------------------------------------------------------------------
 
-/// Q1 select list over `issue_activities` (`:270-272`).
-fn dashboard_q1_sql() -> String {
-    format!(
-        "SELECT {} FROM issue_activities {} WHERE {} {}",
-        core_q::DASHBOARD_Q1_SELECT_SQL,
-        core_q::DASHBOARD_Q1_JOIN_SQL,
-        number_placeholders(
-            &core_q::dashboard_q1_where_sql(),
-            &["user", "tzname", "from_date", "slug"]
-        ),
-        core_q::DASHBOARD_Q1_GROUP_ORDER_SQL,
-    )
+fn open_groups_condition() -> Condition {
+    Condition::all()
+        .add(states::Column::Group.is_in(["completed", "cancelled"]))
+        .add(states::Column::Group.is_not_null())
+        .not()
 }
 
-/// Q2 select list over `issues` (`:285-289`).
-fn dashboard_q2_sql() -> String {
-    format!(
-        "SELECT {} FROM issues {} WHERE {} {}",
-        number_placeholders(&core_q::dashboard_q2_select_sql(), &["tzname"]),
-        core_q::ISSUE_TENANT_JOINS_SQL,
-        number_placeholders(
-            &core_q::dashboard_q2_where_sql(),
-            &["tzname", "user", "slug", "month"]
-        ),
-        core_q::DASHBOARD_Q2_GROUP_ORDER_SQL,
-    )
+async fn dashboard_q2_rows(
+    db: &sea_orm::DatabaseConnection,
+    user_id: Uuid,
+    slug: &str,
+    month: i64,
+    tz_name: &str,
+) -> Result<Vec<WeekInMonthRow>, HandlerError> {
+    dashboard_q2_select(user_id, slug, month, tz_name)
+        .into_model::<WeekInMonthRow>()
+        .all(db)
+        .await
+        .map_err(|_| HandlerError::ServerError)
 }
 
-/// `SELECT COUNT(*)` over `issues` with a tenant where-clause
-/// (`.count()` clears ordering — no `ORDER BY` on Q3-Q6).
-fn dashboard_count_sql(where_sql: &str, order: &[&str]) -> String {
-    format!(
-        "SELECT COUNT(*) FROM issues {} WHERE {}",
-        core_q::ISSUE_TENANT_JOINS_SQL,
-        number_placeholders(where_sql, order),
-    )
+async fn dashboard_q1_rows(
+    db: &sea_orm::DatabaseConnection,
+    user_id: Uuid,
+    slug: &str,
+    from_date: NaiveDate,
+    tz_name: &str,
+) -> Result<Vec<ActivityGraphRow>, HandlerError> {
+    dashboard_q1_select(user_id, slug, from_date, tz_name)
+        .into_model::<ActivityGraphRow>()
+        .all(db)
+        .await
+        .map_err(|_| HandlerError::ServerError)
 }
 
-/// Q7 state distribution (`:311-317`).
-fn dashboard_q7_sql() -> String {
-    format!(
-        "SELECT {} FROM issues {} WHERE {} {}",
-        core_q::DASHBOARD_Q7_SELECT_SQL,
-        core_q::ISSUE_TENANT_JOINS_SQL,
-        number_placeholders(&core_q::dashboard_state_dist_where_sql(), &["user", "slug"]),
-        core_q::DASHBOARD_Q7_GROUP_ORDER_SQL,
-    )
+async fn dashboard_state_rows(
+    db: &sea_orm::DatabaseConnection,
+    user_id: Uuid,
+    slug: &str,
+) -> Result<Vec<StateDistributionRow>, HandlerError> {
+    dashboard_state_select(user_id, slug)
+        .into_model::<StateDistributionRow>()
+        .all(db)
+        .await
+        .map_err(|_| HandlerError::ServerError)
 }
 
-/// Q8/Q9 `.values()` lists: explicit order is absent, so the model
-/// default (`-created_at`) applies.
-fn dashboard_values_sql(columns: &str, where_sql: &str, order: &[&str]) -> String {
-    format!(
-        "SELECT {columns} FROM issues {} WHERE {} ORDER BY {}",
-        core_q::ISSUE_TENANT_JOINS_SQL,
-        number_placeholders(where_sql, order),
-        core_q::ISSUE_DEFAULT_ORDER_SQL,
-    )
+async fn dashboard_values_rows(
+    db: &sea_orm::DatabaseConnection,
+    user_id: Uuid,
+    slug: &str,
+    today: NaiveDate,
+    overdue: bool,
+) -> Result<Vec<IssueValuesRow>, HandlerError> {
+    dashboard_values_select(user_id, slug, today, overdue)
+        .into_model::<IssueValuesRow>()
+        .all(db)
+        .await
+        .map_err(|_| HandlerError::ServerError)
 }
 
 /// `UserWorkspaceDashboardEndpoint.get` (`:262-348`): the 9-key
@@ -2085,150 +2283,102 @@ async fn dashboard_inner(
     let today_utc = Utc::now().date_naive();
     let iso_week = today_utc.iso_week().week() as i32;
     let from_date = profile_q::months_ago(local_today(), 3);
+    let db = pidash_db::pool::sea_orm_connection(pool);
 
     // Q1: activity series.
-    let q1: Vec<(NaiveDate, i64)> = sqlx::query_as(&dashboard_q1_sql())
-        .bind(actor.id)
-        .bind(actor.tz_name.as_str())
-        .bind(from_date)
-        .bind(slug)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    let q1 = dashboard_q1_rows(&db, actor.id, slug, from_date, &actor.tz_name).await?;
     let issue_activities: Vec<serde_json::Value> = q1
         .iter()
-        .map(|(created_date, activity_count)| {
+        .map(|row| {
             serde_json::json!({
-                "created_date": created_date.to_string(),
-                "activity_count": activity_count,
+                "created_date": row.created_date.to_string(),
+                "activity_count": row.activity_count,
             })
         })
         .collect();
 
     // Q2: completed-by-week buckets.
-    let q2: Vec<(i32, i64)> = sqlx::query_as(&dashboard_q2_sql())
-        .bind(actor.tz_name.as_str())
-        .bind(actor.id)
-        .bind(slug)
-        .bind(month)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    let q2 = dashboard_q2_rows(&db, actor.id, slug, month, &actor.tz_name).await?;
     let completed_issues: Vec<serde_json::Value> = q2
         .iter()
-        .map(|(week_in_month, completed_count)| {
+        .map(|row| {
             serde_json::json!({
-                "week_in_month": week_in_month,
-                "completed_count": completed_count,
+                "week_in_month": row.week_in_month,
+                "completed_count": row.completed_count,
             })
         })
         .collect();
 
     // Q3-Q6: counts.
-    let assigned: (i64,) = sqlx::query_as(&dashboard_count_sql(
-        &core_q::dashboard_assigned_where_sql(),
-        &["user", "slug"],
-    ))
-    .bind(actor.id)
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    let pending: (i64,) = sqlx::query_as(&dashboard_count_sql(
-        &core_q::dashboard_pending_where_sql(),
-        &["user", "slug"],
-    ))
-    .bind(actor.id)
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    let completed: (i64,) = sqlx::query_as(&dashboard_count_sql(
-        &core_q::dashboard_completed_where_sql(),
-        &["user", "slug"],
-    ))
-    .bind(actor.id)
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    let due_week: (i64,) = sqlx::query_as(&dashboard_count_sql(
-        &core_q::dashboard_due_week_where_sql(),
-        &["user", "slug", "iso_week"],
-    ))
-    .bind(actor.id)
-    .bind(slug)
-    .bind(iso_week)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    let assigned = dashboard_issues_select()
+        .filter(dashboard_tenant(actor.id, slug))
+        .count(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let pending = dashboard_issues_select()
+        .filter(dashboard_tenant(actor.id, slug))
+        .filter(open_groups_condition())
+        .count(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let completed = dashboard_issues_select()
+        .filter(dashboard_tenant(actor.id, slug))
+        .filter(states::Column::Group.eq("completed"))
+        .count(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    let due_week = dashboard_issues_select()
+        .filter(dashboard_tenant(actor.id, slug))
+        .filter(
+            date_part(
+                "week",
+                Expr::col((issues::Entity, issues::Column::TargetDate)),
+            )
+            .eq(Expr::val(iso_week)),
+        )
+        .count(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
 
     // Q7: state distribution (`COUNT("states"."group")` is 0, not
     // null, for the null-group bucket — the SQL does it as written).
-    let q7: Vec<(Option<String>, i64)> = sqlx::query_as(&dashboard_q7_sql())
-        .bind(actor.id)
-        .bind(slug)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    let q7 = dashboard_state_rows(&db, actor.id, slug).await?;
     let state_distribution: Vec<serde_json::Value> = q7
         .iter()
-        .map(|(state_group, state_count)| {
+        .map(|row| {
             serde_json::json!({
-                "state_group": state_group,
-                "state_count": state_count,
+                "state_group": row.state_group,
+                "state_count": row.state_count,
             })
         })
         .collect();
 
     // Q8: overdue `.values()` in source order.
-    let overdue_sql = dashboard_values_sql(
-        "issues.id, issues.name, workspaces.slug AS workspace__slug, issues.project_id, issues.target_date",
-        &core_q::overdue_where_sql(),
-        &["user", "slug", "today"],
-    );
-    let q8: Vec<(Uuid, String, String, Uuid, NaiveDate)> = sqlx::query_as(&overdue_sql)
-        .bind(actor.id)
-        .bind(slug)
-        .bind(today_utc)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    let q8 = dashboard_values_rows(&db, actor.id, slug, today_utc, true).await?;
     let overdue_issues: Vec<serde_json::Value> = q8
         .iter()
-        .map(|(id, name, workspace_slug, project_id, target_date)| {
+        .map(|row| {
             serde_json::json!({
-                "id": id.to_string(),
-                "name": name,
-                "workspace__slug": workspace_slug,
-                "project_id": project_id.to_string(),
-                "target_date": target_date.to_string(),
+                "id": row.id.to_string(),
+                "name": row.name,
+                "workspace__slug": row.workspace_slug,
+                "project_id": row.project_id.to_string(),
+                "target_date": row.value_date.to_string(),
             })
         })
         .collect();
 
     // Q9: upcoming `.values()` in source order.
-    let upcoming_sql = dashboard_values_sql(
-        "issues.id, issues.name, workspaces.slug AS workspace__slug, issues.project_id, issues.start_date",
-        &core_q::upcoming_where_sql(),
-        &["user", "slug", "today"],
-    );
-    let q9: Vec<(Uuid, String, String, Uuid, NaiveDate)> = sqlx::query_as(&upcoming_sql)
-        .bind(actor.id)
-        .bind(slug)
-        .bind(today_utc)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    let q9 = dashboard_values_rows(&db, actor.id, slug, today_utc, false).await?;
     let upcoming_issues: Vec<serde_json::Value> = q9
         .iter()
-        .map(|(id, name, workspace_slug, project_id, start_date)| {
+        .map(|row| {
             serde_json::json!({
-                "id": id.to_string(),
-                "name": name,
-                "workspace__slug": workspace_slug,
-                "project_id": project_id.to_string(),
-                "start_date": start_date.to_string(),
+                "id": row.id.to_string(),
+                "name": row.name,
+                "workspace__slug": row.workspace_slug,
+                "project_id": row.project_id.to_string(),
+                "start_date": row.value_date.to_string(),
             })
         })
         .collect();
@@ -2243,10 +2393,10 @@ async fn dashboard_inner(
         "completed_issues".to_owned(),
         serde_json::Value::Array(completed_issues),
     );
-    envelope.insert("assigned_issues_count".to_owned(), assigned.0.into());
-    envelope.insert("pending_issues_count".to_owned(), pending.0.into());
-    envelope.insert("completed_issues_count".to_owned(), completed.0.into());
-    envelope.insert("issues_due_week_count".to_owned(), due_week.0.into());
+    envelope.insert("assigned_issues_count".to_owned(), assigned.into());
+    envelope.insert("pending_issues_count".to_owned(), pending.into());
+    envelope.insert("completed_issues_count".to_owned(), completed.into());
+    envelope.insert("issues_due_week_count".to_owned(), due_week.into());
     envelope.insert(
         "state_distribution".to_owned(),
         serde_json::Value::Array(state_distribution),
@@ -2411,55 +2561,90 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_statements_number_fully() {
-        assert_fully_numbered(&dashboard_q1_sql());
-        assert_fully_numbered(&dashboard_q2_sql());
-        assert_fully_numbered(&dashboard_count_sql(
-            &core_q::dashboard_assigned_where_sql(),
-            &["user", "slug"],
-        ));
-        assert_fully_numbered(&dashboard_count_sql(
-            &core_q::dashboard_due_week_where_sql(),
-            &["user", "slug", "iso_week"],
-        ));
-        assert_fully_numbered(&dashboard_q7_sql());
-        assert_fully_numbered(&dashboard_values_sql(
-            "issues.id",
-            &core_q::overdue_where_sql(),
-            &["user", "slug", "today"],
-        ));
-        // Q2 binds tzname twice (select + filter) at one position.
-        let q2 = dashboard_q2_sql();
-        assert_eq!(q2.matches("$1").count(), 2);
-        assert!(q2.contains("$4"));
-        // Counts carry no ORDER BY (`.count()` clears ordering).
-        let q3 = dashboard_count_sql(&core_q::dashboard_assigned_where_sql(), &["user", "slug"]);
-        assert!(!q3.contains("ORDER BY"));
-        // Values lists carry the model default order.
-        let q8 = dashboard_values_sql(
-            "issues.id",
-            &core_q::overdue_where_sql(),
-            &["user", "slug", "today"],
+    fn dashboard_statements_pin() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let uid = Uuid::nil();
+        let from_date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 2, 6).unwrap();
+        let q1 = dashboard_q1_select(uid, "acme", from_date, "UTC")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(q1.contains("FROM \"issue_activities\""), "{q1}");
+        assert!(q1.contains("INNER JOIN \"workspaces\""), "{q1}");
+        assert!(q1.contains("\"created_date\""), "{q1}");
+        assert!(q1.contains("\"activity_count\""), "{q1}");
+        assert!(q1.contains("AT TIME ZONE"), "{q1}");
+        assert!(q1.contains("GROUP BY"), "{q1}");
+
+        let q2 = dashboard_q2_select(uid, "acme", 1, "UTC")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(q2.contains("\"week_in_month\""), "{q2}");
+        assert!(q2.contains("LEFT JOIN \"states\""), "{q2}");
+        assert!(q2.contains("INNER JOIN \"projects\""), "{q2}");
+        assert!(q2.contains("INNER JOIN \"issue_assignees\""), "{q2}");
+        assert!(q2.contains("INNER JOIN \"workspaces\""), "{q2}");
+        assert!(q2.contains("date_part"), "{q2}");
+        assert!(q2.contains("GROUP BY"), "{q2}");
+
+        let q7 = dashboard_state_select(uid, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(q7.contains("\"state_count\""), "{q7}");
+        assert!(q7.contains("GROUP BY"), "{q7}");
+
+        let q8 = dashboard_values_select(uid, "acme", today, true)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(q8.contains("\"workspace_slug\""), "{q8}");
+        assert!(q8.contains("DESC"), "{q8}");
+
+        let q9 = dashboard_values_select(uid, "acme", today, false)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(q9.contains("\"value_date\""), "{q9}");
+
+        // Counts share the tenant scope and carry no ORDER BY.
+        let assigned = dashboard_issues_select()
+            .filter(dashboard_tenant(uid, "acme"))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            assigned.contains("\"issues\".\"deleted_at\" IS NULL"),
+            "{assigned}"
         );
-        assert!(q8.ends_with("ORDER BY issues.created_at DESC"));
+        assert!(!assigned.contains("ORDER BY"), "{assigned}");
     }
 
     #[test]
-    fn account_and_profile_statements_number_fully() {
-        assert_fully_numbered(&number_placeholders(&user_q::account_list_sql(), &["user"]));
-        assert_fully_numbered(&number_placeholders(
-            &user_q::account_detail_sql(),
-            &["pk", "user"],
-        ));
+    fn account_and_profile_statements_pin() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let uid = Uuid::nil();
+        let list = accounts::Entity::find()
+            .filter(accounts::Column::UserId.eq(uid))
+            .order_by_desc(accounts::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(list.contains("ORDER BY"), "{list}");
+
+        let detail = accounts::Entity::find()
+            .filter(accounts::Column::Id.eq(uid))
+            .filter(accounts::Column::UserId.eq(uid))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(detail.contains("FROM \"accounts\""), "{detail}");
+
+        let profile = profiles::Entity::find()
+            .filter(profiles::Column::UserId.eq(uid))
+            .lock_exclusive()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(profile.contains("FOR UPDATE"), "{profile}");
+
         assert_fully_numbered(&number_placeholders(
             &user_q::account_hard_delete_sql(),
             &["pk"],
         ));
-        assert_fully_numbered(&number_placeholders(
-            &user_q::profile_by_user_sql(),
-            &["user"],
-        ));
-        assert_fully_numbered(&number_placeholders(&user_q::profile_lock_sql(), &["user"]));
         let save = number_placeholders(&user_q::profile_full_save_sql(), &profile_save_order());
         assert_fully_numbered(&save);
         // 29 columns + pk.
@@ -3384,6 +3569,201 @@ mod tests {
             core_q::UPCOMING_VALUES_FIELDS,
             ["id", "name", "workspace__slug", "project_id", "start_date"]
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Live reads (scratch DB): every new SeaORM statement executes.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn live_user_extras_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "users",
+            "accounts",
+            "profiles",
+            "workspaces",
+            "projects",
+            "states",
+            "issues",
+            "issue_assignees",
+            "issue_activities",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (uid, ws, project, state, issue, completed_issue, account) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO users (id, is_active, user_timezone) VALUES ('{uid}', true, 'UTC')"),
+            format!(
+                "INSERT INTO accounts (created_at, updated_at, id, provider_account_id, provider, \
+                 access_token, access_token_expired_at, refresh_token, refresh_token_expired_at, \
+                 last_connected_at, metadata, user_id, id_token) VALUES (now(), now(), '{account}', \
+                 'pa', 'github', 'tok', NULL, NULL, NULL, now(), '{{}}'::jsonb, '{uid}', 'idt')"
+            ),
+            format!(
+                "INSERT INTO profiles (created_at, updated_at, id, theme, is_tour_completed, \
+                 onboarding_step, is_onboarded, billing_address_country, has_billing_address, \
+                 company_name, user_id, is_mobile_onboarded, mobile_onboarding_step, \
+                 mobile_timezone_auto_set, language, is_smooth_cursor_enabled, start_of_the_week, \
+                 is_app_rail_docked, background_color, goals, has_marketing_email_consent, \
+                 is_navigation_tour_completed, is_subscribed_to_changelog, notification_view_mode, \
+                 product_tour, settings) VALUES (now(), now(), gen_random_uuid(), '{{}}'::jsonb, false, \
+                 '{{}}'::jsonb, false, '', false, '', '{uid}', false, '{{}}'::jsonb, false, 'en', \
+                 false, 0, false, '#fff', '{{}}'::jsonb, false, false, false, 'full', '{{}}'::jsonb, \
+                 '{{}}'::jsonb)"
+            ),
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!("INSERT INTO projects (id, workspace_id, deleted_at) VALUES ('{project}', '{ws}', NULL)"),
+            format!(
+                "INSERT INTO states (id, workspace_id, project_id, \"group\") \
+                 VALUES ('{state}', '{ws}', '{project}', 'started')"
+            ),
+            format!(
+                "INSERT INTO issues (id, workspace_id, project_id, state_id, name, deleted_at, \
+                 target_date, start_date, completed_at, is_draft) VALUES ('{issue}', '{ws}', \
+                 '{project}', '{state}', 'Open issue', NULL, '2026-02-01'::date, \
+                 '2026-03-01'::date, NULL, false)"
+            ),
+            format!(
+                "INSERT INTO issues (id, workspace_id, project_id, state_id, name, deleted_at, \
+                 target_date, start_date, completed_at, is_draft) VALUES ('{completed_issue}', \
+                 '{ws}', '{project}', '{state}', 'Done issue', NULL, NULL, NULL, \
+                 '2026-02-06T12:00:00Z'::timestamptz, false)"
+            ),
+            format!(
+                "INSERT INTO issue_assignees (id, assignee_id, issue_id, project_id, workspace_id, \
+                 deleted_at) VALUES (gen_random_uuid(), '{uid}', '{completed_issue}', '{project}', \
+                 '{ws}', NULL), (gen_random_uuid(), '{uid}', '{issue}', '{project}', '{ws}', NULL)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+
+        // Actor read.
+        let actor: Option<(bool, Option<String>)> = users::Entity::find()
+            .select_only()
+            .columns([users::Column::IsActive, users::Column::UserTimezone])
+            .filter(users::Column::Id.eq(uid))
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("actor");
+        assert_eq!(actor, Some((true, Some("UTC".to_owned()))));
+
+        // Account list / detail.
+        let list = accounts::Entity::find()
+            .filter(accounts::Column::UserId.eq(uid))
+            .order_by_desc(accounts::Column::CreatedAt)
+            .all(&db)
+            .await
+            .expect("accounts");
+        assert_eq!(list.len(), 1);
+        assert_eq!(DbAccount::from_model(list[0].clone()).id, account);
+        let detail = accounts::Entity::find()
+            .filter(accounts::Column::Id.eq(account))
+            .filter(accounts::Column::UserId.eq(uid))
+            .one(&db)
+            .await
+            .expect("detail")
+            .expect("row");
+        assert_eq!(detail.provider, "github");
+
+        // Profile locked read over a transaction.
+        let mut tx = pool.begin().await.expect("begin");
+        let locked = {
+            let conn = TxConn::new(&mut tx);
+            profiles::Entity::find()
+                .filter(profiles::Column::UserId.eq(uid))
+                .lock_exclusive()
+                .one(&conn)
+                .await
+                .expect("locked")
+        };
+        assert!(locked.is_some());
+        tx.rollback().await.expect("rollback");
+
+        // Graphs + dashboard.
+        let activity = activity_graph_select(
+            uid,
+            "acme",
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            "UTC",
+        )
+        .into_model::<ActivityGraphRow>()
+        .all(&db)
+        .await
+        .expect("activity");
+        assert!(activity.is_empty());
+
+        let completed = completed_graph_select(uid, "acme", 2, "UTC")
+            .into_model::<CompletedGraphRow>()
+            .all(&db)
+            .await
+            .expect("completed");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].completed_count, 1);
+
+        let assigned = dashboard_issues_select()
+            .filter(dashboard_tenant(uid, "acme"))
+            .count(&db)
+            .await
+            .expect("count");
+        assert_eq!(assigned, 2);
+
+        let state_rows = dashboard_state_select(uid, "acme")
+            .into_model::<StateDistributionRow>()
+            .all(&db)
+            .await
+            .expect("state");
+        assert_eq!(state_rows.len(), 1);
+        assert_eq!(state_rows[0].state_group.as_deref(), Some("started"));
+
+        let overdue = dashboard_values_select(
+            uid,
+            "acme",
+            NaiveDate::from_ymd_opt(2026, 2, 6).unwrap(),
+            true,
+        )
+        .into_model::<IssueValuesRow>()
+        .all(&db)
+        .await
+        .expect("overdue");
+        assert_eq!(overdue.len(), 1);
+        assert_eq!(overdue[0].workspace_slug, "acme");
+
+        let upcoming = dashboard_values_select(
+            uid,
+            "acme",
+            NaiveDate::from_ymd_opt(2026, 2, 6).unwrap(),
+            false,
+        )
+        .into_model::<IssueValuesRow>()
+        .all(&db)
+        .await
+        .expect("upcoming");
+        assert_eq!(upcoming.len(), 1);
     }
 
     #[test]
