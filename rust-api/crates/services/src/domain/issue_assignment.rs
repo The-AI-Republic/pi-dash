@@ -686,6 +686,38 @@ pub async fn resolve_run_pin(
 // dispatch_wait (design §14.3)
 // ---------------------------------------------------------------------------
 
+/// The flat inputs `build_dispatch_wait` / `runs_ahead` need (design
+/// §14.3), so both the SeaORM row and the L2 run row feed the same
+/// builder without a variant per caller.
+#[derive(Clone, Debug)]
+pub struct RunWaitInputs {
+    pub id: Uuid,
+    pub status: String,
+    pub pinned_runner_id: Option<Uuid>,
+    pub pin_kind: String,
+    pub work_item_id: Option<Uuid>,
+    pub pod_id: Uuid,
+    pub created_by_id: Uuid,
+    pub trigger: String,
+    pub created_at: chrono::DateTime<chrono::FixedOffset>,
+}
+
+impl From<&agent_run::Model> for RunWaitInputs {
+    fn from(run: &agent_run::Model) -> Self {
+        RunWaitInputs {
+            id: run.id,
+            status: run.status.clone(),
+            pinned_runner_id: run.pinned_runner_id,
+            pin_kind: run.pin_kind.clone(),
+            work_item_id: run.work_item_id,
+            pod_id: run.pod_id,
+            created_by_id: run.created_by_id,
+            trigger: run.trigger.clone(),
+            created_at: run.created_at,
+        }
+    }
+}
+
 /// The `dispatch_wait` object for a QUEUED pinned run (design §14.3), else
 /// `Null`. Dedicated pins are always `releasable: false` (H-13);
 /// `pause_reason` is set only with `runner_paused`; `expires_at` is
@@ -693,7 +725,7 @@ pub async fn resolve_run_pin(
 /// else `null`.
 pub async fn build_dispatch_wait(
     db: &impl ConnectionTrait,
-    run: &agent_run::Model,
+    run: &RunWaitInputs,
     viewer_id: Option<Uuid>,
 ) -> Result<Value, sea_orm::DbErr> {
     if run.status != AgentRunStatus::Queued.value() || run.pinned_runner_id.is_none() {
@@ -801,7 +833,7 @@ pub async fn build_dispatch_wait(
 async fn can_view_run(
     db: &impl ConnectionTrait,
     viewer_id: Uuid,
-    run: &agent_run::Model,
+    run: &RunWaitInputs,
     issue_id: Uuid,
 ) -> Result<bool, sea_orm::DbErr> {
     if let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? {
@@ -830,7 +862,7 @@ async fn can_view_run(
 /// behind newer locality pins (rank 0 always); those count too.
 pub async fn runs_ahead(
     db: &impl ConnectionTrait,
-    run: &agent_run::Model,
+    run: &RunWaitInputs,
 ) -> Result<u64, sea_orm::DbErr> {
     let Some(pinned_id) = run.pinned_runner_id else {
         return Ok(0);

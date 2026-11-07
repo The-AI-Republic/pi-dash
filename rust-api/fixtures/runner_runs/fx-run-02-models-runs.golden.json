@@ -401,6 +401,32 @@
      }
     },
     {
+     "name": "pin_kind",
+     "column": "pin_kind",
+     "type": "CharField",
+     "db_type": "character varying(16)",
+     "null": false,
+     "blank": false,
+     "default": "locality",
+     "db_default": "locality",
+     "db_index": false,
+     "unique": false,
+     "max_length": 16,
+     "choices": [
+      [
+       "locality",
+       "Locality"
+      ],
+      [
+       "dedicated",
+       "Dedicated"
+      ]
+     ],
+     "editable": true,
+     "auto_now": false,
+     "auto_now_add": false
+    },
+    {
      "name": "work_item",
      "column": "work_item_id",
      "type": "ForeignKey",

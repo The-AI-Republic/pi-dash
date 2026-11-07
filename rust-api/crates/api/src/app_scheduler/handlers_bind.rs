@@ -765,7 +765,10 @@ pub async fn binding_runs(
                 None => return Denial::ServerError.into_response(),
             },
         };
-        results.push(render_list_row(run, pod, calls, binding));
+        match render_list_row(pool, run, pod, calls, binding, None).await {
+            Ok(value) => results.push(value),
+            Err(response) => return response.into_response(),
+        }
     }
     // `count` is the page length, not the total (`views.py:363`).
     let count = results.len();

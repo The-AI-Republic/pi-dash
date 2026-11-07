@@ -289,6 +289,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "type_id",
     "url",
     "description_markdown",
+    "assigned_runner_detail",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -319,6 +320,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Write-only fields (`issue.py:118-151`): accepted on write, absent from the
@@ -352,6 +354,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "id",
     "type_id",
     "url",
+    "assigned_runner_detail",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -382,6 +385,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Read-only blocker keys `to_representation` appends for single-item
@@ -1213,6 +1217,12 @@ pub struct IssueRow<'a> {
     pub state: Option<&'a str>,
     pub estimate_point: Option<&'a str>,
     pub assigned_pod: Option<&'a str>,
+    /// Bare `assigned_runner` FK (model field, renders the PK or null —
+    /// same convention as `assigned_pod`).
+    pub assigned_runner: Option<&'a str>,
+    /// The `assigned_runner_detail` object (design §14.1), `None` when
+    /// the issue is pod-assigned or the runner is gone — renders `null`.
+    pub assigned_runner_detail: Option<&'a Value>,
 }
 
 /// Failure modes of [`render_issue`]: caller-contract violations and the two
@@ -1407,6 +1417,11 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             "state" => opt_str(row.state),
             "estimate_point" => opt_str(row.estimate_point),
             "assigned_pod" => opt_str(row.assigned_pod),
+            "assigned_runner" => opt_str(row.assigned_runner),
+            "assigned_runner_detail" => match row.assigned_runner_detail {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
             // `filter_fields` only ever yields `FIELDS_IN_ORDER` names, and
             // every non-write-only one is matched above.
             _ => unreachable!("render_issue matched every kept readable field"),
@@ -1647,7 +1662,7 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 36);
+        assert_eq!(FIELDS_IN_ORDER.len(), 38);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
@@ -1661,7 +1676,7 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 33);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 35);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
         assert_eq!(
             WRITE_ONLY_FIELDS,
@@ -2565,6 +2580,8 @@ mod tests {
             state: Some("97b22834-b823-4109-a527-b39aa310ceae"),
             estimate_point: None,
             assigned_pod: None,
+            assigned_runner: None,
+            assigned_runner_detail: None,
         }
     }
 
@@ -2632,7 +2649,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 37);
+        assert_eq!(keys.len(), 39);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(

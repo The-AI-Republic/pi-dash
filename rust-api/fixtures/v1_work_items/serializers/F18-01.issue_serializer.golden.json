@@ -427,6 +427,7 @@
         "type_id",
         "url",
         "description_markdown",
+        "assigned_runner_detail",
         "created_at",
         "updated_at",
         "deleted_at",
@@ -456,7 +457,8 @@
         "state",
         "estimate_point",
         "type",
-        "assigned_pod"
+        "assigned_pod",
+        "assigned_runner"
       ]
     },
     "create": {
@@ -543,6 +545,7 @@
           "id",
           "type_id",
           "url",
+          "assigned_runner_detail",
           "created_at",
           "updated_at",
           "deleted_at",
@@ -573,6 +576,7 @@
           "estimate_point",
           "type",
           "assigned_pod",
+          "assigned_runner",
           "assignees",
           "labels",
           "relations_summary",

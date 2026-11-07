@@ -611,6 +611,27 @@ impl MoveStore for SeaMoveStore<'_> {
         Ok(hit.is_some())
     }
 
+    async fn representation_assigned_runner_detail(
+        &self,
+        runner_id: Option<Uuid>,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        use sea_orm::EntityTrait;
+        let Some(runner_id) = runner_id else {
+            return Ok(None);
+        };
+        let Some(runner) = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+            .one(&self.conn)
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        crate::domain::issue_assignment::assigned_runner_detail(&self.conn, &runner)
+            .await
+            .map(Some)
+            .map_err(store_error)
+    }
+
     async fn target_default_state(
         &self,
         target_project_id: Uuid,
