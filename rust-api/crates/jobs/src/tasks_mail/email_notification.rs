@@ -707,7 +707,10 @@ impl StackStore for SqlStackStore {
         let now = chrono::Utc::now();
         let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
         logs_entity::Entity::update_many()
-            .col_expr(logs_entity::Column::ProcessedAt, sea_orm::sea_query::Expr::value(now_tz))
+            .col_expr(
+                logs_entity::Column::ProcessedAt,
+                sea_orm::sea_query::Expr::value(now_tz),
+            )
             .filter(logs_entity::Column::Id.is_in(ids))
             .filter(logs_entity::Column::DeletedAt.is_null())
             .exec(&db)
@@ -1932,8 +1935,8 @@ mod tests {
         // SeaORM equivalent of `STACK_SELECT_SQL` / `STACK_MARK_PROCESSED_SQL`
         // (Batch MAIL-EXPORT-1): same filters, same ordering, unique aliases.
         // `select_only` + `column_as` keeps the consumed-column shape.
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QueryTrait};
         use sea_orm::DbBackend;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QueryTrait};
 
         let select = logs_entity::Entity::find()
             .filter(logs_entity::Column::ProcessedAt.is_null())

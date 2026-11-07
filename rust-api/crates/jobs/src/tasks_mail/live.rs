@@ -68,7 +68,11 @@ use super::mail_send::{self, OutgoingMail, SmtpSend};
 use crate::queue::{self, NewJob};
 use crate::task_message::TaskMessage;
 use pidash_db::config::ConfigValue;
-use pidash_db::entity::{users as users_entity, issues as issues_entity, email_notification_logs as logs_entity, projects as projects_entity, workspaces as workspaces_entity, file_assets as file_assets_entity};
+use pidash_db::entity::{
+    email_notification_logs as logs_entity, file_assets as file_assets_entity,
+    issues as issues_entity, projects as projects_entity, users as users_entity,
+    workspaces as workspaces_entity,
+};
 
 /// Run an async operation from a sync seam method. The worker runs on the
 /// multi-thread runtime, so the current thread is parked aside while the
@@ -418,36 +422,37 @@ impl MailDb for SqlMailDb {
             .await
             .map_err(|e| MailDbError::Db(e.to_string()))?
             .ok_or_else(|| MailDbError::NotFound(actor_id.to_owned()))?;
-        let (asset_id, entity_type, project_id, issue_id, workspace_slug) = if let Some(asset_id) = user.avatar_asset_id {
-            let asset = file_assets_entity::Entity::find_by_id(asset_id)
-                .filter(file_assets_entity::Column::DeletedAt.is_null())
-                .one(&db)
-                .await
-                .map_err(|e| MailDbError::Db(e.to_string()))?;
-            if let Some(asset) = asset {
-                let slug = if let Some(wid) = asset.workspace_id {
-                    let ws = workspaces_entity::Entity::find_by_id(wid)
-                        .filter(workspaces_entity::Column::DeletedAt.is_null())
-                        .one(&db)
-                        .await
-                        .map_err(|e| MailDbError::Db(e.to_string()))?;
-                    ws.map(|w| w.slug)
+        let (asset_id, entity_type, project_id, issue_id, workspace_slug) =
+            if let Some(asset_id) = user.avatar_asset_id {
+                let asset = file_assets_entity::Entity::find_by_id(asset_id)
+                    .filter(file_assets_entity::Column::DeletedAt.is_null())
+                    .one(&db)
+                    .await
+                    .map_err(|e| MailDbError::Db(e.to_string()))?;
+                if let Some(asset) = asset {
+                    let slug = if let Some(wid) = asset.workspace_id {
+                        let ws = workspaces_entity::Entity::find_by_id(wid)
+                            .filter(workspaces_entity::Column::DeletedAt.is_null())
+                            .one(&db)
+                            .await
+                            .map_err(|e| MailDbError::Db(e.to_string()))?;
+                        ws.map(|w| w.slug)
+                    } else {
+                        None
+                    };
+                    (
+                        Some(asset.id),
+                        Some(asset.entity_type.clone().unwrap_or_default()),
+                        asset.project_id,
+                        asset.issue_id,
+                        slug,
+                    )
                 } else {
-                    None
-                };
-                (
-                    Some(asset.id),
-                    Some(asset.entity_type.clone().unwrap_or_default()),
-                    asset.project_id,
-                    asset.issue_id,
-                    slug,
-                )
+                    (None, None, None, None, None)
+                }
             } else {
                 (None, None, None, None, None)
-            }
-        } else {
-            (None, None, None, None, None)
-        };
+            };
         Ok(ActorSnapshot {
             first_name: user.first_name.clone(),
             last_name: user.last_name.clone(),
@@ -539,7 +544,10 @@ impl MailDb for SqlMailDb {
         let now = chrono::Utc::now();
         let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
         logs_entity::Entity::update_many()
-            .col_expr(logs_entity::Column::SentAt, sea_orm::sea_query::Expr::value(now_tz))
+            .col_expr(
+                logs_entity::Column::SentAt,
+                sea_orm::sea_query::Expr::value(now_tz),
+            )
             .filter(logs_entity::Column::Id.is_in(ids))
             .filter(logs_entity::Column::DeletedAt.is_null())
             .exec(&db)
@@ -1257,8 +1265,8 @@ mod tests {
 
     #[test]
     fn mail_seaorm_statements_scope_soft_deleted_rows() {
-        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryTrait};
         use sea_orm::DbBackend;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryTrait};
 
         // receiver_email: users has no deleted_at, find_by_id alone.
         let receiver = users_entity::Entity::find_by_id(uuid::Uuid::nil());

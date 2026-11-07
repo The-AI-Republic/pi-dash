@@ -24,8 +24,8 @@ use pidash_db::entity::{
     issue_mentions as mentions_entity, issue_subscribers as subscribers_entity,
     issues as issues_entity, notifications as notifications_entity,
     project_members as project_members_entity, projects as projects_entity,
-    states as states_entity, user_notification_preferences as pref_entity,
-    users as users_entity, workspaces as workspaces_entity,
+    states as states_entity, user_notification_preferences as pref_entity, users as users_entity,
+    workspaces as workspaces_entity,
 };
 
 /// One `issue_mentions` row to insert: `update_mentions_for_issue` builds
@@ -880,10 +880,7 @@ async fn active_member_ids(
         .filter(project_members_entity::Column::IsActive.eq(true))
         .all(&db)
         .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|m| m.member_id)
-        .collect())
+    Ok(rows.into_iter().filter_map(|m| m.member_id).collect())
 }
 
 async fn fetch_preference(
@@ -930,10 +927,10 @@ async fn fetch_issue_shape(
     db_pool: &sqlx::PgPool,
     issue_id: Uuid,
 ) -> Result<IssueNotifShape, TaskSwallow> {
+    use sea_orm::sea_query::JoinType;
     use sea_orm::{
         ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, RelationTrait,
     };
-    use sea_orm::sea_query::JoinType;
 
     #[derive(Debug, Clone, FromQueryResult)]
     struct IssueShapeRowSea {
@@ -1104,8 +1101,8 @@ async fn insert_email_log_chunk(
     rows: &[NewEmailLog],
     now: DateTime<Utc>,
 ) -> Result<(), TaskSwallow> {
-    use sea_orm::EntityTrait;
     use sea_orm::sea_query::OnConflict;
+    use sea_orm::EntityTrait;
     if rows.is_empty() {
         return Ok(());
     }
@@ -1168,8 +1165,8 @@ async fn insert_mention_subscribers(
     rows: &[NewIssueSubscriber],
     now: DateTime<Utc>,
 ) -> Result<(), TaskSwallow> {
-    use sea_orm::EntityTrait;
     use sea_orm::sea_query::OnConflict;
+    use sea_orm::EntityTrait;
     let db = pidash_db::pool::sea_orm_connection(db_pool);
     let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
     for chunk in rows.chunks(BULK_BATCH_SIZE) {
@@ -1364,7 +1361,11 @@ pub async fn run_notifications(
                     issue_id: sea_orm::ActiveValue::Set(input.issue_id),
                     subscriber_id: sea_orm::ActiveValue::Set(input.actor_id),
                 })
-                .on_conflict(sea_orm::sea_query::OnConflict::new().do_nothing().to_owned())
+                .on_conflict(
+                    sea_orm::sea_query::OnConflict::new()
+                        .do_nothing()
+                        .to_owned(),
+                )
                 .exec_without_returning(&db)
                 .await;
                 Result::<(), sea_orm::DbErr>::Ok(())
@@ -1554,7 +1555,9 @@ pub async fn run_notifications(
             .one(&db)
             .await?
             .map(|m| m.display_name)
-            .ok_or_else(|| TaskSwallow::message("notifications: User matching query does not exist"))?
+            .ok_or_else(|| {
+                TaskSwallow::message("notifications: User matching query does not exist")
+            })?
     };
 
     // Comment-mention notifications (`:465-520`).

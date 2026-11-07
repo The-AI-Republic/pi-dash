@@ -91,10 +91,9 @@ use super::mail_send::{escape_context, plain_text_from_html, py_str, render_temp
 use crate::queue::JobRow;
 use crate::worker::{Handler, Verdict};
 use pidash_db::entity::{
-    project_member_invites as project_invites_entity,
-    project_members as project_members_entity, projects as projects_entity,
-    users as users_entity, workspace_member_invites as workspace_invites_entity,
-    workspaces as workspaces_entity,
+    project_member_invites as project_invites_entity, project_members as project_members_entity,
+    projects as projects_entity, users as users_entity,
+    workspace_member_invites as workspace_invites_entity, workspaces as workspaces_entity,
 };
 
 /// `pi_dash.bgtasks.user_activation_email_task.user_activation_email`.
@@ -257,9 +256,7 @@ async fn load_user_by_id(
 ) -> Result<Option<MailUser>, sea_orm::DbErr> {
     use sea_orm::EntityTrait;
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let model = users_entity::Entity::find_by_id(*user_id)
-        .one(&db)
-        .await?;
+    let model = users_entity::Entity::find_by_id(*user_id).one(&db).await?;
     Ok(model.map(|m| MailUser {
         first_name: m.first_name,
         display_name: m.display_name,
@@ -404,10 +401,8 @@ pub fn project_add_user_email_handler(pool: PgPool) -> Handler {
                 Some(args) => {
                     let current_site = args[0].clone();
                     let outcome: Result<(), String> = async {
-                        let member_id = Uuid::parse_str(&args[1])
-                            .map_err(|e| e.to_string())?;
-                        let invitor_id = Uuid::parse_str(&args[2])
-                            .map_err(|e| e.to_string())?;
+                        let member_id = Uuid::parse_str(&args[1]).map_err(|e| e.to_string())?;
+                        let invitor_id = Uuid::parse_str(&args[2]).map_err(|e| e.to_string())?;
                         // `User.objects.get(pk=invitor_id)` first, like
                         // Python `:29-30` (bare `first_name`, no fallback).
                         let db = pidash_db::pool::sea_orm_connection(&pool);
@@ -464,8 +459,8 @@ pub fn project_add_user_email_handler(pool: PgPool) -> Handler {
                         let workspace_slug = workspace_model.slug.clone();
                         // Lazy `project_member.member.email` hop (nullable
                         // FK; NULL email renders `"None"` like `str()`).
-                        let member_id =
-                            member_id_opt.ok_or_else(|| "ProjectMember.member is None".to_owned())?;
+                        let member_id = member_id_opt
+                            .ok_or_else(|| "ProjectMember.member is None".to_owned())?;
                         let member_user = {
                             use sea_orm::EntityTrait;
                             users_entity::Entity::find_by_id(member_id)
@@ -526,8 +521,7 @@ pub fn workspace_invitation_handler(pool: PgPool) -> Handler {
                 Some(args) => {
                     let outcome: Result<Option<()>, String> = async {
                         let email = args[0].clone();
-                        let workspace_id = Uuid::parse_str(&args[1])
-                            .map_err(|e| e.to_string())?;
+                        let workspace_id = Uuid::parse_str(&args[1]).map_err(|e| e.to_string())?;
                         let token = args[2].clone();
                         let current_site = args[3].clone();
                         let inviter = args[4].clone();
@@ -568,10 +562,10 @@ pub fn workspace_invitation_handler(pool: PgPool) -> Handler {
                             return Ok(None);
                         };
                         let invite_id = inv.id;
-                        let email_str = user.email.as_deref().map_or_else(
-                            || py_str(&serde_json::Value::Null),
-                            str::to_owned,
-                        );
+                        let email_str = user
+                            .email
+                            .as_deref()
+                            .map_or_else(|| py_str(&serde_json::Value::Null), str::to_owned);
                         let name = or_name(&user.first_name, &user.display_name, &email_str);
                         let relative = invite_relative_link(&invite_id, &workspace_slug, &token);
                         let abs_url = invite_abs_url(&current_site, &relative);
@@ -595,8 +589,7 @@ pub fn workspace_invitation_handler(pool: PgPool) -> Handler {
                         {
                             use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
                             let now = chrono::Utc::now();
-                            let now_tz =
-                                sea_orm::prelude::DateTimeWithTimeZone::from(now);
+                            let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
                             workspace_invites_entity::Entity::update_many()
                                 .col_expr(
                                     workspace_invites_entity::Column::Message,
@@ -668,8 +661,8 @@ pub fn project_invitation_handler(pool: PgPool) -> Handler {
                     let outcome: Result<Option<()>, String> = async {
                         let email = args[0].clone();
                         let project_id_arg = args[1].clone();
-                        let project_id = Uuid::parse_str(&project_id_arg)
-                            .map_err(|e| e.to_string())?;
+                        let project_id =
+                            Uuid::parse_str(&project_id_arg).map_err(|e| e.to_string())?;
                         let token = args[2].clone();
                         let current_site = args[3].clone();
                         let invitor = args[4].clone();
@@ -728,10 +721,10 @@ pub fn project_invitation_handler(pool: PgPool) -> Handler {
                                 .ok_or_else(|| "Workspace.DoesNotExist".to_owned())?
                         };
                         let workspace_slug = workspace_model.slug.clone();
-                        let email_str = user.email.as_deref().map_or_else(
-                            || py_str(&serde_json::Value::Null),
-                            str::to_owned,
-                        );
+                        let email_str = user
+                            .email
+                            .as_deref()
+                            .map_or_else(|| py_str(&serde_json::Value::Null), str::to_owned);
                         let name = or_name(&user.first_name, &user.display_name, &email_str);
                         let relative = project_invite_relative_link(
                             &invite_id,
@@ -757,8 +750,7 @@ pub fn project_invitation_handler(pool: PgPool) -> Handler {
                         {
                             use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
                             let now = chrono::Utc::now();
-                            let now_tz =
-                                sea_orm::prelude::DateTimeWithTimeZone::from(now);
+                            let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
                             project_invites_entity::Entity::update_many()
                                 .col_expr(
                                     project_invites_entity::Column::Message,

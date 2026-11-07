@@ -52,14 +52,14 @@ use super::{
 use crate::queue::JobRow;
 use crate::worker::{Handler, Verdict};
 use pidash_db::entity::{
-    cycles as cycles_entity, cycle_issues as cycle_issues_entity, estimate_points as estimate_entity,
-    exporters as exporters_entity, issue_assignees as assignees_entity,
-    issue_comments as comments_entity, issue_labels as issue_labels_entity,
-    issue_links as links_entity, issue_relations as relations_entity,
-    issue_subscribers as subscribers_entity, issues as issues_entity, labels as labels_entity,
-    module_issues as module_issues_entity, modules as modules_entity,
-    project_members as project_members_entity, projects as projects_entity,
-    states as states_entity, users as users_entity,
+    cycle_issues as cycle_issues_entity, cycles as cycles_entity,
+    estimate_points as estimate_entity, exporters as exporters_entity,
+    issue_assignees as assignees_entity, issue_comments as comments_entity,
+    issue_labels as issue_labels_entity, issue_links as links_entity,
+    issue_relations as relations_entity, issue_subscribers as subscribers_entity,
+    issues as issues_entity, labels as labels_entity, module_issues as module_issues_entity,
+    modules as modules_entity, project_members as project_members_entity,
+    projects as projects_entity, states as states_entity, users as users_entity,
 };
 
 /// Row keys in serializer `Meta.fields` order
@@ -453,9 +453,9 @@ async fn fetch_issues(
 
     let mut out = Vec::with_capacity(issues_models.len());
     for im in issues_models {
-        let proj = projects_map.get(&im.project_id).ok_or_else(|| {
-            "issue_export_task: issue query failed (missing project)".to_string()
-        })?;
+        let proj = projects_map
+            .get(&im.project_id)
+            .ok_or_else(|| "issue_export_task: issue query failed (missing project)".to_string())?;
         let project_name = proj.name.clone();
         let project_identifier = proj.identifier.clone();
         let state_name = im
@@ -465,11 +465,7 @@ async fn fetch_issues(
         let (created_first, created_last, has_creator) = match im.created_by_id {
             Some(cid) => {
                 if let Some(u) = users_map.get(&cid) {
-                    (
-                        Some(u.first_name.clone()),
-                        Some(u.last_name.clone()),
-                        true,
-                    )
+                    (Some(u.first_name.clone()), Some(u.last_name.clone()), true)
                 } else {
                     (None, None, false)
                 }
@@ -551,7 +547,8 @@ async fn fetch_relations(pool: &PgPool, issue_ids: &[Uuid]) -> Result<IssueRelat
         return Ok(relations);
     }
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let failed = |leg: &str, e: sea_orm::DbErr| format!("issue_export_task: {leg} query failed ({e})");
+    let failed =
+        |leg: &str, e: sea_orm::DbErr| format!("issue_export_task: {leg} query failed ({e})");
 
     // Assignees: unscoped through join, active users, user -created_at.
     {
@@ -602,7 +599,11 @@ async fn fetch_relations(pool: &PgPool, issue_ids: &[Uuid]) -> Result<IssueRelat
                 labels.into_iter().map(|l| (l.id, l.name.clone())).collect();
             for r in rows {
                 if let Some(name) = lmap.get(&r.label_id) {
-                    relations.labels.entry(r.issue_id).or_default().push(name.clone());
+                    relations
+                        .labels
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push(name.clone());
                 }
             }
         }
@@ -627,7 +628,11 @@ async fn fetch_relations(pool: &PgPool, issue_ids: &[Uuid]) -> Result<IssueRelat
                 cycles.into_iter().map(|c| (c.id, c.name.clone())).collect();
             for r in rows {
                 if let Some(name) = cmap.get(&r.cycle_id) {
-                    relations.cycles.entry(r.issue_id).or_default().push(name.clone());
+                    relations
+                        .cycles
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push(name.clone());
                 }
             }
         }
@@ -652,7 +657,11 @@ async fn fetch_relations(pool: &PgPool, issue_ids: &[Uuid]) -> Result<IssueRelat
                 mods.into_iter().map(|m| (m.id, m.name.clone())).collect();
             for r in rows {
                 if let Some(name) = mmap.get(&r.module_id) {
-                    relations.modules.entry(r.issue_id).or_default().push(name.clone());
+                    relations
+                        .modules
+                        .entry(r.issue_id)
+                        .or_default()
+                        .push(name.clone());
                 }
             }
         }
@@ -680,16 +689,23 @@ async fn fetch_relations(pool: &PgPool, issue_ids: &[Uuid]) -> Result<IssueRelat
                 .collect()
         };
         for r in rows {
-            let (first, last) = r.actor_id.and_then(|id| users_map.get(&id)).map_or((None, None), |u| {
-                (Some(u.first_name.clone()), Some(u.last_name.clone()))
-            });
-            relations.comments.entry(r.issue_id).or_default().push(CommentRow {
-                stripped: r.comment_stripped,
-                first_name: first,
-                last_name: last,
-                has_actor: r.actor_id.is_some(),
-                created_at: Some(r.created_at.with_timezone(&Utc)),
-            });
+            let (first, last) = r
+                .actor_id
+                .and_then(|id| users_map.get(&id))
+                .map_or((None, None), |u| {
+                    (Some(u.first_name.clone()), Some(u.last_name.clone()))
+                });
+            relations
+                .comments
+                .entry(r.issue_id)
+                .or_default()
+                .push(CommentRow {
+                    stripped: r.comment_stripped,
+                    first_name: first,
+                    last_name: last,
+                    has_actor: r.actor_id.is_some(),
+                    created_at: Some(r.created_at.with_timezone(&Utc)),
+                });
         }
     }
     // Subscribers: scoped, through -created_at.
@@ -731,7 +747,11 @@ async fn fetch_relations(pool: &PgPool, issue_ids: &[Uuid]) -> Result<IssueRelat
             .await
             .map_err(|e| failed("link", e))?;
         for r in rows {
-            relations.links.entry(r.issue_id).or_default().push((r.url, r.title));
+            relations
+                .links
+                .entry(r.issue_id)
+                .or_default()
+                .push((r.url, r.title));
         }
     }
     // Relations, both directions: scoped, unordered.
@@ -788,8 +808,10 @@ async fn fetch_identifiers(
         .all(&db)
         .await
         .map_err(|e| format!("issue_export_task: identifier query failed ({e})"))?;
-    let proj_map: HashMap<Uuid, String> =
-        projects.into_iter().map(|p| (p.id, p.identifier.clone())).collect();
+    let proj_map: HashMap<Uuid, String> = projects
+        .into_iter()
+        .map(|p| (p.id, p.identifier.clone()))
+        .collect();
     Ok(rows
         .into_iter()
         .filter_map(|r| {
@@ -1264,7 +1286,10 @@ async fn fetch_exporter(pool: &PgPool, token: &str) -> Result<ExporterRow, Strin
     let rows = exporters_entity::Entity::find()
         .filter(exporters_entity::Column::Token.eq(token.to_owned()))
         .select_only()
-        .columns([exporters_entity::Column::Id, exporters_entity::Column::InitiatedById])
+        .columns([
+            exporters_entity::Column::Id,
+            exporters_entity::Column::InitiatedById,
+        ])
         .into_tuple::<(Uuid, Uuid)>()
         .all(&db)
         .await
