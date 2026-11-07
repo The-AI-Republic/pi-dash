@@ -98,7 +98,6 @@ crates/db/src/config/accessor.rs 1
 crates/db/src/entity/issue_hooks.rs 5
 crates/db/src/filterset.rs 6
 crates/db/src/license/queries.rs 13
-crates/db/src/loop/queries.rs 9
 crates/db/src/ops/instance.rs 5
 crates/db/src/ops/repair.rs 7
 crates/db/src/ops/users.rs 12
@@ -119,7 +118,7 @@ crates/jobs/src/license/commands.rs 9
 crates/jobs/src/license/tasks.rs 4
 crates/jobs/src/loop/dispatch.rs 14
 crates/jobs/src/loop/fire.rs 4
-crates/jobs/src/loop/scan.rs 7
+crates/jobs/src/loop/scan.rs 5
 crates/jobs/src/oss_worker/execute_seams.rs 6
 crates/jobs/src/oss_worker/model_runtime/invoke.rs 1
 crates/jobs/src/oss_worker/model_runtime/tools_exec.rs 57
