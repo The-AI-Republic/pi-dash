@@ -9,10 +9,7 @@ crates/api/src/app_assets/handlers_v1.rs 7
 crates/api/src/app_assets/handlers_v2_project.rs 22
 crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
 crates/api/src/app_cycles/handlers_analytics.rs 12
-crates/api/src/app_cycles/handlers_archive.rs 14
-crates/api/src/app_cycles/handlers_cycles.rs 18
 crates/api/src/app_cycles/handlers_favorites.rs 5
-crates/api/src/app_cycles/handlers_misc.rs 21
 crates/api/src/app_cycles/handlers_progress.rs 6
 crates/api/src/app_intake/intakes.rs 7
 crates/api/src/app_intake/issues.rs 71
