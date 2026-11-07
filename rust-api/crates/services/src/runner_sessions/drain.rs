@@ -854,8 +854,10 @@ mod tests {
         // Managed pins AND the pod-member local arm.
         assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'managed_runner'"));
         assert!(sql.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
-        // Narrow PO-3 usability: no owner_id arm, trigger gate present.
-        assert!(!sql.contains("\"agent_run\".\"owner_id\""));
+        // Narrow PO-3 usability: no owner_id arm in the predicate, trigger gate present.
+        // (The 39-column projection always names owner_id; check WHERE only.)
+        let where_clause = sql.split(" WHERE ").nth(1).expect("WHERE present");
+        assert!(!where_clause.contains("\"agent_run\".\"owner_id\""));
         assert!(sql.contains("NOT IN"));
     }
 
