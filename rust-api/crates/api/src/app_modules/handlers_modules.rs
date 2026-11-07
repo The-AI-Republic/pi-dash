@@ -4349,22 +4349,44 @@ mod tests {
         // `base.py:86-135` annotates `completed` before `cancelled`;
         // the live wire counts a completed-group issue under
         // `completed_issues` (PIDASHCONV-504). Pinned on the SeaORM
-        // statement twin.
+        // statement twin: sea-query renders the group filter as a
+        // bound parameter (`"states"."group" = $N`), so the group
+        // literal lives in the values, not the SQL text.
         let pid = uuid::Uuid::nil();
         let uid = uuid::Uuid::nil();
-        let (sql, _) = module_rows_statement("acme", &pid, &uid, None, true, false, true)
+        let (sql, values) = module_rows_statement("acme", &pid, &uid, None, true, false, true)
             .build(sea_orm::sea_query::PostgresQueryBuilder);
         let completed = sql.find("AS \"completed_issues\"").expect("alias");
         let cancelled = sql.find("AS \"cancelled_issues\"").expect("alias");
         let completed_group = sql[..completed]
-            .rfind("\"states\".\"group\" = 'completed'")
+            .rfind("\"states\".\"group\" = $")
             .expect("group");
         let cancelled_group = sql[..cancelled]
-            .rfind("\"states\".\"group\" = 'cancelled'")
+            .rfind("\"states\".\"group\" = $")
             .expect("group");
         assert!(completed_group < completed);
         assert!(cancelled_group < cancelled);
         assert!(completed < cancelled);
+        // The bound value at each slot must be the alias's own group,
+        // so a dropped group filter (which would leave the NULL-safe
+        // triage guard as the last match) or a swapped label pair
+        // (PIDASHCONV-504) fails the pin.
+        let param_of = |pos: usize| -> usize {
+            sql[pos + "\"states\".\"group\" = $".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .expect("placeholder number")
+        };
+        assert_eq!(
+            values.0[param_of(completed_group) - 1],
+            sea_orm::sea_query::Value::String(Some(Box::new("completed".to_owned())))
+        );
+        assert_eq!(
+            values.0[param_of(cancelled_group) - 1],
+            sea_orm::sea_query::Value::String(Some(Box::new("cancelled".to_owned())))
+        );
     }
 
     #[test]
