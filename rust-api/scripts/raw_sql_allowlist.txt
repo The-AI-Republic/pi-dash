@@ -101,9 +101,6 @@ crates/jobs/src/integrations/github_signals.rs 4
 crates/jobs/src/integrations/github_sync.rs 33
 crates/jobs/src/license/commands.rs 9
 crates/jobs/src/license/tasks.rs 4
-crates/jobs/src/oss_worker/execute_seams.rs 6
-crates/jobs/src/oss_worker/model_runtime/invoke.rs 1
-crates/jobs/src/oss_worker/model_runtime/tools_exec.rs 57
 crates/jobs/src/runner_enroll.rs 5
 crates/jobs/src/scheduler.rs 4
 crates/jobs/src/tasks_cleanup/dummy_data.rs 34

@@ -53,17 +53,15 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::admission::RedisAdmissionCache;
 use crate::dispatch::{append_event, dispatch_agent_run, DispatchDecision};
 use crate::issue_transition::WorkerTaskEnqueueHook;
 use crate::orchestration::{
-    fire_tick_seam::{emit_logs, lock_ticker_by_issue_sql, map_ticker},
-    live_inputs::JobsMatcher,
-    preflight_eligibility_or_bounce, LiveCreationStore, StoreDeps,
+    fire_tick_seam::emit_logs, live_inputs::JobsMatcher, preflight_eligibility_or_bounce,
+    LiveCreationStore, StoreDeps,
 };
 use crate::queue::{enqueue, enqueue_in, NewJob};
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
@@ -71,12 +69,26 @@ use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::entity::comment_hooks::description_stripped_for;
-use pidash_db::orchestration::querysets::MEMBER_PROJECT_ISSUES_SQL;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
+use sea_orm::{
+    sea_query::Expr, ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, JoinType,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
+
+/// SeaORM view over the request pool (no I/O; built once per call).
+fn sea_conn(pool: &PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// One tx SeaORM handle over the audit transaction (the sqlx tx stays
+/// the owner; this only adapts statement execution onto it).
+fn tx_conn<'x>(tx: &'x mut Transaction<'_>) -> pidash_db::orm_tx::TxConn<'x> {
+    pidash_db::orm_tx::TxConn::new(tx.inner())
+}
 use pidash_services::assistant::markdown::to_safe_html;
 use pidash_services::assistant::seams::agent_model_profile_for_user;
-use pidash_services::assistant::tools_issues::{escape_icontains, PROJECT_WRITE_GATE_SQL};
+use pidash_services::assistant::tools_issues::escape_icontains;
 use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::dispatch::tool_issues::{self, ToolIssueRow};
 use pidash_services::dispatch::tools as plan;
@@ -97,12 +109,12 @@ use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
     AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
     FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+    RenderedTurn, RunView, RunnerView, StateView,
 };
 use pidash_services::orchestration::entries::{
     fire_state_transition, handle_issue_state_transition, BindingView, EntriesSeam, FireOutcome,
     FireRequest, NewSchedulerRun, PreflightSeam, ProjectRoleFacts, SchedulerView,
-    TransitionRequest, WorkspaceView, CLOCK_POLICY_SQL, PRIOR_STATE_SELECT_SQL,
+    TransitionRequest, WorkspaceView,
 };
 use pidash_services::orchestration::relations as rel;
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
@@ -341,44 +353,180 @@ pub struct ToolScope {
     pub project_id: Uuid,
 }
 
-/// `_scope` (`tools.py:46-73`) over one connection: the caller's
-/// connection (the audit transaction on the write path, a fresh pool
-/// connection on the read path). A missing run row is
-/// `AgentRun.DoesNotExist` (`.get()`, `query.py:639-640`); a dangling
-/// work-item/scheduler-binding back-pointer reads its project as the
-/// `AttributeError` Python's `run.work_item.project` raises.
-async fn load_scope(
-    conn: &mut sqlx::PgConnection,
+/// The project-role gate (`check_project_role` on the slug-named
+/// workspace): write allows admin/member `[20, 15]`, read adds guest
+/// `[20, 15, 5]`; either bit also passes with any-role membership plus
+/// workspace-admin (role 20). One statement, like the SQL gate.
+async fn project_role_ok<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    user_id: Uuid,
+    workspace_slug: &str,
+    project_id: Uuid,
+    write: bool,
+) -> Result<bool, ToolExecError> {
+    use pidash_db::entity::{
+        project_members as pm_entity, workspace_members as wm_entity, workspaces as ws_entity,
+    };
+    let roles: &[i16] = if write { &[20, 15] } else { &[20, 15, 5] };
+    let admin_exists = Expr::exists(
+        sea_orm::sea_query::Query::select()
+            .expr(Expr::value(1))
+            .from(wm_entity::Entity)
+            .join(
+                JoinType::InnerJoin,
+                ws_entity::Entity,
+                Expr::col((ws_entity::Entity, ws_entity::Column::Id))
+                    .equals((wm_entity::Entity, wm_entity::Column::WorkspaceId)),
+            )
+            .and_where(Expr::col((wm_entity::Entity, wm_entity::Column::MemberId)).eq(user_id))
+            .and_where(Expr::col((ws_entity::Entity, ws_entity::Column::Slug)).eq(workspace_slug))
+            .and_where(Expr::col((wm_entity::Entity, wm_entity::Column::Role)).eq(20))
+            .and_where(Expr::col((wm_entity::Entity, wm_entity::Column::IsActive)).eq(true))
+            .and_where(Expr::col((wm_entity::Entity, wm_entity::Column::DeletedAt)).is_null())
+            .to_owned(),
+    );
+    let row = pm_entity::Entity::find()
+        .join(JoinType::InnerJoin, pm_entity::Relation::Workspaces.def())
+        .filter(pm_entity::Column::MemberId.eq(user_id))
+        .filter(ws_entity::Column::Slug.eq(workspace_slug))
+        .filter(pm_entity::Column::ProjectId.eq(project_id))
+        .filter(pm_entity::Column::IsActive.eq(true))
+        .filter(pm_entity::Column::DeletedAt.is_null())
+        .filter(
+            sea_orm::sea_query::Condition::any()
+                .add(pm_entity::Column::Role.is_in(roles.to_vec()))
+                .add(admin_exists),
+        )
+        .select_only()
+        .column(pm_entity::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(conn)
+        .await
+        .map_err(orm_error)?;
+    Ok(row.is_some())
+}
+
+/// `SCOPE_RUN_SQL` beside-index-free form: joined once, with every
+/// same-named `project_id` under its own alias.
+#[derive(Debug, FromQueryResult)]
+struct ScopeRow {
+    workspace_id: Uuid,
+    created_by_id: Uuid,
+    work_item_id: Option<Uuid>,
+    scheduler_binding_id: Option<Uuid>,
+    cancel_requested_at: Option<DateTime<Utc>>,
+    is_active: bool,
+    is_bot: bool,
+    slug: String,
+    work_item_project_id: Option<Uuid>,
+    scheduler_project_id: Option<Uuid>,
+    pod_project_id: Option<Uuid>,
+}
+
+/// One `FIND_EXISTING_CALL_SQL` row: latest-by-id ledger state.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct LedgerExisting {
+    request_fingerprint: String,
+    status: String,
+    safe_replay_result: Option<Value>,
+}
+
+/// `_scope` (`tools.py:46-73`) on one SeaORM connection: the audit
+/// transaction handle on the write path, the pool handle on the read
+/// path. A missing run row is `AgentRun.DoesNotExist` (`.get()`,
+/// `query.py:639-640`); a dangling work-item/scheduler-binding
+/// back-pointer reads its project as the `AttributeError` Python's
+/// `run.work_item.project` raises.
+async fn load_scope<C: sea_orm::ConnectionTrait>(
+    conn: &C,
     run_id: Uuid,
     write: bool,
 ) -> Result<ToolScope, ToolExecError> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(plan::SCOPE_RUN_SQL)
-        .bind(run_id)
-        .fetch_optional(&mut *conn)
-        .await?;
+    use pidash_db::entity::{
+        agent_run as run_entity, issues as issue_entity, pod as pod_entity,
+        scheduler_bindings as sb_entity, users as u_entity, workspaces as ws_entity,
+    };
+    let row = run_entity::Entity::find_by_id(run_id)
+        .select_only()
+        .column(run_entity::Column::WorkspaceId)
+        .column(run_entity::Column::CreatedById)
+        .column(run_entity::Column::WorkItemId)
+        .column(run_entity::Column::SchedulerBindingId)
+        .column(run_entity::Column::CancelRequestedAt)
+        .column_as(u_entity::Column::IsActive, "is_active")
+        .column_as(u_entity::Column::IsBot, "is_bot")
+        .column_as(ws_entity::Column::Slug, "slug")
+        .column_as(issue_entity::Column::ProjectId, "work_item_project_id")
+        .column_as(sb_entity::Column::ProjectId, "scheduler_project_id")
+        .column_as(pod_entity::Column::ProjectId, "pod_project_id")
+        .join(
+            JoinType::InnerJoin,
+            run_entity::Entity::belongs_to(u_entity::Entity)
+                .from(run_entity::Column::CreatedById)
+                .to(u_entity::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            run_entity::Entity::belongs_to(ws_entity::Entity)
+                .from(run_entity::Column::WorkspaceId)
+                .to(ws_entity::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::LeftJoin,
+            run_entity::Entity::belongs_to(issue_entity::Entity)
+                .from(run_entity::Column::WorkItemId)
+                .to(issue_entity::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::LeftJoin,
+            run_entity::Entity::belongs_to(sb_entity::Entity)
+                .from(run_entity::Column::SchedulerBindingId)
+                .to(sb_entity::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            run_entity::Entity::belongs_to(pod_entity::Entity)
+                .from(run_entity::Column::PodId)
+                .to(pod_entity::Column::Id)
+                .into(),
+        )
+        .into_model::<ScopeRow>()
+        .one(conn)
+        .await
+        .map_err(orm_error)?;
     let Some(row) = row else {
         return Err(ToolExecError::Missing { model: "AgentRun" });
     };
-    let workspace_id: Uuid = row.try_get("workspace_id")?;
-    let creator_id: Uuid = row.try_get("created_by_id")?;
-    let work_item_id: Option<Uuid> = row.try_get("work_item_id")?;
-    let scheduler_binding_id: Option<Uuid> = row.try_get("scheduler_binding_id")?;
-    let cancel_requested_at: Option<DateTime<Utc>> = row.try_get("cancel_requested_at")?;
-    let creator_active: bool = row.try_get("is_active")?;
-    let creator_is_bot: bool = row.try_get("is_bot")?;
-    let workspace_slug: String = row.try_get("slug")?;
-    // `SCOPE_RUN_SQL` projects three same-named `project_id` columns
-    // (one per source); positional reads disambiguate them in select
-    // order (work item 10, scheduler binding 11, pod 12).
-    let work_item_project_id: Option<Uuid> = row.try_get(10)?;
-    let scheduler_project_id: Option<Uuid> = row.try_get(11)?;
-    let pod_project_id: Option<Uuid> = row.try_get(12)?;
+    let ScopeRow {
+        workspace_id,
+        created_by_id: creator_id,
+        work_item_id,
+        scheduler_binding_id,
+        cancel_requested_at,
+        is_active: creator_active,
+        is_bot: creator_is_bot,
+        slug: workspace_slug,
+        work_item_project_id,
+        scheduler_project_id,
+        pod_project_id,
+    } = row;
 
-    let workspace_member: bool = sqlx::query(plan::SCOPE_WORKSPACE_MEMBER_SQL)
-        .bind(creator_id)
-        .bind(workspace_id)
-        .fetch_optional(&mut *conn)
-        .await?
+    use pidash_db::entity::workspace_members as wm_entity;
+    let workspace_member = wm_entity::Entity::find()
+        .filter(wm_entity::Column::MemberId.eq(creator_id))
+        .filter(wm_entity::Column::WorkspaceId.eq(workspace_id))
+        .filter(wm_entity::Column::IsActive.eq(true))
+        .filter(wm_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(wm_entity::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(conn)
+        .await
+        .map_err(orm_error)?
         .is_some();
     // The project id gates the role check, but the source (hence which
     // column) resolves inside `check_scope` after the actor gates: read
@@ -396,17 +544,11 @@ async fn load_scope(
             attribute: "project",
         });
     };
-    let gate_sql = if write {
-        PROJECT_WRITE_GATE_SQL
-    } else {
-        plan::PROJECT_READ_GATE_SQL
-    };
-    let role_ok: bool = sqlx::query_scalar(gate_sql)
-        .bind(creator_id)
-        .bind(workspace_slug.as_str())
-        .bind(project_id)
-        .fetch_one(&mut *conn)
-        .await?;
+    // The role gate: project membership (role list per bit) on the
+    // slug-named workspace, or any-role membership plus workspace admin
+    // (role 20). `EXISTS`-shaped, exactly like the SQL gates it replaces.
+    let role_ok =
+        project_role_ok(conn, creator_id, workspace_slug.as_str(), project_id, write).await?;
     let actor = plan::ScopeActorVerdicts {
         cancel_requested: cancel_requested_at.is_some(),
         creator_active,
@@ -480,22 +622,33 @@ pub async fn write_begin<'a>(
         plan::ReplayDecision::Proceed => {}
     }
     let mut tx = Transaction::begin(&ctx.pool).await?;
-    let scope = match load_scope(tx.inner(), run_id, true).await {
+    let scope = match load_scope(&tx_conn(&mut tx), run_id, true).await {
         Ok(scope) => scope,
         Err(error) => {
             let _ = tx.rollback().await;
             return Err(error);
         }
     };
-    let succeeded_writes: i64 = sqlx::query_scalar(plan::COUNT_SUCCEEDED_WRITES_SQL)
-        .bind(run_id)
-        .fetch_one(&mut **tx.inner())
-        .await?;
-    let tool_used: bool = sqlx::query(plan::WRITE_TOOL_USED_SQL)
-        .bind(run_id)
-        .bind(tool_name)
-        .fetch_optional(&mut **tx.inner())
-        .await?
+    use pidash_db::entity::agent_run_tool_call as ledger_entity;
+    let succeeded_writes: u64 = ledger_entity::Entity::find()
+        .filter(ledger_entity::Column::AgentRunId.eq(run_id))
+        .filter(ledger_entity::Column::Risk.eq("write"))
+        .filter(ledger_entity::Column::Status.eq("succeeded"))
+        .count(&tx_conn(&mut tx))
+        .await
+        .map_err(orm_error)?;
+    let succeeded_writes: i64 = succeeded_writes.try_into().unwrap_or(i64::MAX);
+    let tool_used = ledger_entity::Entity::find()
+        .filter(ledger_entity::Column::AgentRunId.eq(run_id))
+        .filter(ledger_entity::Column::ToolName.eq(tool_name))
+        .filter(ledger_entity::Column::Risk.eq("write"))
+        .filter(ledger_entity::Column::Status.eq("succeeded"))
+        .select_only()
+        .column(ledger_entity::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&tx_conn(&mut tx))
+        .await
+        .map_err(orm_error)?
         .is_some();
     if let Err(denied) = plan::write_admission(succeeded_writes, tool_used, tool_name, &ctx.cloud) {
         let _ = tx.rollback().await;
@@ -504,23 +657,39 @@ pub async fn write_begin<'a>(
     let ledger_id = Uuid::new_v4();
     let idempotency_hash =
         plan::fingerprint(&serde_json::json!({"run": run_id.to_string(), "tool": tool_name}));
-    sqlx::query(plan::LEDGER_INSERT_WRITE_SQL)
-        .bind(ledger_id)
-        .bind(run_id)
-        .bind(call_id)
-        .bind(source)
-        .bind(server_key)
-        .bind(tool_name)
-        .bind(fingerprint)
-        .bind(idempotency_hash)
-        .bind(Utc::now())
-        .execute(&mut **tx.inner())
-        .await?;
-    sqlx::query(plan::LEDGER_MARK_SUBMITTED_SQL)
-        .bind(ledger_id)
-        .bind(Utc::now())
-        .execute(&mut **tx.inner())
-        .await?;
+    let now = Utc::now();
+    ledger_entity::ActiveModel {
+        id: sea_orm::Set(ledger_id),
+        agent_run_id: sea_orm::Set(run_id),
+        tool_call_id: sea_orm::Set(call_id.to_owned()),
+        source: sea_orm::Set(source.to_owned()),
+        server_key: sea_orm::Set(server_key.to_owned()),
+        tool_name: sea_orm::Set(tool_name.to_owned()),
+        risk: sea_orm::Set("write".to_owned()),
+        status: sea_orm::Set("prepared".to_owned()),
+        request_fingerprint: sea_orm::Set(fingerprint),
+        result_fingerprint: sea_orm::Set("".to_owned()),
+        idempotency_key_hash: sea_orm::Set(idempotency_hash),
+        external_operation_id: sea_orm::Set("".to_owned()),
+        safe_replay_result: sea_orm::Set(None),
+        error_code: sea_orm::Set("".to_owned()),
+        prepared_at: sea_orm::Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+        submitted_at: sea_orm::Set(None),
+        completed_at: sea_orm::Set(None),
+    }
+    .insert(&tx_conn(&mut tx))
+    .await
+    .map_err(orm_error)?;
+    ledger_entity::Entity::update_many()
+        .col_expr(ledger_entity::Column::Status, Expr::value("submitted"))
+        .col_expr(
+            ledger_entity::Column::SubmittedAt,
+            Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+        )
+        .filter(ledger_entity::Column::Id.eq(ledger_id))
+        .exec(&tx_conn(&mut tx))
+        .await
+        .map_err(orm_error)?;
     Ok(AuditBegin::Proceed(WriteAudit {
         tx,
         scope,
@@ -568,13 +737,26 @@ async fn write_commit_tx(
         bounded.clone()
     };
     let result_fingerprint = plan::fingerprint(&bounded);
-    sqlx::query(plan::LEDGER_MARK_SUCCEEDED_SQL)
-        .bind(ledger_id)
-        .bind(replay)
-        .bind(result_fingerprint)
-        .bind(Utc::now())
-        .execute(&mut **tx.inner())
-        .await?;
+    use pidash_db::entity::agent_run_tool_call as ledger_entity;
+    let now = Utc::now();
+    {
+        let conn = tx_conn(&mut tx);
+        ledger_entity::Entity::update_many()
+            .col_expr(ledger_entity::Column::Status, Expr::value("succeeded"))
+            .col_expr(ledger_entity::Column::SafeReplayResult, Expr::value(replay))
+            .col_expr(
+                ledger_entity::Column::ResultFingerprint,
+                Expr::value(result_fingerprint),
+            )
+            .col_expr(
+                ledger_entity::Column::CompletedAt,
+                Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+            )
+            .filter(ledger_entity::Column::Id.eq(ledger_id))
+            .exec(&conn)
+            .await
+            .map_err(orm_error)?;
+    }
     tx.commit().await?;
     Ok(result)
 }
@@ -617,22 +799,33 @@ pub async fn read_begin(
         plan::ReplayDecision::Replay(value) => return Ok(ReadAudit::Replay(value)),
         plan::ReplayDecision::Proceed => {}
     }
-    let mut conn = ctx.pool.acquire().await?;
-    let scope = load_scope(&mut conn, run_id, false).await?;
+    let db = sea_conn(&ctx.pool);
+    let scope = load_scope(&db, run_id, false).await?;
     let ledger_id = Uuid::new_v4();
     let now = Utc::now();
-    sqlx::query(plan::LEDGER_INSERT_READ_SQL)
-        .bind(ledger_id)
-        .bind(run_id)
-        .bind(call_id)
-        .bind(source)
-        .bind(server_key)
-        .bind(tool_name)
-        .bind(fingerprint)
-        .bind(now)
-        .bind(now)
-        .execute(&ctx.pool)
-        .await?;
+    use pidash_db::entity::agent_run_tool_call as ledger_entity;
+    ledger_entity::ActiveModel {
+        id: sea_orm::Set(ledger_id),
+        agent_run_id: sea_orm::Set(run_id),
+        tool_call_id: sea_orm::Set(call_id.to_owned()),
+        source: sea_orm::Set(source.to_owned()),
+        server_key: sea_orm::Set(server_key.to_owned()),
+        tool_name: sea_orm::Set(tool_name.to_owned()),
+        risk: sea_orm::Set("read".to_owned()),
+        status: sea_orm::Set("submitted".to_owned()),
+        request_fingerprint: sea_orm::Set(fingerprint),
+        result_fingerprint: sea_orm::Set("".to_owned()),
+        idempotency_key_hash: sea_orm::Set("".to_owned()),
+        external_operation_id: sea_orm::Set("".to_owned()),
+        safe_replay_result: sea_orm::Set(None),
+        error_code: sea_orm::Set("".to_owned()),
+        prepared_at: sea_orm::Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+        submitted_at: sea_orm::Set(Some(sea_orm::prelude::DateTimeWithTimeZone::from(now))),
+        completed_at: sea_orm::Set(None),
+    }
+    .insert(&db)
+    .await
+    .map_err(orm_error)?;
     Ok(ReadAudit::Proceed { scope, ledger_id })
 }
 
@@ -647,14 +840,25 @@ pub async fn read_settle(
     ledger_id: Uuid,
     outcome: Result<Value, ToolExecError>,
 ) -> Result<Value, ToolExecError> {
+    use pidash_db::entity::agent_run_tool_call as ledger_entity;
+    let db = sea_conn(&ctx.pool);
     match outcome {
         Err(error) => {
-            sqlx::query(plan::LEDGER_MARK_FAILED_SQL)
-                .bind(ledger_id)
-                .bind(plan::failure_error_code(error.python_type()))
-                .bind(Utc::now())
-                .execute(&ctx.pool)
-                .await?;
+            let now = Utc::now();
+            ledger_entity::Entity::update_many()
+                .col_expr(ledger_entity::Column::Status, Expr::value("failed"))
+                .col_expr(
+                    ledger_entity::Column::ErrorCode,
+                    Expr::value(plan::failure_error_code(error.python_type())),
+                )
+                .col_expr(
+                    ledger_entity::Column::CompletedAt,
+                    Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+                )
+                .filter(ledger_entity::Column::Id.eq(ledger_id))
+                .exec(&db)
+                .await
+                .map_err(orm_error)?;
             Err(error)
         }
         Ok(result) => {
@@ -665,13 +869,22 @@ pub async fn read_settle(
                 bounded.clone()
             };
             let result_fingerprint = plan::fingerprint(&bounded);
-            sqlx::query(plan::LEDGER_MARK_SUCCEEDED_SQL)
-                .bind(ledger_id)
-                .bind(replay)
-                .bind(result_fingerprint)
-                .bind(Utc::now())
-                .execute(&ctx.pool)
-                .await?;
+            let now = Utc::now();
+            ledger_entity::Entity::update_many()
+                .col_expr(ledger_entity::Column::Status, Expr::value("succeeded"))
+                .col_expr(ledger_entity::Column::SafeReplayResult, Expr::value(replay))
+                .col_expr(
+                    ledger_entity::Column::ResultFingerprint,
+                    Expr::value(result_fingerprint),
+                )
+                .col_expr(
+                    ledger_entity::Column::CompletedAt,
+                    Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+                )
+                .filter(ledger_entity::Column::Id.eq(ledger_id))
+                .exec(&db)
+                .await
+                .map_err(orm_error)?;
             emit_completed(ctx, run_id, tool_name, plan::ToolRisk::Read).await?;
             Ok(result)
         }
@@ -684,25 +897,30 @@ async fn find_existing(
     run_id: Uuid,
     call_id: &str,
 ) -> Result<Option<plan::ExistingCall>, ToolExecError> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(plan::FIND_EXISTING_CALL_SQL)
-        .bind(run_id)
-        .bind(call_id)
-        .fetch_optional(pool)
-        .await?;
+    use pidash_db::entity::agent_run_tool_call as ledger_entity;
+    let db = sea_conn(pool);
+    let row = ledger_entity::Entity::find()
+        .filter(ledger_entity::Column::AgentRunId.eq(run_id))
+        .filter(ledger_entity::Column::ToolCallId.eq(call_id))
+        .order_by_desc(ledger_entity::Column::Id)
+        .limit(1)
+        .into_model::<LedgerExisting>()
+        .one(&db)
+        .await
+        .map_err(orm_error)?;
     row.map(|row| {
-        let status: String = row.try_get("status")?;
         // A junk stored status compares unequal to `succeeded` in
         // Python (→ `already_submitted`); `Unknown` preserves that arm.
-        let status = pidash_db::dispatch::ToolCallStatus::from_value(&status)
+        let status = pidash_db::dispatch::ToolCallStatus::from_value(&row.status)
             .unwrap_or(pidash_db::dispatch::ToolCallStatus::Unknown);
-        Ok(plan::ExistingCall {
-            request_fingerprint: row.try_get("request_fingerprint")?,
+        plan::ExistingCall {
+            request_fingerprint: row.request_fingerprint,
             status,
-            safe_replay_result: row.try_get("safe_replay_result")?,
-        })
+            safe_replay_result: row.safe_replay_result,
+        }
     })
+    .map(Ok)
     .transpose()
-    .map_err(ToolExecError::Db)
 }
 
 /// `events.append(run_id, "tool_completed", ...)` (`tools.py:156`).
@@ -724,6 +942,33 @@ async fn emit_completed(
     )
     .await?;
     Ok(())
+}
+
+/// One `CURRENT_ISSUE_COMMENTS_SQL` row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct IssueCommentRow {
+    id: Uuid,
+    comment_stripped: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+/// One `PROJECT_STATES_SQL` row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct ProjectStateRow {
+    id: Uuid,
+    name: String,
+    group: String,
+}
+
+/// One `LINKED_REVIEWS_SQL` row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct LinkedReviewRow {
+    id: Uuid,
+    provider: String,
+    url: String,
+    title: String,
+    state: String,
+    external_iid: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -799,20 +1044,23 @@ async fn op_list_current_issue_comments(
     };
     // A hard-deleted bound issue still lists (the related manager
     // filters comments, not the issue): no liveness probe here.
-    let rows = sqlx::query(plan::CURRENT_ISSUE_COMMENTS_SQL)
-        .bind(work_item_id)
-        .fetch_all(&ctx.pool)
-        .await?;
+    use pidash_db::entity::issue_comments as ic_entity;
+    let db = sea_conn(&ctx.pool);
+    let rows = ic_entity::Entity::find()
+        .filter(ic_entity::Column::IssueId.eq(work_item_id))
+        .filter(ic_entity::Column::DeletedAt.is_null())
+        .order_by_desc(ic_entity::Column::CreatedAt)
+        .limit(50)
+        .into_model::<IssueCommentRow>()
+        .all(&db)
+        .await
+        .map_err(orm_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let id: Uuid = row.try_get("id").map_err(ToolExecError::Db)?;
-        let stripped: Option<String> =
-            row.try_get("comment_stripped").map_err(ToolExecError::Db)?;
-        let created_at: DateTime<Utc> = row.try_get("created_at").map_err(ToolExecError::Db)?;
         out.push(plan::comment_row(
-            &id.to_string(),
-            stripped.as_deref(),
-            &render_isoformat(created_at),
+            &row.id.to_string(),
+            row.comment_stripped.as_deref(),
+            &render_isoformat(row.created_at),
         ));
     }
     serde_json::to_value(out)
@@ -821,19 +1069,23 @@ async fn op_list_current_issue_comments(
 
 /// `pidash_list_project_states` (`tools.py:215-225`).
 async fn op_list_project_states(ctx: &ToolCtx, scope: &ToolScope) -> Result<Value, ToolExecError> {
-    let rows = sqlx::query(plan::PROJECT_STATES_SQL)
-        .bind(scope.project_id)
-        .fetch_all(&ctx.pool)
-        .await?;
+    use pidash_db::entity::states as st_entity;
+    let db = sea_conn(&ctx.pool);
+    let rows = st_entity::Entity::find()
+        .filter(st_entity::Column::ProjectId.eq(scope.project_id))
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
+        .order_by_asc(st_entity::Column::Sequence)
+        .into_model::<ProjectStateRow>()
+        .all(&db)
+        .await
+        .map_err(orm_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let id: Uuid = row.try_get("id").map_err(ToolExecError::Db)?;
-        let name: String = row.try_get("name").map_err(ToolExecError::Db)?;
-        let group: String = row.try_get("group").map_err(ToolExecError::Db)?;
         out.push(plan::StateRow {
-            id: id.to_string(),
-            name,
-            group,
+            id: row.id.to_string(),
+            name: row.name.clone(),
+            group: row.group.clone(),
         });
     }
     serde_json::to_value(out)
@@ -903,25 +1155,26 @@ async fn op_list_linked_code_reviews(
     let Some(work_item_id) = scope.work_item_id else {
         return Ok(Value::Array(Vec::new()));
     };
-    let rows = sqlx::query(plan::LINKED_REVIEWS_SQL)
-        .bind(work_item_id)
-        .fetch_all(&ctx.pool)
-        .await?;
+    use pidash_db::entity::git_code_review_links as gc_entity;
+    let db = sea_conn(&ctx.pool);
+    let rows = gc_entity::Entity::find()
+        .filter(gc_entity::Column::IssueId.eq(work_item_id))
+        .filter(gc_entity::Column::DeletedAt.is_null())
+        .order_by_desc(gc_entity::Column::CreatedAt)
+        .limit(plan::LINKED_REVIEWS_LIMIT as u64)
+        .into_model::<LinkedReviewRow>()
+        .all(&db)
+        .await
+        .map_err(orm_error)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let id: Uuid = row.try_get("id").map_err(ToolExecError::Db)?;
-        let provider: String = row.try_get("provider").map_err(ToolExecError::Db)?;
-        let url: String = row.try_get("url").map_err(ToolExecError::Db)?;
-        let title: String = row.try_get("title").map_err(ToolExecError::Db)?;
-        let state: String = row.try_get("state").map_err(ToolExecError::Db)?;
-        let external_iid: String = row.try_get("external_iid").map_err(ToolExecError::Db)?;
         out.push(plan::LinkedReviewRow {
-            id: id.to_string(),
-            provider,
-            url,
-            title,
-            state,
-            number: external_iid,
+            id: row.id.to_string(),
+            provider: row.provider.clone(),
+            url: row.url.clone(),
+            title: row.title.clone(),
+            state: row.state.clone(),
+            number: row.external_iid.clone(),
         });
     }
     serde_json::to_value(out)
@@ -1100,24 +1353,40 @@ async fn op_update_current_issue_workpad(
     }
 }
 
-/// One [`STATE_SELECT_SQL`] row: the orchestration state view.
+/// The orchestration state view (the `STATE_SELECT_SQL` read).
 async fn state_view_tx(
     tx: &mut Transaction<'_>,
     state_id: Uuid,
 ) -> Result<Option<pidash_services::orchestration::creation::StateView>, ToolExecError> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(STATE_SELECT_SQL)
-        .bind(state_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
-    row.map(|row| {
-        Ok(pidash_services::orchestration::creation::StateView {
-            id: row.try_get("id")?,
-            name: row.try_get("name")?,
-            group: row.try_get("group")?,
-        })
-    })
-    .transpose()
-    .map_err(ToolExecError::Db)
+    use pidash_db::entity::states as st_entity;
+    let conn = tx_conn(tx);
+    let row = st_entity::Entity::find_by_id(state_id)
+        .into_model::<IssueStateView>()
+        .one(&conn)
+        .await
+        .map_err(orm_error)?;
+    Ok(
+        row.map(|row| pidash_services::orchestration::creation::StateView {
+            id: row.id,
+            name: row.name,
+            group: row.group,
+        }),
+    )
+}
+
+/// One `STATE_SELECT_SQL` row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct IssueStateView {
+    id: Uuid,
+    name: String,
+    group: String,
+}
+
+/// One `TRANSITION_ISSUE_LOCK_SQL` row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct IssueStateLockRow {
+    id: Uuid,
+    state_id: Option<Uuid>,
 }
 
 /// `pidash_create_project_issue` (`tools.py:345-371`) through
@@ -1146,11 +1415,17 @@ async fn op_create_project_issue(
             attribute: "project_id",
         });
     };
-    let binding_project_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT project_id FROM scheduler_bindings WHERE id = $1 LIMIT 1")
-            .bind(binding_id)
-            .fetch_optional(&mut **tx.inner())
-            .await?;
+    use pidash_db::entity::{
+        issues as issue_entity, projects as proj_entity, scheduler_bindings as sb_entity,
+        states as st_entity,
+    };
+    let binding_project_id = sb_entity::Entity::find_by_id(binding_id)
+        .select_only()
+        .column(sb_entity::Column::ProjectId)
+        .into_tuple::<Uuid>()
+        .one(&tx_conn(tx))
+        .await
+        .map_err(orm_error)?;
     let Some(project_id) = binding_project_id else {
         return Err(ToolExecError::AttributeError {
             attribute: "project_id",
@@ -1164,34 +1439,59 @@ async fn op_create_project_issue(
     // one-way lock wait; the 60s idle guard then kills the audit
     // connection, PIDASHCONV-1596). The lock lands after the domain
     // commit below, still inside the audit transaction.
-    let exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(project_id)
-            .fetch_optional(&mut **tx.inner())
-            .await?;
+    let exists = proj_entity::Entity::find_by_id(project_id)
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(proj_entity::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&tx_conn(tx))
+        .await
+        .map_err(orm_error)?;
     if exists.is_none() {
         return Err(ToolExecError::Missing { model: "Project" });
     }
-    let tool_state: Option<Uuid> = sqlx::query_scalar(plan::CREATE_DEFAULT_STATE_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten();
+    let tool_state = st_entity::Entity::find()
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(st_entity::Column::Default.eq(true))
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
+        .order_by_asc(st_entity::Column::Sequence)
+        .limit(1)
+        .select_only()
+        .column(st_entity::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&tx_conn(tx))
+        .await
+        .map_err(orm_error)?;
     let tool_state = match tool_state {
         Some(state) => Some(state),
-        None => sqlx::query_scalar(plan::CREATE_BACKLOG_STATE_SQL)
-            .bind(project_id)
-            .fetch_optional(&mut **tx.inner())
-            .await?
-            .flatten(),
+        None => st_entity::Entity::find()
+            .filter(st_entity::Column::ProjectId.eq(project_id))
+            .filter(st_entity::Column::Group.eq("backlog"))
+            .filter(st_entity::Column::DeletedAt.is_null())
+            .filter(Expr::col(st_entity::Column::Group).ne("triage"))
+            .order_by_asc(st_entity::Column::Sequence)
+            .limit(1)
+            .select_only()
+            .column(st_entity::Column::Id)
+            .into_tuple::<Uuid>()
+            .one(&tx_conn(tx))
+            .await
+            .map_err(orm_error)?,
     };
     // The tool's `seq` probe executes; `save` then discards its value
     // for the effective sequence.
-    let _: Option<i64> = sqlx::query_scalar(plan::CREATE_SEQ_MAX_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?
-        .flatten();
+    let _max_seq: Option<i64> = issue_entity::Entity::find()
+        .filter(issue_entity::Column::ProjectId.eq(project_id))
+        .filter(issue_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(issue_entity::Column::SequenceId)
+        .order_by_desc(issue_entity::Column::SequenceId)
+        .limit(1)
+        .into_tuple::<i64>()
+        .one(&tx_conn(tx))
+        .await
+        .map_err(orm_error)?;
     // The save rides `domain::issues::create`: the hooks repair a
     // missing tool state (same default-then-fallback queries), take the
     // advisory lock, scan the effective sequence and sort order, resolve
@@ -1294,10 +1594,14 @@ async fn op_create_project_issue(
     // still held when the audit commits. A project deleted mid-flight
     // errors here with the issue standing (fault-path only, like the
     // audit-aftermath note above).
-    let locked: Option<Uuid> = sqlx::query_scalar(plan::CREATE_PROJECT_LOCK_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
+    let locked = proj_entity::Entity::find_by_id(project_id)
+        .lock_exclusive()
+        .select_only()
+        .column(proj_entity::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&tx_conn(tx))
+        .await
+        .map_err(orm_error)?;
     if locked.is_none() {
         return Err(ToolExecError::Missing { model: "Project" });
     }
@@ -1305,12 +1609,13 @@ async fn op_create_project_issue(
     let sequence_id = i64::from(outcome.issue.sequence_id);
     // `{"created": True, **_issue_data(issue)}` (brief, `created`
     // first): the project identifier plus the resolved state.
-    let project_identifier: Option<String> =
-        sqlx::query_scalar("SELECT identifier FROM projects WHERE id = $1 LIMIT 1")
-            .bind(project_id)
-            .fetch_optional(&mut **tx.inner())
-            .await?
-            .flatten();
+    let project_identifier = proj_entity::Entity::find_by_id(project_id)
+        .select_only()
+        .column(proj_entity::Column::Identifier)
+        .into_tuple::<String>()
+        .one(&tx_conn(tx))
+        .await
+        .map_err(orm_error)?;
     let (state_name, state_group) = match state_id {
         Some(state) => match state_view_tx(tx, state).await? {
             Some(view) => (Some(view.name), Some(view.group)),
@@ -1447,16 +1752,6 @@ struct LiveToolTransitionSeam<'a, C, H, P> {
     pool: &'a PgPool,
     store: LiveCreationStore<'a, C, H, P>,
 }
-
-/// One [`CLOCK_POLICY_SQL`] row: ticking flag, pool, impl/review/test
-/// cadence columns (the scheduler-dispatch alias shape).
-type ClockPolicyRow = (
-    Option<bool>,
-    Option<i32>,
-    Option<i32>,
-    Option<i32>,
-    Option<i32>,
-);
 
 impl<'a, C, H, P> LiveToolTransitionSeam<'a, C, H, P> {
     fn db(error: sqlx::Error) -> CreationError {
@@ -1636,12 +1931,16 @@ where
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
     async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
+        use pidash_db::entity::issues as issue_entity;
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = issue_entity::Entity::find_by_id(issue_id)
+            .select_only()
+            .column(issue_entity::Column::StateId)
+            .into_tuple::<Option<Uuid>>()
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        Ok(row.and_then(|(_, state_id)| state_id))
+            .map_err(|error| Self::db(pidash_db::orm_tx::into_sqlx(error)))?;
+        Ok(row.flatten())
     }
 
     async fn queued_follow_up(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -1652,14 +1951,18 @@ where
         &mut self,
         issue_id: Uuid,
     ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        let row: Option<PgRow> = sqlx::query(&lock_ticker_by_issue_sql())
-            .bind(issue_id)
-            .fetch_optional(self.pool)
+        use pidash_db::entity::issue_agent_ticker as tick_entity;
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = tick_entity::Entity::find()
+            .filter(tick_entity::Column::IssueId.eq(issue_id))
+            .filter(tick_entity::Column::DeletedAt.is_null())
+            .order_by_asc(tick_entity::Column::Id)
+            .limit(1)
+            .lock_exclusive()
+            .one(&db)
             .await
-            .map_err(Self::db)?;
-        row.map(|row| map_ticker(&row))
-            .transpose()
-            .map_err(Self::db)
+            .map_err(|error| Self::db(pidash_db::orm_tx::into_sqlx(error)))?;
+        Ok(row.map(IssueAgentTicker::from))
     }
 
     async fn save_ticker(
@@ -1687,11 +1990,10 @@ where
         &mut self,
         project_id: Uuid,
     ) -> Result<ProjectClockPolicy, CreationError> {
-        let row: Option<ClockPolicyRow> = sqlx::query_as(CLOCK_POLICY_SQL)
-            .bind(project_id)
-            .fetch_optional(self.pool)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let row = pidash_services::orchestration::entries::clock_policy(&db, project_id)
             .await
-            .map_err(Self::db)?;
+            .map_err(|error| Self::db(pidash_db::orm_tx::into_sqlx(error)))?;
         let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
         else {
             return Err(CreationError::MissingRow(format!(
@@ -1699,11 +2001,11 @@ where
             )));
         };
         Ok(ProjectClockPolicy {
-            agent_ticking_enabled: ticking_enabled,
-            agent_default_max_ticks: max_ticks,
-            agent_default_interval_seconds: interval.map(i64::from),
-            agent_review_default_interval_seconds: interval_review.map(i64::from),
-            agent_test_default_interval_seconds: interval_test.map(i64::from),
+            agent_ticking_enabled: Some(ticking_enabled),
+            agent_default_max_ticks: Some(max_ticks),
+            agent_default_interval_seconds: Some(i64::from(interval)),
+            agent_review_default_interval_seconds: Some(i64::from(interval_review)),
+            agent_test_default_interval_seconds: Some(i64::from(interval_test)),
         })
     }
 
@@ -2019,31 +2321,52 @@ async fn op_transition_current_issue<'a>(
             }),
         );
     };
-    let target: Option<(Uuid, String)> =
-        match sqlx::query_as::<_, (Uuid, String)>(plan::TRANSITION_STATE_GET_SQL)
-            .bind(target_id)
-            .bind(scope.project_id)
-            .fetch_optional(&mut **tx.inner())
-            .await
-        {
-            Ok(row) => row,
-            Err(error) => return (tx, Err(error.into())),
-        };
-    let Some((target_id, target_name)) = target else {
+    use pidash_db::entity::{issues as issue_entity, states as st_entity};
+    let target = st_entity::Entity::find()
+        .filter(st_entity::Column::Id.eq(target_id))
+        .filter(st_entity::Column::ProjectId.eq(scope.project_id))
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
+        .select_only()
+        .column(st_entity::Column::Id)
+        .column(st_entity::Column::Name)
+        .into_model::<IssueStateView>()
+        .one(&tx_conn(&mut tx))
+        .await
+        .map_err(orm_error);
+    let target = match target {
+        Ok(row) => row,
+        Err(error) => return (tx, Err(error)),
+    };
+    let Some(target) = target else {
         return (tx, Err(ToolExecError::Missing { model: "State" }));
     };
-    let locked: Option<(Uuid, Option<Uuid>)> =
-        match sqlx::query_as::<_, (Uuid, Option<Uuid>)>(plan::TRANSITION_ISSUE_LOCK_SQL)
-            .bind(scope.work_item_id)
-            .fetch_optional(&mut **tx.inner())
-            .await
-        {
-            Ok(row) => row,
-            Err(error) => return (tx, Err(error.into())),
-        };
-    let Some((issue_id, from_state_id)) = locked else {
+    let target_id = target.id;
+    let target_name = target.name;
+    // `FOR UPDATE OF issues`: SeaORM's exclusive lock with `of` omitted
+    // takes the joined state row too, which the SQL forbids; here the
+    // lock is on the bare issue row (no join), equal to
+    // `FOR UPDATE OF issues` on the issues row.
+    let locked = issue_entity::Entity::find()
+        .filter(issue_entity::Column::Id.eq(scope.work_item_id))
+        .filter(issue_entity::Column::DeletedAt.is_null())
+        .lock_exclusive()
+        .select_only()
+        .column(issue_entity::Column::Id)
+        .column(issue_entity::Column::StateId)
+        .into_model::<IssueStateLockRow>()
+        .one(&tx_conn(&mut tx))
+        .await
+        .map_err(orm_error);
+    let locked = match locked {
+        Ok(row) => row,
+        Err(error) => return (tx, Err(error)),
+    };
+    let Some(locked) = locked else {
         return (tx, Err(ToolExecError::Missing { model: "Issue" }));
     };
+    let issue_id = locked.id;
+    let from_state_id = locked.state_id;
     if plan::transition_same_state(from_state_id, target_id) {
         let result = plan::transition_result(false, &target_name, &target_id.to_string());
         let value = serde_json::to_value(result)
@@ -2203,41 +2526,68 @@ async fn drive_transition<'a>(
 // Relations (`tools.py:373-448` over `orchestration/relations.py`)
 // ---------------------------------------------------------------------------
 
-/// Render `:named` parameters to `$N`: single pass, `:` + ident-char
-/// tokens only, so `:id` never corrupts `:issue_id`.
-fn render_named_params(sql: &str, params: &[(&str, usize)]) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut chars = sql.chars().peekable();
-    while let Some(char) = chars.next() {
-        if char != ':' {
-            out.push(char);
-            continue;
-        }
-        let mut name = String::new();
-        while let Some(next) = chars.peek() {
-            if next.is_ascii_alphanumeric() || *next == '_' {
-                name.push(*next);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-        match params.iter().find(|(key, _)| *key == name) {
-            Some((_, n)) => out.push_str(&format!("${n}")),
-            None => {
-                out.push(':');
-                out.push_str(&name);
-            }
-        }
-    }
-    out
+/// The member-issues pool as a SeaORM subquery: the `issues` ids of
+/// the user's active project memberships on the slug-named workspace,
+/// under `IssueManager` liveness (including Django's
+/// `exclude(state__group='triage')` NULL-safe form, which keeps
+/// stateless issues). Select-statement copy of the old
+/// `MEMBER_PROJECT_ISSUES_SQL` (binds: user id, workspace slug).
+fn member_pool_stmt(creator_id: Uuid, workspace_slug: &str) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{
+        issues as i_entity, project_members as pm_entity, projects as proj_entity,
+        states as st_entity, workspaces as ws_entity,
+    };
+    sea_orm::sea_query::Query::select()
+        .expr_as(Expr::col(i_entity::Column::Id), "id")
+        .from(i_entity::Entity)
+        .join(
+            JoinType::LeftJoin,
+            st_entity::Entity,
+            Expr::col((st_entity::Entity, st_entity::Column::Id))
+                .equals((i_entity::Entity, i_entity::Column::StateId)),
+        )
+        .join(
+            JoinType::InnerJoin,
+            proj_entity::Entity,
+            Expr::col((proj_entity::Entity, proj_entity::Column::Id))
+                .equals((i_entity::Entity, i_entity::Column::ProjectId)),
+        )
+        .join(
+            JoinType::InnerJoin,
+            pm_entity::Entity,
+            Expr::col((pm_entity::Entity, pm_entity::Column::ProjectId))
+                .equals((proj_entity::Entity, proj_entity::Column::Id)),
+        )
+        .join(
+            JoinType::InnerJoin,
+            ws_entity::Entity,
+            Expr::col((ws_entity::Entity, ws_entity::Column::Id))
+                .equals((i_entity::Entity, i_entity::Column::WorkspaceId)),
+        )
+        .and_where(Expr::col((i_entity::Entity, i_entity::Column::DeletedAt)).is_null())
+        .and_where(
+            Expr::col((st_entity::Entity, st_entity::Column::Group))
+                .is_null()
+                .or(Expr::col((st_entity::Entity, st_entity::Column::Group)).ne("triage")),
+        )
+        .and_where(Expr::col((i_entity::Entity, i_entity::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((proj_entity::Entity, proj_entity::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((i_entity::Entity, i_entity::Column::IsDraft)).eq(false))
+        .and_where(Expr::col((pm_entity::Entity, pm_entity::Column::IsActive)).eq(true))
+        .and_where(Expr::col((pm_entity::Entity, pm_entity::Column::MemberId)).eq(creator_id))
+        .and_where(Expr::col((ws_entity::Entity, ws_entity::Column::Slug)).eq(workspace_slug))
+        .distinct()
+        .to_owned()
 }
 
-/// The member-issues pool as an `IN` subquery over
-/// [`MEMBER_PROJECT_ISSUES_SQL`] (binds `$1` user id, `$2` workspace
-/// slug — the const's own numbering, preserved textually).
-fn member_pool_subquery() -> String {
-    format!("SELECT pool.id FROM ({MEMBER_PROJECT_ISSUES_SQL}) AS pool")
+/// One `resolve_by_id`/`_by_identifier` output row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct ResolvedIssueRow {
+    id: Uuid,
+    workspace_id: Uuid,
+    project_id: Uuid,
+    identifier: String,
+    sequence_id: i32,
 }
 
 /// `resolve_refs` (`relations.py:138-163`) against the member pool:
@@ -2274,29 +2624,71 @@ async fn resolve_refs_tx(
     Ok((found, unresolved))
 }
 
-/// The UUID half of `resolve_refs`: `$1`/`$2` pool, `$3` project when
-/// narrowed, then the canonical id.
+/// Map a resolve row onto [`rel::ResolvedIssue`].
+fn resolved_issue_from_row(row: ResolvedIssueRow) -> rel::ResolvedIssue {
+    rel::ResolvedIssue {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        project_id: row.project_id,
+        project_identifier: row.identifier,
+        sequence_id: row.sequence_id,
+    }
+}
+
+/// The resolve read over the member pool: the `ResolvedIssue` columns,
+/// newest-first, one row (Django's `.first()` under `-created_at`).
+async fn resolve_tx<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    scope: &ToolScope,
+    own_project: bool,
+    id: Option<Uuid>,
+    project_code: Option<&str>,
+    sequence_id: Option<i32>,
+) -> Result<Option<rel::ResolvedIssue>, ToolExecError> {
+    use pidash_db::entity::{issues as i_entity, projects as proj_entity};
+    let pool = member_pool_stmt(scope.creator_id, workspace_slug_str(scope));
+    let mut query = i_entity::Entity::find()
+        .join(JoinType::InnerJoin, i_entity::Relation::Projects.def())
+        .filter(i_entity::Column::Id.in_subquery(pool))
+        .order_by_desc(i_entity::Column::CreatedAt);
+    if own_project {
+        query = query.filter(i_entity::Column::ProjectId.eq(scope.project_id));
+    }
+    if let Some(id) = id {
+        query = query.filter(i_entity::Column::Id.eq(id));
+    }
+    if let (Some(code), Some(sequence)) = (project_code, sequence_id) {
+        query = query
+            .filter(
+                Expr::expr(sea_orm::sea_query::Func::upper(Expr::col(
+                    proj_entity::Column::Identifier,
+                )))
+                .eq(sea_orm::sea_query::Func::upper(Expr::val(code.to_owned()))),
+            )
+            .filter(i_entity::Column::SequenceId.eq(sequence));
+    }
+    let row = query
+        .limit(1)
+        .into_model::<ResolvedIssueRow>()
+        .one(conn)
+        .await
+        .map_err(orm_error)?;
+    Ok(row.map(resolved_issue_from_row))
+}
+
+fn workspace_slug_str(scope: &ToolScope) -> &str {
+    scope.workspace_slug.as_str()
+}
+
+/// The UUID half of `resolve_refs`: pool, `$3` project when narrowed,
+/// then the canonical id.
 async fn resolve_by_id_tx(
     tx: &mut Transaction<'_>,
     scope: &ToolScope,
     own_project: bool,
     id: Uuid,
 ) -> Result<Option<rel::ResolvedIssue>, ToolExecError> {
-    let ref_bind = if own_project { 4 } else { 3 };
-    let predicate = render_named_params(
-        &rel::resolve_id_predicate("issues"),
-        &[("ref_id", ref_bind)],
-    );
-    let sql = resolve_sql(own_project, &predicate);
-    let mut query = sqlx::query(&sql)
-        .bind(scope.creator_id)
-        .bind(scope.workspace_slug.as_str());
-    if own_project {
-        query = query.bind(scope.project_id);
-    }
-    let row: Option<sqlx::postgres::PgRow> =
-        query.bind(id).fetch_optional(&mut **tx.inner()).await?;
-    row.map(resolved_issue_from_row).transpose()
+    resolve_tx(&tx_conn(tx), scope, own_project, Some(id), None, None).await
 }
 
 /// The identifier half of `resolve_refs`: pool, optional narrowing,
@@ -2308,56 +2700,15 @@ async fn resolve_by_identifier_tx(
     project_code: &str,
     sequence_id: i64,
 ) -> Result<Option<rel::ResolvedIssue>, ToolExecError> {
-    let (code_bind, seq_bind) = if own_project { (4, 5) } else { (3, 4) };
-    let predicate = render_named_params(
-        &rel::resolve_identifier_predicate("issues", "projects"),
-        &[("project_code", code_bind), ("sequence_id", seq_bind)],
-    );
-    let sql = resolve_sql(own_project, &predicate);
-    let mut query = sqlx::query(&sql)
-        .bind(scope.creator_id)
-        .bind(scope.workspace_slug.as_str());
-    if own_project {
-        query = query.bind(scope.project_id);
-    }
-    let row: Option<sqlx::postgres::PgRow> = query
-        .bind(project_code)
-        .bind(sequence_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
-    row.map(resolved_issue_from_row).transpose()
-}
-
-/// The resolve statement: the `ResolvedIssue` columns over the member
-/// pool plus the ref predicate, newest-first with `LIMIT 1` (Django's
-/// `.first()` under `-created_at` ordering).
-fn resolve_sql(own_project: bool, predicate: &str) -> String {
-    let pool = member_pool_subquery();
-    let narrow = if own_project {
-        format!("AND {}", plan::OWN_PROJECT_ISSUES_PREDICATE)
-    } else {
-        String::new()
-    };
-    format!(
-        "SELECT issues.id, issues.workspace_id, issues.project_id, \
-         projects.identifier, issues.sequence_id FROM issues \
-         INNER JOIN projects ON projects.id = issues.project_id \
-         WHERE issues.id IN ({pool}) {narrow} AND ({predicate}) \
-         ORDER BY issues.created_at DESC LIMIT 1"
+    resolve_tx(
+        &tx_conn(tx),
+        scope,
+        own_project,
+        None,
+        Some(project_code),
+        Some(i32::try_from(sequence_id).unwrap_or(i32::MAX)),
     )
-}
-
-/// Map one resolve row onto [`rel::ResolvedIssue`].
-fn resolved_issue_from_row(
-    row: sqlx::postgres::PgRow,
-) -> Result<rel::ResolvedIssue, ToolExecError> {
-    Ok(rel::ResolvedIssue {
-        id: row.try_get("id").map_err(ToolExecError::Db)?,
-        workspace_id: row.try_get("workspace_id").map_err(ToolExecError::Db)?,
-        project_id: row.try_get("project_id").map_err(ToolExecError::Db)?,
-        project_identifier: row.try_get("identifier").map_err(ToolExecError::Db)?,
-        sequence_id: row.try_get("sequence_id").map_err(ToolExecError::Db)?,
-    })
+    .await
 }
 
 /// `_pair_rows` (`relations.py:117-120`) over the audit transaction.
@@ -2366,22 +2717,54 @@ async fn pair_rows_tx(
     a_id: Uuid,
     b_id: Uuid,
 ) -> Result<Vec<rel::PairRow>, ToolExecError> {
-    let sql = render_named_params(&rel::pair_rows_sql(), &[("a_id", 1), ("b_id", 2)]);
-    let rows = sqlx::query(&sql)
-        .bind(a_id)
-        .bind(b_id)
-        .fetch_all(&mut **tx.inner())
-        .await?;
-    rows.iter()
-        .map(|row| {
-            Ok(rel::PairRow {
-                id: row.try_get("id").map_err(ToolExecError::Db)?,
-                issue_id: row.try_get("issue_id").map_err(ToolExecError::Db)?,
-                related_issue_id: row.try_get("related_issue_id").map_err(ToolExecError::Db)?,
-                relation_type: row.try_get("relation_type").map_err(ToolExecError::Db)?,
-            })
+    pair_rows(&tx_conn(tx), a_id, b_id).await
+}
+
+/// `#pair_rows` on any connection: the live rows between the pair, in
+/// either direction, with no self-pair exclusion.
+async fn pair_rows<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    a_id: Uuid,
+    b_id: Uuid,
+) -> Result<Vec<rel::PairRow>, ToolExecError> {
+    use pidash_db::entity::issue_relations as rel_entity;
+    let rows = rel_entity::Entity::find()
+        .filter(
+            sea_orm::sea_query::Condition::any()
+                .add(
+                    sea_orm::sea_query::Condition::all()
+                        .add(rel_entity::Column::IssueId.eq(a_id))
+                        .add(rel_entity::Column::RelatedIssueId.eq(b_id)),
+                )
+                .add(
+                    sea_orm::sea_query::Condition::all()
+                        .add(rel_entity::Column::IssueId.eq(b_id))
+                        .add(rel_entity::Column::RelatedIssueId.eq(a_id)),
+                ),
+        )
+        .filter(rel_entity::Column::DeletedAt.is_null())
+        .into_model::<IssuePairRow>()
+        .all(conn)
+        .await
+        .map_err(orm_error)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| rel::PairRow {
+            id: row.id,
+            issue_id: row.issue_id,
+            related_issue_id: row.related_issue_id,
+            relation_type: row.relation_type,
         })
-        .collect()
+        .collect())
+}
+
+/// One pair/grouped row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct IssuePairRow {
+    id: Uuid,
+    issue_id: Uuid,
+    related_issue_id: Uuid,
+    relation_type: String,
 }
 
 /// `pidash_relate_issues` (`tools.py:416-424` over
@@ -2493,6 +2876,7 @@ async fn relate_insert_tx(
     row: &rel::RelateInsert,
 ) -> Result<(), ToolExecError> {
     let now = Utc::now();
+    // raw-sql: SAVEPOINT is a transaction command, not a select/insert the ORM can build.
     sqlx::query("SAVEPOINT relate_target")
         .execute(&mut **tx.inner())
         .await?;
@@ -2512,6 +2896,7 @@ async fn relate_insert_tx(
         relation_domain::relate_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &value).await;
     match inserted {
         Ok(_) => {
+            // raw-sql: RELEASE is a transaction command, not a statement the ORM can build.
             sqlx::query("RELEASE SAVEPOINT relate_target")
                 .execute(&mut **tx.inner())
                 .await?;
@@ -2521,9 +2906,11 @@ async fn relate_insert_tx(
             // Scope the rollback to the savepoint; cleanup failures
             // cannot mask the original (Python's atomic exit raises
             // the `IntegrityError`, not a teardown error).
+            // raw-sql: ROLLBACK TO is a transaction command, not a statement the ORM can build.
             let _ = sqlx::query("ROLLBACK TO SAVEPOINT relate_target")
                 .execute(&mut **tx.inner())
                 .await;
+            // raw-sql: RELEASE is a transaction command, not a statement the ORM can build.
             let _ = sqlx::query("RELEASE SAVEPOINT relate_target")
                 .execute(&mut **tx.inner())
                 .await;
@@ -2612,26 +2999,32 @@ async fn grouped_tx(
     scope: &ToolScope,
     source: &rel::ResolvedIssue,
 ) -> Result<Value, ToolExecError> {
-    let sql = render_named_params(
-        &rel::grouped_relations_sql(),
-        &[("issue_id", 1), ("workspace_id", 2)],
-    );
-    let rows = sqlx::query(&sql)
-        .bind(source.id)
-        .bind(source.workspace_id)
-        .fetch_all(&mut **tx.inner())
-        .await?;
+    use pidash_db::entity::{issue_relations as rel_entity, issues as i_entity};
+    let rows = rel_entity::Entity::find()
+        .filter(
+            sea_orm::sea_query::Condition::any()
+                .add(rel_entity::Column::IssueId.eq(source.id))
+                .add(rel_entity::Column::RelatedIssueId.eq(source.id)),
+        )
+        .filter(rel_entity::Column::WorkspaceId.eq(source.workspace_id))
+        .filter(
+            Expr::col(rel_entity::Column::IssueId)
+                .ne(Expr::col(rel_entity::Column::RelatedIssueId)),
+        )
+        .filter(rel_entity::Column::DeletedAt.is_null())
+        .into_model::<IssuePairRow>()
+        .all(&tx_conn(&mut *tx))
+        .await
+        .map_err(orm_error)?;
     let pair_rows: Vec<rel::PairRow> = rows
-        .iter()
-        .map(|row| {
-            Ok(rel::PairRow {
-                id: row.try_get("id").map_err(ToolExecError::Db)?,
-                issue_id: row.try_get("issue_id").map_err(ToolExecError::Db)?,
-                related_issue_id: row.try_get("related_issue_id").map_err(ToolExecError::Db)?,
-                relation_type: row.try_get("relation_type").map_err(ToolExecError::Db)?,
-            })
+        .into_iter()
+        .map(|row| rel::PairRow {
+            id: row.id,
+            issue_id: row.issue_id,
+            related_issue_id: row.related_issue_id,
+            relation_type: row.relation_type,
         })
-        .collect::<Result<Vec<_>, ToolExecError>>()?;
+        .collect();
     let mut wanted: Vec<Uuid> = Vec::new();
     for row in &pair_rows {
         let other = if row.issue_id == source.id {
@@ -2645,39 +3038,48 @@ async fn grouped_tx(
     }
     let mut pool: Vec<rel::GroupedIssue> = Vec::new();
     if !wanted.is_empty() {
-        let pool_query = member_pool_subquery();
-        let rows = sqlx::query(&format!(
-            "SELECT issues.id, issues.name, issues.sequence_id, \
-             projects.identifier AS project_identifier, \
-             states.name AS state_name, states.group AS state_group \
-             FROM issues \
-             LEFT OUTER JOIN states ON states.id = issues.state_id \
-             INNER JOIN projects ON projects.id = issues.project_id \
-             WHERE issues.id IN ({pool_query}) \
-             AND issues.id = ANY($3) AND issues.workspace_id = $4"
-        ))
-        .bind(scope.creator_id)
-        .bind(scope.workspace_slug.as_str())
-        .bind(wanted.as_slice())
-        .bind(source.workspace_id)
-        .fetch_all(&mut **tx.inner())
-        .await?;
-        for row in &rows {
+        let pool_query = member_pool_stmt(scope.creator_id, workspace_slug_str(scope));
+        let rows = i_entity::Entity::find()
+            .filter(i_entity::Column::Id.in_subquery(pool_query))
+            .filter(i_entity::Column::Id.is_in(wanted.clone()))
+            .filter(i_entity::Column::WorkspaceId.eq(source.workspace_id))
+            .join(
+                JoinType::LeftJoin,
+                i_entity::Entity::belongs_to(pidash_db::entity::states::Entity)
+                    .from(i_entity::Column::StateId)
+                    .to(pidash_db::entity::states::Column::Id)
+                    .into(),
+            )
+            .join(JoinType::InnerJoin, i_entity::Relation::Projects.def())
+            .into_model::<GroupedIssueRow>()
+            .all(&tx_conn(&mut *tx))
+            .await
+            .map_err(orm_error)?;
+        for row in rows {
             pool.push(rel::GroupedIssue {
-                id: row.try_get("id").map_err(ToolExecError::Db)?,
-                project_identifier: row
-                    .try_get("project_identifier")
-                    .map_err(ToolExecError::Db)?,
-                sequence_id: row.try_get("sequence_id").map_err(ToolExecError::Db)?,
-                name: row.try_get("name").map_err(ToolExecError::Db)?,
-                state_name: row.try_get("state_name").map_err(ToolExecError::Db)?,
-                state_group: row.try_get("state_group").map_err(ToolExecError::Db)?,
+                id: row.id,
+                project_identifier: row.project_identifier,
+                sequence_id: row.sequence_id,
+                name: row.name,
+                state_name: row.state_name,
+                state_group: row.state_group,
             });
         }
     }
     let grouped = rel::grouped_relations(&source.id, &pair_rows, &pool);
     serde_json::to_value(grouped)
         .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
+}
+
+/// One grouped-pool row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct GroupedIssueRow {
+    id: Uuid,
+    project_identifier: String,
+    sequence_id: i32,
+    name: String,
+    state_name: Option<String>,
+    state_group: Option<String>,
 }
 
 /// `pidash_list_issue_relations` (`tools.py:433-448`): the explicit
@@ -2795,37 +3197,74 @@ struct GithubOpCtx {
 /// miss is `GitRepositoryBinding.DoesNotExist`), the verification
 /// verdict, the installation lookup, and the installation client.
 async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx, ToolExecError> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(plan::GITHUB_BINDING_SQL)
-        .bind(scope.project_id)
-        .fetch_optional(&ctx.pool)
-        .await?;
+    use pidash_db::entity::{
+        git_provider_accounts as acc_entity, git_repositories as repo_entity,
+        git_repository_bindings as bind_entity, github_app_installations as inst_entity,
+    };
+    let db = sea_conn(&ctx.pool);
+    let row = bind_entity::Entity::find()
+        .filter(bind_entity::Column::ProjectId.eq(scope.project_id))
+        .filter(bind_entity::Column::DeletedAt.is_null())
+        .join(
+            JoinType::InnerJoin,
+            bind_entity::Entity::belongs_to(repo_entity::Entity)
+                .from(bind_entity::Column::RepositoryId)
+                .to(repo_entity::Column::Id)
+                .into(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            bind_entity::Entity::belongs_to(acc_entity::Entity)
+                .from(bind_entity::Column::ProviderAccountId)
+                .to(acc_entity::Column::Id)
+                .into(),
+        )
+        .limit(1)
+        .into_model::<GithubBindingRow>()
+        .one(&db)
+        .await
+        .map_err(orm_error)?;
     let Some(row) = row else {
         return Err(ToolExecError::Missing {
             model: "GitRepositoryBinding",
         });
     };
-    // `workspace_id` (1, 9), `provider` (4, 10), and `host_url` (5,
-    // 11) collide: all three pairs read positionally.
-    let verified_at: Option<DateTime<Utc>> = row.try_get(14)?;
+    // The binding/account/repo columns carry Django's colliding names
+    // (`workspace_id`, `provider`, `host_url`); here every joined
+    // column decodes under its own alias.
     let verdict = plan::GithubBindingVerdict {
-        binding_workspace_id: row.try_get(1)?,
+        binding_workspace_id: row.binding_workspace_id,
         run_workspace_id: scope.workspace_id,
-        repo_provider: row.try_get(4)?,
-        repo_host_url: row.try_get(5)?,
-        account_workspace_id: row.try_get(9)?,
-        account_provider: row.try_get(10)?,
-        account_host_url: row.try_get(11)?,
-        account_auth_type: row.try_get(12)?,
-        account_status: row.try_get(13)?,
-        account_verified: verified_at.is_some(),
-        account_workspace_integration_id: row.try_get(15)?,
+        repo_provider: row.repo_provider,
+        repo_host_url: row.repo_host_url,
+        account_workspace_id: row.account_workspace_id,
+        account_provider: row.account_provider,
+        account_host_url: row.account_host_url,
+        account_auth_type: row.account_auth_type,
+        account_status: row.account_status,
+        account_verified: row.account_verified_at.is_some(),
+        account_workspace_integration_id: row.account_workspace_integration_id,
     };
-    let integration_id = plan::check_github_binding(&verdict)?;
-    let installation_id: Option<i64> = sqlx::query_scalar(plan::GITHUB_INSTALLATION_SQL)
-        .bind(integration_id)
-        .fetch_optional(&ctx.pool)
-        .await?
-        .flatten();
+    plan::check_github_binding(&verdict)?;
+    let row_workspace_integration_id = row.account_workspace_integration_id;
+    let installation_id = if let Some(integration) = row_workspace_integration_id {
+        let row = inst_entity::Entity::find()
+            .filter(inst_entity::Column::WorkspaceIntegrationId.eq(integration))
+            .filter(inst_entity::Column::SuspendedAt.is_null())
+            .filter(inst_entity::Column::VerifiedAt.is_not_null())
+            .filter(inst_entity::Column::DeletedAt.is_null())
+            .order_by_desc(inst_entity::Column::CreatedAt)
+            .limit(1)
+            .select_only()
+            .column(inst_entity::Column::InstallationId)
+            .into_tuple::<i64>()
+            .one(&db)
+            .await
+            .map_err(orm_error)?;
+        row
+    } else {
+        None
+    };
     let installation_id = plan::check_github_installation(installation_id)?;
     let timeout_secs = ctx.cloud.tool_timeout_secs.max(1) as u64;
     let client =
@@ -2833,10 +3272,36 @@ async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx,
             .await?;
     Ok(GithubOpCtx {
         client,
-        namespace: row.try_get(6)?,
-        name: row.try_get(7)?,
-        default_branch: row.try_get(8)?,
+        namespace: row.repo_namespace,
+        name: row.repo_name,
+        default_branch: Some(row.repo_default_branch),
     })
+}
+
+/// One `LINKED_PR_SQL` row.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct LinkedPrRow {
+    namespace: String,
+    repo_name: String,
+    external_iid: String,
+}
+
+/// One `GITHUB_BINDING_SQL` row with every colliding name aliased.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct GithubBindingRow {
+    binding_workspace_id: Uuid,
+    repo_provider: String,
+    repo_host_url: String,
+    repo_namespace: String,
+    repo_name: String,
+    repo_default_branch: String,
+    account_workspace_id: Uuid,
+    account_provider: String,
+    account_host_url: String,
+    account_auth_type: String,
+    account_status: String,
+    account_verified_at: Option<DateTime<Utc>>,
+    account_workspace_integration_id: Option<Uuid>,
 }
 
 /// `github_get_file` (`tools.py:450-480`). Path/ref pre-validation
@@ -2849,12 +3314,15 @@ async fn op_github_get_file(
     ref_arg: &str,
 ) -> Result<Value, ToolExecError> {
     let repo = github_context(ctx, scope).await?;
-    let base_branch: Option<String> =
-        sqlx::query_scalar("SELECT base_branch FROM projects WHERE id = $1 LIMIT 1")
-            .bind(scope.project_id)
-            .fetch_optional(&ctx.pool)
-            .await?
-            .flatten();
+    use pidash_db::entity::projects as proj_entity;
+    let db = sea_conn(&ctx.pool);
+    let base_branch = proj_entity::Entity::find_by_id(scope.project_id)
+        .select_only()
+        .column(proj_entity::Column::BaseBranch)
+        .into_tuple::<String>()
+        .one(&db)
+        .await
+        .map_err(orm_error)?;
     let git_ref = plan::resolve_file_ref(
         ref_arg,
         repo.default_branch.as_deref().unwrap_or(""),
@@ -2876,22 +3344,29 @@ async fn op_github_get_linked_pull_request(
     aspect: &str,
 ) -> Result<Value, ToolExecError> {
     let repo = github_context(ctx, scope).await?;
-    let link: Option<(String, String, String)> = match scope.work_item_id {
-        Some(issue_id) => {
-            sqlx::query_as::<_, (String, String, String)>(plan::LINKED_PR_SQL)
-                .bind(issue_id)
-                .bind(repo.namespace.as_str())
-                .bind(repo.name.as_str())
-                .fetch_optional(&ctx.pool)
-                .await?
-        }
+    use pidash_db::entity::git_code_review_links as gc_entity;
+    let db = sea_conn(&ctx.pool);
+    let link: Option<LinkedPrRow> = match scope.work_item_id {
+        Some(issue_id) => gc_entity::Entity::find()
+            .filter(gc_entity::Column::IssueId.eq(issue_id))
+            .filter(gc_entity::Column::Provider.eq("github"))
+            .filter(gc_entity::Column::HostUrl.eq("https://github.com"))
+            .filter(gc_entity::Column::Namespace.eq(repo.namespace.as_str()))
+            .filter(gc_entity::Column::RepoName.eq(repo.name.as_str()))
+            .filter(gc_entity::Column::DeletedAt.is_null())
+            .order_by_desc(gc_entity::Column::CreatedAt)
+            .into_model::<LinkedPrRow>()
+            .one(&db)
+            .await
+            .map_err(orm_error)?,
         None => None,
     };
-    let Some((namespace, repo_name, external_iid)) = link else {
+    let Some(link) = link else {
         return Err(
             plan::ToolCallFailure::Failed(plan::MSG_NO_LINKED_PULL_REQUEST.to_owned()).into(),
         );
     };
+    let (namespace, repo_name, external_iid) = (link.namespace, link.repo_name, link.external_iid);
     let call = plan::linked_pr_call(aspect, &namespace, &repo_name, &external_iid)?;
     let client = &repo.client;
     match call.method {
@@ -3598,32 +4073,6 @@ mod tests {
         );
     }
 
-    /// `:named` rendering never lets a short name corrupt a longer one
-    /// (`:id` inside `:issue_id`).
-    #[test]
-    fn render_named_params_overlapping_names() {
-        let sql = "SELECT :id, :now, :actor_id, :issue_id, :related_issue_id, :stored_type";
-        assert_eq!(
-            render_named_params(
-                sql,
-                &[
-                    ("related_issue_id", 7),
-                    ("stored_type", 8),
-                    ("actor_id", 3),
-                    ("issue_id", 6),
-                    ("now", 2),
-                    ("id", 1),
-                ],
-            ),
-            "SELECT $1, $2, $3, $6, $7, $8"
-        );
-        // Unknown names pass through untouched.
-        assert_eq!(
-            render_named_params("SELECT :known, :mystery", &[("known", 1)]),
-            "SELECT $1, :mystery"
-        );
-    }
-
     /// The related-objects sweep shape: positionals
     /// `("db", model, pk)`, kwargs `{"using": null}`.
     #[test]
@@ -3787,63 +4236,150 @@ mod live_tests {
         scope: ToolScope,
     }
 
-    /// Seed user → workspace → project → issue. Column lists mirror
-    /// the contract-suite factories (`_harness/seed.py`); every
-    /// unique column carries a random tag so reruns never collide.
+    /// Seed user → workspace → project → issue through the entities.
+    /// Every unique column carries a random tag so reruns never
+    /// collide.
     async fn seed_world(pool: &sqlx::PgPool) -> Seed {
+        use pidash_db::entity::{
+            issues as i_entity, projects as proj_entity, states as st_entity, users as u_entity,
+            workspaces as ws_entity,
+        };
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = pidash_db::pool::sea_orm_connection(pool);
         let tag: String = Uuid::new_v4().simple().to_string()[..10].to_owned();
         let user_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO users (id, password, email, username, display_name, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, is_password_reset_required, token, last_active, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, user_timezone, is_email_valid) VALUES ($1, 'pbkdf2_sha256$600000$salt$hash', $2, $3, '', '', '', '', now(), now(), now(), '', '', false, false, false, true, false, false, false, false, '', now(), '', '', 'email', '', false, 'UTC', true)",
-        )
-        .bind(user_id)
-        .bind(format!("rs1581-{tag}@example.com"))
-        .bind(format!("rs1581_{tag}"))
-        .execute(pool)
+        let now = chrono::Utc::now();
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        u_entity::ActiveModel {
+            id: Set(user_id),
+            password: Set("pbkdf2_sha256$600000$salt$hash".to_owned()),
+            email: Set(Some(format!("rs1581-{tag}@example.com"))),
+            username: Set(format!("rs1581_{tag}")),
+            display_name: Set(String::new()),
+            first_name: Set(String::new()),
+            last_name: Set(String::new()),
+            avatar: Set(String::new()),
+            date_joined: Set(now_tz),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            last_location: Set(String::new()),
+            created_location: Set(String::new()),
+            is_superuser: Set(false),
+            is_managed: Set(false),
+            is_password_expired: Set(false),
+            is_active: Set(true),
+            is_staff: Set(false),
+            is_email_verified: Set(false),
+            is_password_autoset: Set(false),
+            is_password_reset_required: Set(false),
+            token: Set(String::new()),
+            last_active: Set(None),
+            last_login_ip: Set(String::new()),
+            last_logout_ip: Set(String::new()),
+            last_login_medium: Set("email".to_owned()),
+            last_login_uagent: Set(String::new()),
+            is_bot: Set(false),
+            user_timezone: Set("UTC".to_owned()),
+            is_email_valid: Set(true),
+            ..Default::default()
+        }
+        .insert(&db)
         .await
         .expect("seed user");
         let workspace_id = Uuid::new_v4();
         let slug = format!("rs1581-{tag}");
-        sqlx::query(
-            "INSERT INTO workspaces (id, name, owner_id, slug, timezone, background_color, created_at, updated_at) VALUES ($1, $2, $3, $4, 'UTC', '#ffffff', now(), now())",
-        )
-        .bind(workspace_id)
-        .bind(format!("RS1581 {tag}"))
-        .bind(user_id)
-        .bind(&slug)
-        .execute(pool)
+        ws_entity::ActiveModel {
+            id: Set(workspace_id),
+            name: Set(format!("RS1581 {tag}")),
+            owner_id: Set(user_id),
+            slug: Set(slug.clone()),
+            timezone: Set("UTC".to_owned()),
+            background_color: Set("#ffffff".to_owned()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
         .await
         .expect("seed workspace");
         let project_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO projects (id, name, description, network, workspace_id, identifier, module_view, cycle_view, issue_views_view, page_view, intake_view, is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, members_can_edit_states, archive_in, close_in, logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, agent_review_default_interval_seconds, agent_test_default_interval_seconds, agent_ticking_enabled, default_agent_executor, created_at, updated_at) VALUES ($1, $2, '', 2, $3, $4, false, false, false, true, false, false, false, false, false, true, 0, 0, '{}', 'UTC', '', 'main', 10800, 10, 10800, 10800, true, 'local_runner', now(), now())",
-        )
-        .bind(project_id)
-        .bind(format!("RS1581 {tag}"))
-        .bind(workspace_id)
-        .bind(format!("RS{}", tag.to_uppercase()))
-        .execute(pool)
+        proj_entity::ActiveModel {
+            id: Set(project_id),
+            name: Set(format!("RS1581 {tag}")),
+            description: Set(String::new()),
+            network: Set(2),
+            workspace_id: Set(workspace_id),
+            identifier: Set(format!("RS{}", tag.to_uppercase())),
+            module_view: Set(false),
+            cycle_view: Set(false),
+            issue_views_view: Set(false),
+            page_view: Set(true),
+            intake_view: Set(false),
+            is_time_tracking_enabled: Set(false),
+            is_issue_type_enabled: Set(false),
+            is_default: Set(false),
+            guest_view_all_features: Set(false),
+            members_can_edit_states: Set(true),
+            archive_in: Set(0),
+            close_in: Set(0),
+            logo_props: Set(serde_json::json!({})),
+            timezone: Set("UTC".to_owned()),
+            repo_url: Set(String::new()),
+            base_branch: Set("main".to_owned()),
+            agent_default_interval_seconds: Set(10800),
+            agent_default_max_ticks: Set(10),
+            agent_review_default_interval_seconds: Set(10800),
+            agent_test_default_interval_seconds: Set(10800),
+            agent_ticking_enabled: Set(true),
+            default_agent_executor: Set("local_runner".to_owned()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
         .await
         .expect("seed project");
         let state_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO states (id, workspace_id, project_id, name, description, color, slug, sequence, \"group\", is_triage, \"default\", created_at, updated_at) VALUES ($1, $2, $3, 'Backlog', '', '#ff0000', '', 65535, 'backlog', false, false, now(), now())",
-        )
-        .bind(state_id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .execute(pool)
+        st_entity::ActiveModel {
+            id: Set(state_id),
+            workspace_id: Set(workspace_id),
+            project_id: Set(project_id),
+            name: Set("Backlog".to_owned()),
+            description: Set(String::new()),
+            color: Set("#ff0000".to_owned()),
+            slug: Set(String::new()),
+            sequence: Set(65535.0),
+            group: Set("backlog".to_owned()),
+            is_triage: Set(false),
+            default: Set(false),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
         .await
         .expect("seed state");
         let issue_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO issues (id, workspace_id, project_id, state_id, name, description_json, description_html, priority, complexity_score, sequence_id, sort_order, is_draft, git_work_branch, workpad, created_at, updated_at) VALUES ($1, $2, $3, $4, 'Tool issue', '{}', '<p></p>', 'none', 0, 1, 65535, false, '', '', now(), now())",
-        )
-        .bind(issue_id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(state_id)
-        .execute(pool)
+        i_entity::ActiveModel {
+            id: Set(issue_id),
+            workspace_id: Set(workspace_id),
+            project_id: Set(project_id),
+            state_id: Set(Some(state_id)),
+            name: Set("Tool issue".to_owned()),
+            description_json: Set(serde_json::json!({})),
+            description_html: Set("<p></p>".to_owned()),
+            priority: Set("none".to_owned()),
+            complexity_score: Set(0),
+            sequence_id: Set(1),
+            sort_order: Set(65535.0),
+            is_draft: Set(false),
+            git_work_branch: Set(String::new()),
+            workpad: Set(String::new()),
+            created_at: Set(now_tz),
+            updated_at: Set(now_tz),
+            ..Default::default()
+        }
+        .insert(&db)
         .await
         .expect("seed issue");
         Seed {
@@ -3860,41 +4396,72 @@ mod live_tests {
     }
 
     async fn cleanup(pool: &sqlx::PgPool, scope: &ToolScope, comment_id: Uuid) {
-        let description_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT description_id FROM issue_comments WHERE id = $1")
-                .bind(comment_id)
-                .fetch_optional(pool)
-                .await
-                .expect("read back description link")
-                .flatten();
-        sqlx::query("DELETE FROM issue_comments WHERE id = $1")
-            .bind(comment_id)
-            .execute(pool)
+        use pidash_db::entity::{
+            descriptions as d_entity, issue_comments as ic_entity, issue_sequences as iseq_entity,
+            issues as i_entity, projects as proj_entity, states as st_entity,
+            user_notification_preferences as unp_entity, users as u_entity,
+            workspaces as ws_entity,
+        };
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let comment = ic_entity::Entity::find_by_id(comment_id)
+            .one(&db)
+            .await
+            .expect("read back comment");
+        let description_id = comment.and_then(|c| c.description_id);
+        ic_entity::Entity::delete_by_id(comment_id)
+            .exec(&db)
             .await
             .expect("teardown comment");
         if let Some(description_id) = description_id {
-            sqlx::query("DELETE FROM descriptions WHERE id = $1")
-                .bind(description_id)
-                .execute(pool)
+            d_entity::Entity::delete_by_id(description_id)
+                .exec(&db)
                 .await
                 .expect("teardown description");
         }
-        for (sql, id) in [
-            (
-                "DELETE FROM issues WHERE id = $1",
-                scope.work_item_id.expect("bound issue"),
-            ),
-            ("DELETE FROM states WHERE project_id = $1", scope.project_id),
-            ("DELETE FROM projects WHERE id = $1", scope.project_id),
-            ("DELETE FROM workspaces WHERE id = $1", scope.workspace_id),
-            ("DELETE FROM users WHERE id = $1", scope.creator_id),
-        ] {
-            sqlx::query(sql)
-                .bind(id)
-                .execute(pool)
-                .await
-                .expect("teardown delete");
-        }
+        // The `issues` entity's `after_save` hook writes the
+        // `issue_sequences` row on insert (Django's `IssueSequence`
+        // create); raw-SQL seeds never fired it, so the row is new
+        // with the SeaORM seed and must go before the issue (FK).
+        iseq_entity::Entity::delete_many()
+            .filter(iseq_entity::Column::IssueId.eq(scope.work_item_id.expect("bound issue")))
+            .exec(&db)
+            .await
+            .expect("teardown issue sequence");
+        i_entity::Entity::delete_many()
+            .filter(i_entity::Column::Id.eq(scope.work_item_id.expect("bound issue")))
+            .exec(&db)
+            .await
+            .expect("teardown issue");
+        st_entity::Entity::delete_many()
+            .filter(st_entity::Column::ProjectId.eq(scope.project_id))
+            .exec(&db)
+            .await
+            .expect("teardown states");
+        proj_entity::Entity::delete_many()
+            .filter(proj_entity::Column::Id.eq(scope.project_id))
+            .exec(&db)
+            .await
+            .expect("teardown project");
+        ws_entity::Entity::delete_many()
+            .filter(ws_entity::Column::Id.eq(scope.workspace_id))
+            .exec(&db)
+            .await
+            .expect("teardown workspace");
+        // The `users` entity's `after_save` hook writes the
+        // `user_notification_preferences` row on non-bot insert
+        // (Django `create_user_notification`); same FK story as the
+        // sequence row above.
+        unp_entity::Entity::delete_many()
+            .filter(unp_entity::Column::UserId.eq(scope.creator_id))
+            .exec(&db)
+            .await
+            .expect("teardown notification prefs");
+        u_entity::Entity::delete_many()
+            .filter(u_entity::Column::Id.eq(scope.creator_id))
+            .exec(&db)
+            .await
+            .expect("teardown user");
     }
 
     /// `pidash_add_current_issue_comment` strips each column with its
@@ -3918,23 +4485,23 @@ mod live_tests {
             .expect("comment_id renders")
             .parse()
             .expect("comment_id parses");
-        let row: (String, String, Option<Uuid>) = sqlx::query_as(
-            "SELECT comment_html, comment_stripped, description_id FROM issue_comments WHERE id = $1",
-        )
-        .bind(comment_id)
-        .fetch_one(&pool)
-        .await
-        .expect("read back the comment");
-        assert_eq!(row.0, "<p>a &amp; b</p>");
-        assert_eq!(row.1, "a & b");
-        let description_id = row.2.expect("comment links a description");
-        let desc: (Option<String>,) =
-            sqlx::query_as("SELECT description_stripped FROM descriptions WHERE id = $1")
-                .bind(description_id)
-                .fetch_one(&pool)
-                .await
-                .expect("read back the description");
-        assert_eq!(desc.0.as_deref(), Some("a &amp; b"));
+        use pidash_db::entity::{descriptions as d_entity2, issue_comments as ic_entity2};
+        use sea_orm::EntityTrait;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let comment = ic_entity2::Entity::find_by_id(comment_id)
+            .one(&db)
+            .await
+            .expect("read back the comment")
+            .expect("comment row");
+        assert_eq!(comment.comment_html, "<p>a &amp; b</p>");
+        assert_eq!(comment.comment_stripped, "a & b");
+        let description_id = comment.description_id.expect("comment links a description");
+        let desc = d_entity2::Entity::find_by_id(description_id)
+            .one(&db)
+            .await
+            .expect("read back the description")
+            .expect("description row");
+        assert_eq!(desc.description_stripped.as_deref(), Some("a &amp; b"));
         cleanup(&pool, &seed.scope, comment_id).await;
     }
 }
