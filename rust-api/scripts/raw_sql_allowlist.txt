@@ -186,8 +186,6 @@ crates/jobs/src/tasks_cleanup/expiry.rs 2
 crates/jobs/src/tasks_cleanup/versions.rs 17
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
-crates/jobs/src/tasks_ticker/fire_binding.rs 9
-crates/jobs/src/tasks_ticker/fire_tick.rs 7
 crates/jobs/src/tasks_webhooks/activity_dispatch.rs 15
 crates/jobs/src/tasks_webhooks/automation.rs 4
 crates/jobs/src/tasks_webhooks/link_crawl.rs 2
