@@ -47,7 +47,7 @@ def _maybe_decrypt(token: str | None) -> str | None:
 
 def _find_token(deps: AssistantDeps, provider: str, namespace: str, repo: str) -> str | None:
     """Best-effort access token from a binding on a project the user can access."""
-    from pi_dash.db.models import GitRepositoryBinding, GithubRepositorySync
+    from pi_dash.db.models import GitRepositoryBinding
 
     binding = (
         GitRepositoryBinding.objects.filter(
@@ -60,26 +60,10 @@ def _find_token(deps: AssistantDeps, provider: str, namespace: str, repo: str) -
         .order_by("-created_at")
         .first()
     )
-    if binding is not None:
-        config = binding.provider_account.credential_config or {}
-        return _maybe_decrypt(config.get("token"))
-
-    if provider != "github":
+    if binding is None:
         return None
-    sync = (
-        GithubRepositorySync.objects.filter(
-            project__in=_scoping.member_projects(deps),
-            repository__owner__iexact=namespace,
-            repository__name__iexact=repo,
-        )
-        .order_by("-created_at")
-        .first()
-    )
-    if sync is None:
-        return None
-    creds = sync.credentials or {}
-    token = creds.get("access_token") or creds.get("token")
-    return _maybe_decrypt(token)
+    config = binding.provider_account.credential_config or {}
+    return _maybe_decrypt(config.get("token"))
 
 
 @assistant.tool

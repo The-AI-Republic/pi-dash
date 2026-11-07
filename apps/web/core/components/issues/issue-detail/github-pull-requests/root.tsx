@@ -4,6 +4,12 @@
  * See the LICENSE file for details.
  */
 
+/**
+ * Issue PR list (directory name is a legacy GitHub-compat label,
+ * PDASHOSS01-359). Implementation already uses the generic
+ * ``GitIntegrationService`` code-review endpoints; responses are generic.
+ */
+
 import { useState } from "react";
 import { observer } from "mobx-react";
 import { ExternalLink, GitMerge, GitPullRequest, GitPullRequestDraft } from "lucide-react";
