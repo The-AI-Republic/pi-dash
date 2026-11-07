@@ -48,8 +48,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
     QueryTrait, RelationTrait, Set,
 };
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::entity::comment_hooks::description_stripped_for;
@@ -74,7 +73,7 @@ use pidash_services::domain::identity::{
     AGENT_USER_FIRST_NAME, AGENT_USER_LAST_NAME,
 };
 use pidash_services::domain::issues as domain_issues;
-use pidash_services::orchestration::clock::{ClockWrite, LOCK_TICKER_PARAMS};
+use pidash_services::orchestration::clock::ClockWrite;
 use pidash_services::orchestration::dispatch::{
     BounceOutcome, CandidateUser, ContinuationDispatchOutcome, DispatchError, DispatchSeam,
     HumanRunAiOutcome, LogLine, NewIssueComment, NewWaitActivity, PauseOutcome, PodRunnerMatcher,
@@ -113,61 +112,6 @@ pub struct DispatchOutcome<T> {
     pub dispatched: Vec<Uuid>,
     pub dispatch_decisions: Vec<(Uuid, DispatchDecision)>,
     pub terminal_effects: Vec<Uuid>,
-}
-
-// ---------------------------------------------------------------------------
-// Row mappers
-// ---------------------------------------------------------------------------
-
-pub(crate) fn map_ticker(row: &PgRow) -> Result<IssueAgentTicker, sqlx::Error> {
-    Ok(IssueAgentTicker {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        issue_id: row.try_get("issue_id")?,
-        used: row.try_get("used")?,
-        granted: row.try_get("granted")?,
-        waited: row.try_get("waited")?,
-        user_disabled: row.try_get("user_disabled")?,
-        next_run_at: row.try_get("next_run_at")?,
-        last_tick_at: row.try_get("last_tick_at")?,
-        enabled: row.try_get("enabled")?,
-        disarm_reason: row.try_get("disarm_reason")?,
-        pending_entry: row.try_get("pending_entry")?,
-        pending_entry_free: row.try_get("pending_entry_free")?,
-        pending_entry_actor_id: row.try_get("pending_entry_actor_id")?,
-        pending_entry_trigger: row.try_get("pending_entry_trigger")?,
-        resume_parent_run_id: row.try_get("resume_parent_run_id")?,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Clock SQL translation (`:name` → `$n`)
-// ---------------------------------------------------------------------------
-
-/// Translate an L5 clock statement's `:name` placeholders to positional
-/// `$n` in `params` order (the documented handler contract in
-/// `services::orchestration::clock`; never a fork — the text still comes
-/// from the L5 consts). Longer names first so `:id` never corrupts
-/// `:issue_id`.
-fn translate_clock_sql(sql: &str, params: &[&str]) -> String {
-    let mut ordered: Vec<(usize, &&str)> = params.iter().enumerate().collect();
-    ordered.sort_by_key(|item| std::cmp::Reverse(item.1.len()));
-    let mut out = sql.to_owned();
-    for (index, name) in ordered {
-        out = out.replace(&format!(":{name}"), &format!("${}", index + 1));
-    }
-    out
-}
-
-pub(crate) fn lock_ticker_by_issue_sql() -> String {
-    translate_clock_sql(
-        &pidash_services::orchestration::clock::lock_ticker_sql(),
-        LOCK_TICKER_PARAMS,
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,17 +1270,6 @@ mod tests {
     use std::sync::Mutex;
 
     // -- offline -----------------------------------------------------------
-
-    #[test]
-    fn clock_sql_translation() {
-        // `:name` → `$n` in PARAMS order, longest names first. The
-        // save/create goldens moved to `domain::clock` with the
-        // shared write; the seams keep only the lock query.
-        assert_eq!(
-            lock_ticker_by_issue_sql(),
-            pidash_services::orchestration::clock::lock_ticker_sql().replace(":issue_id", "$1")
-        );
-    }
 
     #[test]
     fn shim_ticking_vectors() {
