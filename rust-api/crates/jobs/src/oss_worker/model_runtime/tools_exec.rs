@@ -1389,6 +1389,17 @@ struct IssueStateLockRow {
     state_id: Option<Uuid>,
 }
 
+/// The create-path deferred project lock (`CREATE_PROJECT_LOCK_SQL`):
+/// the live project row under `FOR UPDATE` (a soft-deleted project
+/// errors as `Project.DoesNotExist`, matching Django's
+/// `SoftDeletionManager`).
+fn project_lock_query(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::projects::Entity> {
+    use pidash_db::entity::projects as proj_entity;
+    proj_entity::Entity::find_by_id(project_id)
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .lock_exclusive()
+}
+
 /// `pidash_create_project_issue` (`tools.py:345-371`) through
 /// `Issue.save` (`db/models/issue.py:267-341`): lock the scheduler
 /// project, resolve the default/backlog state (plus the save-time
@@ -1594,8 +1605,7 @@ async fn op_create_project_issue(
     // still held when the audit commits. A project deleted mid-flight
     // errors here with the issue standing (fault-path only, like the
     // audit-aftermath note above).
-    let locked = proj_entity::Entity::find_by_id(project_id)
-        .lock_exclusive()
+    let locked = project_lock_query(project_id)
         .select_only()
         .column(proj_entity::Column::Id)
         .into_tuple::<Uuid>()
@@ -4006,6 +4016,22 @@ mod tests {
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
     use pidash_services::orchestration::clock::{on_enter_or_move, ClockIssue, ProjectClockPolicy};
     use pidash_types::orchestration::ticker::TickerEvent;
+
+    /// The create-path project lock pins `CREATE_PROJECT_LOCK_SQL`:
+    /// the live row only (`deleted_at IS NULL`, Django's
+    /// `SoftDeletionManager`) under an exclusive lock.
+    #[test]
+    fn project_lock_query_pins_deleted_filter_and_lock() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = project_lock_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "lock must exclude soft-deleted projects: {sql}"
+        );
+        assert!(sql.contains("FOR UPDATE"), "lock takes the row lock: {sql}");
+    }
 
     /// The CPython `uuid.UUID(hex=...)` acceptance battery (probed on
     /// 3.12): simple, braced, lowercase-`urn:`, misplaced-hyphen, and
