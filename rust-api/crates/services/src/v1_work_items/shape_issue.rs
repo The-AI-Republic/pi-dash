@@ -450,6 +450,21 @@ pub const POD_WRONG_PROJECT_BODY: &str = r#"{"assigned_pod":["pod is in a differ
 /// `validate()` pod-reassign guard (`:211-216`).
 pub const POD_REASSIGN_ACTIVE_RUN_BODY: &str =
     r#"{"assigned_pod":["cannot reassign pod while the issue has an active run"]}"#;
+/// The dedicated-runner E-checks (`validate_execution_target`, design
+/// §7.1): one variant per code, each Django's `ErrorDetail` — every
+/// one keyed on `assigned_runner` (both serializers carry the runner
+/// in attrs under that key, even though the app surface posts
+/// `assigned_runner_id`).
+pub const RUNNER_NOT_FOUND_BODY: &str = r#"{"assigned_runner":["runner not found"]}"#;
+pub const RUNNER_WRONG_PROJECT_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different project"]}"#;
+pub const RUNNER_POD_MISMATCH_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different pod"]}"#;
+pub const RUNNER_REVOKED_BODY: &str = r#"{"assigned_runner":["runner has been revoked"]}"#;
+pub const RUNNER_OWNER_NOT_ON_ISSUE_BODY: &str =
+    r#"{"assigned_runner":["the runner's owner is not on this issue"]}"#;
+pub const ACTIVE_RUN_IN_PROGRESS_BODY: &str =
+    r#"{"assigned_runner":["the issue has an active run; changes take effect on the next run"]}"#;
 /// `normalize_issue_executor` unknown value
 /// (`runner/services/issue_assignment.py:37-38`).
 pub const EXECUTOR_UNKNOWN_BODY: &str = r#"{"agent_executor":["unknown agent executor"]}"#;
@@ -595,6 +610,19 @@ pub enum ValidateError {
     ParentWrongProject,
     /// `estimate_point` is not one of this workspace+project (`:278-286`).
     EstimatePointWrongProject,
+    /// The dedicated-runner E-checks (`validate_execution_target`):
+    /// E1 `runner_not_found`.
+    RunnerNotFound,
+    /// E2 `runner_wrong_project`.
+    RunnerWrongProject,
+    /// E3 `runner_pod_mismatch`.
+    RunnerPodMismatch,
+    /// E4 `runner_revoked`.
+    RunnerRevoked,
+    /// E7 `runner_owner_not_on_issue`.
+    RunnerOwnerNotOnIssue,
+    /// E8 `active_run_in_progress`.
+    ActiveRunInProgress,
 }
 
 impl ValidateError {
@@ -617,6 +645,27 @@ impl ValidateError {
             ValidateError::ExecutorMidFlight => EXECUTOR_MID_FLIGHT_BODY,
             ValidateError::ParentWrongProject => PARENT_WRONG_PROJECT_BODY,
             ValidateError::EstimatePointWrongProject => ESTIMATE_POINT_WRONG_PROJECT_BODY,
+            ValidateError::RunnerNotFound => RUNNER_NOT_FOUND_BODY,
+            ValidateError::RunnerWrongProject => RUNNER_WRONG_PROJECT_BODY,
+            ValidateError::RunnerPodMismatch => RUNNER_POD_MISMATCH_BODY,
+            ValidateError::RunnerRevoked => RUNNER_REVOKED_BODY,
+            ValidateError::RunnerOwnerNotOnIssue => RUNNER_OWNER_NOT_ON_ISSUE_BODY,
+            ValidateError::ActiveRunInProgress => ACTIVE_RUN_IN_PROGRESS_BODY,
+        }
+    }
+
+    /// Map a domain E-check code (design §7.1, `validate_execution_target`)
+    /// to its variant. The fallthrough is E8 — the only code left after
+    /// E1-E4/E7 (`""` = assignable never reaches this helper, and the
+    /// domain's other failures carry a DB error instead).
+    pub fn from_runner_code(code: &str) -> Self {
+        match code {
+            "runner_not_found" => ValidateError::RunnerNotFound,
+            "runner_wrong_project" => ValidateError::RunnerWrongProject,
+            "runner_pod_mismatch" => ValidateError::RunnerPodMismatch,
+            "runner_revoked" => ValidateError::RunnerRevoked,
+            "runner_owner_not_on_issue" => ValidateError::RunnerOwnerNotOnIssue,
+            _ => ValidateError::ActiveRunInProgress,
         }
     }
 }

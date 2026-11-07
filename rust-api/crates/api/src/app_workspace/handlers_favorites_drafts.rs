@@ -6050,6 +6050,9 @@ async fn run_issue_create_validate(
             _ => None,
         }),
         assigned_pod,
+        // Drafts convert to issues without a runner (design §7: the
+        // web app and v1 surfaces own the write path).
+        assigned_runner: None,
         agent_executor,
         description_html: text("description_html"),
         description_binary: None,
@@ -6226,6 +6229,7 @@ async fn run_issue_create_validate(
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
         paused_exists: &|| paused_exists,
+        runner_error: &|| None,
     };
     let ctx = ValidateContext {
         project_id: Some(*project_id),

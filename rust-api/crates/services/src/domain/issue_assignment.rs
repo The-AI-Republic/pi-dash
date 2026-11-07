@@ -405,12 +405,14 @@ impl From<sea_orm::DbErr> for ValidateError {
 /// Validate the requested execution target (design §7.1).
 ///
 /// When a runner is named, E1-E8 are evaluated and the first failure is
-/// returned as [`ValidateError::Field`] keyed on `assigned_runner_id`.
-/// Skips runner checks when the request names no runner — except E8:
-/// clearing the runner under an ASSIGNED/RUNNING run is refused with
-/// `active_run_in_progress` (§13.2). `project_id` carries E2 on create
-/// (when there is no issue yet). A no-op resend of the current runner is
-/// never rejected (§7.2).
+/// returned as [`ValidateError::Field`] keyed on `assigned_runner` (the
+/// attrs/source key both Django serializers raise on — the app surface
+/// posts `assigned_runner_id`, but Django's `validate()` keys the error
+/// on `assigned_runner`). Skips runner checks when the request names no
+/// runner — except E8: clearing the runner under an ASSIGNED/RUNNING
+/// run is refused with `active_run_in_progress` (§13.2). `project_id`
+/// carries E2 on create (when there is no issue yet). A no-op resend of
+/// the current runner is never rejected (§7.2).
 pub async fn validate_execution_target(
     db: &impl ConnectionTrait,
     write: &ExecutionTargetWrite,
@@ -418,7 +420,9 @@ pub async fn validate_execution_target(
     if !write.runner_present {
         return Ok(());
     }
-    let field = "assigned_runner_id";
+    // Both Django serializers carry the runner in attrs under the
+    // source/model key `assigned_runner`, so the error keys there.
+    let field = "assigned_runner";
     match write.runner_id {
         None => {
             // A clear is a runner change: E8 applies (§13.2). The no-op

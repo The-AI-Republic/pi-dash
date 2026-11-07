@@ -212,8 +212,19 @@ impl From<operations::Error> for Denial {
     }
 }
 
-/// Wrap an operation outcome in the v1 response.
-fn op_response(outcome: operations::Outcome) -> Result<Response, Denial> {
+/// Wrap an operation outcome in the v1 response. A re-pointed QUEUED run
+/// drains its pod on commit (design §13.2), exactly Django's
+/// `transaction.on_commit(_drain)`.
+async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<Response, Denial> {
+    if let Some(pod_id) = outcome.drain_pod {
+        let pool = pool_of(state).map_err(|_| Denial::ServerError)?;
+        if crate::runner_enroll::teardown::drain_pod_by_id(&pool, state, pod_id)
+            .await
+            .is_err()
+        {
+            return Err(Denial::ServerError);
+        }
+    }
     let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
     Ok(json_response(status, outcome.body))
 }
@@ -1810,7 +1821,7 @@ async fn create_issue_inner(
         },
     )
     .await?;
-    op_response(outcome)
+    op_response(state, outcome).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1988,7 +1999,7 @@ async fn patch_issue_inner(
         },
     )
     .await?;
-    op_response(outcome)
+    op_response(state, outcome).await
 }
 
 async fn delete_issue_inner(
