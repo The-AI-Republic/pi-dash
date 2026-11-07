@@ -1197,6 +1197,7 @@ struct ProjectRow {
     agent_test_default_interval_seconds: i32,
     agent_ticking_enabled: bool,
     default_agent_executor: String,
+    dedicated_runner_lost_action: String,
     members_can_edit_states: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -1254,6 +1255,7 @@ impl ProjectRow {
                 .try_get("agent_test_default_interval_seconds")?,
             agent_ticking_enabled: row.try_get("agent_ticking_enabled")?,
             default_agent_executor: row.try_get("default_agent_executor")?,
+            dedicated_runner_lost_action: row.try_get("dedicated_runner_lost_action")?,
             members_can_edit_states: row.try_get("members_can_edit_states")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
@@ -1321,7 +1323,7 @@ async fn fetch_project_row_opts(
               p.agent_default_interval_seconds, p.agent_default_max_ticks,
               p.agent_review_default_interval_seconds, p.agent_test_default_interval_seconds,
               p.agent_ticking_enabled,
-              p.default_agent_executor, p.members_can_edit_states,
+              p.default_agent_executor, p.dedicated_runner_lost_action, p.members_can_edit_states,
               p.created_at, p.updated_at, p.created_by_id, p.updated_by_id, p.deleted_at,
               EXISTS (SELECT 1 FROM user_favorites uf
                       WHERE uf.deleted_at IS NULL AND uf.user_id = $2
@@ -1807,6 +1809,7 @@ async fn render_list_row(
         agent_test_default_interval_seconds: i64::from(row.agent_test_default_interval_seconds),
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
+        dedicated_runner_lost_action: row.dedicated_runner_lost_action.clone(),
         agent_executor_options: options.to_vec(),
         next_work_item_sequence: sequence,
         members_can_edit_states: row.members_can_edit_states,
@@ -1915,6 +1918,7 @@ async fn render_current_instance(
         agent_test_default_interval_seconds: i64::from(row.agent_test_default_interval_seconds),
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
+        dedicated_runner_lost_action: row.dedicated_runner_lost_action.clone(),
         members_can_edit_states: row.members_can_edit_states,
     };
     let value = serde_json::to_value(&read).map_err(|_| Denial::ServerError)?;

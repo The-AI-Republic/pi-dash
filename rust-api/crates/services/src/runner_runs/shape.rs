@@ -1329,6 +1329,10 @@ mod tests {
             paused_by: None,
             created_at: "2026-10-02T23:03:54.579295Z",
             updated_at: "2026-10-02T23:03:54.579295Z",
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         };
         let body = serde_json::to_value(chat_session_to_representation(&session, &runner))
             .expect("serializes");

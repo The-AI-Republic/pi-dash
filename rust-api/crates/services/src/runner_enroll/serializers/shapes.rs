@@ -495,6 +495,12 @@ pub struct RunnerRow<'a> {
     pub paused_by: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
+    /// `?assignable_for=` eligibility read (design §7.4): absent unless
+    /// the list was asked for it, mirroring the context-gated fields.
+    pub assignable: Option<bool>,
+    pub not_assignable_code: Option<&'a str>,
+    pub is_busy: Option<bool>,
+    pub queue_depth: Option<u64>,
 }
 
 /// `RunnerSerializer.to_representation` output, in wire order.
@@ -527,6 +533,16 @@ pub struct RunnerView<'a> {
     pub paused_by: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
+    /// `?assignable_for=` eligibility read (design §7.4): absent unless
+    /// the list was asked for it, mirroring the context-gated fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_assignable_code: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_busy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<u64>,
 }
 
 /// Port of `RunnerSerializer` (`serializers.py:156-220`).
@@ -562,6 +578,10 @@ pub fn runner_to_representation<'a>(row: &'a RunnerRow<'a>) -> RunnerView<'a> {
         paused_by: row.paused_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        assignable: row.assignable,
+        not_assignable_code: row.not_assignable_code,
+        is_busy: row.is_busy,
+        queue_depth: row.queue_depth,
     }
 }
 
@@ -1495,6 +1515,10 @@ mod tests {
             paused_by: Some("88888888-8888-4888-8888-888888888888"),
             created_at: "2026-10-01T00:00:00+00:00",
             updated_at: "2026-10-02T01:02:03+00:00",
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         }
     }
 
