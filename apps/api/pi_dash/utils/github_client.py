@@ -286,7 +286,7 @@ def _parse_iso8601(value: Optional[str]) -> Optional[datetime]:
 
 def pr_snapshot_from_payload(pull_request: dict) -> dict:
     """Map a GitHub pull-request object (REST API or webhook payload) onto the
-    display-only snapshot fields stored on ``GithubPullRequestLink``.
+    display-only snapshot fields stored on ``GitCodeReviewLink``.
 
     GitHub reports ``merged_at`` rather than a boolean on the webhook payload,
     so derive ``merged`` from either ``merged`` or ``merged_at``. ``pr_updated_at``

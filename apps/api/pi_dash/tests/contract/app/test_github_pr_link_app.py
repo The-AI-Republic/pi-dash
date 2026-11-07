@@ -16,7 +16,7 @@ from django.urls import reverse
 
 from rest_framework import status
 
-from pi_dash.db.models import GithubPullRequestLink, Issue, Project, ProjectMember
+from pi_dash.db.models import GitCodeReviewLink, Issue, Project, ProjectMember
 
 
 pytestmark = [pytest.mark.contract, pytest.mark.django_db]
@@ -63,8 +63,14 @@ def test_attach_invalid_url_via_session(session_client, setup):
 @patch("pi_dash.db.mixins.soft_delete_related_objects.delay")
 def test_detach_via_session(_delay, session_client, setup):
     workspace, project, issue = setup
-    link = GithubPullRequestLink.objects.create(
-        project=project, issue=issue, repo_owner="acme", repo_name="web", pr_number=13,
+    link = GitCodeReviewLink.objects.create(
+        project=project,
+        issue=issue,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="13",
         url="https://github.com/acme/web/pull/13",
     )
     detail = reverse(
@@ -73,4 +79,4 @@ def test_detach_via_session(_delay, session_client, setup):
     )
     response = session_client.delete(detail)
     assert response.status_code == status.HTTP_204_NO_CONTENT
-    assert GithubPullRequestLink.objects.filter(pk=link.id).count() == 0
+    assert GitCodeReviewLink.objects.filter(pk=link.id).count() == 0

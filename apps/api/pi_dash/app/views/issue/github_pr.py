@@ -4,9 +4,11 @@
 
 """Session app-API endpoints for the issue-detail "Pull requests" overview.
 
-Mirrors the external-API ``pidash issue attach-pr`` contract (which the coding
-agent uses) but with session auth for the web UI. Both surfaces share
-``utils.github_pr_links`` so attach behaviour is identical.
+GitHub-compatibility surface over generic code-review storage
+(PDASHOSS01-359). Mirrors the external-API ``pidash issue attach-pr``
+contract (which the coding agent uses) but with session auth for the web
+UI. Both surfaces share ``utils.github_pr_links`` so attach behaviour is
+identical.
 """
 
 from rest_framework import status
@@ -15,7 +17,7 @@ from rest_framework.response import Response
 from .. import BaseViewSet
 from pi_dash.app.permissions import ProjectEntityPermission
 from pi_dash.app.serializers import GithubPullRequestLinkSerializer
-from pi_dash.db.models import GithubPullRequestLink
+from pi_dash.db.models import GitCodeReviewLink
 from pi_dash.utils.github_pr_links import (
     InvalidPullRequestURL,
     IssueNotFound,
@@ -28,7 +30,7 @@ from pi_dash.utils.github_pr_links import (
 class GithubPullRequestLinkViewSet(BaseViewSet):
     permission_classes = [ProjectEntityPermission]
 
-    model = GithubPullRequestLink
+    model = GitCodeReviewLink
     serializer_class = GithubPullRequestLinkSerializer
 
     def get_queryset(self):

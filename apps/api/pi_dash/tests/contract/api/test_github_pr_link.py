@@ -4,6 +4,8 @@
 
 """Contract tests for the GitHub PR ↔ work-item link endpoints.
 
+Compatibility surface (PDASHOSS01-359): storage is generic
+GitCodeReviewLink, responses keep the legacy GithubPullRequestLink shape.
 Covers ``pidash issue attach-pr``'s server contract: attach by URL, idempotent
 re-attach, one-PR-one-issue conflict, URL validation, list, detach, and the
 best-effort snapshot at attach time. See
@@ -17,7 +19,6 @@ from rest_framework import status as http_status
 
 from pi_dash.db.models import (
     GitCodeReviewLink,
-    GithubPullRequestLink,
     Issue,
     Project,
     ProjectMember,
@@ -76,17 +77,14 @@ def test_attach_creates_link(api_key_client, workspace, pr_project, issue):
     assert response.data["repo_name"] == "web"
     assert response.data["url"] == "https://github.com/acme-corp/web/pull/42"
 
-    link = GithubPullRequestLink.objects.get(pk=response.data["id"])
+    link = GitCodeReviewLink.objects.get(pk=response.data["id"])
     assert link.issue_id == issue.id
+    assert link.provider == "github"
+    assert link.namespace == "acme-corp"
+    assert link.repo_name == "web"
+    assert link.external_iid == "42"
     assert link.state == "open"
     assert link.merged is False
-    review_link = GitCodeReviewLink.objects.get(
-        provider="github",
-        namespace="acme-corp",
-        repo_name="web",
-        external_iid="42",
-    )
-    assert review_link.issue_id == issue.id
 
 
 def test_attach_is_idempotent_for_same_issue(api_key_client, workspace, pr_project, issue):
@@ -99,7 +97,12 @@ def test_attach_is_idempotent_for_same_issue(api_key_client, workspace, pr_proje
     assert first.status_code == http_status.HTTP_201_CREATED
     assert second.status_code == http_status.HTTP_200_OK
     assert second.data["id"] == first.data["id"]
-    assert GithubPullRequestLink.objects.filter(repo_owner="acme", repo_name="web", pr_number=7).count() == 1
+    assert (
+        GitCodeReviewLink.objects.filter(
+            provider="github", namespace="acme", repo_name="web", external_iid="7"
+        ).count()
+        == 1
+    )
 
 
 def test_attach_conflict_when_pr_linked_to_other_issue(api_key_client, workspace, pr_project, issue, create_user):
@@ -109,8 +112,14 @@ def test_attach_conflict_when_pr_linked_to_other_issue(api_key_client, workspace
         workspace=pr_project.workspace,
         created_by=create_user,
     )
-    GithubPullRequestLink.objects.create(
-        project=pr_project, issue=other_issue, repo_owner="acme", repo_name="web", pr_number=9,
+    GitCodeReviewLink.objects.create(
+        project=pr_project,
+        issue=other_issue,
+        provider="github",
+        host_url="https://github.com",
+        namespace="acme",
+        repo_name="web",
+        external_iid="9",
         url="https://github.com/acme/web/pull/9",
     )
 
@@ -121,7 +130,12 @@ def test_attach_conflict_when_pr_linked_to_other_issue(api_key_client, workspace
     )
 
     assert response.status_code == http_status.HTTP_409_CONFLICT
-    assert GithubPullRequestLink.objects.filter(repo_owner="acme", repo_name="web", pr_number=9).count() == 1
+    assert (
+        GitCodeReviewLink.objects.filter(
+            provider="github", namespace="acme", repo_name="web", external_iid="9"
+        ).count()
+        == 1
+    )
 
 
 def test_attach_conflicts_when_neutral_code_review_linked_to_other_issue(
@@ -155,7 +169,12 @@ def test_attach_conflicts_when_neutral_code_review_linked_to_other_issue(
     )
 
     assert response.status_code == http_status.HTTP_409_CONFLICT
-    assert GithubPullRequestLink.objects.filter(repo_owner="acme", repo_name="web", pr_number=10).count() == 0
+    assert (
+        GitCodeReviewLink.objects.filter(
+            provider="github", namespace="acme", repo_name="web", external_iid="10"
+        ).count()
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -173,18 +192,25 @@ def test_attach_rejects_invalid_url(api_key_client, workspace, pr_project, issue
         _list_url(workspace.slug, pr_project.id, issue.id), {"url": bad_url}, format="json"
     )
     assert response.status_code == http_status.HTTP_400_BAD_REQUEST
-    assert GithubPullRequestLink.objects.count() == 0
+    assert GitCodeReviewLink.objects.count() == 0
 
 
 def _install_app(workspace, actor, account_login="acme"):
-    """Create a real WorkspaceIntegration + GithubAppInstallation so the
-    best-effort snapshot path resolves an installation for ``account_login``."""
-    from pi_dash.app.views.integration.github import _get_or_create_workspace_integration
-    from pi_dash.db.models import GithubAppInstallation
+    """Create a GitHub App provider account so the best-effort snapshot path
+    resolves an installation for ``account_login``."""
+    from pi_dash.db.models import GitProviderAccount
 
-    wi = _get_or_create_workspace_integration(workspace, actor)
-    return GithubAppInstallation.objects.create(
-        workspace_integration=wi, installation_id=4242, account_login=account_login
+    return GitProviderAccount.objects.create(
+        workspace=workspace,
+        provider="github",
+        host_url="https://github.com",
+        auth_type=GitProviderAccount.AuthType.GITHUB_APP,
+        external_account_id="4242",
+        external_account_login=account_login,
+        display_name=account_login,
+        capabilities={},
+        credential_config={"auth_type": "github_app", "installation_id": 4242},
+        status=GitProviderAccount.Status.CONNECTED,
     )
 
 
@@ -244,8 +270,14 @@ def test_attach_survives_snapshot_failure(api_key_client, workspace, pr_project,
 
 def test_list_returns_attached_prs(api_key_client, workspace, pr_project, issue):
     for n in (1, 2):
-        GithubPullRequestLink.objects.create(
-            project=pr_project, issue=issue, repo_owner="acme", repo_name="web", pr_number=n,
+        GitCodeReviewLink.objects.create(
+            project=pr_project,
+            issue=issue,
+            provider="github",
+            host_url="https://github.com",
+            namespace="acme",
+            repo_name="web",
+            external_iid=str(n),
             url=f"https://github.com/acme/web/pull/{n}",
         )
 
@@ -258,11 +290,7 @@ def test_list_returns_attached_prs(api_key_client, workspace, pr_project, issue)
 
 @patch("pi_dash.db.mixins.soft_delete_related_objects.delay")
 def test_detach_soft_deletes_link(_delay, api_key_client, workspace, pr_project, issue):
-    link = GithubPullRequestLink.objects.create(
-        project=pr_project, issue=issue, repo_owner="acme", repo_name="web", pr_number=3,
-        url="https://github.com/acme/web/pull/3",
-    )
-    review_link = GitCodeReviewLink.objects.create(
+    link = GitCodeReviewLink.objects.create(
         project=pr_project,
         issue=issue,
         provider="github",
@@ -276,8 +304,7 @@ def test_detach_soft_deletes_link(_delay, api_key_client, workspace, pr_project,
     response = api_key_client.delete(_detail_url(workspace.slug, pr_project.id, issue.id, link.id))
 
     assert response.status_code == http_status.HTTP_204_NO_CONTENT
-    assert GithubPullRequestLink.objects.filter(pk=link.id).count() == 0  # soft-deleted (default manager hides it)
-    assert GitCodeReviewLink.objects.filter(pk=review_link.id).count() == 0
+    assert GitCodeReviewLink.objects.filter(pk=link.id).count() == 0  # soft-deleted (default manager hides it)
     # the same PR can be re-attached after detach (partial-unique on deleted_at)
     reattach = api_key_client.post(
         _list_url(workspace.slug, pr_project.id, issue.id),
@@ -313,7 +340,7 @@ def test_attach_rejects_issue_not_in_project(api_key_client, workspace, pr_proje
     )
 
     assert response.status_code == http_status.HTTP_404_NOT_FOUND
-    assert GithubPullRequestLink.objects.count() == 0
+    assert GitCodeReviewLink.objects.count() == 0
 
 
 def test_attach_requires_project_membership(api_client, workspace, pr_project, issue, create_user):
@@ -331,4 +358,4 @@ def test_attach_requires_project_membership(api_client, workspace, pr_project, i
     )
 
     assert response.status_code in (http_status.HTTP_403_FORBIDDEN, http_status.HTTP_404_NOT_FOUND)
-    assert GithubPullRequestLink.objects.count() == 0
+    assert GitCodeReviewLink.objects.count() == 0

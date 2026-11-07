@@ -4,10 +4,12 @@
 
 """External-API endpoints for linking a work item to GitHub pull requests.
 
-This is the server-side contract behind the ``pidash issue attach-pr`` CLI
-command. Attaching/detaching never mutates the issue's workflow state; the
-PR status snapshot is best-effort at attach time and refreshed by the GitHub
-App ``pull_request`` webhook (see ``app/views/integration/github.py``).
+GitHub-compatibility surface over generic code-review storage
+(PDASHOSS01-359). This is the server-side contract behind the
+``pidash issue attach-pr`` CLI command. Attaching/detaching never mutates
+the issue's workflow state; the PR status snapshot is best-effort at attach
+time and refreshed by the GitHub App ``pull_request`` webhook (see
+``app/views/integration/github.py``).
 """
 
 from rest_framework import status
@@ -16,7 +18,7 @@ from rest_framework.response import Response
 from pi_dash.api.serializers import GithubPullRequestLinkSerializer
 from pi_dash.api.views.base import BaseAPIView
 from pi_dash.app.permissions import ProjectEntityPermission
-from pi_dash.db.models import GithubPullRequestLink
+from pi_dash.db.models import GitCodeReviewLink
 from pi_dash.utils.github_pr_links import (
     InvalidPullRequestURL,
     IssueNotFound,
@@ -29,14 +31,14 @@ from pi_dash.utils.github_pr_links import (
 class GithubPullRequestLinkListCreateAPIEndpoint(BaseAPIView):
     """List PRs linked to a work item, or attach a new one by URL."""
 
-    model = GithubPullRequestLink
+    model = GitCodeReviewLink
     serializer_class = GithubPullRequestLinkSerializer
     permission_classes = [ProjectEntityPermission]
     use_read_replica = True
 
     def get_queryset(self):
         return (
-            GithubPullRequestLink.objects.filter(workspace__slug=self.kwargs.get("slug"))
+            GitCodeReviewLink.objects.filter(workspace__slug=self.kwargs.get("slug"))
             .filter(project_id=self.kwargs.get("project_id"))
             .filter(issue_id=self.kwargs.get("issue_id"))
             .filter(
@@ -79,13 +81,13 @@ class GithubPullRequestLinkListCreateAPIEndpoint(BaseAPIView):
 class GithubPullRequestLinkDetailAPIEndpoint(BaseAPIView):
     """Detach (soft-delete) a linked PR."""
 
-    model = GithubPullRequestLink
+    model = GitCodeReviewLink
     serializer_class = GithubPullRequestLinkSerializer
     permission_classes = [ProjectEntityPermission]
 
     def get_queryset(self):
         return (
-            GithubPullRequestLink.objects.filter(workspace__slug=self.kwargs.get("slug"))
+            GitCodeReviewLink.objects.filter(workspace__slug=self.kwargs.get("slug"))
             .filter(project_id=self.kwargs.get("project_id"))
             .filter(issue_id=self.kwargs.get("issue_id"))
             .filter(
