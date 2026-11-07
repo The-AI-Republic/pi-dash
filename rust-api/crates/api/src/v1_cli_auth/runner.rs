@@ -461,6 +461,7 @@ pub async fn delete_runner(
     let ports = LivePorts::new(pool.clone(), &state);
     let pool_ref = &pool;
     let ports_ref = &ports;
+    let state_ref = &state;
     // Each lifecycle arm below never fails (it logs internally and
     // answers `Ok`), so the results discard, as the merged drain did;
     // only drains and cleanup propagate, as the server error.
@@ -493,6 +494,67 @@ pub async fn delete_runner(
                 terminal_created_by,
             )
             .await;
+        },
+        // §13.1: the ticking-issue bounce for a lost runner.
+        |issue_id, runner_name, reason, triggered_by| async move {
+            let name = runner_name.unwrap_or_else(|| "the dedicated runner".to_owned());
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state_ref,
+                pool_ref,
+                Uuid::nil(),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, _)) => {
+                    if let Err(error) = pidash_jobs::orchestration::bounce_issue_no_eligible_runner(
+                        pool_ref,
+                        deps,
+                        now,
+                        0.0,
+                        issue_id,
+                        &triggered_by,
+                        &reason,
+                        &name,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner bounce failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner bounce: dispatch deps failed");
+                }
+            }
+        },
+        // §13.1 `fall_back` step 2: recreate in the default pod.
+        |issue_id, _pod_id, trigger, creator| async move {
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state_ref,
+                pool_ref,
+                creator.unwrap_or(Uuid::nil()),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, matcher)) => {
+                    if let Err(error) = pidash_jobs::orchestration::dispatch_continuation_run(
+                        pool_ref, deps, &matcher, now, 0.0, issue_id, &trigger, creator, false,
+                        false,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner recreate failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner recreate: dispatch deps failed");
+                }
+            }
         },
     )
     .await

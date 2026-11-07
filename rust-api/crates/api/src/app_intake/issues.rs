@@ -131,6 +131,7 @@ pub struct IssueRow {
     pub deleted_at: Option<DateTime<Utc>>,
     pub git_work_branch: String,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
     pub complexity_score: i32,
@@ -171,6 +172,7 @@ impl IssueRow {
             deleted_at: row.try_get("deleted_at")?,
             git_work_branch: row.try_get("git_work_branch")?,
             assigned_pod_id: row.try_get("assigned_pod_id")?,
+            assigned_runner_id: row.try_get("assigned_runner_id")?,
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
             complexity_score: row.try_get("complexity_score")?,
@@ -215,6 +217,7 @@ impl IssueRow {
             workpad: self.workpad.clone(),
             created_via: self.created_via.clone(),
             assigned_pod_id: self.assigned_pod_id,
+            assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
         }
     }
@@ -286,7 +289,7 @@ const ISSUE_COLS: &str = concat!(
     "i.description_stripped, i.completed_at, i.sort_order, i.point, i.archived_at, ",
     "i.is_draft, i.external_id, i.external_source, i.description_binary, ",
     "i.estimate_point_id, i.type_id, i.deleted_at, i.git_work_branch, ",
-    "i.assigned_pod_id, i.created_via, i.agent_executor, i.complexity_score, ",
+    "i.assigned_pod_id, i.assigned_runner_id, i.created_via, i.agent_executor, i.complexity_score, ",
     "i.workpad"
 );
 
@@ -4373,6 +4376,7 @@ pub async fn collection_create(
         workpad: String::new(),
         created_via: validated.created_via.clone(),
         assigned_pod_id: validated.assigned_pod_id,
+        assigned_runner_id: None,
         agent_executor: validated.agent_executor.clone(),
     };
     // The m2m plan resolves pre-save (pure reads of validated input).

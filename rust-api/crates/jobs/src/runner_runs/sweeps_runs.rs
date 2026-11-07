@@ -1523,7 +1523,8 @@ mod tests {
     #[test]
     fn approval_lock_sql_byte_exact() {
         // All 52 columns spelled out: the 11 approval columns in L2
-        // order, then the 40 agent_run columns in L2 order.
+        // order, then the 41 agent_run columns in L2 order (pin_kind
+        // at COLUMNS idx 7, after pinned_runner_id).
         let expected = "SELECT \"agent_run_approval\".\"id\", \"agent_run_approval\".\"agent_run_id\", \
              \"agent_run_approval\".\"kind\", \"agent_run_approval\".\"payload\", \
              \"agent_run_approval\".\"reason\", \"agent_run_approval\".\"status\", \
@@ -1531,7 +1532,7 @@ mod tests {
              \"agent_run_approval\".\"requested_at\", \"agent_run_approval\".\"expires_at\", \
              \"agent_run_approval\".\"decided_at\", \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \
              \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \
-             \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \
+             \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"pin_kind\", \
              \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \
              \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \
              \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \
@@ -2109,7 +2110,7 @@ mod tests {
         for task in l6a {
             assert!(registry.owns(task), "{task} registered");
         }
-        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 13);
+        assert_eq!(crate::runner_runs::TASK_NAMES.len(), 15);
         assert!(crate::runner_runs::is_runner_runs_task(EXPIRE_TASK));
         assert!(crate::runner_runs::is_runner_runs_task(
             "runner.reconcile_stalled_runs"

@@ -21,11 +21,36 @@ use crate::v1_work_items::{filter_fields, FieldSpec};
 /// The `issues.*` columns every read path selects (F18-05 column order).
 /// `description_json` / `description_stripped` / `workpad` are unrendered
 /// and unread here, so they stay out of the select list.
-pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id""#;
+pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id", "issues"."assigned_runner_id""#;
 
 /// The joined extras every read path selects: the URL parts and the state
 /// group (the completed-arm check on writes).
 pub const ISSUE_EXTRA_COLS: &str = r#""projects"."identifier" AS "project_identifier", "workspaces"."slug" AS "workspace_slug", "states"."group" AS "state_group""#;
+
+/// `assigned_runner_detail` by runner id (`issue_assignment.py`,
+/// design §14.1): `None` when the issue is pod-assigned or the runner
+/// is gone.
+async fn fetch_assigned_runner_detail(
+    pool: &PgPool,
+    runner_id: Option<Uuid>,
+) -> Result<Option<Value>, Error> {
+    use sea_orm::EntityTrait;
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let Some(runner) = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Error::Failed("render-decoded"))?
+    else {
+        return Ok(None);
+    };
+    crate::domain::issue_assignment::assigned_runner_detail(&orm, &runner)
+        .await
+        .map(Some)
+        .map_err(|_| Error::Failed("render-decoded"))
+}
 
 /// A decoded `issues` row: every column the renderer or the write paths
 /// read, datetimes already rendered as DRF strings in the request timezone
@@ -65,6 +90,7 @@ pub struct DecodedIssue {
     pub estimate_point: Option<String>,
     pub type_id: Option<String>,
     pub assigned_pod: Option<String>,
+    pub assigned_runner: Option<String>,
     pub project_identifier: String,
     pub workspace_slug: String,
     pub state_group: Option<String>,
@@ -350,6 +376,7 @@ pub fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue
         estimate_point: row_uuid_opt(row, "estimate_point_id")?.map(|id| id.to_string()),
         type_id: row_uuid_opt(row, "type_id")?.map(|id| id.to_string()),
         assigned_pod: row_uuid_opt(row, "assigned_pod_id")?.map(|id| id.to_string()),
+        assigned_runner: row_uuid_opt(row, "assigned_runner_id")?.map(|id| id.to_string()),
         project_identifier: row_string(row, "project_identifier")?,
         workspace_slug: row_string(row, "workspace_slug")?,
         state_group: row_string_opt(row, "state_group")?,
@@ -969,6 +996,22 @@ pub async fn render_decoded(
         Some(decoded.project_identifier.as_str()),
         Some(decoded.sequence_id),
     );
+    // The dedicated-runner detail (design §14.1): fetched only when the
+    // field is kept, the same value Django's serializer method field
+    // renders either way.
+    let assigned_runner_id = decoded
+        .assigned_runner
+        .as_deref()
+        .map(|text| {
+            text.parse::<Uuid>()
+                .map_err(|_| Error::Failed("render-decoded"))
+        })
+        .transpose()?;
+    let assigned_runner_detail = if kept("assigned_runner_detail") {
+        fetch_assigned_runner_detail(pool, assigned_runner_id).await?
+    } else {
+        None
+    };
     let row = shape::IssueRow {
         id: &decoded.id,
         type_id: decoded.type_id.as_deref(),
@@ -1002,6 +1045,8 @@ pub async fn render_decoded(
         state: decoded.state.as_deref(),
         estimate_point: decoded.estimate_point.as_deref(),
         assigned_pod: decoded.assigned_pod.as_deref(),
+        assigned_runner: decoded.assigned_runner.as_deref(),
+        assigned_runner_detail: assigned_runner_detail.as_ref(),
     };
 
     let issue_id = decoded

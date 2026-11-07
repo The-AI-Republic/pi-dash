@@ -45,10 +45,11 @@ use pidash_services::orchestration::creation::{
 };
 use pidash_services::orchestration::creation::{
     finalize_error_details_patch, finalize_lock_sql, finalize_update_sql,
-    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, ExecutionError,
-    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
-    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RunView, RunnerSelectRow,
-    RunnerView, StateView, TickerBudget,
+    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, DedicatedPinArgs,
+    ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment, PinOutcome,
+    PodView, ProjectView, RenderBundle, RunView, RunnerSelectRow, RunnerView, StateView,
+    TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_services::runner_runs::finalization as finalize_kernel;
@@ -225,6 +226,7 @@ fn twin_map_run_view(row: &sqlx::postgres::PgRow) -> Result<RunView, sqlx::Error
         pod_id: row.try_get("pod_id")?,
         runner_id: row.try_get("runner_id")?,
         pinned_runner_id: row.try_get("pinned_runner_id")?,
+        pin_kind: row.try_get("pin_kind")?,
         parent_run_id: row.try_get("parent_run_id")?,
         work_item_id: row.try_get("work_item_id")?,
         status: twin_map_status(status)?,
@@ -249,6 +251,7 @@ fn twin_map_issue(row: &sqlx::postgres::PgRow) -> Result<IssueView, sqlx::Error>
         parent_id: row.try_get("parent_id")?,
         created_by_id: row.try_get("created_by_id")?,
         assigned_pod_id: row.try_get("assigned_pod_id")?,
+        assigned_runner_id: row.try_get("assigned_runner_id")?,
         agent_executor: row.try_get("agent_executor")?,
         git_work_branch: row.try_get("git_work_branch")?,
         workpad: row.try_get("workpad")?,
@@ -291,6 +294,53 @@ impl CreationSeam for HandoffStore<'_, '_> {
             .await
             .map_err(Self::db)?;
         twin_map_issue(&row).map_err(Self::db)
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        // Project-move handoffs never pass them through Django's
+        // refusal/waiting-comment path here; the pin still resolves.
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::flight_pin(&conn, args, args.actor_id)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::system_comment_row(&conn, comment)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        let conn = pidash_db::orm_tx::TxConn::new(self.tx.inner());
+        pidash_services::domain::issue_assignment::pod_once_started_comment(
+            &conn, issue_id, pod_id, actor_id, now,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))
+    }
+
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+        // raw-sql: conditional single-column update; the ORM shape is the same.
+        sqlx::query(pidash_services::orchestration::creation::THREAD_CLEAR_SQL)
+            .bind(run_id)
+            .execute(&mut **self.tx.inner())
+            .await
+            .map_err(Self::db)?;
+        Ok(())
     }
 
     async fn project(&mut self, project_id: Uuid) -> Result<ProjectView, CreationError> {
@@ -366,10 +416,12 @@ impl CreationSeam for HandoffStore<'_, '_> {
                 provisioning,
                 pod_dispatch,
                 engine_paused,
+                name,
             )| RunnerView {
                 id,
                 pod_id,
                 status,
+                name,
                 last_heartbeat_at,
                 paused_at,
                 provisioning,

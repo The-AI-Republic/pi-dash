@@ -194,6 +194,7 @@ pub struct IssueFieldSet {
     pub workpad: String,
     pub created_via: Option<String>,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub agent_executor: Option<String>,
 }
 
@@ -237,6 +238,7 @@ impl IssueFieldSet {
             workpad: Set(self.workpad),
             created_via: Set(self.created_via),
             assigned_pod_id: Set(self.assigned_pod_id),
+            assigned_runner_id: Set(self.assigned_runner_id),
             agent_executor: Set(self.agent_executor),
         }
     }
@@ -280,6 +282,7 @@ impl IssueFieldSet {
             workpad: Set(self.workpad),
             created_via: Set(self.created_via),
             assigned_pod_id: Set(self.assigned_pod_id),
+            assigned_runner_id: Set(self.assigned_runner_id),
             agent_executor: Set(self.agent_executor),
         }
     }
@@ -321,6 +324,7 @@ impl From<&issues::Model> for IssueFieldSet {
             workpad: model.workpad.clone(),
             created_via: model.created_via.clone(),
             assigned_pod_id: model.assigned_pod_id,
+            assigned_runner_id: model.assigned_runner_id,
             agent_executor: model.agent_executor.clone(),
         }
     }
@@ -2000,6 +2004,7 @@ fn mirror_issue_row(insert: &MirrorIssueInsert) -> Result<issues::ActiveModel, s
         workpad: Set(String::new()),
         created_via: Set(None),
         assigned_pod_id: Set(insert.pod_id),
+        assigned_runner_id: sea_orm::NotSet,
         agent_executor: Set(None),
     })
 }
@@ -2234,6 +2239,7 @@ fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, s
         estimate_point_id: Set(None),
         type_id: Set(None),
         assigned_pod_id: Set(insert.pod_id),
+        assigned_runner_id: sea_orm::NotSet,
     })
 }
 
@@ -2445,6 +2451,7 @@ fn seed_issue_row(id: Uuid, issue: &SeedIssue<'_>) -> Result<issues::ActiveModel
         deleted_at: Set(None),
         git_work_branch: Set(String::new()),
         assigned_pod_id: Set(issue.assigned_pod_id),
+        assigned_runner_id: sea_orm::NotSet,
         workpad: Set(String::new()),
         created_via: Set(None),
         agent_executor: Set(None),
@@ -4340,6 +4347,7 @@ mod tests {
             workpad: String::new(),
             created_via: None,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
         };
         let issue_id = fields.id;
@@ -4903,6 +4911,7 @@ mod tests {
                                     workpad: String::new(),
                                     created_via: None,
                                     assigned_pod_id: None,
+                                    assigned_runner_id: None,
                                     agent_executor: None,
                                 },
                                 assignees: Some(vec![new_link]),

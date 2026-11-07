@@ -1877,6 +1877,7 @@ async fn render_full(
         type_id: get_str(row, "i_type_id"),
         is_epic,
         assigned_pod_id: get_str(row, "i_assigned_pod_id"),
+        assigned_runner_id: get_str(row, "i_assigned_runner_id"),
         agent_executor: get_str(row, "i_agent_executor"),
         module_ids: Some(str_refs(&module_ids)),
         label_ids: Some(str_refs(&label_ids)),
@@ -1892,6 +1893,14 @@ async fn render_full(
         archived_at: get_str(row, "i_archived_at"),
         is_synced,
     };
+    let runner_uuid = get_str(row, "i_assigned_runner_id")
+        .map(|raw| raw.parse::<uuid::Uuid>())
+        .transpose()
+        .map_err(|_| Denial::ServerError)?;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let assigned_runner_detail = super::access::fetch_assigned_runner_detail(&orm, runner_uuid)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let detail = IssueDetailRow {
         base,
         description_html: req_str(row, "i_description_html")?,
@@ -1902,6 +1911,7 @@ async fn render_full(
         active_run: active_row,
         run_count,
         blockers: &blockers,
+        assigned_runner_detail,
     };
     let view = issue_detail_to_representation(&detail);
     let body = serde_json::to_string(&view).map_err(|_| Denial::ServerError)?;
@@ -2583,6 +2593,7 @@ async fn render_post_row(
         type_id: get_str(row, "type_id"),
         is_epic,
         assigned_pod_id: get_str(row, "assigned_pod_id"),
+        assigned_runner_id: get_str(row, "assigned_runner_id"),
         agent_executor: get_str(row, "agent_executor"),
         module_ids: None,
         label_ids: None,

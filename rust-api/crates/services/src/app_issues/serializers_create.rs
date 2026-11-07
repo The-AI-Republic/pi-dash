@@ -100,11 +100,12 @@ use crate::tasks_cleanup::versions::chunk_ranges;
 /// `assignee_ids` first and `label_ids` second (`:187-190`). The write-only
 /// pair is absent from `super().to_representation` — the echo keys sit at
 /// the END, not in declared position.
-pub const ISSUE_CREATE_FIELDS: [&str; 41] = [
+pub const ISSUE_CREATE_FIELDS: [&str; 42] = [
     "id",
     "state_id",
     "parent_id",
     "assigned_pod_id",
+    "assigned_runner_id",
     "project_id",
     "workspace_id",
     "created_at",
@@ -157,6 +158,7 @@ pub struct IssueCreateRow<'a> {
     pub state_id: Option<&'a str>,
     pub parent_id: Option<&'a str>,
     pub assigned_pod_id: Option<&'a str>,
+    pub assigned_runner_id: Option<&'a str>,
     pub project_id: &'a str,
     pub workspace_id: &'a str,
     pub created_at: &'a str,
@@ -206,6 +208,7 @@ pub struct IssueCreateView {
     pub state_id: Option<String>,
     pub parent_id: Option<String>,
     pub assigned_pod_id: Option<String>,
+    pub assigned_runner_id: Option<String>,
     pub project_id: String,
     pub workspace_id: String,
     pub created_at: String,
@@ -285,6 +288,7 @@ pub fn issue_create_to_representation(
         state_id: row.state_id.map(str::to_owned),
         parent_id: row.parent_id.map(str::to_owned),
         assigned_pod_id: row.assigned_pod_id.map(str::to_owned),
+        assigned_runner_id: row.assigned_runner_id.map(str::to_owned),
         project_id: row.project_id.to_owned(),
         workspace_id: row.workspace_id.to_owned(),
         created_at: row.created_at.to_owned(),
@@ -557,6 +561,11 @@ pub struct ValidateAttrs<'a> {
     /// `attrs["assigned_pod"]` (step 3): outer `None` = key absent,
     /// `Some(None)` = explicit clear, `Some(Some)` = resolved pod.
     pub assigned_pod: Option<Option<PodRef>>,
+    /// `attrs["assigned_runner"]` (step 3.5, design §7.1): outer `None`
+    /// = key absent (a pod-only request skips the E-checks), inner
+    /// `None` = explicit clear (E8 applies), `Some(id)` = dedicated
+    /// choice (E1-E8).
+    pub assigned_runner: Option<Option<uuid::Uuid>>,
     /// `attrs["agent_executor"]` (step 4): outer `None` = key absent,
     /// `Some(None)` = clear the override, `Some(Some)` = pinned value.
     pub agent_executor: Option<Option<&'a str>>,
@@ -678,6 +687,10 @@ pub struct ValidateProbes<'a> {
     /// but none is online, exactly as Python's `if` runs the paused
     /// probe last.
     pub paused_exists: &'a dyn Fn() -> bool,
+    /// The `validate_execution_target` E-check verdict (design §7.1):
+    /// the failing [`FieldError`](crate::domain::issue_assignment::FieldError)
+    /// or `None` when the choice is assignable.
+    pub runner_error: &'a dyn Fn() -> Option<crate::domain::issue_assignment::FieldError>,
 }
 
 /// The attrs `validate()` mutates, returned on success. Every other key
@@ -810,6 +823,20 @@ pub fn issue_create_validate(
         label_ids: None,
         agent_executor: None,
     };
+
+    // Step 3.5. The dedicated-runner E-check (`validate_execution_target`,
+    // design §7.1): runs only when the runner key is present in attrs,
+    // after the pod checks and before the executor normalize, exactly
+    // Django's order. The wire key is `assigned_runner` (the attrs /
+    // source key), not the posted `assigned_runner_id`.
+    if attrs.assigned_runner.is_some() {
+        if let Some(error) = (probes.runner_error)() {
+            return Err(CreateValidateError::Field {
+                field: error.field,
+                message: Cow::Borrowed(error.detail),
+            });
+        }
+    }
 
     // Step 4. agent_executor (#2903, `issue_assignment.py:28-51`): key
     // presence, not truthiness. Unknown is a 400; deprecated choices
@@ -1425,6 +1452,7 @@ mod tests {
             start_date: None,
             target_date: None,
             assigned_pod: None,
+            assigned_runner: None,
             agent_executor: None,
             description_html: None,
             description_binary: None,
@@ -1478,6 +1506,7 @@ mod tests {
         enrolled_exists: Box<dyn Fn() -> bool>,
         online_exists: Box<dyn Fn() -> bool>,
         paused_exists: Box<dyn Fn() -> bool>,
+        runner_error: Box<dyn Fn() -> Option<crate::domain::issue_assignment::FieldError>>,
     }
 
     impl ProbeBank {
@@ -1502,6 +1531,7 @@ mod tests {
                 enrolled_exists: Box::new(|| true),
                 online_exists: Box::new(|| true),
                 paused_exists: Box::new(|| false),
+                runner_error: Box::new(|| None),
             }
         }
 
@@ -1521,6 +1551,7 @@ mod tests {
                 enrolled_exists: &self.enrolled_exists,
                 online_exists: &self.online_exists,
                 paused_exists: &self.paused_exists,
+                runner_error: &self.runner_error,
             }
         }
     }
@@ -1740,8 +1771,30 @@ mod tests {
             serde_json::json!({ "assigned_pod_id": POD_DIFFERENT_PROJECT_MESSAGE }),
         );
 
-        // Step 4 wins once the pod key is absent.
+        // Step 3.5 (the dedicated-runner E-check) wins once the pod
+        // key is absent but a runner key is present.
         attrs.assigned_pod = None;
+        attrs.assigned_runner = Some(Some(uid(30)));
+        bank.runner_error = Box::new(|| {
+            Some(crate::domain::issue_assignment::FieldError {
+                field: "assigned_runner",
+                code: "runner_not_found",
+                detail: "runner not found",
+            })
+        });
+        let probes = bank.probes();
+        let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
+            .expect_err("runner wins");
+        assert_eq!(
+            err.raised_detail().expect("raised"),
+            serde_json::json!({ "assigned_runner": "runner not found" }),
+        );
+
+        // Step 4 wins once the runner key is absent (and the E-check
+        // no longer armed).
+        attrs.assigned_runner = None;
+        bank.runner_error = Box::new(|| None);
+        let probes = bank.probes();
         let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
             .expect_err("executor wins");
         assert_eq!(
@@ -2485,6 +2538,7 @@ mod tests {
                 })
             },
             paused_exists: Box::new(|| false),
+            runner_error: Box::new(|| None),
         };
         let probes = bank.probes();
         let cloud = cloud_settings(false);
@@ -2535,8 +2589,8 @@ mod tests {
         let sent = serde_json::json!(["a", "b"]);
         assert_eq!(echo_initial_ids(Some(&sent)), sent);
 
-        // 41 wire keys with the echo pair appended last (:187-190).
-        assert_eq!(ISSUE_CREATE_FIELDS.len(), 41);
+        // 42 wire keys with the echo pair appended last (:187-190).
+        assert_eq!(ISSUE_CREATE_FIELDS.len(), 42);
         assert_eq!(ISSUE_CREATE_FIELDS[0], "id");
         assert_eq!(
             &ISSUE_CREATE_FIELDS[ISSUE_CREATE_FIELDS.len() - 2..],
@@ -2552,6 +2606,7 @@ mod tests {
             state_id: Some("22222222-2222-2222-2222-222222222222"),
             parent_id: None,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             project_id: "33333333-3333-3333-3333-333333333333",
             workspace_id: "44444444-4444-4444-4444-444444444444",
             created_at: "2026-10-03T00:00:00Z",

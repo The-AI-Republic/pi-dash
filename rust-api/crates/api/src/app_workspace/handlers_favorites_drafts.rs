@@ -6050,6 +6050,9 @@ async fn run_issue_create_validate(
             _ => None,
         }),
         assigned_pod,
+        // Drafts convert to issues without a runner (design §7: the
+        // web app and v1 surfaces own the write path).
+        assigned_runner: None,
         agent_executor,
         description_html: text("description_html"),
         description_binary: None,
@@ -6226,6 +6229,7 @@ async fn run_issue_create_validate(
         enrolled_exists: &|| enrolled_exists,
         online_exists: &|| online_exists,
         paused_exists: &|| paused_exists,
+        runner_error: &|| None,
     };
     let ctx = ValidateContext {
         project_id: Some(*project_id),
@@ -6310,6 +6314,7 @@ fn assemble_new_issue(
         workpad: String::new(),
         created_via: opt_text(values, "created_via"),
         assigned_pod_id: pod,
+        assigned_runner_id: None,
         agent_executor: opt_text(values, "agent_executor"),
     };
     Ok((
@@ -6504,6 +6509,7 @@ async fn render_draft_to_issue_body(
     let estimate_point = row.estimate_point_id.map(|value| value.to_string());
     let issue_type = row.type_id.map(|value| value.to_string());
     let assigned_pod_id = row.assigned_pod_id.map(|value| value.to_string());
+    let assigned_runner_id = row.assigned_runner_id.map(|value| value.to_string());
     let created_at = render_datetime_in(&row.created_at, timezone);
     let updated_at = render_datetime_in(&row.updated_at, timezone);
     let deleted_at = row
@@ -6534,6 +6540,7 @@ async fn render_draft_to_issue_body(
         parent_id: parent.as_deref(),
         issue_type: issue_type.as_deref(),
         assigned_pod_id: assigned_pod_id.as_deref(),
+        assigned_runner_id: assigned_runner_id.as_deref(),
         assignees: &assignee_refs,
         labels: &label_refs,
         name: row.name.as_str(),
