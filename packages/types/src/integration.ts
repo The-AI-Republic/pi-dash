@@ -4,6 +4,14 @@
  * See the LICENSE file for details.
  */
 
+/**
+ * GitHub-compatibility types (PDASHOSS01-359, design Phase 10).
+ *
+ * The server stores data in generic ``git_*`` tables; ``IGithub*`` types
+ * describe the byte-identical GitHub-only compatibility routes. Prefer the
+ * generic ``IGit*`` types for new code.
+ */
+
 import type { IUserLite } from "./users";
 
 // All the app integrations that are available

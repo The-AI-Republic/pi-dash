@@ -123,6 +123,12 @@ export class ProjectService extends APIService {
       });
   }
 
+  /**
+   * GitHub-compatibility binding wrappers (PDASHOSS01-359, design Phase 10).
+   * The server stores bindings generically; these routes stay byte-identical.
+   * Prefer the ``getGitRepositoryBinding``/``bindGitRepository``/
+   * ``setGitSyncEnabled``/``unbindGitRepository`` methods for new code.
+   */
   async getGithubBindingStatus(workspaceSlug: string, projectId: string): Promise<IGithubProjectBindingStatus> {
     return this.get(`/api/workspaces/${workspaceSlug}/projects/${projectId}/github/`)
       .then((response) => response?.data)

@@ -220,12 +220,12 @@ class TestCompletionCommentSignal:
         mock_delay.assert_not_called()
 
     @patch("pi_dash.bgtasks.git_sync_task.post_completion_comment.delay")
-    @patch("pi_dash.bgtasks.github_sync_task.post_completion_comment.delay")
     def test_legacy_github_sync_row_does_not_fire(
-        self, mock_legacy_delay, mock_git_delay, db, project, workspace, started_state, completed_state,
+        self, mock_delay, db, project, workspace, started_state, completed_state,
         github_repo_sync,
     ):
-        # PDASHOSS01-359: legacy-only rows are ignored.
+        # PDASHOSS01-359: legacy-only rows are ignored (legacy poller module
+        # deleted in Part 4a; generic task must not fire either).
         issue = Issue.objects.create(
             project=project,
             workspace=workspace,
@@ -246,5 +246,4 @@ class TestCompletionCommentSignal:
         )
         issue.state = completed_state
         issue.save()
-        mock_git_delay.assert_not_called()
-        mock_legacy_delay.assert_not_called()
+        mock_delay.assert_not_called()

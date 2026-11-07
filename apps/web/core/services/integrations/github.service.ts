@@ -4,6 +4,17 @@
  * See the LICENSE file for details.
  */
 
+/**
+ * GitHub-compatibility service (PDASHOSS01-359, design Phase 10).
+ *
+ * The server stores data in generic ``git_*`` tables; these GitHub-only
+ * routes are kept as byte-identical compatibility surfaces. PAT/App methods
+ * remain live for GitHub-specific flows (profile PAT/App cards); the generic
+ * ``GitIntegrationService`` owns accounts/repos for new code. Issue PR methods
+ * are kept for compatibility — new callers should use
+ * ``GitIntegrationService`` code-review methods. Responses do not change.
+ */
+
 import { API_BASE_URL } from "@pi-dash/constants";
 import type {
   IGithubAppInstallationStatus,

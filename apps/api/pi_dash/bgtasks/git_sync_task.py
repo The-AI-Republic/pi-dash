@@ -10,9 +10,10 @@ import logging
 
 from celery import shared_task
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.utils import timezone
+from django.utils.html import escape
 
-from pi_dash.bgtasks.github_sync_task import _safe_render, pi_dash_issue_url
 from pi_dash.db.models import GitCommentSync, GitIssueSync, GitRepositoryBinding, Issue, IssueComment, State
 from pi_dash.integrations.git.adapters.base import (
     GitProviderAuthError,
@@ -22,7 +23,9 @@ from pi_dash.integrations.git.adapters.base import (
 from pi_dash.integrations.git.dtos import RemoteComment, RemoteIssue, RemoteRepository
 from pi_dash.integrations.git.registry import get_adapter
 from pi_dash.integrations.git.services import account_credential
+from pi_dash.utils.content_validator import validate_html_content
 from pi_dash.utils.exception_logger import log_exception
+from pi_dash.utils.html_processor import strip_tags
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,46 @@ logger = logging.getLogger(__name__)
 def _is_enabled() -> bool:
     """Instance-level kill switch for provider-neutral Git sync."""
     return getattr(settings, "GIT_SYNC_ENABLED", getattr(settings, "GITHUB_SYNC_ENABLED", True))
+
+
+def _markdown_to_html(body: str | None) -> str:
+    """Render upstream markdown body to a minimal HTML representation, with
+    each paragraph escaped (defense in depth — `validate_html_content` is the
+    second layer). Paragraph-per-blank-line is enough for MVP without a full
+    markdown engine."""
+    if not body:
+        return "<p></p>"
+    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return "<p></p>"
+    return "".join(
+        f"<p>{escape(p).replace(chr(10), '<br/>')}</p>" for p in paragraphs
+    )
+
+
+def _safe_render(body: str | None) -> tuple[str, str]:
+    """Render an upstream body to (description_html, description_stripped),
+    sanitized through `validate_html_content` (nh3) so the same allow-list
+    that protects user-written content also protects sync-imported content.
+
+    Falls back to fully-escaped plain text if the sanitizer rejects outright."""
+    rendered = _markdown_to_html(body)
+    is_valid, _err, sanitized = validate_html_content(rendered)
+    if not is_valid:
+        safe_html = f"<p>{escape(body or '').replace(chr(10), '<br/>')}</p>"
+    else:
+        safe_html = sanitized if sanitized is not None else rendered
+    return safe_html, strip_tags(safe_html) or ""
+
+
+def pi_dash_issue_url(issue: Issue) -> str:
+    """Absolute deep-link to an issue in the Pi Dash UI. Used in completion
+    comments posted to the provider, where relative paths aren't clickable."""
+    base = getattr(settings, "WEB_URL", None) or getattr(settings, "APP_BASE_URL", None)
+    if not base:
+        raise ImproperlyConfigured("WEB_URL or APP_BASE_URL must be set for provider completion comments")
+    workspace = issue.workspace
+    return f"{base.rstrip('/')}/{workspace.slug}/projects/{issue.project_id}/issues/{issue.id}"
 
 
 def _project_default_state(project_id) -> State | None:

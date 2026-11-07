@@ -98,9 +98,11 @@ export const GITHUB_INTEGRATION_STATUS = (workspaceSlug: string) =>
 export const GITHUB_INTEGRATION_REPOS = (workspaceSlug: string, page: number) =>
   `GITHUB_INTEGRATION_REPOS_${workspaceSlug.toUpperCase()}_${page}`;
 export const GIT_PROJECT_BINDING = (projectId: string) => `GIT_PROJECT_BINDING_${projectId.toUpperCase()}`;
+/** @deprecated GitHub-compatibility alias (PDASHOSS01-359); use GIT_PROJECT_BINDING. */
 export const GITHUB_PROJECT_BINDING = GIT_PROJECT_BINDING;
 export const GITHUB_APP_STATUS = "GITHUB_APP_STATUS";
 export const GIT_ISSUE_CODE_REVIEWS = (issueId: string) => `GIT_ISSUE_CODE_REVIEWS_${issueId.toUpperCase()}`;
+/** @deprecated GitHub-compatibility alias (PDASHOSS01-359); use GIT_ISSUE_CODE_REVIEWS. */
 export const GITHUB_ISSUE_PULL_REQUESTS = GIT_ISSUE_CODE_REVIEWS;
 export const GIT_PROVIDER_ACCOUNTS = (workspaceSlug: string) => `GIT_PROVIDER_ACCOUNTS_${workspaceSlug.toUpperCase()}`;
 

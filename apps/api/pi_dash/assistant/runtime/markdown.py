@@ -5,7 +5,7 @@
 """Convert assistant-authored markdown to sanitized HTML for issue/comment bodies.
 
 Uses the same minimal paragraph-per-blank-line rendering + nh3 sanitization as
-the GitHub sync importer (``bgtasks/github_sync_task.py``); there is no Python
+the Git sync importer (``bgtasks/git_sync_task.py``); there is no Python
 Tiptap converter, so ``description_json`` is stored empty. See
 ``.ai_design/integrate_ai_agent/02-backend.md`` §4.2.
 """
