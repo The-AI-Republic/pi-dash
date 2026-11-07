@@ -43,7 +43,6 @@ crates/api/src/app_scheduler/mod.rs 1
 crates/api/src/app_views_search/handlers_search.rs 3
 crates/api/src/app_views_search/handlers_views.rs 29
 crates/api/src/app_views_search/mod.rs 2
-crates/api/src/app_workspace/handlers_favorites_drafts.rs 61
 crates/api/src/app_workspace/handlers_invites.rs 33
 crates/api/src/app_workspace/handlers_lists.rs 9
 crates/api/src/app_workspace/handlers_members.rs 11
