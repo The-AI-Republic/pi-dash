@@ -66,10 +66,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono_tz::Tz;
-use sea_orm::sea_query::{Alias, Condition, Expr};
+use sea_orm::sea_query::{Alias, Condition, Expr, Func, SelectStatement, SimpleExpr};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType,
-    PaginatorTrait, QueryFilter, QuerySelect, QueryTrait, RelationTrait, Set,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, QueryTrait, Set,
 };
 use serde_json::Value;
 use sqlx::PgPool;
@@ -78,10 +78,9 @@ use pidash_auth::permissions::{project, workspace};
 use pidash_auth::scope::TenantScope;
 
 use pidash_db::entity::{
-    api_tokens, cycles, dev_machine, estimates, file_assets, intake_issues, intakes, issues,
-    labels, machine_token, modules, project_identifiers, project_members, project_pages,
-    project_user_properties, projects, states, user_favorites, users, workspace_members,
-    workspaces,
+    api_tokens, dev_machine, estimates, file_assets, intakes, machine_token, project_identifiers,
+    project_members, project_user_properties, projects, states, user_favorites, users,
+    workspace_members, workspaces,
 };
 
 use crate::license::AssetUrl;
@@ -2217,80 +2216,130 @@ pub async fn summary_inner(
     Ok(json_ok(text))
 }
 
-/// Summary counts (`_get_all_summary_counts`): a count per requested
-/// field. Soft-deleted rows never count (the default managers); issues
-/// exclude the triage state-group (`views/project.py:643-649`).
-///
-/// The old one-round-trip `COALESCE(subquery)` statement becomes at most
-/// eight `COUNT` queries (one per requested field); the returned counts
-/// are identical.
+/// One `COUNT(*)` scalar subquery for [`summary_counts`]: the table
+/// predicate is `project_id = <pid> AND deleted_at IS NULL` (the
+/// default-manager scope); `members` adds `is_active` and `issues` joins
+/// `states` for the triage-group exclusion. Values stay on the builder
+/// (no [`Expr::cust`] placeholders).
+fn summary_count_subquery(field: &str, pid: uuid::Uuid) -> SimpleExpr {
+    fn col(table: &str, column: &str) -> Expr {
+        Expr::col((Alias::new(table), Alias::new(column)))
+    }
+    fn count_for(table: &str, pid: uuid::Uuid, extra: Option<Condition>) -> SelectStatement {
+        let mut sub = sea_orm::sea_query::Query::select();
+        sub.expr(Func::count(col(table, "id")));
+        sub.from(Alias::new(table));
+        let mut cond = Condition::all()
+            .add(col(table, "project_id").eq(pid))
+            .add(col(table, "deleted_at").is_null());
+        if let Some(extra) = extra {
+            cond = cond.add(extra);
+        }
+        sub.cond_where(cond);
+        sub
+    }
+    let sub = match field {
+        "members" => count_for(
+            "project_members",
+            pid,
+            Some(Condition::all().add(col("project_members", "is_active").eq(true))),
+        ),
+        "states" => count_for("states", pid, None),
+        "labels" => count_for("labels", pid, None),
+        "cycles" => count_for("cycles", pid, None),
+        "modules" => count_for("modules", pid, None),
+        "issues" => {
+            let mut sub = sea_orm::sea_query::Query::select();
+            sub.expr(Func::count(col("i", "id")));
+            sub.from_as(Alias::new("issues"), Alias::new("i"));
+            sub.join_as(
+                JoinType::InnerJoin,
+                Alias::new("states"),
+                Alias::new("s"),
+                col("s", "id").equals((Alias::new("i"), Alias::new("state_id"))),
+            );
+            sub.cond_where(
+                Condition::all()
+                    .add(col("i", "project_id").eq(pid))
+                    .add(col("i", "deleted_at").is_null())
+                    .add(col("s", "group").ne("triage")),
+            );
+            sub
+        }
+        "intakes" => count_for("intake_issues", pid, None),
+        "pages" => count_for("project_pages", pid, None),
+        _ => {
+            // Unreachable: callers iterate `ALLOWED_SUMMARY_FIELDS`.
+            // Fall back to a constant zero subquery `(SELECT 0)`.
+            let mut sub = sea_orm::sea_query::Query::select();
+            sub.expr(Expr::value(0));
+            sub
+        }
+    };
+    SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
+}
+
+/// Annotation alias is `pages_count` for `pages` (the `Project.pages`
+/// M2M clash, `views/project.py:608-610`).
+fn summary_alias(field: &str) -> &str {
+    if field == "pages" {
+        "pages_count"
+    } else {
+        field
+    }
+}
+
+/// One statement with one `COUNT(*)` scalar subquery column per
+/// requested field, in sorted order. Empty in, `None` out (no query).
+fn summary_statement(project_id: uuid::Uuid, requested: &[&str]) -> Option<SelectStatement> {
+    let mut ordered: Vec<&str> = ALLOWED_SUMMARY_FIELDS
+        .iter()
+        .filter(|f| requested.contains(f))
+        .copied()
+        .collect();
+    ordered.sort();
+    if ordered.is_empty() {
+        return None;
+    }
+    let mut stmt = sea_orm::sea_query::Query::select();
+    for field in &ordered {
+        stmt.expr_as(
+            summary_count_subquery(field, project_id),
+            Alias::new(summary_alias(field).to_owned()),
+        );
+    }
+    Some(stmt)
+}
+
+/// One-round-trip summary counts (`_get_all_summary_counts`): a
+/// `COALESCE(subquery, 0)` column per requested field. Soft-deleted rows
+/// never count (the default managers); issues exclude the triage
+/// state-group (`views/project.py:643-649`).
 pub async fn summary_counts(
     pool: &PgPool,
     project_id: &uuid::Uuid,
     requested: &[&str],
 ) -> Result<HashMap<String, i64>, Denial> {
-    let db = orm(pool);
-    let pid = *project_id;
-    let mut out = HashMap::new();
-    for field in ALLOWED_SUMMARY_FIELDS
+    let Some(stmt) = summary_statement(*project_id, requested) else {
+        return Ok(HashMap::new());
+    };
+    let mut ordered: Vec<&str> = ALLOWED_SUMMARY_FIELDS
         .iter()
         .filter(|f| requested.contains(f))
-    {
-        let count: u64 = match *field {
-            "members" => project_members::Entity::find()
-                .filter(project_members::Column::ProjectId.eq(pid))
-                .filter(project_members::Column::IsActive.eq(true))
-                .filter(project_members::Column::DeletedAt.is_null())
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            "states" => states::Entity::find()
-                .filter(states::Column::ProjectId.eq(pid))
-                .filter(states::Column::DeletedAt.is_null())
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            "labels" => labels::Entity::find()
-                .filter(labels::Column::ProjectId.eq(pid))
-                .filter(labels::Column::DeletedAt.is_null())
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            "cycles" => cycles::Entity::find()
-                .filter(cycles::Column::ProjectId.eq(pid))
-                .filter(cycles::Column::DeletedAt.is_null())
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            "modules" => modules::Entity::find()
-                .filter(modules::Column::ProjectId.eq(pid))
-                .filter(modules::Column::DeletedAt.is_null())
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            "issues" => issues::Entity::find()
-                .join(JoinType::InnerJoin, issues::Relation::States.def())
-                .filter(issues::Column::ProjectId.eq(pid))
-                .filter(issues::Column::DeletedAt.is_null())
-                .filter(states::Column::Group.ne("triage"))
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            "intakes" => intake_issues::Entity::find()
-                .filter(intake_issues::Column::ProjectId.eq(pid))
-                .filter(intake_issues::Column::DeletedAt.is_null())
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            "pages" => project_pages::Entity::find()
-                .filter(project_pages::Column::ProjectId.eq(pid))
-                .filter(project_pages::Column::DeletedAt.is_null())
-                .count(&db)
-                .await
-                .map_err(|_| Denial::ServerError)?,
-            _ => 0,
-        };
-        out.insert((*field).to_owned(), count as i64);
+        .copied()
+        .collect();
+    ordered.sort();
+    let row = orm(pool)
+        .query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let mut out = HashMap::with_capacity(ordered.len());
+    for field in ordered {
+        let value: i64 = row
+            .try_get("", summary_alias(field))
+            .map_err(|_| Denial::ServerError)?;
+        out.insert(field.to_owned(), value);
     }
     Ok(out)
 }
@@ -3762,6 +3811,61 @@ pub async fn insert_default_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+
+    #[test]
+    fn summary_statement_is_one_statement_with_count_columns() {
+        // `summary_counts` stays one round-trip: one `COUNT(*)` scalar
+        // subquery column per field, sorted, `pages` aliased `pages_count`.
+        // Empty in, `None` out (no query).
+        let pid = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        assert!(summary_statement(pid, &[]).is_none());
+        assert!(summary_statement(pid, &["bogus"]).is_none());
+        let sql = summary_statement(pid, ALLOWED_SUMMARY_FIELDS)
+            .expect("full statement")
+            .to_string(PostgresQueryBuilder);
+        // One outer SELECT (subqueries are nested, not extra statements).
+        assert_eq!(sql.matches("SELECT").count(), 9, "{sql}");
+        assert!(!sql.contains(';'), "{sql}");
+        for alias in [
+            r#"AS "members""#,
+            r#"AS "states""#,
+            r#"AS "labels""#,
+            r#"AS "cycles""#,
+            r#"AS "modules""#,
+            r#"AS "issues""#,
+            r#"AS "intakes""#,
+            r#"AS "pages_count""#,
+        ] {
+            assert!(sql.contains(alias), "{sql}");
+        }
+        // Sorted column order (old `ordered.sort()`).
+        let members_at = sql.find(r#"AS "members""#).unwrap();
+        let pages_at = sql.find(r#"AS "pages_count""#).unwrap();
+        assert!(members_at < pages_at, "{sql}");
+        // Subquery predicates: soft-delete scope on every table,
+        // `is_active` only on members, triage-group only on issues.
+        assert!(
+            sql.contains(
+                r#"FROM "project_members" WHERE "project_members"."project_id" = '11111111-1111-1111-1111-111111111111' AND "project_members"."deleted_at" IS NULL AND "project_members"."is_active" = TRUE"#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"FROM "states" WHERE "states"."project_id" = '11111111-1111-1111-1111-111111111111' AND "states"."deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.contains(r#"INNER JOIN "states" AS "s" ON "s"."id" = "i"."state_id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""s"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#"FROM "intake_issues""#), "{sql}");
+        assert!(sql.contains(r#"FROM "project_pages""#), "{sql}");
+        // Narrow request renders only that column.
+        let narrow = summary_statement(pid, &["states"])
+            .expect("narrow statement")
+            .to_string(PostgresQueryBuilder);
+        assert!(narrow.contains(r#"AS "states""#), "{narrow}");
+        assert!(!narrow.contains(r#"AS "members""#), "{narrow}");
+    }
 
     #[test]
     fn soft_delete_message_shape() {
