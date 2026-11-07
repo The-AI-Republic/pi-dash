@@ -781,7 +781,6 @@ pub mod jobs {
     pub use pidash_jobs::integrations::github_signals::dispatch_job;
     pub use pidash_jobs::integrations::github_signals::DispatchOutcome;
     pub use pidash_jobs::integrations::github_signals::DispatchTarget;
-    pub use pidash_jobs::integrations::github_sync::TASK_NAMES as GITHUB_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::license::tasks::TASK_NAME;
     pub use pidash_jobs::loop_scan::TASK_NAMES as LOOP_SCAN_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::orchestration::bounce_issue_no_eligible_runner;
