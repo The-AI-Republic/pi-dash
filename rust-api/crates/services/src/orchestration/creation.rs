@@ -270,7 +270,7 @@ pub fn run_select_sql() -> String {
 /// the #2903 engine facts: provisioning, pod_dispatch, and engine_paused
 /// (`dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> ''`)
 /// — the locality-pin gate (`locality_pin_allowed`).
-pub const RUNNER_SELECT_SQL: &str = "SELECT runner.id, runner.pod_id, runner.status, runner.last_heartbeat_at, runner.paused_at, runner.provisioning, runner.pod_dispatch, (dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> '') AS engine_paused FROM runner LEFT JOIN dev_machine dm ON dm.id = runner.dev_machine_id WHERE runner.id = $1";
+pub const RUNNER_SELECT_SQL: &str = "SELECT runner.id, runner.pod_id, runner.status, runner.last_heartbeat_at, runner.paused_at, runner.provisioning, runner.pod_dispatch, (dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> '') AS engine_paused, runner.name FROM runner LEFT JOIN dev_machine dm ON dm.id = runner.dev_machine_id WHERE runner.id = $1";
 
 /// The decoded [`RUNNER_SELECT_SQL`] row (`id, pod_id, status,
 /// last_heartbeat_at, paused_at, provisioning, pod_dispatch,
@@ -284,6 +284,7 @@ pub type RunnerSelectRow = (
     String,
     String,
     bool,
+    String,
 );
 
 /// The assigned pod (`service.py:329`): the default `Pod.objects`
@@ -746,6 +747,9 @@ pub struct RunnerView {
     pub id: Uuid,
     pub pod_id: Uuid,
     pub status: String,
+    /// `runner.name` (the H-13/release and dedicated-bounce comments
+    /// name the runner).
+    pub name: String,
     /// `70d684af`: the pin check needs the heartbeat freshness.
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     /// `09738d222`: the pin check skips operator-paused runners.
@@ -3067,6 +3071,7 @@ mod tests {
             id: uid(0x60),
             pod_id: uid(0x50),
             status: "online".to_owned(),
+            name: "runner-fixture".to_owned(),
             last_heartbeat_at: Some(clock),
             paused_at: None,
             provisioning: "personal".to_owned(),
@@ -3078,6 +3083,7 @@ mod tests {
         // M2: revoked.
         let revoked = RunnerView {
             status: RUNNER_STATUS_REVOKED.to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -3102,6 +3108,7 @@ mod tests {
         // M6 (`70d684af`): offline.
         let offline = RunnerView {
             status: RUNNER_STATUS_OFFLINE.to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -3129,6 +3136,7 @@ mod tests {
         // M9: busy but fresh stays eligible (the pinned run waits for it).
         let busy = RunnerView {
             status: "busy".to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -3140,6 +3148,7 @@ mod tests {
         // the heartbeat — not the status — rules it out.
         let busy_stale = RunnerView {
             status: "busy".to_owned(),
+            name: "runner-fixture".to_owned(),
             last_heartbeat_at: Some(clock - chrono::Duration::seconds(3600)),
             ..runner.clone()
         };
@@ -3535,6 +3544,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
                 provisioning: "personal".to_owned(),
@@ -3566,6 +3576,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
                 provisioning: "personal".to_owned(),
@@ -3692,6 +3703,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
                 provisioning: "personal".to_owned(),
@@ -3833,6 +3845,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
                 provisioning: "personal".to_owned(),
@@ -3864,6 +3877,7 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
                 provisioning: "personal".to_owned(),

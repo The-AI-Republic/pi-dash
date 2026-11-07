@@ -263,6 +263,16 @@ pub(crate) async fn drain_pod_by_id(
         let pod_dispatch: String = runner_row.try_get("", "pod_dispatch").map_err(map)?;
         let machine_id: Option<Uuid> = runner_row.try_get("", "dev_machine_id").map_err(map)?;
         let visibility: i32 = runner_row.try_get("", "visibility").map_err(map)?;
+        // §10.2 alternation input: the runner's most recent
+        // assigned run (by `assigned_at`) had a dedicated pin.
+        let last = agent_run::Entity::find()
+            .filter(agent_run::Column::RunnerId.eq(runner_id))
+            .filter(agent_run::Column::AssignedAt.is_not_null())
+            .order_by_desc(agent_run::Column::AssignedAt)
+            .one(&txn)
+            .await
+            .map_err(map)?;
+        let last_dedicated = matches!(last, Some(run) if run.pinned_runner_id.is_some() && run.pin_kind == "dedicated");
         let facts = {
             let is_engine = provisioning == "desktop_bundled";
             let pod_member = pod_dispatch == "pod_member";
@@ -272,6 +282,7 @@ pub(crate) async fn drain_pod_by_id(
                     pod_member,
                     paused: false,
                     team_runs: true,
+                    last_dedicated,
                 }
             } else {
                 let (paused, team_runs) = match machine_id {
@@ -296,6 +307,7 @@ pub(crate) async fn drain_pod_by_id(
                     pod_member,
                     paused,
                     team_runs,
+                    last_dedicated,
                 }
             }
         };

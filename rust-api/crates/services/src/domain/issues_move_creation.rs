@@ -249,11 +249,13 @@ impl CreationSeam for SeaHandoffStore<'_> {
                     provisioning,
                     pod_dispatch,
                     engine_paused,
+                    name,
                 ): RunnerSelectRow = row.try_get_many_by_index().map_err(Self::db)?;
                 Ok(Some(RunnerView {
                     id,
                     pod_id,
                     status,
+                    name,
                     last_heartbeat_at,
                     paused_at,
                     provisioning,

@@ -100,6 +100,14 @@ pub const REASON_NO_ELIGIBLE_RUNNER: &str = "no-eligible-runner";
 /// Cloud `_bounce_issue_no_eligible_runner` reason (`:967`): the execution
 /// principal holds no usable LLM config.
 pub const REASON_NO_LLM_CONFIG: &str = "no-llm-config";
+/// Dedicated `_bounce_issue_no_eligible_runner` reason
+/// (`scheduling.py:994`): the assigned runner's usage rule excludes
+/// the run's creator or trigger.
+pub const REASON_DEDICATED_RUNNER_NOT_ELIGIBLE: &str = "dedicated-runner-not-eligible";
+/// Dedicated lost-runner `_bounce_issue_no_eligible_runner` reason
+/// (`scheduling.py:1174`): the assigned runner was revoked or
+/// deleted (§13.1).
+pub const REASON_DEDICATED_RUNNER_REVOKED: &str = "dedicated-runner-revoked";
 
 /// The `no-llm-config` bounce body (`:1064-1070`), byte-verbatim.
 /// `format_html` with no args is a plain literal.
@@ -109,12 +117,18 @@ pub const BOUNCE_BODY_NO_LLM_CONFIG: &str = "<p><strong>Agent run skipped — no
 /// except `no-llm-config`.
 pub const BOUNCE_BODY_DEFAULT: &str = "<p><strong>Agent run skipped — no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>";
 
-/// Pick the bounce body (`:1064-1077`): only `no-llm-config` differs.
-pub fn bounce_body(reason: &str) -> &'static str {
-    if reason == REASON_NO_LLM_CONFIG {
-        BOUNCE_BODY_NO_LLM_CONFIG
-    } else {
-        BOUNCE_BODY_DEFAULT
+/// Pick the bounce body (`:1064-1077`), with `reason_name` naming the
+/// runner for the dedicated arms (`:1165-1182`).
+pub fn bounce_body(reason: &str, reason_name: &str) -> String {
+    match reason {
+        REASON_NO_LLM_CONFIG => BOUNCE_BODY_NO_LLM_CONFIG.to_owned(),
+        REASON_DEDICATED_RUNNER_NOT_ELIGIBLE => format!(
+            "<p><strong>Agent run skipped — dedicated runner not eligible.</strong></p><p>Runner <strong>{reason_name}</strong> cannot serve this run: its usage rule excludes the run's creator or trigger. Reassign the issue to a runner that can serve it, or return it to the pod.</p>"
+        ),
+        REASON_DEDICATED_RUNNER_REVOKED => format!(
+            "<p><strong>Dedicated runner lost.</strong></p><p>Runner <strong>{reason_name}</strong> was revoked or deleted, so this issue is no longer assigned to a dedicated runner. Choose a new runner or return the issue to the pod.</p>"
+        ),
+        _ => BOUNCE_BODY_DEFAULT.to_owned(),
     }
 }
 
@@ -1024,6 +1038,7 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
             issue_id,
             triggered_by,
             REASON_NO_LLM_CONFIG,
+            "",
             now,
             jitter_secs,
         )
@@ -1053,11 +1068,25 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
             logs: Vec::new(),
         });
     }
+    // §9.4: a dedicated issue bounced for usage-rule exclusion reports
+    // dedicated-runner-not-eligible and names the runner + failing rule.
+    let (reason, reason_name): (&str, String) = match issue.assigned_runner_id {
+        Some(assigned_id) => {
+            let name = CreationSeam::runner(seam, assigned_id)
+                .await
+                .map_err(DispatchError::Store)?
+                .map(|runner| runner.name)
+                .unwrap_or_else(|| "the dedicated runner".to_owned());
+            (REASON_DEDICATED_RUNNER_NOT_ELIGIBLE, name)
+        }
+        None => (REASON_NO_ELIGIBLE_RUNNER, String::new()),
+    };
     let bounced = bounce_issue_no_eligible_runner(
         seam,
         issue_id,
         triggered_by,
-        REASON_NO_ELIGIBLE_RUNNER,
+        reason,
+        &reason_name,
         now,
         jitter_secs,
     )
@@ -1081,12 +1110,13 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     issue_id: Uuid,
     triggered_by: &str,
     reason: &str,
+    reason_name: &str,
     now: DateTime<Utc>,
     jitter_secs: f64,
 ) -> Result<BounceOutcome, DispatchError> {
     let mut logs = Vec::new();
     logs.push(bounce_log_line(issue_id, reason, triggered_by));
-    let body = bounce_body(reason);
+    let body = bounce_body(reason, reason_name);
 
     let issue = CreationSeam::issue(seam, issue_id)
         .await
@@ -1181,7 +1211,7 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
         issue_id,
         actor_id,
         comment_html: body.to_owned(),
-        comment_stripped: comment_stripped_for(body),
+        comment_stripped: comment_stripped_for(&body),
     })
     .await?;
     Ok(BounceOutcome { moved_to, logs })
@@ -1206,6 +1236,7 @@ async fn bounce_no_creator<S: DispatchSeam>(
             issue_id,
             triggered_by,
             REASON_NO_LLM_CONFIG,
+            "",
             now,
             jitter_secs,
         )
@@ -2783,7 +2814,7 @@ mod tests {
         assert_eq!(b1.as_str().unwrap(), BOUNCE_BODY_NO_LLM_CONFIG);
         let b2 = &fixture(BOUNCE)["cases"]["B2_body_default"]["comment_html"][0];
         assert_eq!(b2.as_str().unwrap(), BOUNCE_BODY_DEFAULT);
-        assert_eq!(bounce_body("no-llm-config"), BOUNCE_BODY_NO_LLM_CONFIG);
+        assert_eq!(bounce_body("no-llm-config", ""), BOUNCE_BODY_NO_LLM_CONFIG);
         // Every other reason — including the managed ones (B2b) — takes
         // the default body.
         for reason in [
@@ -2792,8 +2823,18 @@ mod tests {
             "managed_runner_disabled",
             "llm_config_missing",
         ] {
-            assert_eq!(bounce_body(reason), BOUNCE_BODY_DEFAULT, "{reason}");
+            assert_eq!(bounce_body(reason, ""), BOUNCE_BODY_DEFAULT, "{reason}");
         }
+        // Dedicated arms (`scheduling.py:1165-1182`): the runner is
+        // named in both.
+        assert_eq!(
+            bounce_body(REASON_DEDICATED_RUNNER_NOT_ELIGIBLE, "gpu-box"),
+            "<p><strong>Agent run skipped — dedicated runner not eligible.</strong></p><p>Runner <strong>gpu-box</strong> cannot serve this run: its usage rule excludes the run's creator or trigger. Reassign the issue to a runner that can serve it, or return it to the pod.</p>",
+        );
+        assert_eq!(
+            bounce_body(REASON_DEDICATED_RUNNER_REVOKED, "gpu-box"),
+            "<p><strong>Dedicated runner lost.</strong></p><p>Runner <strong>gpu-box</strong> was revoked or deleted, so this issue is no longer assigned to a dedicated runner. Choose a new runner or return the issue to the pod.</p>",
+        );
     }
 
     #[test]
@@ -3255,6 +3296,7 @@ mod tests {
             fxid("8110"),
             "tick",
             REASON_NO_LLM_CONFIG,
+            "",
             now(),
             JITTER,
         )
@@ -3283,6 +3325,7 @@ mod tests {
             fxid("8111"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3304,6 +3347,7 @@ mod tests {
             fxid("8112"),
             "tick",
             "no-managed-runner",
+            "",
             now(),
             JITTER,
         )
@@ -3327,6 +3371,7 @@ mod tests {
                 fxid(suffix),
                 "tick",
                 REASON_NO_ELIGIBLE_RUNNER,
+                "",
                 now(),
                 JITTER,
             )
@@ -3356,6 +3401,7 @@ mod tests {
             fxid("8115"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3380,6 +3426,7 @@ mod tests {
             fxid("8116"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3406,6 +3453,7 @@ mod tests {
             fxid("8117"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3432,6 +3480,7 @@ mod tests {
             fxid("8118"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3454,6 +3503,7 @@ mod tests {
             fxid("8119"),
             TRIGGER_RUN_AI,
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )

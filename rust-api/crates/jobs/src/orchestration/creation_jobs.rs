@@ -372,10 +372,12 @@ where
                 provisioning,
                 pod_dispatch,
                 engine_paused,
+                name,
             )| RunnerView {
                 id,
                 pod_id,
                 status,
+                name,
                 last_heartbeat_at,
                 paused_at,
                 provisioning,

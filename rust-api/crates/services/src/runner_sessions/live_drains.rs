@@ -210,16 +210,35 @@ pub enum DrainError {
 // Executors
 // ---------------------------------------------------------------------------
 
+/// §10.2 `last_dedicated`: true when the runner's most recent run by
+/// `assigned_at` (NULLs excluded) has a pin with
+/// `pin_kind = dedicated`. Derived, not stored — one indexed
+/// lookup; a runner with no assigned runs counts as false.
+async fn last_dedicated_for(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<bool, DrainError> {
+    let last = agent_run::Entity::find()
+        .filter(agent_run::Column::RunnerId.eq(runner_id))
+        .filter(agent_run::Column::AssignedAt.is_not_null())
+        .order_by_desc(agent_run::Column::AssignedAt)
+        .one(db)
+        .await?;
+    Ok(matches!(last, Some(run) if run.pinned_runner_id.is_some() && run.pin_kind == "dedicated"))
+}
+
 /// The runner's [`DispatchFacts`]: own-agent runners need no machine
 /// read; engines read their machine's pause/team fields. A missing
 /// machine answers unpaused/no-team (matching
 /// `engine_team_runs_enabled` and `engine_paused`).
 async fn dispatch_facts_of(
     db: &impl ConnectionTrait,
+    runner_id: Uuid,
     provisioning: &str,
     pod_dispatch: &str,
     machine_id: Option<Uuid>,
 ) -> Result<DispatchFacts, DrainError> {
+    let last_dedicated = last_dedicated_for(db, runner_id).await?;
     let is_engine = provisioning == "desktop_bundled";
     let pod_member = pod_dispatch == "pod_member";
     if !is_engine {
@@ -228,6 +247,7 @@ async fn dispatch_facts_of(
             pod_member,
             paused: false,
             team_runs: true,
+            last_dedicated,
         });
     }
     let (paused, team_runs) = match machine_id {
@@ -248,6 +268,7 @@ async fn dispatch_facts_of(
         pod_member,
         paused,
         team_runs,
+        last_dedicated,
     })
 }
 
@@ -317,7 +338,8 @@ async fn drain_for_runner(
     let pod_dispatch: String = locked.try_get("", "pod_dispatch")?;
     let machine_id: Option<Uuid> = locked.try_get("", "dev_machine_id")?;
     let visibility: i16 = locked.try_get("", "visibility")?;
-    let facts = dispatch_facts_of(&txn, &provisioning, &pod_dispatch, machine_id).await?;
+    let facts =
+        dispatch_facts_of(&txn, runner_id, &provisioning, &pod_dispatch, machine_id).await?;
     // Non-private runners issue no query (the `qs.none()` arm).
     let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
         i32::from(visibility),
@@ -412,7 +434,8 @@ async fn drain_pod(
         let pod_dispatch: String = runner_row.try_get("", "pod_dispatch")?;
         let machine_id: Option<Uuid> = runner_row.try_get("", "dev_machine_id")?;
         let visibility: i16 = runner_row.try_get("", "visibility")?;
-        let facts = dispatch_facts_of(&txn, &provisioning, &pod_dispatch, machine_id).await?;
+        let facts =
+            dispatch_facts_of(&txn, runner_id, &provisioning, &pod_dispatch, machine_id).await?;
         let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
             i32::from(visibility),
             pod_id,
