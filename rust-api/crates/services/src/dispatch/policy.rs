@@ -492,13 +492,15 @@ pub const LOCAL_RUNNER_AVAILABLE_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER 
 
 /// The binding leg of `github_available_for_project` (`policy.py:80-94`).
 ///
-/// Four `INNER JOIN`s mirroring Django's join chain for the
-/// `provider_account__workspace_integration__github_app_installation` span (the
-/// intermediate `workspace_integrations` join is required: a `NULL`
-/// `workspace_integration_id` must not match). No `deleted_at` scope on the joined
-/// tables — Django filters only the base table. Predicates follow the `filter()`
-/// kwarg order. Params: `$1` project id (uuid), `$2` workspace id (uuid).
-pub const GITHUB_BINDING_EXISTS_SQL: &str = "SELECT 1 FROM git_repository_bindings b INNER JOIN git_repositories r ON r.id = b.repository_id INNER JOIN git_provider_accounts a ON a.id = b.provider_account_id INNER JOIN workspace_integrations w ON w.id = a.workspace_integration_id INNER JOIN github_app_installations i ON i.workspace_integration_id = w.id WHERE b.project_id = $1 AND b.workspace_id = $2 AND b.deleted_at IS NULL AND r.provider = 'github' AND r.host_url = 'https://github.com' AND a.workspace_id = $2 AND a.provider = 'github' AND a.host_url = 'https://github.com' AND a.auth_type = 'github_app' AND a.status = 'connected' AND a.verified_at IS NOT NULL AND i.verified_at IS NOT NULL AND i.suspended_at IS NULL LIMIT 1";
+/// Two `INNER JOIN`s mirroring Django's join chain for the
+/// `provider_account__workspace_integration__github_app_installation`
+/// span: the installation's `verified_at`/`suspended_at` predicates
+/// read on the account row itself (PDASHOSS01-356), so the
+/// `workspace_integrations` hop and the legacy table join are gone. No
+/// `deleted_at` scope on the joined tables — Django filters only the
+/// base table. Predicates follow the `filter()` kwarg order. Params:
+/// `$1` project id (uuid), `$2` workspace id (uuid).
+pub const GITHUB_BINDING_EXISTS_SQL: &str = "SELECT 1 FROM git_repository_bindings b INNER JOIN git_repositories r ON r.id = b.repository_id INNER JOIN git_provider_accounts a ON a.id = b.provider_account_id WHERE b.project_id = $1 AND b.workspace_id = $2 AND b.deleted_at IS NULL AND r.provider = 'github' AND r.host_url = 'https://github.com' AND a.workspace_id = $2 AND a.provider = 'github' AND a.host_url = 'https://github.com' AND a.auth_type = 'github_app' AND a.status = 'connected' AND a.verified_at IS NOT NULL AND a.suspended_at IS NULL LIMIT 1";
 
 /// Whether the project's GitHub tooling is usable (`policy.py:75-94`).
 ///
@@ -1548,15 +1550,13 @@ mod tests {
     fn github_binding_sql_matches_filter_shape() {
         assert_eq!(
             GITHUB_BINDING_EXISTS_SQL,
-            "SELECT 1 FROM git_repository_bindings b INNER JOIN git_repositories r ON r.id = b.repository_id INNER JOIN git_provider_accounts a ON a.id = b.provider_account_id INNER JOIN workspace_integrations w ON w.id = a.workspace_integration_id INNER JOIN github_app_installations i ON i.workspace_integration_id = w.id WHERE b.project_id = $1 AND b.workspace_id = $2 AND b.deleted_at IS NULL AND r.provider = 'github' AND r.host_url = 'https://github.com' AND a.workspace_id = $2 AND a.provider = 'github' AND a.host_url = 'https://github.com' AND a.auth_type = 'github_app' AND a.status = 'connected' AND a.verified_at IS NOT NULL AND i.verified_at IS NOT NULL AND i.suspended_at IS NULL LIMIT 1"
+            "SELECT 1 FROM git_repository_bindings b INNER JOIN git_repositories r ON r.id = b.repository_id INNER JOIN git_provider_accounts a ON a.id = b.provider_account_id WHERE b.project_id = $1 AND b.workspace_id = $2 AND b.deleted_at IS NULL AND r.provider = 'github' AND r.host_url = 'https://github.com' AND a.workspace_id = $2 AND a.provider = 'github' AND a.host_url = 'https://github.com' AND a.auth_type = 'github_app' AND a.status = 'connected' AND a.verified_at IS NOT NULL AND a.suspended_at IS NULL LIMIT 1"
         );
         // Table names cross-checked against the ported models.
         for table in [
             pidash_db::integrations::git_models::git_repository_binding::TABLE,
             pidash_db::integrations::git_models::git_repository::TABLE,
             pidash_db::integrations::git_models::git_provider_account::TABLE,
-            pidash_db::app_integrations::models_webhook::workspace_integration::TABLE,
-            pidash_db::integrations::github_models::github_app_installation::TABLE,
         ] {
             assert!(GITHUB_BINDING_EXISTS_SQL.contains(table), "joins {table}");
         }

@@ -3699,6 +3699,8 @@ impl GitStore for ReviewStore {
             workspace_integration_id: None,
             status: row.status,
             verified_at: Some(row.verified_at),
+            suspended_at: None,
+            last_checked_at: None,
             last_check_error: String::new(),
             metadata: row.metadata,
         })

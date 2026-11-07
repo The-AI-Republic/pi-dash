@@ -1799,7 +1799,12 @@ class Seeder:
         return {"id": binding_id, "repository_id": repo_id}
 
     def create_github_app_installation(self, wi_id: str) -> dict[str, Any]:
-        """Seed a ``github_app_installations`` row with a unique install id."""
+        """Seed a ``github_app_installations`` row with a unique install id.
+
+        Also seeds the ``git_provider_accounts`` row the 0173 backfill
+        would produce, so the suite passes on both backends during the
+        3/6 migration (Django reads legacy; Rust reads generic).
+        """
         installation_id = random.randint(1_000_000, 9_999_999)
         row_id = _uid()
         self.db.execute(
@@ -1812,6 +1817,31 @@ class Seeder:
                        3,'{}','[]','',now(),now())""",
             (row_id, wi_id, installation_id),
         )
+        workspace_row = self.db.fetchone(
+            "SELECT workspace_id FROM workspace_integrations WHERE id = %s", (wi_id,)
+        )
+        account_id = _uid()
+        self.db.execute(
+            """INSERT INTO git_provider_accounts
+               (id, workspace_id, provider, host_url, auth_type,
+                external_account_id, external_account_login, display_name,
+                capabilities, credential_config, workspace_integration_id,
+                status, metadata, last_check_error, created_at, updated_at)
+               VALUES (%s,%s,'github','https://github.com','github_app',
+                       %s,'contract-octocat','contract-octocat',
+                       '{"read_repositories": true, "read_issues": true, "write_comments": false, "manage_webhooks": true, "clone": false}',
+                       %s, %s, 'connected',
+                       '{"account_type": "Organization", "repository_count": 3, "permissions": {}, "events": [], "repository_selection": "selected", "installed_at": null, "suspended_at": null}',
+                       '', now(), now())""",
+            (
+                account_id,
+                workspace_row["workspace_id"],
+                str(installation_id),
+                f'{{"auth_type": "github_app", "host_url": "https://github.com", "installation_id": {installation_id}}}',
+                wi_id,
+            ),
+        )
+        self._put("git_provider_accounts", account_id)
         self._put("github_app_installations", row_id)
         return {"id": row_id, "installation_id": installation_id}
 

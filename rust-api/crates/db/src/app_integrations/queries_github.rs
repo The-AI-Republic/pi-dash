@@ -41,13 +41,11 @@ use sea_orm::{
 
 use super::{queries_git, GITHUB_PROVIDER, ROLE_ADMIN};
 use crate::entity::{
-    github_app_install_sessions, github_repositories, github_repository_syncs, integrations,
+    git_provider_install_sessions, github_repositories, github_repository_syncs, integrations,
     workspace_integrations, workspace_members, workspaces,
 };
-use crate::integrations::github_models::{
-    github_app_install_session::GithubAppInstallSession,
-    github_repository_sync::GithubRepositorySync,
-};
+use crate::integrations::git_models::git_provider_install_session::GitProviderInstallSession;
+use crate::integrations::github_models::github_repository_sync::GithubRepositorySync;
 
 // ---------------------------------------------------------------------------
 // Integration / workspace-integration reads (github.py:90-137)
@@ -411,68 +409,18 @@ pub async fn fetch_github_binding_for_project(
 // Install-session callback read (github.py:751-755)
 // ---------------------------------------------------------------------------
 
-impl From<crate::entity::github_app_installations::Model>
-    for crate::integrations::github_models::github_app_installation::GithubAppInstallation
-{
-    fn from(row: crate::entity::github_app_installations::Model) -> Self {
-        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
-        Self {
-            id: row.id,
-            created_at: at(row.created_at),
-            updated_at: at(row.updated_at),
-            created_by_id: row.created_by_id,
-            updated_by_id: row.updated_by_id,
-            deleted_at: row.deleted_at.map(at),
-            workspace_integration_id: row.workspace_integration_id,
-            installation_id: row.installation_id,
-            account_login: row.account_login,
-            account_type: row.account_type,
-            repository_selection: row.repository_selection,
-            repository_count: row.repository_count,
-            permissions: row.permissions,
-            events: row.events,
-            installed_at: row.installed_at.map(at),
-            suspended_at: row.suspended_at.map(at),
-            verified_at: row.verified_at.map(at),
-            last_checked_at: row.last_checked_at.map(at),
-            last_check_error: row.last_check_error,
-        }
-    }
-}
-
-impl From<github_app_install_sessions::Model> for GithubAppInstallSession {
-    fn from(row: github_app_install_sessions::Model) -> Self {
-        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
-        Self {
-            id: row.id,
-            created_at: at(row.created_at),
-            updated_at: at(row.updated_at),
-            created_by_id: row.created_by_id,
-            updated_by_id: row.updated_by_id,
-            deleted_at: row.deleted_at.map(at),
-            state: row.state,
-            workspace_id: row.workspace_id,
-            actor_id: row.actor_id,
-            installation_id: row.installation_id,
-            account_login: row.account_login,
-            status: row.status,
-            expires_at: at(row.expires_at),
-            completed_at: row.completed_at.map(at),
-            error: row.error,
-        }
-    }
-}
-
-/// `GithubAppInstallSession.objects.filter(state=state).select_related(
+/// `GitProviderInstallSession.objects.filter(state=state).select_related(
 /// "workspace", "actor").first()` (`github.py:751-753`). `state` is
-/// UNIQUE (`github.py:197`), so at most one row. This is the session
-/// lookup half: the joined workspace/actor rows the callback then reads
-/// (`install_session.workspace.slug`, `actor_id`) resolve through the
-/// workspace read in [`super`] plus the FK ids carried on this row.
-pub fn install_session_by_state_query(state: &str) -> Select<github_app_install_sessions::Entity> {
-    github_app_install_sessions::Entity::find()
-        .filter(github_app_install_sessions::Column::DeletedAt.is_null())
-        .filter(github_app_install_sessions::Column::State.eq(state.to_owned()))
+/// UNIQUE, so at most one row. This is the session lookup half: the
+/// joined workspace/actor rows the callback then reads (`actor_id`)
+/// resolve through the workspace read in [`super`] plus the FK ids
+/// carried on this row.
+pub fn install_session_by_state_query(
+    state: &str,
+) -> Select<git_provider_install_sessions::Entity> {
+    git_provider_install_sessions::Entity::find()
+        .filter(git_provider_install_sessions::Column::DeletedAt.is_null())
+        .filter(git_provider_install_sessions::Column::State.eq(state.to_owned()))
         .limit(1)
 }
 
@@ -481,9 +429,9 @@ pub fn install_session_by_state_query(state: &str) -> Select<github_app_install_
 pub async fn fetch_install_session_by_state(
     db: &impl ConnectionTrait,
     state: &str,
-) -> Result<Option<GithubAppInstallSession>, sea_orm::DbErr> {
+) -> Result<Option<GitProviderInstallSession>, sea_orm::DbErr> {
     let row = install_session_by_state_query(state).one(db).await?;
-    Ok(row.map(GithubAppInstallSession::from))
+    Ok(row.map(GitProviderInstallSession::from))
 }
 
 /// The callback expiry predicate: `install_session.expires_at <= now`
@@ -808,7 +756,7 @@ mod tests {
             .build(DbBackend::Postgres)
             .to_string();
         assert!(
-            sql.contains(r#"FROM "github_app_install_sessions""#),
+            sql.contains(r#"FROM "git_provider_install_sessions""#),
             "{sql}"
         );
         assert!(sql.contains(r#""state" = 's'"#), "{sql}");
@@ -1002,9 +950,9 @@ mod tests {
         "CREATE TEMPORARY TABLE github_repositories (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, name VARCHAR(500) NOT NULL, url VARCHAR(500), config JSONB NOT NULL, repository_id BIGINT NOT NULL, owner VARCHAR(500) NOT NULL)",
         "CREATE TEMPORARY TABLE github_repository_syncs (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, repository_id UUID NOT NULL, credentials JSONB NOT NULL, actor_id UUID NOT NULL, workspace_integration_id UUID NOT NULL, label_id UUID, is_sync_enabled BOOLEAN NOT NULL, last_synced_at TIMESTAMPTZ, last_sync_error TEXT NOT NULL)",
         "CREATE TEMPORARY TABLE git_repositories (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, provider VARCHAR(32) NOT NULL, host_url VARCHAR(500) NOT NULL, external_id VARCHAR(255) NOT NULL, namespace VARCHAR(500) NOT NULL, name VARCHAR(500) NOT NULL, full_name VARCHAR(1000) NOT NULL, web_url VARCHAR(1000) NOT NULL, clone_url_http VARCHAR(1000) NOT NULL, clone_url_ssh VARCHAR(1000) NOT NULL, default_branch VARCHAR(255) NOT NULL, is_private BOOLEAN NOT NULL, metadata JSONB NOT NULL)",
-        "CREATE TEMPORARY TABLE git_provider_accounts (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, workspace_id UUID NOT NULL, provider VARCHAR(32) NOT NULL, host_url VARCHAR(500) NOT NULL, auth_type VARCHAR(32) NOT NULL, external_account_id VARCHAR(255) NOT NULL, external_account_login VARCHAR(255) NOT NULL, display_name VARCHAR(255) NOT NULL, capabilities JSONB NOT NULL, credential_config JSONB NOT NULL, workspace_integration_id UUID, status VARCHAR(16) NOT NULL, verified_at TIMESTAMPTZ, last_check_error TEXT NOT NULL, metadata JSONB NOT NULL)",
+        "CREATE TEMPORARY TABLE git_provider_accounts (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, workspace_id UUID NOT NULL, provider VARCHAR(32) NOT NULL, host_url VARCHAR(500) NOT NULL, auth_type VARCHAR(32) NOT NULL, external_account_id VARCHAR(255) NOT NULL, external_account_login VARCHAR(255) NOT NULL, display_name VARCHAR(255) NOT NULL, capabilities JSONB NOT NULL, credential_config JSONB NOT NULL, workspace_integration_id UUID, status VARCHAR(16) NOT NULL, verified_at TIMESTAMPTZ, suspended_at TIMESTAMPTZ, last_checked_at TIMESTAMPTZ, last_check_error TEXT NOT NULL, metadata JSONB NOT NULL)",
         "CREATE TEMPORARY TABLE git_repository_bindings (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, repository_id UUID NOT NULL, provider_account_id UUID NOT NULL, actor_id UUID NOT NULL, is_sync_enabled BOOLEAN NOT NULL, clone_auth_mode VARCHAR(32) NOT NULL, last_synced_at TIMESTAMPTZ, last_sync_error TEXT NOT NULL, metadata JSONB NOT NULL)",
-        "CREATE TEMPORARY TABLE github_app_install_sessions (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, state VARCHAR(128) NOT NULL UNIQUE, workspace_id UUID NOT NULL, actor_id UUID NOT NULL, installation_id BIGINT, account_login VARCHAR(255) NOT NULL, status VARCHAR(16) NOT NULL, expires_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ, error TEXT NOT NULL)",
+        "CREATE TEMPORARY TABLE git_provider_install_sessions (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, state VARCHAR(128) NOT NULL UNIQUE, provider VARCHAR(32) NOT NULL, workspace_id UUID NOT NULL, actor_id UUID NOT NULL, external_account_id VARCHAR(255), account_login VARCHAR(255) NOT NULL, status VARCHAR(16) NOT NULL, expires_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ, error TEXT NOT NULL)",
     ];
 
     async fn live_tx(pool: &sqlx::PgPool) -> sqlx::Transaction<'_, sqlx::Postgres> {
@@ -1185,7 +1133,7 @@ mod tests {
         .execute(&mut *tx).await.expect("seed binding");
         // Install session (FX-GHA-01 read).
         sqlx::query(
-            "INSERT INTO github_app_install_sessions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, state, workspace_id, actor_id, installation_id, account_login, status, expires_at, completed_at, error) VALUES ($1, $2, $2, NULL, NULL, NULL, 'st_abc', $3, $3, NULL, '', 'started', $4, NULL, '')",
+            "INSERT INTO git_provider_install_sessions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, state, provider, workspace_id, actor_id, external_account_id, account_login, status, expires_at, completed_at, error) VALUES ($1, $2, $2, NULL, NULL, NULL, 'st_abc', 'github', $3, $3, NULL, '', 'started', $4, NULL, '')",
         )
         .bind(live_uuid(21)).bind(ts).bind(ws).bind(live_ts(1_700_090_000))
         .execute(&mut *tx).await.expect("seed session");

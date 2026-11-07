@@ -134,12 +134,16 @@ pub enum CreatePrLinkOutcome {
 // SQL text (Django shape; the pool implementation executes verbatim)
 // ---------------------------------------------------------------------------
 
-/// Installation lookup for [`best_effort_snapshot`] (`:48-51`):
-/// `filter(workspace_integration__workspace__slug, account_login__iexact)`
-/// `.first()`. Soft-delete scope on the installation table only (FK joins
-/// carry no manager scope); `iexact` is `LOWER()` on both sides;
-/// `-created_at` ordering. `$1` workspace slug, `$2` owner login.
-pub const INSTALLATION_LOOKUP_SQL: &str = "SELECT \"github_app_installations\".\"id\", \"github_app_installations\".\"created_at\", \"github_app_installations\".\"updated_at\", \"github_app_installations\".\"created_by_id\", \"github_app_installations\".\"updated_by_id\", \"github_app_installations\".\"deleted_at\", \"github_app_installations\".\"workspace_integration_id\", \"github_app_installations\".\"installation_id\", \"github_app_installations\".\"account_login\", \"github_app_installations\".\"account_type\", \"github_app_installations\".\"repository_selection\", \"github_app_installations\".\"repository_count\", \"github_app_installations\".\"permissions\", \"github_app_installations\".\"events\", \"github_app_installations\".\"installed_at\", \"github_app_installations\".\"suspended_at\", \"github_app_installations\".\"verified_at\", \"github_app_installations\".\"last_checked_at\", \"github_app_installations\".\"last_check_error\" FROM \"github_app_installations\" INNER JOIN \"workspace_integrations\" ON (\"github_app_installations\".\"workspace_integration_id\" = \"workspace_integrations\".\"id\") INNER JOIN \"workspaces\" ON (\"workspace_integrations\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"github_app_installations\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND LOWER(\"github_app_installations\".\"account_login\") = LOWER($2)) ORDER BY \"github_app_installations\".\"created_at\" DESC LIMIT 1";
+/// Installation lookup for [`best_effort_snapshot`] (`:48-51`, moved
+/// to `git_provider_accounts` by PDASHOSS01-356): the workspace's
+/// GitHub App account whose `external_account_login` matches the owner
+/// (`iexact`). `external_account_id` (the `str(installation_id)`)
+/// is cast back to BIGINT under the `installation_id` alias the row
+/// reader expects. Soft-delete scope on the account table only (the
+/// `workspaces` join carries no manager scope); `iexact` is `LOWER()`
+/// on both sides; `-created_at` ordering. `$1` workspace slug,
+/// `$2` owner login.
+pub const INSTALLATION_LOOKUP_SQL: &str = "SELECT \"git_provider_accounts\".\"id\", \"git_provider_accounts\".\"created_at\", \"git_provider_accounts\".\"updated_at\", \"git_provider_accounts\".\"created_by_id\", \"git_provider_accounts\".\"updated_by_id\", \"git_provider_accounts\".\"deleted_at\", \"git_provider_accounts\".\"workspace_id\", \"git_provider_accounts\".\"provider\", \"git_provider_accounts\".\"host_url\", \"git_provider_accounts\".\"auth_type\", \"git_provider_accounts\".\"external_account_id\", \"git_provider_accounts\".\"external_account_login\", \"git_provider_accounts\".\"display_name\", \"git_provider_accounts\".\"capabilities\", \"git_provider_accounts\".\"credential_config\", \"git_provider_accounts\".\"workspace_integration_id\", \"git_provider_accounts\".\"status\", \"git_provider_accounts\".\"verified_at\", \"git_provider_accounts\".\"suspended_at\", \"git_provider_accounts\".\"last_checked_at\", \"git_provider_accounts\".\"last_check_error\", \"git_provider_accounts\".\"metadata\", CAST(\"git_provider_accounts\".\"external_account_id\" AS BIGINT) AS \"installation_id\" FROM \"git_provider_accounts\" INNER JOIN \"workspaces\" ON (\"git_provider_accounts\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"git_provider_accounts\".\"deleted_at\" IS NULL AND \"git_provider_accounts\".\"provider\" = 'github' AND \"git_provider_accounts\".\"host_url\" = 'https://github.com' AND \"git_provider_accounts\".\"auth_type\" = 'github_app' AND \"workspaces\".\"slug\" = $1 AND LOWER(\"git_provider_accounts\".\"external_account_login\") = LOWER($2)) ORDER BY \"git_provider_accounts\".\"created_at\" DESC LIMIT 1";
 
 /// Issue-membership probe for [`attach_pull_request`] (`:138-139`):
 /// `Issue.objects.filter(id, project_id, workspace__slug).exists()`.
@@ -205,9 +209,9 @@ pub const SOFT_DELETE_TASK: &str = "pi_dash.bgtasks.deletion_task.soft_delete_re
 // Rows
 // ---------------------------------------------------------------------------
 
-/// One `GithubAppInstallation` row as [`best_effort_snapshot`] consumes
-/// it: only `installation_id` is read (the client auth); the lookup SQL
-/// still projects the full row, mirroring `.first()`.
+/// One `git_provider_accounts` row as [`best_effort_snapshot`]
+/// consumes it: only `installation_id` is read (the client auth); the
+/// lookup SQL still projects the full row, mirroring `.first()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallationRow {
     pub id: Uuid,
@@ -1755,7 +1759,7 @@ mod tests {
             assert!(sql.contains("LIMIT 1"), "{sql}");
         }
         assert!(INSTALLATION_LOOKUP_SQL
-            .contains("LOWER(\"github_app_installations\".\"account_login\") = LOWER($2)"));
+            .contains("LOWER(\"git_provider_accounts\".\"external_account_login\") = LOWER($2)"));
         assert!(INSTALLATION_LOOKUP_SQL.contains("\"workspaces\".\"slug\" = $1"));
         assert!(ISSUE_EXISTS_SQL.contains("SELECT 1 AS \"a\""));
         assert!(PR_LINK_INSERT_SQL.contains("\"pr_number\""));

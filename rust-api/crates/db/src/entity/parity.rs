@@ -439,6 +439,7 @@ parity_tests!(
     git_comment_syncs,
     git_issue_syncs,
     git_provider_accounts,
+    git_provider_install_sessions,
     git_repositories,
     git_repository_bindings,
     git_webhook_deliveries,

@@ -22,6 +22,8 @@ pub struct Model {
     pub credential_config: Json,
     pub status: String,
     pub verified_at: Option<DateTimeWithTimeZone>,
+    pub suspended_at: Option<DateTimeWithTimeZone>,
+    pub last_checked_at: Option<DateTimeWithTimeZone>,
     #[sea_orm(column_type = "Text")]
     pub last_check_error: String,
     #[sea_orm(column_type = "JsonBinary")]

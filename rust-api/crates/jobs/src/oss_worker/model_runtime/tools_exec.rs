@@ -3209,7 +3209,7 @@ struct GithubOpCtx {
 async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx, ToolExecError> {
     use pidash_db::entity::{
         git_provider_accounts as acc_entity, git_repositories as repo_entity,
-        git_repository_bindings as bind_entity, github_app_installations as inst_entity,
+        git_repository_bindings as bind_entity,
     };
     let db = sea_conn(&ctx.pool);
     let row = bind_entity::Entity::find()
@@ -3258,20 +3258,26 @@ async fn github_context(ctx: &ToolCtx, scope: &ToolScope) -> Result<GithubOpCtx,
     plan::check_github_binding(&verdict)?;
     let row_workspace_integration_id = row.account_workspace_integration_id;
     let installation_id = if let Some(integration) = row_workspace_integration_id {
-        let row = inst_entity::Entity::find()
-            .filter(inst_entity::Column::WorkspaceIntegrationId.eq(integration))
-            .filter(inst_entity::Column::SuspendedAt.is_null())
-            .filter(inst_entity::Column::VerifiedAt.is_not_null())
-            .filter(inst_entity::Column::DeletedAt.is_null())
-            .order_by_desc(inst_entity::Column::CreatedAt)
+        // `tools.py:543-549`: the workspace's installation, unsuspended
+        // and verified. On the generic table the `github_app` filters
+        // keep PAT accounts (which share the WI) out of the pick.
+        let row = acc_entity::Entity::find()
+            .filter(acc_entity::Column::WorkspaceIntegrationId.eq(Some(integration)))
+            .filter(acc_entity::Column::Provider.eq("github"))
+            .filter(acc_entity::Column::HostUrl.eq("https://github.com"))
+            .filter(acc_entity::Column::AuthType.eq("github_app"))
+            .filter(acc_entity::Column::SuspendedAt.is_null())
+            .filter(acc_entity::Column::VerifiedAt.is_not_null())
+            .filter(acc_entity::Column::DeletedAt.is_null())
+            .order_by_desc(acc_entity::Column::CreatedAt)
             .limit(1)
             .select_only()
-            .column(inst_entity::Column::InstallationId)
-            .into_tuple::<i64>()
+            .column(acc_entity::Column::ExternalAccountId)
+            .into_tuple::<String>()
             .one(&db)
             .await
             .map_err(orm_error)?;
-        row
+        row.and_then(|external_id| external_id.parse::<i64>().ok())
     } else {
         None
     };

@@ -15,6 +15,7 @@ from .github import (
 )
 from .git import (
     GitProviderAccount,
+    GitProviderInstallSession,
     GitRepository,
     GitRepositoryBinding,
     GitIssueSync,
