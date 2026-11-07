@@ -33,7 +33,6 @@ from pi_dash.db.models import (
     ModuleIssue,
     IssueLink,
     GitCodeReviewLink,
-    GithubPullRequestLink,
     FileAsset,
     IssueReaction,
     CommentReaction,
@@ -690,16 +689,22 @@ class IssueModuleDetailSerializer(BaseSerializer):
 
 
 class GithubPullRequestLinkSerializer(BaseSerializer):
-    """Read serializer for a GitHub PR linked to a work item (web overview).
+    """Compatibility serializer for GitHub PR links (web overview).
 
-    All PR-status fields are server-managed (set at attach time and refreshed by
-    the GitHub App webhook), so the client only ever supplies ``url`` on create.
+    Serializes generic GitCodeReviewLink rows with the legacy
+    GithubPullRequestLink field names so the GitHub-only URLs and
+    ``pidash issue attach-pr`` clients keep byte-identical responses
+    (PDASHOSS01-359). Storage is generic; only the representation is legacy.
     """
 
+    repo_owner = serializers.SerializerMethodField()
+    pr_number = serializers.SerializerMethodField()
+    state = serializers.SerializerMethodField()
+    pr_updated_at = serializers.SerializerMethodField()
     created_by_detail = UserLiteSerializer(read_only=True, source="created_by")
 
     class Meta:
-        model = GithubPullRequestLink
+        model = GitCodeReviewLink
         fields = [
             "id",
             "issue",
@@ -718,6 +723,23 @@ class GithubPullRequestLinkSerializer(BaseSerializer):
             "created_by_detail",
         ]
         read_only_fields = fields
+
+    def get_repo_owner(self, obj):
+        return obj.namespace
+
+    def get_pr_number(self, obj):
+        try:
+            return int(obj.external_iid)
+        except (TypeError, ValueError):
+            return obj.external_iid
+
+    def get_state(self, obj):
+        if obj.state in ("closed", "merged"):
+            return "closed"
+        return "open"
+
+    def get_pr_updated_at(self, obj):
+        return obj.remote_updated_at
 
 
 class GitCodeReviewLinkSerializer(BaseSerializer):

@@ -13,7 +13,7 @@ import logging
 
 from django.db import IntegrityError
 
-from pi_dash.db.models import GitCodeReviewLink, GithubAppInstallation, GithubPullRequestLink, Issue
+from pi_dash.db.models import GitCodeReviewLink, GitProviderAccount, Issue
 from pi_dash.utils.exception_logger import log_exception
 from pi_dash.utils.github_client import (
     GithubClient,
@@ -42,17 +42,30 @@ class PullRequestAlreadyLinked(Exception):
 
 
 def best_effort_snapshot(workspace_slug: str, owner: str, name: str, number: int) -> dict:
-    """Fetch the PR via the workspace's GitHub App installation, if one covers
+    """Fetch the PR via the workspace's GitHub App account, if one covers
     this account. Returns the display snapshot, or ``{}`` on any failure — the
     webhook keeps the link fresh regardless, so attach must never fail here."""
-    installation = GithubAppInstallation.objects.filter(
-        workspace_integration__workspace__slug=workspace_slug,
-        account_login__iexact=owner,
-    ).first()
-    if installation is None:
+    account = (
+        GitProviderAccount.objects.filter(
+            workspace__slug=workspace_slug,
+            provider="github",
+            host_url=GITHUB_HOST,
+            auth_type=GitProviderAccount.AuthType.GITHUB_APP,
+            external_account_login__iexact=owner,
+        )
+        .exclude(status=GitProviderAccount.Status.REVOKED)
+        .first()
+    )
+    if account is None:
         return {}
+    installation_id = (account.credential_config or {}).get("installation_id")
+    if installation_id is None:
+        try:
+            installation_id = int(account.external_account_id)
+        except (TypeError, ValueError):
+            return {}
     try:
-        pull_request = GithubClient.for_installation(installation.installation_id).get_pull_request(owner, name, number)
+        pull_request = GithubClient.for_installation(int(installation_id)).get_pull_request(owner, name, number)
         return pr_snapshot_from_payload(pull_request)
     except Exception as e:  # network / token / 404 — non-fatal
         log_exception(e)
@@ -73,47 +86,20 @@ def _matching_code_review_link(owner: str, name: str, number: int) -> GitCodeRev
     )
 
 
-def _ensure_code_review_link(link: GithubPullRequestLink) -> None:
-    existing = _matching_code_review_link(link.repo_owner, link.repo_name, link.pr_number)
-    state = "merged" if link.merged else ("closed" if link.state == GithubPullRequestLink.State.CLOSED else "open")
-    fields = {
-        "project_id": link.project_id,
-        "issue_id": link.issue_id,
-        "url": link.url,
-        "title": link.title,
+def _snapshot_to_review(snapshot: dict) -> dict:
+    merged = bool(snapshot.get("merged"))
+    state = "merged" if merged else snapshot.get("state") or "open"
+    return {
+        "title": snapshot.get("title") or "",
         "state": state,
-        "merged": link.merged,
-        "draft": link.draft,
-        "remote_updated_at": link.pr_updated_at,
-        "metadata": {
-            **(existing.metadata if existing else {}),
-            "legacy_github_pull_request_link_id": str(link.id),
-        },
+        "merged": merged,
+        "draft": bool(snapshot.get("draft")),
+        "remote_updated_at": snapshot.get("pr_updated_at"),
     }
-    if existing is not None:
-        if existing.issue_id != link.issue_id:
-            raise PullRequestAlreadyLinked(existing.issue_id)
-        for field, value in fields.items():
-            setattr(existing, field, value)
-        existing.save()
-        return
-    GitCodeReviewLink.objects.create(
-        provider="github",
-        host_url=GITHUB_HOST,
-        namespace=link.repo_owner,
-        repo_name=link.repo_name,
-        repo_external_id="",
-        external_id="",
-        external_iid=str(link.pr_number),
-        **fields,
-    )
 
 
-def detach_pull_request_link(link: GithubPullRequestLink) -> None:
-    review_link = _matching_code_review_link(link.repo_owner, link.repo_name, link.pr_number)
+def detach_pull_request_link(link: GitCodeReviewLink) -> None:
     link.delete()
-    if review_link is not None and review_link.issue_id == link.issue_id:
-        review_link.delete()
 
 
 def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: str):
@@ -138,37 +124,34 @@ def attach_pull_request(*, project_id, issue_id, workspace_slug: str, raw_url: s
     if not Issue.objects.filter(id=issue_id, project_id=project_id, workspace__slug=workspace_slug).exists():
         raise IssueNotFound()
 
-    existing = GithubPullRequestLink.objects.filter(repo_owner=owner, repo_name=name, pr_number=number).first()
-    if existing is not None:
-        if str(existing.issue_id) != str(issue_id):
-            raise PullRequestAlreadyLinked(existing.issue_id)
-        _ensure_code_review_link(existing)
-        return existing, False
-
     existing_review = _matching_code_review_link(owner, name, number)
-    if existing_review is not None and str(existing_review.issue_id) != str(issue_id):
-        raise PullRequestAlreadyLinked(existing_review.issue_id)
+    if existing_review is not None:
+        if str(existing_review.issue_id) != str(issue_id):
+            raise PullRequestAlreadyLinked(existing_review.issue_id)
+        return existing_review, False
 
     snapshot = best_effort_snapshot(workspace_slug, owner, name, number)
     try:
-        link = GithubPullRequestLink.objects.create(
+        link = GitCodeReviewLink.objects.create(
             project_id=project_id,
             issue_id=issue_id,
-            repo_owner=owner,
+            provider="github",
+            host_url=GITHUB_HOST,
+            namespace=owner,
             repo_name=name,
-            pr_number=number,
+            repo_external_id="",
+            external_id="",
+            external_iid=str(number),
             url=f"https://github.com/{owner}/{name}/pull/{number}",
-            **snapshot,
+            **_snapshot_to_review(snapshot),
         )
-        _ensure_code_review_link(link)
         return link, True
     except IntegrityError:
         # A concurrent attach won the partial-unique race; resolve to the row
         # that now exists instead of surfacing a 500.
-        existing = GithubPullRequestLink.objects.filter(repo_owner=owner, repo_name=name, pr_number=number).first()
+        existing = _matching_code_review_link(owner, name, number)
         if existing is None:
             raise
         if str(existing.issue_id) != str(issue_id):
             raise PullRequestAlreadyLinked(existing.issue_id)
-        _ensure_code_review_link(existing)
         return existing, False
