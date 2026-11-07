@@ -159,7 +159,6 @@ crates/jobs/src/dispatch/execute.rs 19
 crates/jobs/src/integrations/git_sync.rs 26
 crates/jobs/src/integrations/github_signals.rs 4
 crates/jobs/src/integrations/github_sync.rs 33
-crates/jobs/src/issue_transition.rs 3
 crates/jobs/src/license/commands.rs 9
 crates/jobs/src/license/tasks.rs 4
 crates/jobs/src/loop/dispatch.rs 14
