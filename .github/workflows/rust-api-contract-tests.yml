@@ -71,7 +71,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12.10"
+          python-version: "3.12.x"
 
       - name: Install system deps for psycopg-c
         run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
@@ -103,7 +103,13 @@ jobs:
         run: python -m pytest web_edge -v
   contract-tests:
     name: worker-plane oracle vs Django
-    runs-on: ubuntu-latest
+    # Pinned image + exact Python on purpose (PIDASH-6 exception): the
+    # tasks_webhooks link-crawl parity tests (test_link_crawl_rcdata.py,
+    # test_link_crawl_comments_scripts.py) pin production's html.parser
+    # behaviour (CPython 3.12.10, apps/api/Dockerfile.api) and skip on
+    # >=3.12.12, so "3.12.x" would silently drop them. ubuntu-24.04 still
+    # ships a 3.12.10 build; ubuntu-26.04 does not. Move both together.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
@@ -211,7 +217,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.10"
+          python-version: "3.12.10" # see runs-on comment
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt
