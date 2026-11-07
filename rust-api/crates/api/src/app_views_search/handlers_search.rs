@@ -123,11 +123,7 @@ async fn global_search(
                 fetch_shaped(
                     &pool,
                     &queries_search::global_workspaces(&scope, search_ref),
-                    &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("slug", 2, Col::Text),
-                    ],
+                    &[("name", Col::Text), ("id", Col::Uuid), ("slug", Col::Text)],
                 )
                 .await?
             }
@@ -136,10 +132,10 @@ async fn global_search(
                     &pool,
                     &queries_search::global_projects(&scope, search_ref),
                     &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("identifier", 2, Col::Text),
-                        ("workspace__slug", 3, Col::Text),
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("identifier", Col::Text),
+                        ("workspace__slug", Col::Text),
                     ],
                 )
                 .await?
@@ -185,11 +181,11 @@ async fn global_search(
                     &pool,
                     &queries_search::global_pages(&scope, search_ref),
                     &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("workspace__slug", 4, Col::Text),
-                        ("project_ids", 2, Col::UuidArray),
-                        ("project_identifiers", 3, Col::StrArray),
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("workspace__slug", Col::Text),
+                        ("project_ids", Col::UuidArray),
+                        ("project_identifiers", Col::StrArray),
                     ],
                 )
                 .await?
@@ -217,24 +213,24 @@ async fn global_search(
 /// (`values("name", "id", "sequence_id", "project__identifier",
 /// "project_id", "workspace__slug")`, `base.py:102-109,245-252`).
 /// Output order matches `SELECT` order here (no annotations).
-const GLOBAL_ISSUE_SPEC: [(&str, usize, Col); 6] = [
-    ("name", 0, Col::Text),
-    ("id", 1, Col::Uuid),
-    ("sequence_id", 2, Col::Int),
-    ("project__identifier", 3, Col::Text),
-    ("project_id", 4, Col::Uuid),
-    ("workspace__slug", 5, Col::Text),
+const GLOBAL_ISSUE_SPEC: [(&str, Col); 6] = [
+    ("name", Col::Text),
+    ("id", Col::Uuid),
+    ("sequence_id", Col::Int),
+    ("project__identifier", Col::Text),
+    ("project_id", Col::Uuid),
+    ("workspace__slug", Col::Text),
 ];
 
 /// Row spec for the global cycle / module / view sections
 /// (`values("name", "id", "project_id", "project__identifier",
 /// "workspace__slug")`, `base.py:132,156,226`).
-const GLOBAL_NAMED_SPEC: [(&str, usize, Col); 5] = [
-    ("name", 0, Col::Text),
-    ("id", 1, Col::Uuid),
-    ("project_id", 2, Col::Uuid),
-    ("project__identifier", 3, Col::Text),
-    ("workspace__slug", 4, Col::Text),
+const GLOBAL_NAMED_SPEC: [(&str, Col); 5] = [
+    ("name", Col::Text),
+    ("id", Col::Uuid),
+    ("project_id", Col::Uuid),
+    ("project__identifier", Col::Text),
+    ("workspace__slug", Col::Text),
 ];
 
 // ---------------------------------------------------------------------------
@@ -304,14 +300,14 @@ async fn entity_search(
             // first (`base.py:345-349` vs the emitted `SELECT`).
             "user_mention" => {
                 let built = queries_search::entity_user_mention(&scope, search_ref);
-                // Positions are explicit, so one spec serves both branches
-                // (the project branch's trailing `created_at` is simply
-                // never referenced; the workspace branch selects no
-                // trailing column at all — `base.py:542`).
-                let spec: [(&str, usize, Col); 3] = [
-                    ("member__display_name", 0, Col::Text),
-                    ("member__id", 1, Col::Uuid),
-                    ("member__avatar_url", 2, Col::Text),
+                // One spec serves both branches: the project branch's
+                // trailing `created_at` is simply never referenced (the
+                // workspace branch selects no trailing column at all —
+                // `base.py:542`).
+                let spec: [(&str, Col); 3] = [
+                    ("member__display_name", Col::Text),
+                    ("member__id", Col::Uuid),
+                    ("member__avatar_url", Col::Text),
                 ];
                 fetch_shaped(&pool, &built, &spec).await?
             }
@@ -320,11 +316,11 @@ async fn entity_search(
                     &pool,
                     &queries_search::entity_project(&scope, search_ref),
                     &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("identifier", 2, Col::Text),
-                        ("logo_props", 3, Col::Json),
-                        ("workspace__slug", 4, Col::Text),
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("identifier", Col::Text),
+                        ("logo_props", Col::Json),
+                        ("workspace__slug", Col::Text),
                     ],
                 )
                 .await?
@@ -334,14 +330,14 @@ async fn entity_search(
                     &pool,
                     &queries_search::entity_issue(&scope, search_ref),
                     &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("sequence_id", 2, Col::Int),
-                        ("project__identifier", 3, Col::Text),
-                        ("project_id", 4, Col::Uuid),
-                        ("priority", 5, Col::Text),
-                        ("state_id", 6, Col::Uuid),
-                        ("type_id", 7, Col::Uuid),
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("sequence_id", Col::Int),
+                        ("project__identifier", Col::Text),
+                        ("project_id", Col::Uuid),
+                        ("priority", Col::Text),
+                        ("state_id", Col::Uuid),
+                        ("type_id", Col::Uuid),
                     ],
                 )
                 .await?
@@ -354,12 +350,12 @@ async fn entity_search(
                     &pool,
                     &queries_search::entity_cycle(&scope, search_ref, &now),
                     &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("project_id", 2, Col::Uuid),
-                        ("project__identifier", 3, Col::Text),
-                        ("workspace__slug", 5, Col::Text),
-                        ("status", 4, Col::Text),
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("project_id", Col::Uuid),
+                        ("project__identifier", Col::Text),
+                        ("workspace__slug", Col::Text),
+                        ("status", Col::Text),
                     ],
                 )
                 .await?
@@ -369,12 +365,12 @@ async fn entity_search(
                     &pool,
                     &queries_search::entity_module(&scope, search_ref),
                     &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("project_id", 2, Col::Uuid),
-                        ("project__identifier", 3, Col::Text),
-                        ("status", 4, Col::Text),
-                        ("workspace__slug", 5, Col::Text),
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("project_id", Col::Uuid),
+                        ("project__identifier", Col::Text),
+                        ("status", Col::Text),
+                        ("workspace__slug", Col::Text),
                     ],
                 )
                 .await?
@@ -384,11 +380,11 @@ async fn entity_search(
                     &pool,
                     &queries_search::entity_page(&scope, search_ref),
                     &[
-                        ("name", 0, Col::Text),
-                        ("id", 1, Col::Uuid),
-                        ("logo_props", 2, Col::Json),
-                        ("projects__id", 3, Col::Uuid),
-                        ("workspace__slug", 4, Col::Text),
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("logo_props", Col::Json),
+                        ("projects__id", Col::Uuid),
+                        ("workspace__slug", Col::Text),
                     ],
                 )
                 .await?
@@ -513,17 +509,17 @@ async fn issue_search(
         &pool,
         &built,
         &[
-            ("name", 0, Col::Text),
-            ("id", 1, Col::Uuid),
-            ("start_date", 2, Col::Date),
-            ("sequence_id", 3, Col::Int),
-            ("project__name", 4, Col::Text),
-            ("project__identifier", 5, Col::Text),
-            ("project_id", 6, Col::Uuid),
-            ("workspace__slug", 7, Col::Text),
-            ("state__name", 8, Col::Text),
-            ("state__group", 9, Col::Text),
-            ("state__color", 10, Col::Text),
+            ("name", Col::Text),
+            ("id", Col::Uuid),
+            ("start_date", Col::Date),
+            ("sequence_id", Col::Int),
+            ("project__name", Col::Text),
+            ("project__identifier", Col::Text),
+            ("project_id", Col::Uuid),
+            ("workspace__slug", Col::Text),
+            ("state__name", Col::Text),
+            ("state__group", Col::Text),
+            ("state__color", Col::Text),
         ],
     )
     .await?;
@@ -811,5 +807,219 @@ mod tests {
             .await
             .expect("related")
             .is_empty());
+    }
+
+    /// TEMP tables shadow public (no FKs needed for statement execution).
+    #[tokio::test]
+    async fn live_search_sections() {
+        use crate::app_views_search::{fetch_shaped, Col};
+        use pidash_services::app_views_search::queries_search::{
+            self, EntityScope, GlobalScope, IssueSearchInput,
+        };
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "workspace_members",
+            "projects",
+            "project_members",
+            "issues",
+            "states",
+            "issue_comments",
+            "pages",
+            "project_pages",
+            "cycles",
+            "modules",
+            "users",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        // The 731 scratch predates `anchor` (NEWFRONT-972) — see
+        // live_view_list_fetch; no section statement selects it, but the
+        // TEMP copy of issue_views is not needed here at all.
+        // The pages statement's GROUP BY leans on functional dependency
+        // (selected pages.* through the pages.id PK) — TEMP copies carry
+        // no constraints, so restore the two the query needs.
+        for sql in [
+            "ALTER TABLE pg_temp.pages ADD PRIMARY KEY (id)",
+            "ALTER TABLE pg_temp.workspaces ADD CONSTRAINT ws_slug_unique UNIQUE (slug)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect("constraints");
+        }
+        let (ws, proj, user) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let user_s = user.to_string();
+        let proj_s = proj.to_string();
+        let (page, issue, state_ok) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let triage = uuid::Uuid::new_v4();
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug, deleted_at) VALUES ('{ws}', 'acme_live', NULL)"),
+            format!("INSERT INTO workspace_members (id, workspace_id, member_id, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{user}', true, NULL)"),
+            format!("INSERT INTO projects (id, workspace_id, identifier, name, deleted_at, archived_at) VALUES ('{proj}', '{ws}', 'ACM', 'Acme', NULL, NULL)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user}', true, NULL)"),
+            format!("INSERT INTO states (id, name, \"group\") VALUES ('{state_ok}', 'Backlog', 'backlog'), ('{triage}', 'Triage', 'triage')"),
+            format!("INSERT INTO issues (id, workspace_id, project_id, name, description_stripped, sequence_id, state_id, deleted_at, archived_at, is_draft, created_by_id) VALUES ('{issue}', '{ws}', '{proj}', 'refund flow', 'refund description', 42, '{state_ok}', NULL, NULL, false, '{user}')"),
+            format!("INSERT INTO issues (id, workspace_id, project_id, name, description_stripped, sequence_id, state_id, deleted_at, archived_at, is_draft, created_by_id) VALUES (gen_random_uuid(), '{ws}', '{proj}', 'triage item', NULL, 43, '{triage}', NULL, NULL, false, '{user}')"),
+            format!("INSERT INTO pages (id, workspace_id, name, access, is_global, deleted_at) VALUES ('{page}', '{ws}', 'Roadmap', 0, true, NULL)"),
+            format!("INSERT INTO project_pages (id, page_id, project_id, created_at, deleted_at) VALUES (gen_random_uuid(), '{page}', '{proj}', now(), NULL)"),
+            format!("INSERT INTO users (id, first_name, last_name, display_name, is_bot) VALUES ('{user}', 'Ada', NULL, 'Ada', false)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // Global section statements, decoded by name.
+        let scope = GlobalScope {
+            user_id: user_s.as_str(),
+            workspace_slug: "acme_live",
+            narrow_project_id: None,
+        };
+        let built = queries_search::global_workspaces(&scope, None);
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[("name", Col::Text), ("id", Col::Uuid), ("slug", Col::Text)],
+        )
+        .await
+        .expect("workspace section");
+        assert_eq!(rows.len(), 1, "one workspace: {rows:?}");
+        assert!(rows[0].contains("\"slug\":\"acme_live\""), "{}", rows[0]);
+        assert!(rows[0].contains(&format!("\"id\":\"{ws}\"")), "{}", rows[0]);
+        // Pages section: array annotations decode as UUID/string arrays.
+        let built = queries_search::global_pages(&scope, None);
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("name", Col::Text),
+                ("id", Col::Uuid),
+                ("project_ids", Col::UuidArray),
+                ("project_identifiers", Col::StrArray),
+                ("workspace__slug", Col::Text),
+            ],
+        )
+        .await
+        .expect("pages section");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].contains(&format!("\"id\":\"{page}\"")),
+            "{}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains("\"workspace__slug\":\"acme_live\""),
+            "{}",
+            rows[0]
+        );
+        // FTS arms execute: the name match hits, an unmatched query misses,
+        // and the triage-state row stays out under the manager scope.
+        let built = queries_search::global_issues(&scope, Some("refund"));
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("name", Col::Text),
+                ("id", Col::Uuid),
+                ("sequence_id", Col::Int),
+                ("project__identifier", Col::Text),
+                ("project_id", Col::Uuid),
+                ("workspace__slug", Col::Text),
+            ],
+        )
+        .await
+        .expect("issue section");
+        assert_eq!(rows.len(), 1, "manager scope keeps one: {rows:?}");
+        assert!(rows[0].contains("\"sequence_id\":42"), "{}", rows[0]);
+        let built = queries_search::global_issues(&scope, Some("zzz-unmatched"));
+        let rows = fetch_shaped(&pool, &built, &[("name", Col::Text), ("id", Col::Uuid)])
+            .await
+            .expect("no match");
+        assert!(rows.is_empty(), "unmatched query: {rows:?}");
+        // Entity user_mention workspace branch (avatar CASE) executes.
+        let entity = EntityScope {
+            user_id: user_s.as_str(),
+            workspace_slug: "acme_live",
+            project_id: None,
+            count: 5,
+        };
+        let built = queries_search::entity_user_mention(&entity, None);
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("member__display_name", Col::Text),
+                ("member__id", Col::Uuid),
+                ("member__avatar_url", Col::Text),
+            ],
+        )
+        .await
+        .expect("mention section");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].contains("\"member__display_name\":\"Ada\""),
+            "{}",
+            rows[0]
+        );
+        // Issue pipeline minimal shape executes with the state joins.
+        let input = IssueSearchInput {
+            slug: "acme_live",
+            url_project_id: proj_s.as_str(),
+            user_id: user_s.as_str(),
+            query: None,
+            workspace_search: "true",
+            parent: false,
+            issue_relation: false,
+            sub_issue: false,
+            cycle: false,
+            module: None,
+            target_date_none: false,
+            issue_id: None,
+            issue_parent_id: None,
+            related_ids: Vec::new(),
+            guest: false,
+        };
+        let built = queries_search::build_issue_search(&input).expect("pipeline");
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("name", Col::Text),
+                ("id", Col::Uuid),
+                ("start_date", Col::Date),
+                ("sequence_id", Col::Int),
+                ("project__name", Col::Text),
+                ("project__identifier", Col::Text),
+                ("project_id", Col::Uuid),
+                ("workspace__slug", Col::Text),
+                ("state__name", Col::Text),
+                ("state__group", Col::Text),
+                ("state__color", Col::Text),
+            ],
+        )
+        .await
+        .expect("pipeline section");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].contains("\"state__group\":\"backlog\""),
+            "{}",
+            rows[0]
+        );
     }
 }
