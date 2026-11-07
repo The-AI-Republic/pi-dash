@@ -1,4 +1,4 @@
-//! Pull-request operation: attach a GitHub PR link to an issue.
+//! Pull-request operation: attach a GitHub PR link to an issue (PDASHOSS01-355: generic git_code_review_links).
 //!
 //! The serializer step of the v1 PR-link create endpoint, moved from
 //! `pidash_api::v1_work_items::handlers_pr_links` (OVL-14,
@@ -145,11 +145,11 @@ const PR_RACE_MISS: &str = "pr link lost the create race";
 /// 400, so the handler maps these to 400, not 500.
 const PR_PAYLOAD_INVALID: &str = "pr-links: payload not valid";
 
-/// Re-read one PR link by id for the create response (the serializer
-/// reads the saved instance, whose audit columns the store stamped).
-const PR_OWNED_SQL: &str = r#"SELECT id, issue_id, repo_owner, repo_name, pr_number, url, title, state,
-              merged, draft, pr_updated_at, created_at, updated_at, created_by_id
-       FROM github_pull_request_links WHERE id = $1 LIMIT 1"#;
+/// Re-read one PR link by id for the create response (PDASHOSS01-355:
+/// generic git_code_review_links, GitHub-shaped via namespace mapping).
+const PR_OWNED_SQL: &str = r#"SELECT id, issue_id, namespace AS repo_owner, repo_name, CAST(external_iid AS INTEGER) AS pr_number, url, title, CASE WHEN state = 'merged' THEN 'closed' ELSE state END AS state,
+              merged, draft, remote_updated_at AS pr_updated_at, created_at, updated_at, created_by_id
+       FROM git_code_review_links WHERE id = $1 AND provider = 'github' AND host_url = 'https://github.com' LIMIT 1"#;
 
 /// `POST .../github/pull-requests/` (`GithubPullRequestLinkSerializer`,
 /// `github_pr.py:53-95`): validate the URL, attach through the store,
