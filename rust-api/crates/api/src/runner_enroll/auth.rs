@@ -1577,13 +1577,13 @@ mod tests {
             ),
             format!(
                 "INSERT INTO runner (id, owner_id, workspace_id, dev_machine_id, pod_id, name, \
-                 host_label, provisioning, visibility, refresh_token_hash, \
+                 host_label, provisioning, pod_dispatch, visibility, refresh_token_hash, \
                  refresh_token_fingerprint, refresh_token_generation, \
                  previous_refresh_token_hash, access_token_signing_key_version, \
                  enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, os, \
                  arch, runner_version, dev_metadata, protocol_version, created_at, updated_at, \
                  revoked_reason) VALUES ('{runner_id}', '{user}', '{workspace}', '{machine}', \
-                 gen_random_uuid(), 'r', 'h', 'desktop_bundled', 0, '', '', 3, '', 1, '', '', \
+                 gen_random_uuid(), 'r', 'h', 'desktop_bundled', 'pinned_only', 0, '', '', 3, '', 1, '', '', \
                  '[]', 'online', '', '', '', '{{}}', 1, now(), now(), '')"
             ),
             format!(

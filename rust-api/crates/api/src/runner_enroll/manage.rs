@@ -148,6 +148,11 @@ pub const POD_MISSING_BODY: &str = r#"{"error":"pod does not exist or has been d
 pub const POD_OTHER_WORKSPACE_BODY: &str = r#"{"error":"pod is in a different workspace"}"#;
 /// Runner busy guard — 409 (`runners.py:414-417`).
 pub const RUNNER_BUSY_BODY: &str = r#"{"error":"runner has an in-flight or queued run; wait for it to finish or cancel it first","code":"runner_busy"}"#;
+/// `pod_dispatch` validation — 400 (`runners.py` #2903).
+pub const POD_DISPATCH_INVALID_BODY: &str =
+    r#"{"error":"pod_dispatch must be one of: pinned_only, pod_member"}"#;
+/// Engine pod-move restriction — 400 (`runners.py` #2903).
+pub const ENGINE_PROJECT_FIXED_BODY: &str = r#"{"error":"a built-in engine runner can only move between pods of its project","code":"engine_runner_project_fixed"}"#;
 /// Pod delete guard 1 — 409 (`pods.py:230-234`).
 pub const POD_HAS_RUNNERS_BODY: &str =
     r#"{"error":"pod has runners; move or revoke them first","code":"pod_has_runners"}"#;
@@ -425,6 +430,59 @@ fn body_uuid(value: &JVal) -> Result<Uuid, Response> {
         JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
             Err(server_error())
         }
+    }
+}
+
+/// The runner-PATCH `pod_dispatch` member (`runners.py` #2903): the raw
+/// value must be one of the two choices; anything else (including
+/// non-strings) is the 400. Returns the value when valid.
+fn pod_dispatch_value(value: Option<&JVal>) -> Option<String> {
+    match value {
+        Some(JVal::Str(text)) => {
+            let raw = text.to_lossy_string().to_owned();
+            if raw == "pinned_only" || raw == "pod_member" {
+                Some(raw)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a runner is a built-in engine runner (`provisioning` check,
+/// `Runner.is_engine`, `models.py` #2903).
+fn is_engine_runner(executor: &RunnerOwned) -> bool {
+    executor.provisioning == "desktop_bundled"
+}
+
+/// Drain a runner after commit (the `_apply_pod_dispatch_change` pod-member
+/// arm, `drain_for_runner_by_id` on commit).
+async fn drain_runner_after_commit(pool: &PgPool, state: &AppState, runner_id: Uuid) {
+    let redis = pidash_db::redis::client_from_settings(state.settings());
+    let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await;
+}
+
+/// Drain pods after commit (the `release_locality_pins` pod drains).
+async fn drain_pods_after_commit(pool: &PgPool, state: &AppState, pods: &[Uuid]) {
+    if pods.is_empty() {
+        return;
+    }
+    let redis = pidash_db::redis::client_from_settings(state.settings());
+    for pod in pods {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod,
+        )
+        .await;
     }
 }
 
@@ -1717,6 +1775,26 @@ pub async fn runner_patch(
         Ok(false) => {}
         Err(response) => return response,
     }
+    // `pod_dispatch` validation (`runners.py` #2903): when the key is
+    // present the value must be one of the two choices.
+    let mut new_dispatch: Option<String> = None;
+    match data_has(&data, "pod_dispatch") {
+        Ok(true) => {
+            let raw = match data_get(&data, "pod_dispatch") {
+                Ok(raw) => raw,
+                Err(response) => return response,
+            };
+            match pod_dispatch_value(raw) {
+                Some(value) => new_dispatch = Some(value),
+                None => return bad_request(POD_DISPATCH_INVALID_BODY),
+            }
+        }
+        Ok(false) => {}
+        Err(response) => return response,
+    }
+    let dispatch_changed = new_dispatch
+        .as_deref()
+        .is_some_and(|value| value != runner.pod_dispatch);
     let mut new_pod: Option<PodOwned> = None;
     let want_pod = match data_has(&data, "pod") {
         Ok(want_pod) => want_pod,
@@ -1754,6 +1832,12 @@ pub async fn runner_patch(
         if target.workspace_id != runner.workspace_id {
             return bad_request(POD_OTHER_WORKSPACE_BODY);
         }
+        // Engine pod-move restriction (`runners.py` #2903): an engine
+        // runner that already has a pod may only move within its project.
+        // This runs after the workspace check and before the busy guard.
+        if is_engine_runner(&runner) && target.project_id != hit.row.pod_project_id {
+            return bad_request(ENGINE_PROJECT_FIXED_BODY);
+        }
         if manage_reads::is_real_move(&target.id, &runner.pod_id) {
             let busy = match manage_reads::runner_is_busy(&TxConn::new(&mut tx), runner.id).await {
                 Ok(busy) => busy,
@@ -1771,12 +1855,35 @@ pub async fn runner_patch(
             runner.id,
             Some(target.id),
             new_name.as_deref(),
+            if dispatch_changed {
+                new_dispatch.as_deref()
+            } else {
+                None
+            },
             now,
         )
         .await
         .is_err()
         {
             return server_error();
+        }
+        // Side effects in the same transaction (`_apply_pod_dispatch_change`).
+        let mut drain_runner = false;
+        let mut drain_pods: Vec<Uuid> = Vec::new();
+        if dispatch_changed {
+            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+                match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
+                    &TxConn::new(&mut tx),
+                    &[runner.id],
+                )
+                .await
+                {
+                    Ok((_, pods)) => drain_pods = pods,
+                    Err(_) => return server_error(),
+                }
+            } else if new_dispatch.as_deref() == Some("pod_member") {
+                drain_runner = true;
+            }
         }
         if tx.commit().await.is_err() {
             return server_error();
@@ -1786,24 +1893,89 @@ pub async fn runner_patch(
         if let Some(name) = new_name.clone() {
             runner.name = name;
         }
-        new_pod = Some(target);
-    } else if let Some(name) = new_name.clone() {
-        // Rename-only: a standalone autocommit save, no transaction.
-        let now = now_micros();
-        if manage_reads::patch_runner(
-            &pidash_db::pool::sea_orm_connection(&pool),
-            runner.id,
-            None,
-            Some(&name),
-            now,
-        )
-        .await
-        .is_err()
-        {
-            return server_error();
+        if dispatch_changed {
+            if let Some(dispatch) = new_dispatch.clone() {
+                runner.pod_dispatch = dispatch;
+            }
         }
-        runner.name = name;
-        runner.updated_at = now;
+        new_pod = Some(target);
+        if drain_runner {
+            drain_runner_after_commit(&pool, &state, runner.id).await;
+        } else if !drain_pods.is_empty() {
+            drain_pods_after_commit(&pool, &state, &drain_pods).await;
+        }
+    } else if new_name.is_some() || dispatch_changed {
+        if dispatch_changed {
+            // Non-pod path is wrapped in `transaction.atomic` (#2903).
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(_) => return server_error(),
+            };
+            let now = now_micros();
+            if manage_reads::patch_runner(
+                &TxConn::new(&mut tx),
+                runner.id,
+                None,
+                new_name.as_deref(),
+                new_dispatch.as_deref(),
+                now,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+            let mut drain_runner = false;
+            let mut drain_pods: Vec<Uuid> = Vec::new();
+            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+                match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
+                    &TxConn::new(&mut tx),
+                    &[runner.id],
+                )
+                .await
+                {
+                    Ok((_, pods)) => drain_pods = pods,
+                    Err(_) => return server_error(),
+                }
+            } else if new_dispatch.as_deref() == Some("pod_member") {
+                drain_runner = true;
+            }
+            if tx.commit().await.is_err() {
+                return server_error();
+            }
+            runner.updated_at = now;
+            if let Some(name) = new_name.clone() {
+                runner.name = name;
+            }
+            if let Some(dispatch) = new_dispatch.clone() {
+                runner.pod_dispatch = dispatch;
+            }
+            if drain_runner {
+                drain_runner_after_commit(&pool, &state, runner.id).await;
+            } else if !drain_pods.is_empty() {
+                drain_pods_after_commit(&pool, &state, &drain_pods).await;
+            }
+        } else {
+            // Rename-only: a standalone autocommit save, no transaction.
+            let now = now_micros();
+            if manage_reads::patch_runner(
+                &pidash_db::pool::sea_orm_connection(&pool),
+                runner.id,
+                None,
+                new_name.as_deref(),
+                None,
+                now,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+            runner.updated_at = now;
+            if let Some(name) = new_name.clone() {
+                runner.name = name;
+            }
+        }
     }
     // Serialize the in-memory row: the pod mini comes from the moved-to
     // pod (whose project slug re-reads — the lock-read instance never
