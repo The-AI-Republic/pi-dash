@@ -474,6 +474,30 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
   });
 
+  it("closes only the open picker on Escape and keeps the entered values", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    await user.click(screen.getByLabelText("Search projects"));
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("form")).toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: /project/ });
+    expect(trigger).toHaveTextContent("1 project selected");
+    expect(trigger).toHaveFocus();
+    expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+  });
+
   it("lets the cancel button close without writing", async () => {
     contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA })]);
     const { user, onClose } = renderDialog();
