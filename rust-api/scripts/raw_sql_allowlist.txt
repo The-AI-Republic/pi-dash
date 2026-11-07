@@ -28,8 +28,6 @@ crates/api/src/auth_session/magic.rs 14
 crates/api/src/auth_session/password.rs 5
 crates/api/src/license/handlers_admin.rs 20
 crates/api/src/license/handlers_config_workspace.rs 8
-crates/api/src/license/handlers_instance.rs 11
-crates/api/src/license/mod.rs 3
 crates/api/src/runner_enroll/delete_cmds.rs 1
 crates/api/src/runner_enroll/teardown.rs 10
 crates/api/src/runner_sessions/machine.rs 9
@@ -44,12 +42,9 @@ crates/api/src/turn/tools_local_store.rs 2
 crates/api/src/v1_work_items/handlers_pr_links.rs 38
 crates/db/src/config/accessor.rs 1
 crates/db/src/filterset.rs 6
-crates/db/src/license/queries.rs 13
 crates/db/src/runner_runs/pod.rs 3
 crates/db/src/runner_sessions/machine_outbox.rs 1
 crates/db/src/runner_sessions/outbox.rs 1
-crates/jobs/src/license/commands.rs 9
-crates/jobs/src/license/tasks.rs 4
 crates/jobs/src/runner_enroll.rs 5
 crates/jobs/src/scheduler.rs 2
 crates/jobs/src/tasks_cleanup/dummy_data.rs 34

@@ -54,6 +54,9 @@ use chrono_tz::Tz;
 
 use crate::state::AppState;
 pub use pidash_compat::response::{json_ok_value as json_response, SERVER_ERROR_BODY};
+use pidash_db::entity::{instance_admins, instances, users};
+use pidash_db::pool::sea_orm_connection;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// `BACKEND_SESSION_KEY` value Django accepts here: `AUTHENTICATION_BACKENDS`
 /// is exactly `(ModelBackend,)` (`settings/common.py:125`).
@@ -227,8 +230,7 @@ fn none_str(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| "None".to_owned())
 }
 
-/// One `users` row for session resolution:
-/// `(id, email, first_name, last_name, password, is_active, user_timezone)`.
+/// One `users` row for session resolution (kept for compatibility).
 type UserLookupRow = (
     uuid::Uuid,
     Option<String>,
@@ -238,6 +240,9 @@ type UserLookupRow = (
     bool,
     String,
 );
+
+#[allow(dead_code)]
+type _UserLookupRowUnused = UserLookupRow;
 
 /// The authenticated actor: the `users` row behind a verified session.
 #[derive(Debug, Clone)]
@@ -292,31 +297,28 @@ pub async fn resolve_actor(
         Ok(id) => id,
         Err(_) => return Ok(None),
     };
-    let row: Option<UserLookupRow> = sqlx::query_as(
-        r#"SELECT id, email, first_name, last_name, password, is_active, user_timezone
-           FROM users WHERE id = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((id, email, first_name, last_name, password, is_active, user_timezone)) = row else {
+    let db = sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(u) = user else {
         // `ModelBackend.get_user` catches `DoesNotExist` and returns `None`.
         return Ok(None);
     };
-    if !is_active {
+    if !u.is_active {
         // DRF `SessionAuthentication.authenticate`: inactive users are `None`.
         return Ok(None);
     }
-    if session_hash.is_empty() || !verify_session_hash(&session_hash, &password, secret_key) {
+    if session_hash.is_empty() || !verify_session_hash(&session_hash, &u.password, secret_key) {
         return Ok(None);
     }
-    let timezone: Tz = user_timezone.parse().map_err(|_| Denial::ServerError)?;
+    let timezone: Tz = u.user_timezone.parse().map_err(|_| Denial::ServerError)?;
     Ok(Some(Actor {
-        id,
-        email,
-        first_name,
-        last_name,
+        id: u.id,
+        email: u.email,
+        first_name: u.first_name,
+        last_name: u.last_name,
         timezone,
     }))
 }
@@ -340,24 +342,32 @@ pub async fn require_admin(
     // `Instance.objects.first()`: the exact fixture SQL; only the id is
     // needed, but the row parses through the queries-layer mapper so the
     // emitted SQL stays identical.
-    let instance = sqlx::query(pidash_db::license::queries::INSTANCE_FIRST_SQL)
-        .fetch_optional(pool)
+    let db = sea_orm_connection(pool);
+    let instance = instances::Entity::find()
+        .filter(instances::Column::DeletedAt.is_null())
+        .order_by_desc(instances::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     let Some(instance_row) = instance else {
         // `filter(instance=None, ...)` matches nothing (non-nullable FK).
         return Err(Denial::Forbidden);
     };
-    let instance_id = pidash_db::license::queries::map_instance_row(&instance_row)
-        .map_err(|_| Denial::ServerError)?
-        .id;
+    let instance_id = instance_row.id;
     // `InstanceAdmin.objects.filter(role__gte=15, instance, user).exists()`:
     // the exact permission-check SQL; presence is the decision.
-    let admin = sqlx::query(&pidash_db::license::queries::admin_permission_check_sql())
-        .bind(instance_id)
-        .bind(pidash_db::license::queries::ADMIN_PERMISSION_ROLE_GTE)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let admin = instance_admins::Entity::find()
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .filter(instance_admins::Column::InstanceId.eq(instance_id))
+        .filter(
+            instance_admins::Column::Role
+                .gte(pidash_db::license::queries::ADMIN_PERMISSION_ROLE_GTE),
+        )
+        .filter(instance_admins::Column::UserId.eq(actor.id))
+        .order_by_desc(instance_admins::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     let allows = pidash_auth::license::permissions::instance_admin_allows(
