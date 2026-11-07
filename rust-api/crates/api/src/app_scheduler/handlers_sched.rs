@@ -7,8 +7,8 @@
 //! (`workspaces/<slug>/schedulers/`, `.../schedulers/<uuid>/`).
 //!
 //! Wiring only, no new logic: gates from [`super::gate`] (PIDASHCONV-632),
-//! SQL from `pidash_services::app_scheduler::queries` (PIDASHCONV-630),
-//! shapes from `pidash_services::app_scheduler::shape` (PIDASHCONV-629).
+//! statements as SeaORM entities/queries (orm-migration), shapes from
+//! `pidash_services::app_scheduler::shape` (PIDASHCONV-629).
 //! Fixture: `rust-api/fixtures/app_scheduler/handlers/scheduler_io.golden.json`
 //! (F36-10; trace: `rust-api/fixtures/app_scheduler/TRACE.md`).
 //!
@@ -68,13 +68,19 @@ use http_body_util::BodyExt;
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 
-use pidash_services::app_scheduler::{queries, shape};
+use pidash_db::entity::{scheduler_bindings, schedulers, workspaces};
+use pidash_db::orm_tx;
+use pidash_services::app_scheduler::shape;
+use sea_orm::sea_query::{Expr, Func, JoinType};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Set,
+};
 
 use super::gate::{self, Gate};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
-use pidash_compat::db::is_integrity_error;
 use pidash_compat::response::json_response;
 
 // ---------------------------------------------------------------------------
@@ -150,54 +156,14 @@ impl IntoResponse for Denial {
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder conversion (`:named` in PARAMS order -> `$n`)
-// ---------------------------------------------------------------------------
-
-/// Convert a [`queries`] `:named` statement to sqlx `$n` placeholders.
-///
-/// Numbering follows `PARAMS` order ([`queries::PLACEHOLDER_RULE`]); a
-/// name bound twice (INSERT's `:now`) shares one `$n` and is bound once.
-/// A `:name` only matches when followed by a non-identifier byte, so
-/// `:now` never matches inside `:now2`. Stray colons (none in the
-/// scheduler statements) pass through untouched.
-pub fn positional(sql: &str, params: &[&str]) -> String {
-    let bytes = sql.as_bytes();
-    let mut out = String::with_capacity(sql.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b':' {
-            let mut j = i + 1;
-            while j < bytes.len() && is_ident_byte(bytes[j]) {
-                j += 1;
-            }
-            if j > i + 1 {
-                let name = &sql[i + 1..j];
-                if let Some(position) = params.iter().position(|candidate| *candidate == name) {
-                    out.push('$');
-                    out.push_str(&(position + 1).to_string());
-                    i = j;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn is_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-// ---------------------------------------------------------------------------
-// Rows (`sqlx::FromRow` maps by column name; wide selects exceed the
+// Rows (`FromQueryResult` maps by column name; wide selects exceed the
 // 16-tuple `FromRow` impls — the `license` handler precedent)
 // ---------------------------------------------------------------------------
 
 /// One `schedulers` row in fixture SELECT order (R1/R2/R5b without the
 /// annotation leg). Also the in-memory image for create/PATCH renders.
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+/// Also the v1 surface's row image (struct-literal construction).
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchedulerRow {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -216,14 +182,15 @@ pub struct SchedulerRow {
 }
 
 /// One annotated scheduler row (R1 list / R2 detail): the scheduler
-/// columns plus `_active_binding_count` (`COUNT ... FILTER`, never NULL).
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+/// columns decoded by name plus `_active_binding_count`
+/// (`COUNT(CASE WHEN ...)`, never NULL).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct AnnotatedSchedulerRow {
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    pub updated_at: sea_orm::prelude::DateTimeWithTimeZone,
     pub created_by_id: Option<uuid::Uuid>,
     pub updated_by_id: Option<uuid::Uuid>,
-    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     pub id: uuid::Uuid,
     pub workspace_id: uuid::Uuid,
     pub slug: String,
@@ -239,11 +206,11 @@ pub struct AnnotatedSchedulerRow {
 impl AnnotatedSchedulerRow {
     fn record(&self) -> SchedulerRow {
         SchedulerRow {
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            created_at: self.created_at.with_timezone(&Utc),
+            updated_at: self.updated_at.with_timezone(&Utc),
             created_by_id: self.created_by_id,
             updated_by_id: self.updated_by_id,
-            deleted_at: self.deleted_at,
+            deleted_at: self.deleted_at.map(|stamp| stamp.with_timezone(&Utc)),
             id: self.id,
             workspace_id: self.workspace_id,
             slug: self.slug.clone(),
@@ -255,6 +222,176 @@ impl AnnotatedSchedulerRow {
             color: self.color.clone(),
         }
     }
+}
+
+/// The fourteen `schedulers` columns every read projects, in the old
+/// SQL's SELECT order (decode is by name, so order is cosmetic).
+fn scheduler_columns() -> [schedulers::Column; 14] {
+    use schedulers::Column;
+    [
+        Column::CreatedAt,
+        Column::UpdatedAt,
+        Column::CreatedById,
+        Column::UpdatedById,
+        Column::DeletedAt,
+        Column::Id,
+        Column::WorkspaceId,
+        Column::Slug,
+        Column::Name,
+        Column::Description,
+        Column::Prompt,
+        Column::Source,
+        Column::IsEnabled,
+        Column::Color,
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Statements (SeaORM fetchers; shapes pinned in tests)
+// ---------------------------------------------------------------------------
+
+/// The annotated scheduler statement base (R1/R2): the full scheduler
+/// projection plus `_active_binding_count` over the bindings left join,
+/// grouped by scheduler id (Postgres allows functionally dependent
+/// columns on a single-PK `GROUP BY`). One statement preserves the old
+/// statement count.
+fn annotated_scheduler_statement() -> sea_orm::Select<schedulers::Entity> {
+    schedulers::Entity::find()
+        .select_only()
+        .columns(scheduler_columns())
+        .expr_as(
+            Func::count(Expr::case(
+                Expr::col((
+                    scheduler_bindings::Entity,
+                    scheduler_bindings::Column::DeletedAt,
+                ))
+                .is_null(),
+                Expr::col((scheduler_bindings::Entity, scheduler_bindings::Column::Id)),
+            )),
+            "_active_binding_count",
+        )
+        .join(
+            JoinType::LeftJoin,
+            schedulers::Relation::SchedulerBindings.def(),
+        )
+        .group_by(schedulers::Column::Id)
+}
+
+/// R1 scheduler list: live schedulers of one workspace ordered by name,
+/// each with its annotated count.
+fn scheduler_list_statement(workspace_id: uuid::Uuid) -> sea_orm::Select<schedulers::Entity> {
+    annotated_scheduler_statement()
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .filter(schedulers::Column::WorkspaceId.eq(workspace_id))
+        .order_by_asc(schedulers::Column::Name)
+}
+
+/// R2 scheduler detail: one live scheduler by id in the named
+/// workspace, with its annotated count. The `INNER JOIN` on
+/// `workspaces` has no `deleted_at` predicate — exactly the old SQL.
+fn scheduler_detail_statement(
+    scheduler_id: uuid::Uuid,
+    slug: &str,
+) -> sea_orm::Select<schedulers::Entity> {
+    annotated_scheduler_statement()
+        .join(JoinType::InnerJoin, schedulers::Relation::Workspaces.def())
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .filter(schedulers::Column::Id.eq(scheduler_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+}
+
+/// R5b lookup: the un-annotated row; only existence matters (404
+/// before the transaction opens). The old SQL's `ORDER BY created_at
+/// DESC` is kept (unobservable for a unique-id lookup, but the
+/// statement stays the same shape).
+fn scheduler_delete_lookup_statement(
+    scheduler_id: uuid::Uuid,
+    slug: &str,
+) -> sea_orm::Select<schedulers::Entity> {
+    schedulers::Entity::find()
+        .select_only()
+        .columns(scheduler_columns())
+        .join(JoinType::InnerJoin, schedulers::Relation::Workspaces.def())
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .filter(schedulers::Column::Id.eq(scheduler_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(schedulers::Column::CreatedAt)
+}
+
+/// R7 slug-unique check: one live row with this slug in the workspace,
+/// optionally excluding the row being patched (the PATCH self-row
+/// exclusion). Tombstoned slugs stay reusable (`deleted_at IS NULL`
+/// only).
+fn scheduler_slug_statement(
+    slug: &str,
+    workspace_id: uuid::Uuid,
+    exclude_scheduler: Option<uuid::Uuid>,
+) -> sea_orm::Select<schedulers::Entity> {
+    let statement = schedulers::Entity::find()
+        .select_only()
+        .column(schedulers::Column::Id)
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .filter(schedulers::Column::Slug.eq(slug))
+        .filter(schedulers::Column::WorkspaceId.eq(workspace_id));
+    let statement = match exclude_scheduler {
+        Some(scheduler_id) => statement.filter(schedulers::Column::Id.ne(scheduler_id)),
+        None => statement,
+    };
+    statement.limit(1)
+}
+
+/// R4 scheduler PATCH: full-column save (every writable column plus
+/// the `updated_at`/`updated_by_id` refresh).
+fn scheduler_patch_statement(
+    now: sea_orm::prelude::DateTimeWithTimeZone,
+    user_id: uuid::Uuid,
+    write: &SchedulerWrite,
+    scheduler_id: uuid::Uuid,
+) -> sea_orm::UpdateMany<schedulers::Entity> {
+    schedulers::Entity::update_many()
+        .col_expr(schedulers::Column::UpdatedAt, Expr::value(now))
+        .col_expr(schedulers::Column::UpdatedById, Expr::value(user_id))
+        .col_expr(schedulers::Column::Slug, Expr::value(write.slug.clone()))
+        .col_expr(schedulers::Column::Name, Expr::value(write.name.clone()))
+        .col_expr(
+            schedulers::Column::Description,
+            Expr::value(write.description.clone()),
+        )
+        .col_expr(
+            schedulers::Column::Prompt,
+            Expr::value(write.prompt.clone()),
+        )
+        .col_expr(schedulers::Column::Color, Expr::value(write.color.clone()))
+        .col_expr(schedulers::Column::IsEnabled, Expr::value(write.is_enabled))
+        .filter(schedulers::Column::Id.eq(scheduler_id))
+}
+
+/// R5a delete cascade, bindings first: `deleted_at` only — `update()`
+/// bypasses `auto_now`, so `updated_at` stays untouched (ported quirk
+/// 4).
+fn scheduler_bindings_soft_delete_statement(
+    now: sea_orm::prelude::DateTimeWithTimeZone,
+    scheduler_id: uuid::Uuid,
+) -> sea_orm::UpdateMany<scheduler_bindings::Entity> {
+    scheduler_bindings::Entity::update_many()
+        .col_expr(scheduler_bindings::Column::DeletedAt, Expr::value(now))
+        .filter(scheduler_bindings::Column::SchedulerId.eq(scheduler_id))
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+}
+
+/// R5b delete cascade, scheduler second: two separate `now()` samples
+/// (ported quirk 5).
+fn schedulers_soft_delete_statement(
+    now: sea_orm::prelude::DateTimeWithTimeZone,
+    now2: sea_orm::prelude::DateTimeWithTimeZone,
+    user_id: uuid::Uuid,
+    scheduler_id: uuid::Uuid,
+) -> sea_orm::UpdateMany<schedulers::Entity> {
+    schedulers::Entity::update_many()
+        .col_expr(schedulers::Column::DeletedAt, Expr::value(now))
+        .col_expr(schedulers::Column::UpdatedAt, Expr::value(now2))
+        .col_expr(schedulers::Column::UpdatedById, Expr::value(user_id))
+        .filter(schedulers::Column::Id.eq(scheduler_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -536,24 +673,14 @@ async fn slug_in_use(
     slug: &str,
     exclude_scheduler: Option<&uuid::Uuid>,
 ) -> Result<bool, Denial> {
-    let sql = queries::scheduler_slug_unique_check_sql(exclude_scheduler.is_some());
-    let params = if exclude_scheduler.is_some() {
-        queries::SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_PARAMS
-    } else {
-        queries::SCHEDULER_SLUG_UNIQUE_CHECK_PARAMS
-    };
-    let sql = positional(&sql, params);
-    let mut query = sqlx::query_as::<_, (i32,)>(&sql)
-        .bind(slug)
-        .bind(workspace_id);
-    if let Some(scheduler_id) = exclude_scheduler {
-        query = query.bind(scheduler_id);
-    }
-    let row: Option<(i32,)> = query
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let found: Option<uuid::Uuid> =
+        scheduler_slug_statement(slug, *workspace_id, exclude_scheduler.copied())
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    Ok(found.is_some())
 }
 
 /// The `{"slug": [...]}` conflict body, merged ahead of any other field
@@ -685,10 +812,10 @@ pub async fn scheduler_list(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let sql = positional(queries::SCHEDULER_LIST_SQL, queries::SCHEDULER_LIST_PARAMS);
-    let rows: Vec<AnnotatedSchedulerRow> = match sqlx::query_as(&sql)
-        .bind(gate.workspace_id)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<AnnotatedSchedulerRow> = match scheduler_list_statement(gate.workspace_id)
+        .into_model::<AnnotatedSchedulerRow>()
+        .all(&db)
         .await
     {
         Ok(rows) => rows,
@@ -762,42 +889,42 @@ pub(crate) async fn create_scheduler(
     // note: Django samples per field, unobservable at ~1us).
     let id = uuid::Uuid::new_v4();
     let now = Utc::now();
-    let sql = positional(
-        queries::SCHEDULER_INSERT_SQL,
-        queries::SCHEDULER_INSERT_PARAMS,
-    );
-    sqlx::query(&sql)
-        .bind(id)
-        .bind(now)
-        .bind(user_id)
-        .bind(workspace_id)
-        .bind(&write.slug)
-        .bind(&write.name)
-        .bind(&write.description)
-        .bind(&write.prompt)
-        .bind(write.is_enabled)
-        .bind(&write.color)
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            if is_integrity_error(&error) {
-                Denial::BadError("The payload is not valid".to_owned())
-            } else {
-                Denial::ServerError
-            }
-        })?;
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    schedulers::ActiveModel {
+        id: Set(id),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(Some(*user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(*workspace_id),
+        slug: Set(write.slug.clone()),
+        name: Set(write.name.clone()),
+        description: Set(write.description.clone()),
+        prompt: Set(write.prompt.clone()),
+        source: Set("builtin".to_owned()),
+        is_enabled: Set(write.is_enabled),
+        color: Set(write.color.clone()),
+    }
+    .insert(&db)
+    .await
+    .map_err(|error| {
+        if orm_tx::is_integrity_violation(&error) {
+            Denial::BadError("The payload is not valid".to_owned())
+        } else {
+            Denial::ServerError
+        }
+    })?;
     // The create response serializes the fresh un-annotated row, so the
     // count falls back to the R6 query (always 0 for a new scheduler).
-    let count_sql = positional(
-        queries::ACTIVE_BINDING_COUNT_SQL,
-        queries::ACTIVE_BINDING_COUNT_PARAMS,
-    );
-    let fallback: Option<(i64,)> = sqlx::query_as(&count_sql)
-        .bind(id)
-        .fetch_optional(pool)
+    let fallback: u64 = scheduler_bindings::Entity::find()
+        .filter(scheduler_bindings::Column::SchedulerId.eq(id))
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .count(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let count = shape::resolve_active_binding_count(None, fallback.map(|row| row.0).unwrap_or(0));
+    let count = shape::resolve_active_binding_count(None, fallback as i64);
     let row = SchedulerRow {
         created_at: now,
         updated_at: now,
@@ -846,14 +973,10 @@ pub async fn scheduler_detail(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let sql = positional(
-        queries::SCHEDULER_DETAIL_SQL,
-        queries::SCHEDULER_DETAIL_PARAMS,
-    );
-    let row: Option<AnnotatedSchedulerRow> = match sqlx::query_as(&sql)
-        .bind(scheduler_id)
-        .bind(&slug)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<AnnotatedSchedulerRow> = match scheduler_detail_statement(scheduler_id, &slug)
+        .into_model::<AnnotatedSchedulerRow>()
+        .one(&db)
         .await
     {
         Ok(row) => row,
@@ -900,14 +1023,10 @@ pub async fn scheduler_patch(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let sql = positional(
-        queries::SCHEDULER_DETAIL_SQL,
-        queries::SCHEDULER_DETAIL_PARAMS,
-    );
-    let row: Option<AnnotatedSchedulerRow> = match sqlx::query_as(&sql)
-        .bind(scheduler_id)
-        .bind(&slug)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<AnnotatedSchedulerRow> = match scheduler_detail_statement(scheduler_id, &slug)
+        .into_model::<AnnotatedSchedulerRow>()
+        .one(&db)
         .await
     {
         Ok(row) => row,
@@ -937,24 +1056,12 @@ pub async fn scheduler_patch(
     // R4 (`:127-133`): `save()` rewrites every writable column with the
     // merged values and refreshes `updated_at`/`updated_by_id`.
     let now = Utc::now();
-    let patch_sql = positional(
-        queries::SCHEDULER_PATCH_SQL,
-        queries::SCHEDULER_PATCH_PARAMS,
-    );
-    let update = sqlx::query(&patch_sql)
-        .bind(now)
-        .bind(gate.user_id)
-        .bind(&write.slug)
-        .bind(&write.name)
-        .bind(&write.description)
-        .bind(&write.prompt)
-        .bind(&write.color)
-        .bind(write.is_enabled)
-        .bind(scheduler_id)
-        .execute(pool)
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    let update = scheduler_patch_statement(stamped, gate.user_id, &write, scheduler_id)
+        .exec(&db)
         .await;
     if let Err(error) = update {
-        if is_integrity_error(&error) {
+        if orm_tx::is_integrity_violation(&error) {
             return Denial::BadError("The payload is not valid".to_owned()).into_response();
         }
         return Denial::ServerError.into_response();
@@ -1024,27 +1131,16 @@ pub(crate) async fn soft_delete_scheduler(
     user_id: &uuid::Uuid,
 ) -> Result<(), Denial> {
     let now = Utc::now();
-    let bindings_sql = positional(
-        queries::SCHEDULER_DELETE_BINDINGS_SQL,
-        queries::SCHEDULER_DELETE_BINDINGS_PARAMS,
-    );
-    sqlx::query(&bindings_sql)
-        .bind(now)
-        .bind(scheduler_id)
-        .execute(&mut *conn)
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    let tx_conn = orm_tx::TxConn::new(conn);
+    scheduler_bindings_soft_delete_statement(stamped, *scheduler_id)
+        .exec(&tx_conn)
         .await
         .map_err(|_| Denial::ServerError)?;
     let now2 = Utc::now();
-    let soft_delete_sql = positional(
-        queries::SCHEDULER_SOFT_DELETE_SQL,
-        queries::SCHEDULER_SOFT_DELETE_PARAMS,
-    );
-    sqlx::query(&soft_delete_sql)
-        .bind(now)
-        .bind(now2)
-        .bind(user_id)
-        .bind(scheduler_id)
-        .execute(&mut *conn)
+    let stamped2: sea_orm::prelude::DateTimeWithTimeZone = now2.into();
+    schedulers_soft_delete_statement(stamped, stamped2, *user_id, *scheduler_id)
+        .exec(&tx_conn)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1084,19 +1180,16 @@ pub async fn scheduler_delete(
     };
     // R5 lookup (`:139-141`): the un-annotated row; only existence
     // matters (404 before the transaction opens).
-    let lookup_sql = positional(
-        queries::SCHEDULER_DELETE_LOOKUP_SQL,
-        queries::SCHEDULER_DELETE_LOOKUP_PARAMS,
-    );
-    let row: Option<SchedulerRow> = match sqlx::query_as(&lookup_sql)
-        .bind(scheduler_id)
-        .bind(&slug)
-        .fetch_optional(pool)
-        .await
-    {
-        Ok(row) => row,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<schedulers::Model> =
+        match scheduler_delete_lookup_statement(scheduler_id, &slug)
+            .into_model::<schedulers::Model>()
+            .one(&db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
     if row.is_none() {
         return Denial::ObjectNotFound.into_response();
     }
@@ -1267,102 +1360,219 @@ mod tests {
         assert_eq!(INVALID_PAYLOAD_BODY, crate::app_pages::INVALID_PAYLOAD_BODY);
     }
 
-    // -- Placeholder conversion --------------------------------------------
+    // -- Statement shapes (SeaORM, orm-migration.md §3.2/§3.3) ---------------
 
-    #[test]
-    fn positional_numbers_params_in_order() {
-        assert_eq!(positional(":a :b :a", &["a", "b"]), "$1 $2 $1");
+    fn scheduler_id() -> uuid::Uuid {
+        "0d065023-aa70-4d7d-85da-029d7169843e"
+            .parse()
+            .expect("uuid")
     }
 
-    #[test]
-    fn positional_never_matches_inside_longer_names() {
-        assert_eq!(positional(":now :now2", &["now", "now2"]), "$1 $2");
-        assert_eq!(positional(":now2 :now", &["now", "now2"]), "$2 $1");
+    fn workspace_id() -> uuid::Uuid {
+        "6f819bce-fba0-4ef5-9b16-187eea21a6a1"
+            .parse()
+            .expect("uuid")
     }
 
+    /// The R1 list keeps the old join/filter/order shape: full
+    /// projection, the bindings left join, live rows only, name order,
+    /// and the unique `_active_binding_count` alias.
     #[test]
-    fn positional_leaves_stray_colons_untouched() {
-        assert_eq!(positional("a::b 'x:y'", &["q"]), "a::b 'x:y'");
-    }
-
-    /// Every scheduler statement converts with no `:named` remnant, and
-    /// the highest `$n` equals the PARAMS length.
-    #[test]
-    fn positional_converts_all_scheduler_statements() {
-        let statements = [
-            (queries::SCHEDULER_LIST_SQL, queries::SCHEDULER_LIST_PARAMS),
-            (
-                queries::SCHEDULER_DETAIL_SQL,
-                queries::SCHEDULER_DETAIL_PARAMS,
-            ),
-            (
-                queries::SCHEDULER_DELETE_LOOKUP_SQL,
-                queries::SCHEDULER_DELETE_LOOKUP_PARAMS,
-            ),
-            (
-                queries::ACTIVE_BINDING_COUNT_SQL,
-                queries::ACTIVE_BINDING_COUNT_PARAMS,
-            ),
-            (
-                queries::SCHEDULER_INSERT_SQL,
-                queries::SCHEDULER_INSERT_PARAMS,
-            ),
-            (
-                queries::SCHEDULER_PATCH_SQL,
-                queries::SCHEDULER_PATCH_PARAMS,
-            ),
-            (
-                queries::SCHEDULER_DELETE_BINDINGS_SQL,
-                queries::SCHEDULER_DELETE_BINDINGS_PARAMS,
-            ),
-            (
-                queries::SCHEDULER_SOFT_DELETE_SQL,
-                queries::SCHEDULER_SOFT_DELETE_PARAMS,
-            ),
-            (
-                queries::SCHEDULER_SLUG_UNIQUE_CHECK_SQL,
-                queries::SCHEDULER_SLUG_UNIQUE_CHECK_PARAMS,
-            ),
-        ];
-        for (sql, params) in statements {
-            let converted = positional(sql, params);
-            assert!(!converted.contains(':'), "no :named remnant in {converted}");
-            for (index, name) in params.iter().enumerate() {
-                let marker = format!("${}", index + 1);
-                assert!(
-                    converted.contains(&marker),
-                    "{name} became {marker} in {converted}"
-                );
-            }
-        }
-    }
-
-    /// Full converted INSERT text: repeated `:now` shares `$2`, the
-    /// `'builtin'` literal survives untouched.
-    #[test]
-    fn positional_insert_text() {
-        let converted = positional(
-            queries::SCHEDULER_INSERT_SQL,
-            queries::SCHEDULER_INSERT_PARAMS,
-        );
-        assert!(converted.contains(
-            "VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, 'builtin', $9, $10);"
-        ));
-    }
-
-    /// The R7 PATCH form converts with the exclusion bound last
-    /// (`$3`); slug sorts before workspace (`$1`, `$2`).
-    #[test]
-    fn positional_slug_check_patch_text() {
-        let sql = queries::scheduler_slug_unique_check_sql(true);
-        let converted = positional(&sql, queries::SCHEDULER_SLUG_UNIQUE_CHECK_PATCH_PARAMS);
-        assert!(!converted.contains(':'), "no :named remnant");
+    fn list_statement_pins_join_filters_and_order() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = scheduler_list_statement(workspace_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("FROM"), "list from: {sql}");
+        assert!(sql.contains("LEFT JOIN"), "list left join: {sql}");
         assert!(
-            converted.ends_with(
-                "AND \"schedulers\".\"slug\" = $1 AND \"schedulers\".\"workspace_id\" = $2 AND NOT (\"schedulers\".\"id\" = $3)) LIMIT 1;"
-            ),
-            "unexpected R7 PATCH text: {converted}"
+            sql.contains("\"scheduler_bindings\""),
+            "list bindings join: {sql}"
         );
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL"),
+            "list live rows: {sql}"
+        );
+        assert!(
+            sql.contains("\"_active_binding_count\""),
+            "list count alias: {sql}"
+        );
+        assert!(sql.contains("CASE"), "list filtered count: {sql}");
+        assert!(sql.contains("GROUP BY"), "list group: {sql}");
+        assert!(sql.contains("ORDER BY"), "list order: {sql}");
+        assert!(sql.contains("\"name\""), "list orders by name: {sql}");
+        assert!(
+            sql.contains("\"prompt\""),
+            "list keeps the wide projection: {sql}"
+        );
+    }
+
+    /// The R2 detail keeps the old shape: bindings left join plus the
+    /// workspace inner join (no `workspaces.deleted_at` predicate),
+    /// scoped by id + slug, no ordering.
+    #[test]
+    fn detail_statement_pins_joins_and_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = scheduler_detail_statement(scheduler_id(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("LEFT JOIN"), "detail left join: {sql}");
+        assert!(sql.contains("INNER JOIN"), "detail inner join: {sql}");
+        assert!(
+            sql.contains("\"workspaces\""),
+            "detail workspace join: {sql}"
+        );
+        assert!(
+            sql.contains("\"_active_binding_count\""),
+            "detail count alias: {sql}"
+        );
+        assert!(sql.contains("GROUP BY"), "detail group: {sql}");
+        assert!(sql.contains("\"slug\""), "detail slug scope: {sql}");
+        assert!(!sql.contains("ORDER BY"), "detail keeps no ordering: {sql}");
+    }
+
+    /// The R5b lookup keeps the old shape: the workspace inner join,
+    /// id + slug scope, `created_at DESC` order, no count annotation.
+    #[test]
+    fn delete_lookup_statement_pins_scope_and_order() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = scheduler_delete_lookup_statement(scheduler_id(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("INNER JOIN"), "lookup inner join: {sql}");
+        assert!(
+            sql.contains("\"workspaces\""),
+            "lookup workspace join: {sql}"
+        );
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL"),
+            "lookup live rows: {sql}"
+        );
+        assert!(sql.contains("ORDER BY"), "lookup order: {sql}");
+        assert!(
+            sql.contains("\"created_at\""),
+            "lookup orders by created_at: {sql}"
+        );
+        assert!(
+            !sql.contains("_active_binding_count"),
+            "lookup stays un-annotated: {sql}"
+        );
+    }
+
+    /// The R7 slug check keeps the old shape: live rows only, slug +
+    /// workspace scope, `LIMIT 1`, and the PATCH self-row exclusion
+    /// only on PATCH.
+    #[test]
+    fn slug_statement_pins_scope_limit_and_exclusion() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let create_sql = scheduler_slug_statement("nightly", workspace_id(), None)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            create_sql.contains("\"deleted_at\" IS NULL"),
+            "slug live rows: {create_sql}"
+        );
+        assert!(
+            create_sql.contains("\"slug\""),
+            "slug slug scope: {create_sql}"
+        );
+        assert!(create_sql.contains("LIMIT 1"), "slug limit: {create_sql}");
+        assert!(
+            !create_sql.contains("<>") && !create_sql.contains("NOT"),
+            "create keeps no exclusion: {create_sql}"
+        );
+
+        let patch_sql = scheduler_slug_statement("nightly", workspace_id(), Some(scheduler_id()))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            patch_sql.contains("<>"),
+            "patch excludes the self row: {patch_sql}"
+        );
+        assert!(patch_sql.contains("LIMIT 1"), "patch limit: {patch_sql}");
+    }
+
+    /// The R4 PATCH statement rewrites every writable column plus the
+    /// audit refresh, scoped by id.
+    #[test]
+    fn patch_statement_pins_full_column_save() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let write = SchedulerWrite {
+            slug: "nightly".to_owned(),
+            name: "Nightly".to_owned(),
+            description: "d".to_owned(),
+            prompt: "Scan.".to_owned(),
+            color: "#10B981".to_owned(),
+            is_enabled: true,
+        };
+        let now: sea_orm::prelude::DateTimeWithTimeZone = Utc::now().into();
+        let sql = scheduler_patch_statement(now, workspace_id(), &write, scheduler_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("UPDATE \"schedulers\""), "patch update: {sql}");
+        for column in [
+            "\"updated_at\"",
+            "\"updated_by_id\"",
+            "\"slug\"",
+            "\"name\"",
+            "\"description\"",
+            "\"prompt\"",
+            "\"color\"",
+            "\"is_enabled\"",
+        ] {
+            assert!(sql.contains(column), "patch writes {column}: {sql}");
+        }
+        assert!(sql.contains("WHERE"), "patch scope: {sql}");
+    }
+
+    /// The R5a/R5b cascade keeps the old shape: bindings first
+    /// (`deleted_at` only — `updated_at` untouched, ported quirk 4),
+    /// then the scheduler with both `now()` samples and the actor.
+    #[test]
+    fn soft_delete_statements_pin_cascade_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let now: sea_orm::prelude::DateTimeWithTimeZone = Utc::now().into();
+        let now2: sea_orm::prelude::DateTimeWithTimeZone = Utc::now().into();
+        let bindings = scheduler_bindings_soft_delete_statement(now, scheduler_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            bindings.contains("UPDATE \"scheduler_bindings\""),
+            "bindings update: {bindings}"
+        );
+        assert!(
+            bindings.contains("\"deleted_at\""),
+            "bindings sets deleted_at: {bindings}"
+        );
+        assert!(
+            !bindings.contains("\"updated_at\""),
+            "bindings leaves updated_at alone: {bindings}"
+        );
+        assert!(
+            bindings.contains("\"scheduler_id\""),
+            "bindings scope: {bindings}"
+        );
+
+        let scheduler = schedulers_soft_delete_statement(now, now2, workspace_id(), scheduler_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            scheduler.contains("UPDATE \"schedulers\""),
+            "scheduler update: {scheduler}"
+        );
+        assert!(
+            scheduler.contains("\"deleted_at\""),
+            "scheduler sets deleted_at: {scheduler}"
+        );
+        assert!(
+            scheduler.contains("\"updated_at\""),
+            "scheduler refreshes updated_at: {scheduler}"
+        );
+        assert!(
+            scheduler.contains("\"updated_by_id\""),
+            "scheduler sets the actor: {scheduler}"
+        );
+        assert!(scheduler.contains("WHERE"), "scheduler scope: {scheduler}");
     }
 
     // -- Create validation ---------------------------------------------------
