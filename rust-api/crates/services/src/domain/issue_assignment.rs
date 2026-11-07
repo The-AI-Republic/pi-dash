@@ -21,8 +21,8 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use sea_query::LockType;
 use serde_json::{json, Value};
@@ -1112,12 +1112,9 @@ pub async fn clear_dedicated_runner(
         .unwrap_or_else(|| "the dedicated runner".to_owned());
     let runner_id = assigned.as_ref().map(|r| r.id);
     let now = Utc::now();
-    let model = issues::ActiveModel {
-        id: sea_orm::Unchanged(issue.id),
-        assigned_runner_id: sea_orm::Set(None),
-        updated_at: sea_orm::Set(now.into()),
-        ..Default::default()
-    };
+    let mut model = issue.clone().into_active_model();
+    model.assigned_runner_id = sea_orm::Set(None);
+    model.updated_at = sea_orm::Set(now.into());
     model.update(db).await?;
     let body = format!(
         "<p>The dedicated runner assignment to <strong>{runner_name}</strong> was cleared: <strong>{reason}</strong>.</p>"
@@ -1566,11 +1563,8 @@ pub async fn apply_execution_target(
                     .ok_or_else(|| sea_orm::DbErr::RecordNotFound("issue".to_owned()))?;
                 let prev_runner_id = issue.assigned_runner_id;
                 let now = Utc::now();
-                let mut model = issues::ActiveModel {
-                    id: sea_orm::Unchanged(issue.id),
-                    updated_at: sea_orm::Set(now.into()),
-                    ..Default::default()
-                };
+                let mut model = issue.clone().into_active_model();
+                model.updated_at = sea_orm::Set(now.into());
                 match new_runner_id {
                     Some(new_runner_id) => {
                         model.assigned_runner_id = sea_orm::Set(Some(new_runner_id));
@@ -2176,12 +2170,9 @@ async fn apply_fall_back(
     let other_pod = default_pod.is_some() && default_pod != own_pod_id;
     if other_pod && could_serve(default_pod).await? {
         // Step 2: the project's default pod has one.
-        let model = issues::ActiveModel {
-            id: sea_orm::Unchanged(issue.id),
-            assigned_pod_id: sea_orm::Set(default_pod),
-            updated_at: sea_orm::Set(Utc::now().into()),
-            ..Default::default()
-        };
+        let mut model = issue.clone().into_active_model();
+        model.assigned_pod_id = sea_orm::Set(default_pod);
+        model.updated_at = sea_orm::Set(Utc::now().into());
         model.update(db).await?;
         for run in queued {
             fail_queued_run(
