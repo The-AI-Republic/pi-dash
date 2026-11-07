@@ -192,7 +192,7 @@ async fn bridge_forwards_approval_request_event() {
         read _
         printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_fake"}}'
         read _
-        printf '%s\n' '{"jsonrpc":"2.0","method":"item/commandExecution/requestApproval","params":{"approval_id":"a-1","command":"rm -rf /tmp/x"}}'
+        printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"item/commandExecution/requestApproval","params":{"approvalId":"a-1","command":"rm -rf /tmp/x"}}'
         sleep 0.1
     "#;
     let mut cmd = Command::new("sh");
@@ -229,6 +229,41 @@ async fn bridge_forwards_approval_request_event() {
     assert!(saw, "expected approval request event");
 }
 
+#[tokio::test]
+async fn bridge_refuses_server_requests_it_cannot_answer() {
+    // An unanswered request parks the engine's turn; the fake completes the
+    // turn only once it reads the refusal.
+    let script = r#"
+        set -e
+        read _
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+        read _
+        read _
+        printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_fake"}}'
+        read _
+        printf '%s\n' '{"jsonrpc":"2.0","id":"r-1","method":"item/tool/requestUserInput","params":{}}'
+        read refusal
+        case "$refusal" in
+          '{"jsonrpc":"2.0","id":"r-1","error":{"code":-32601,'*) ;;
+          *) exit 1 ;;
+        esac
+        printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success"}}'
+        sleep 0.1
+    "#;
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(script);
+    let server = AppServer::spawn_command(cmd).await.expect("spawn");
+    let mut bridge = Bridge::from_server(server, None);
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let payload = RunPayload {
+        run_id: Uuid::new_v4(),
+        prompt: "ask me".into(),
+        model: None,
+    };
+    let mut cursor = bridge.run(&payload, &cwd).await.unwrap();
+    wait_completed(&mut bridge, &mut cursor).await;
+}
+
 /// Reads a message sent on stdin by echoing an `Incoming::Notification` helper.
 #[tokio::test]
 async fn app_server_reads_line_delimited_json() {
@@ -261,6 +296,22 @@ fn incoming_parses_frames_without_jsonrpc_field() {
             assert_eq!(result.expect("result")["ok"], true);
         }
         other => panic!("expected response, got {other:?}"),
+    }
+
+    // A server request carries both an id and a method; it is not a response.
+    let request: Incoming = serde_json::from_str(
+        r#"{"id":0,"method":"item/commandExecution/requestApproval","params":{"command":"ls"}}"#,
+    )
+    .expect("request without jsonrpc should parse");
+    match request {
+        Incoming::Request {
+            id, method, params, ..
+        } => {
+            assert_eq!(id, 0);
+            assert_eq!(method, "item/commandExecution/requestApproval");
+            assert_eq!(params["command"], "ls");
+        }
+        other => panic!("expected request, got {other:?}"),
     }
 
     let notification: Incoming =
