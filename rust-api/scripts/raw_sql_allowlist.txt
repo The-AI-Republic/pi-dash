@@ -8,7 +8,6 @@ crates/api/src/app_analytics/render.rs 22
 crates/api/src/app_assets/handlers_v2_project.rs 22
 crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
 crates/api/src/app_notifications/mod.rs 15
-crates/api/src/app_views_search/mod.rs 1
 crates/api/src/app_workspace/handlers_lists.rs 9
 crates/api/src/app_workspace/handlers_tokens.rs 6
 crates/api/src/auth_oauth/login.rs 2
@@ -56,7 +55,6 @@ crates/services/src/runner_runs/finalization.rs 1
 # SELECTs with two output columns of one name (fix, don't add).
 crates/jobs/src/tasks_mail/notifications.rs | c6d50deb8e37
 crates/services/src/app_scheduler/queries.rs | b962acd7acf6
-crates/services/src/app_views_search/queries_search.rs | c53567bfb131
 crates/services/src/dispatch/tools.rs | a0222fd82904
 crates/services/src/dispatch/tools.rs | cff6c3ac1988
 crates/services/src/orchestration/creation.rs | d83ad2c2db97
