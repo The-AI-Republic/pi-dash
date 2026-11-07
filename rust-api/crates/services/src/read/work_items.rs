@@ -14,13 +14,15 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    estimate_points, file_assets, issue_assignees, issue_labels, issues, projects, states, users,
-    workspaces,
+    estimate_points, file_assets, issue_assignees, issue_labels, issue_relations, issues,
+    project_members, projects, states, users, workspaces,
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
+};
 
 use super::{DbError, Error};
-use crate::v1_work_items::queries_core as core_queries;
 use crate::v1_work_items::shape_issue as shape;
 use crate::v1_work_items::{filter_fields, FieldSpec};
 
@@ -125,6 +127,7 @@ pub struct OwnedAssigneeRow {
 
 /// Decoded blocker-target row: issue id, project identifier, sequence,
 /// state name, state group.
+#[allow(dead_code)]
 type BlockerTargetRow = (Uuid, String, i32, Option<String>, Option<String>);
 
 /// Sort key per `_summary_list`: resolved flag, identifier, sequence,
@@ -429,40 +432,83 @@ pub async fn fetch_blocker_rows(pool: &PgPool, issue_id: &Uuid) -> Result<Blocke
     ) -> Result<Vec<(String, Option<String>, Option<String>)>, Error> {
         let mut seen = std::collections::HashSet::new();
         let mut items: Vec<SummarySortKey> = Vec::new();
+        use sea_orm::sea_query::Expr;
+        let db = pidash_db::pool::sea_orm_connection(pool);
         for relation_type in ["blocked_by", "blocking"] {
-            let (anchor_col, target_col) = if blocked_by {
+            // Map the (blocked_by, relation_type) pair to (anchor, target)
+            // columns exactly like the format!-built SQL did.
+            let (anchor_eq_issue, target_is_related) = if blocked_by {
                 match relation_type {
-                    "blocked_by" => ("issue_id", "related_issue_id"),
-                    _ => ("related_issue_id", "issue_id"),
+                    "blocked_by" => (true, true),
+                    _ => (false, false),
                 }
             } else {
                 match relation_type {
-                    "blocked_by" => ("related_issue_id", "issue_id"),
-                    _ => ("issue_id", "related_issue_id"),
+                    "blocked_by" => (false, false),
+                    _ => (true, true),
                 }
             };
-            let rows: Vec<BlockerTargetRow> = sqlx::query_as(&format!(
-                r#"SELECT t."id", p."identifier", t."sequence_id", s."name", s."group"
-                   FROM "issue_relations" r
-                   INNER JOIN "issues" t ON t."id" = r."{target_col}"
-                   INNER JOIN "states" s ON s."id" = t."state_id"
-                   INNER JOIN "projects" p ON p."id" = t."project_id"
-                   WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
-                     AND r."{anchor_col}" = $1 AND r."relation_type" = $2
-                     AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND t."is_draft" = FALSE
-                     AND t."workspace_id" = r."workspace_id"
-                     AND s."group" <> 'triage' AND p."archived_at" IS NULL"#,
-            ))
-            .bind(issue_id)
-            .bind(relation_type)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| DbError::new("expand-blockers", error))?;
-            for (id, identifier, sequence_id, state, group) in rows {
-                if seen.insert(id) {
-                    let resolved =
-                        i64::from(matches!(group.as_deref(), Some("completed" | "cancelled")));
-                    items.push((resolved, identifier, i64::from(sequence_id), state, group));
+            #[derive(Debug, Clone, FromQueryResult)]
+            struct DirRow {
+                id: Uuid,
+                identifier: String,
+                sequence_id: i32,
+                state: Option<String>,
+                group: Option<String>,
+            }
+            let anchor = if anchor_eq_issue {
+                issue_relations::Column::IssueId
+            } else {
+                issue_relations::Column::RelatedIssueId
+            };
+            let to_t = if target_is_related {
+                issue_relations::Relation::Issues1.def()
+            } else {
+                issue_relations::Relation::Issues2.def()
+            };
+            let rows: Vec<DirRow> = issue_relations::Entity::find()
+                .filter(issue_relations::Column::DeletedAt.is_null())
+                .filter(
+                    Expr::col(issue_relations::Column::IssueId)
+                        .ne(Expr::col(issue_relations::Column::RelatedIssueId)),
+                )
+                .filter(issue_relations::Column::RelationType.eq(relation_type))
+                .filter(Expr::col(anchor).eq(*issue_id))
+                .filter(issues::Column::DeletedAt.is_null())
+                .filter(issues::Column::ArchivedAt.is_null())
+                .filter(issues::Column::IsDraft.eq(false))
+                .filter(
+                    Expr::col(issues::Column::WorkspaceId)
+                        .eq(Expr::col(issue_relations::Column::WorkspaceId)),
+                )
+                .filter(Expr::col(states::Column::Group).ne("triage"))
+                .filter(Expr::col(projects::Column::ArchivedAt).is_null())
+                .join(JoinType::InnerJoin, to_t)
+                .join(JoinType::InnerJoin, issues::Relation::States.def())
+                .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+                .select_only()
+                .column_as(issues::Column::Id, "id")
+                .column_as(projects::Column::Identifier, "identifier")
+                .column_as(issues::Column::SequenceId, "sequence_id")
+                .column_as(states::Column::Name, "state")
+                .column_as(states::Column::Group, "group")
+                .into_model::<DirRow>()
+                .all(&db)
+                .await
+                .map_err(|error| DbError::from_orm("expand-blockers", error))?;
+            for row in rows {
+                if seen.insert(row.id) {
+                    let resolved = i64::from(matches!(
+                        row.group.as_deref(),
+                        Some("completed" | "cancelled")
+                    ));
+                    items.push((
+                        resolved,
+                        row.identifier,
+                        i64::from(row.sequence_id),
+                        row.state,
+                        row.group,
+                    ));
                 }
             }
         }
@@ -477,6 +523,7 @@ pub async fn fetch_blocker_rows(pool: &PgPool, issue_id: &Uuid) -> Result<Blocke
     }
     let blocked_by = direction(pool, issue_id, true).await?;
     let blocking = direction(pool, issue_id, false).await?;
+    // raw-sql: SeaORM cannot express CASE JOIN ON for the open-blocker EXISTS (CASE WHEN relation_type = 'blocked_by' THEN related_issue_id ELSE issue_id END as join target). Single-statement EXISTS with CASE join must stay raw to preserve statement count and exact join.
     let has_open_blockers: bool = sqlx::query_scalar(
         r#"SELECT EXISTS(
              SELECT 1 FROM "issue_relations" r
@@ -523,16 +570,33 @@ pub async fn fetch_grouped_rows(
     // `IssueRelation.objects.filter(Q(issue|related) =
     // issue, workspace).exclude(self-loop)` — the default manager is the
     // soft-deletion scope.
-    let edges: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
-        r#"SELECT "issue_id", "related_issue_id", "relation_type" FROM "issue_relations"
-           WHERE ("issue_id" = $1 OR "related_issue_id" = $1) AND "workspace_id" = $2
-             AND "deleted_at" IS NULL AND NOT ("issue_id" = $1 AND "related_issue_id" = $1)"#,
-    )
-    .bind(issue_id)
-    .bind(workspace_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| DbError::new("relations-edges", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let edges: Vec<(Uuid, Uuid, String)> = issue_relations::Entity::find()
+        .filter(
+            Condition::any()
+                .add(issue_relations::Column::IssueId.eq(*issue_id))
+                .add(issue_relations::Column::RelatedIssueId.eq(*issue_id)),
+        )
+        .filter(issue_relations::Column::WorkspaceId.eq(*workspace_id))
+        .filter(issue_relations::Column::DeletedAt.is_null())
+        .filter(
+            sea_orm::sea_query::Expr::col(issue_relations::Column::IssueId)
+                .ne(*issue_id)
+                .or(
+                    sea_orm::sea_query::Expr::col(issue_relations::Column::RelatedIssueId)
+                        .ne(*issue_id),
+                ),
+        )
+        .select_only()
+        .columns([
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+            issue_relations::Column::RelationType,
+        ])
+        .into_tuple::<(Uuid, Uuid, String)>()
+        .all(&db)
+        .await
+        .map_err(|error| DbError::from_orm("relations-edges", error))?;
     let mut other_by_type: Vec<(String, std::collections::HashSet<Uuid>)> = shape::RELATION_TYPES
         .iter()
         .map(|name| (name.to_string(), std::collections::HashSet::new()))
@@ -557,40 +621,92 @@ pub async fn fetch_grouped_rows(
     // is cleared (`.order_by()`) — the Rust sort below applies.
     let mut others: HashMap<Uuid, OwnedRelationItem> = HashMap::new();
     if !wanted.is_empty() {
-        let rows: Vec<(Uuid, String, i32, Option<String>, Option<String>, String)> = sqlx::query_as(
-            format!(
-                r#"SELECT "issues"."id", "issues"."name", "issues"."sequence_id", "states"."name", "states"."group", "projects"."identifier"
-                   FROM "issues"
-                   LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-                   INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-                   WHERE "issues"."id" = ANY($1) AND "issues"."workspace_id" = $2 AND {} AND EXISTS(
-                     SELECT 1 FROM "project_members" pm
-                     WHERE pm."project_id" = "issues"."project_id" AND pm."member_id" = $3
-                       AND pm."is_active" AND pm."deleted_at" IS NULL
-                   )"#,
-                core_queries::ISSUE_MANAGER_WHERE
+        use sea_orm::sea_query::{Expr, Query as SeaQuery};
+        #[derive(Debug, Clone, FromQueryResult)]
+        struct GroupedPoolRow {
+            id: Uuid,
+            name: String,
+            sequence_id: i32,
+            state: Option<String>,
+            state_group: Option<String>,
+            project_identifier: String,
+        }
+        let member_exists = SeaQuery::select()
+            .column(project_members::Column::Id)
+            .from(project_members::Entity)
+            .expr(
+                Expr::col(project_members::Column::ProjectId)
+                    .eq(Expr::col(issues::Column::ProjectId)),
             )
-            .as_str(),
-        )
-        .bind(&wanted)
-        .bind(workspace_id)
-        .bind(viewer_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| DbError::new("relations-pool", error))?;
-        for (id, name, sequence_id, state, state_group, project_identifier) in rows {
+            .expr(Expr::col(project_members::Column::MemberId).eq(*viewer_id))
+            .expr(Expr::col(project_members::Column::IsActive).eq(true))
+            .expr(Expr::col(project_members::Column::DeletedAt).is_null())
+            .limit(1)
+            .to_owned();
+        let rows: Vec<GroupedPoolRow> = issues::Entity::find()
+            .filter(issues::Column::Id.is_in(wanted.clone()))
+            .filter(issues::Column::WorkspaceId.eq(*workspace_id))
+            .filter(issues::Column::DeletedAt.is_null())
+            .filter(issues::Column::ArchivedAt.is_null())
+            .filter(issues::Column::IsDraft.eq(false))
+            .filter(
+                Expr::col(states::Column::Group)
+                    .is_null()
+                    .or(Expr::col(states::Column::Group).ne("triage")),
+            )
+            .filter(Expr::col(projects::Column::ArchivedAt).is_null())
+            .filter(Expr::exists(member_exists))
+            .join(JoinType::LeftJoin, issues::Relation::States.def())
+            .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+            .select_only()
+            .columns([
+                issues::Column::Id,
+                issues::Column::Name,
+                issues::Column::SequenceId,
+            ])
+            .column_as(states::Column::Name, "state")
+            .column_as(states::Column::Group, "state_group")
+            .column_as(projects::Column::Identifier, "project_identifier")
+            .into_model::<GroupedPoolRow>()
+            .all(&db)
+            .await
+            .map_err(|error| DbError::from_orm("relations-pool", error))?;
+        for row in rows {
+            let id = row.id;
             others.insert(
                 id,
                 OwnedRelationItem {
                     id: id.to_string(),
-                    name,
-                    state,
-                    state_group,
-                    project_identifier,
-                    sequence_id: i64::from(sequence_id),
+                    name: row.name,
+                    state: row.state,
+                    state_group: row.state_group,
+                    project_identifier: row.project_identifier,
+                    sequence_id: i64::from(row.sequence_id),
                 },
             );
         }
+        let mut groups = Vec::with_capacity(other_by_type.len());
+        for (name, ids) in &other_by_type {
+            let mut items: Vec<&OwnedRelationItem> =
+                ids.iter().filter_map(|id| others.get(id)).collect();
+            items.sort_by(|a, b| {
+                (&a.project_identifier, a.sequence_id).cmp(&(&b.project_identifier, b.sequence_id))
+            });
+            items.truncate(shape::GROUP_LIMIT);
+            let owned: Vec<OwnedRelationItem> = items
+                .into_iter()
+                .map(|item| OwnedRelationItem {
+                    id: item.id.clone(),
+                    name: item.name.clone(),
+                    state: item.state.clone(),
+                    state_group: item.state_group.clone(),
+                    project_identifier: item.project_identifier.clone(),
+                    sequence_id: item.sequence_id,
+                })
+                .collect();
+            groups.push((name.clone(), owned));
+        }
+        return Ok(groups);
     }
     let mut groups = Vec::with_capacity(other_by_type.len());
     for (name, ids) in &other_by_type {
@@ -862,17 +978,42 @@ pub async fn fetch_assignee_rows(
     pool: &PgPool,
     issue_id: &Uuid,
 ) -> Result<Vec<OwnedAssigneeRow>, Error> {
-    let rows: Vec<(Uuid, String, String, Option<String>, String, Option<Uuid>, Option<String>)> =
-        sqlx::query_as(
-            r#"SELECT u."id", u."first_name", u."last_name", u."email", COALESCE(u."avatar", ''), u."avatar_asset_id", u."display_name"
-               FROM "users" u WHERE u."id" IN (
-                 SELECT "assignee_id" FROM "issue_assignees" WHERE "issue_id" = $1 AND "deleted_at" IS NULL
-               ) ORDER BY u."created_at" DESC"#,
-        )
-        .bind(issue_id)
-        .fetch_all(pool)
+    use sea_orm::sea_query::{Expr, Query as SeaQuery};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let id_sub = SeaQuery::select()
+        .column(issue_assignees::Column::AssigneeId)
+        .from(issue_assignees::Entity)
+        .expr(Expr::col(issue_assignees::Column::IssueId).eq(*issue_id))
+        .expr(Expr::col(issue_assignees::Column::DeletedAt).is_null())
+        .to_owned();
+    let models = users::Entity::find()
+        .filter(Expr::col(users::Column::Id).in_subquery(id_sub))
+        .order_by_desc(users::Column::CreatedAt)
+        .all(&db)
         .await
-        .map_err(|error| DbError::new("expand-assignees", error))?;
+        .map_err(|error| DbError::from_orm("expand-assignees", error))?;
+    let rows: Vec<(
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<Uuid>,
+        Option<String>,
+    )> = models
+        .into_iter()
+        .map(|m| {
+            (
+                m.id,
+                m.first_name,
+                m.last_name,
+                m.email,
+                m.avatar,
+                m.avatar_asset_id,
+                Some(m.display_name),
+            )
+        })
+        .collect();
     let mut out = Vec::with_capacity(rows.len());
     for (id, first_name, last_name, email, avatar, avatar_asset, display_name) in rows {
         let asset_url = match avatar_asset {
@@ -908,33 +1049,39 @@ pub async fn fetch_expanded_labels(
     tz: &Tz,
 ) -> Result<Vec<Value>, Error> {
     use crate::v1_work_items::shape_labels as labels;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT l."id", l."created_at", l."updated_at", l."deleted_at", l."name", l."description", l."color", l."sort_order", l."external_source", l."external_id", l."created_by_id", l."updated_by_id", l."workspace_id", l."project_id", l."parent_id"
-           FROM "labels" l WHERE l."id" IN (
-             SELECT "label_id" FROM "issue_labels" WHERE "issue_id" = $1 AND "deleted_at" IS NULL
-           ) ORDER BY l."created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| DbError::new("expand-labels", error))?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id = row_uuid(row, "id")?.to_string();
-        let created_at = render_dt(&row_datetime(row, "created_at")?, tz);
-        let updated_at = render_dt(&row_datetime(row, "updated_at")?, tz);
-        let deleted_at = render_dt_opt(row_datetime_opt(row, "deleted_at")?, tz);
-        let name = row_string(row, "name")?;
-        let description = row_string(row, "description")?;
-        let color = row_string(row, "color")?;
-        let sort_order = row_f64(row, "sort_order")?;
-        let external_source = row_string_opt(row, "external_source")?;
-        let external_id = row_string_opt(row, "external_id")?;
-        let created_by = row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string());
-        let updated_by = row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string());
-        let workspace = row_uuid(row, "workspace_id")?.to_string();
-        let project = row_uuid_opt(row, "project_id")?.map(|id| id.to_string());
-        let parent = row_uuid_opt(row, "parent_id")?.map(|id| id.to_string());
+    use sea_orm::sea_query::{Expr, Query as SeaQuery};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let id_sub = SeaQuery::select()
+        .column(issue_labels::Column::LabelId)
+        .from(issue_labels::Entity)
+        .expr(Expr::col(issue_labels::Column::IssueId).eq(*issue_id))
+        .expr(Expr::col(issue_labels::Column::DeletedAt).is_null())
+        .to_owned();
+    let models = pidash_db::entity::labels::Entity::find()
+        .filter(Expr::col(pidash_db::entity::labels::Column::Id).in_subquery(id_sub))
+        .order_by_desc(pidash_db::entity::labels::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(|error| DbError::from_orm("expand-labels", error))?;
+    let mut out = Vec::with_capacity(models.len());
+    for model in &models {
+        let id = model.id.to_string();
+        let created_at = super::render_datetime_in(&model.created_at, tz);
+        let updated_at = super::render_datetime_in(&model.updated_at, tz);
+        let deleted_at = model
+            .deleted_at
+            .map(|dt| super::render_datetime_in(&dt, tz));
+        let name = model.name.clone();
+        let description = model.description.clone();
+        let color = model.color.clone();
+        let sort_order = model.sort_order;
+        let external_source = model.external_source.clone();
+        let external_id = model.external_id.clone();
+        let created_by = model.created_by_id.map(|id| id.to_string());
+        let updated_by = model.updated_by_id.map(|id| id.to_string());
+        let workspace = model.workspace_id.to_string();
+        let project = model.project_id.map(|id| id.to_string());
+        let parent = model.parent_id.map(|id| id.to_string());
         let label_row = labels::LabelRow {
             id: &id,
             created_at: &created_at,
@@ -1218,23 +1365,136 @@ pub async fn fetch_issue_for_write(
     pk: &Uuid,
     tz: &Tz,
 ) -> Result<DecodedIssue, Error> {
-    let sql = format!(
-        "SELECT {}, {} FROM \"issues\" {} WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = $1 AND \"issues\".\"project_id\" = $2 AND \"workspaces\".\"slug\" = $3 LIMIT 1",
-        ISSUE_SELECT_COLS,
-        ISSUE_EXTRA_COLS,
-        core_queries::inline_lookup_joins_sql()
-    );
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(pk)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| DbError::new("write-fetch", error))?;
-    match row {
-        Some(row) => decode_issue(&row, tz),
-        None => Err(Error::NotFound),
+    #[derive(Debug, Clone, FromQueryResult)]
+    struct IssueWriteRow {
+        id: Uuid,
+        created_at: sea_orm::prelude::DateTimeWithTimeZone,
+        updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+        deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        point: Option<i32>,
+        name: String,
+        description_html: String,
+        description_binary: Option<Vec<u8>>,
+        priority: String,
+        complexity_score: i32,
+        start_date: Option<chrono::NaiveDate>,
+        target_date: Option<chrono::NaiveDate>,
+        sequence_id: i32,
+        sort_order: f64,
+        completed_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        archived_at: Option<chrono::NaiveDate>,
+        is_draft: bool,
+        external_source: Option<String>,
+        external_id: Option<String>,
+        git_work_branch: String,
+        created_via: Option<String>,
+        agent_executor: Option<String>,
+        created_by_id: Option<Uuid>,
+        updated_by_id: Option<Uuid>,
+        project_id: Uuid,
+        workspace_id: Uuid,
+        parent_id: Option<Uuid>,
+        state_id: Option<Uuid>,
+        estimate_point_id: Option<Uuid>,
+        type_id: Option<Uuid>,
+        assigned_pod_id: Option<Uuid>,
+        project_identifier: String,
+        workspace_slug: String,
+        state_group: Option<String>,
     }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<IssueWriteRow> = issues::Entity::find()
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::Id.eq(*pk))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::CreatedAt,
+            issues::Column::UpdatedAt,
+            issues::Column::DeletedAt,
+            issues::Column::Point,
+            issues::Column::Name,
+            issues::Column::DescriptionHtml,
+            issues::Column::DescriptionBinary,
+            issues::Column::Priority,
+            issues::Column::ComplexityScore,
+            issues::Column::StartDate,
+            issues::Column::TargetDate,
+            issues::Column::SequenceId,
+            issues::Column::SortOrder,
+            issues::Column::CompletedAt,
+            issues::Column::ArchivedAt,
+            issues::Column::IsDraft,
+            issues::Column::ExternalSource,
+            issues::Column::ExternalId,
+            issues::Column::GitWorkBranch,
+            issues::Column::CreatedVia,
+            issues::Column::AgentExecutor,
+            issues::Column::CreatedById,
+            issues::Column::UpdatedById,
+            issues::Column::ProjectId,
+            issues::Column::WorkspaceId,
+            issues::Column::ParentId,
+            issues::Column::StateId,
+            issues::Column::EstimatePointId,
+            issues::Column::TypeId,
+            issues::Column::AssignedPodId,
+        ])
+        .column_as(projects::Column::Identifier, "project_identifier")
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .column_as(states::Column::Group, "state_group")
+        .limit(1)
+        .into_model::<IssueWriteRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("write-fetch", error))?;
+    let Some(row) = row else {
+        return Err(Error::NotFound);
+    };
+    Ok(DecodedIssue {
+        id: row.id.to_string(),
+        created_at: super::render_datetime_in(&row.created_at, tz),
+        created_at_dt: row.created_at.with_timezone(&Utc),
+        updated_at: super::render_datetime_in(&row.updated_at, tz),
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        deleted_at: row.deleted_at.map(|dt| super::render_datetime_in(&dt, tz)),
+        point: row.point.map(i64::from),
+        name: row.name,
+        description_html: row.description_html,
+        description_binary: row.description_binary,
+        priority: row.priority,
+        complexity_score: i64::from(row.complexity_score),
+        start_date: row.start_date.map(|d| d.to_string()),
+        target_date: row.target_date.map(|d| d.to_string()),
+        sequence_id: i64::from(row.sequence_id),
+        sort_order: row.sort_order,
+        completed_at: row
+            .completed_at
+            .map(|dt| super::render_datetime_in(&dt, tz)),
+        archived_at: row.archived_at.map(|d| d.to_string()),
+        is_draft: row.is_draft,
+        external_source: row.external_source,
+        external_id: row.external_id,
+        git_work_branch: row.git_work_branch,
+        created_via: row.created_via,
+        agent_executor: row.agent_executor,
+        project: row.project_id.to_string(),
+        workspace: row.workspace_id.to_string(),
+        parent: row.parent_id.map(|id| id.to_string()),
+        state: row.state_id.map(|id| id.to_string()),
+        estimate_point: row.estimate_point_id.map(|id| id.to_string()),
+        type_id: row.type_id.map(|id| id.to_string()),
+        assigned_pod: row.assigned_pod_id.map(|id| id.to_string()),
+        project_identifier: row.project_identifier,
+        workspace_slug: row.workspace_slug,
+        state_group: row.state_group,
+    })
 }
 
 /// The project row the issue-write paths need: the stored workspace id
@@ -1315,6 +1575,7 @@ pub async fn fetch_comment_direct(
     issue_id: &Uuid,
     pk: &Uuid,
 ) -> Result<Option<sqlx::postgres::PgRow>, Error> {
+    // raw-sql: Group B — returns PgRow for handlers_social/operations/comments; typed-row conversion needs V1WI caller migration (PR 2955).
     let row = sqlx::query(
         r#"SELECT c.* FROM "issue_comments" c
            WHERE c."deleted_at" IS NULL
@@ -1343,6 +1604,7 @@ pub async fn fetch_comment_list_rows(
     issue_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
+    // raw-sql: Group B — returns PgRow for handlers_social; typed-row conversion needs V1WI caller migration (PR 2955).
     let rows = sqlx::query(
         r#"SELECT DISTINCT c.*, EXISTS (
              SELECT 1 FROM "project_members" pm
@@ -1402,6 +1664,7 @@ pub async fn fetch_comment_list_ascending(
            AND issue_comments.issue_id = $3 AND issue_comments.deleted_at IS NULL \
          ORDER BY issue_comments.created_at ASC LIMIT $4"
     );
+    // raw-sql: Group B — returns PgRow for MCP/space callers; typed-row conversion needs caller migration.
     let rows = sqlx::query(&sql)
         .bind(workspace_slug)
         .bind(project_id)
@@ -1539,6 +1802,67 @@ mod tests {
             .build(DbBackend::Postgres)
             .to_string();
         assert!(!sql.contains("deleted_at"), "{sql}");
+    }
+
+    #[test]
+    fn blocker_and_grouped_queries_preserve_scopes_and_order() {
+        let sql = issue_relations::Entity::find()
+            .filter(issue_relations::Column::DeletedAt.is_null())
+            .filter(
+                sea_orm::sea_query::Expr::col(issue_relations::Column::IssueId).ne(
+                    sea_orm::sea_query::Expr::col(issue_relations::Column::RelatedIssueId),
+                ),
+            )
+            .filter(issue_relations::Column::RelationType.eq("blocked_by"))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#""issue_relations"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        let sql = issues::Entity::find()
+            .filter(issues::Column::DeletedAt.is_null())
+            .filter(issues::Column::ArchivedAt.is_null())
+            .filter(issues::Column::IsDraft.eq(false))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""issues"."archived_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""issues"."is_draft" = FALSE"#), "{sql}");
+    }
+
+    #[test]
+    fn assignee_and_label_subqueries_preserve_order() {
+        let sql = users::Entity::find()
+            .filter(
+                sea_orm::sea_query::Expr::col(users::Column::Id).in_subquery(
+                    sea_orm::sea_query::Query::select()
+                        .column(issue_assignees::Column::AssigneeId)
+                        .from(issue_assignees::Entity)
+                        .to_owned(),
+                ),
+            )
+            .order_by_desc(users::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#"ORDER BY "users"."created_at" DESC"#),
+            "{sql}"
+        );
+        assert!(sql.contains("IN"), "{sql}");
+    }
+
+    #[test]
+    fn issue_write_query_joins_and_limits() {
+        let sql = issues::Entity::find()
+            .filter(issues::Column::DeletedAt.is_null())
+            .filter(issues::Column::Id.eq(Uuid::nil()))
+            .filter(issues::Column::ProjectId.eq(Uuid::nil()))
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
     }
 }
 
