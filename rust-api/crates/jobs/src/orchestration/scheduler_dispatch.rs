@@ -462,9 +462,8 @@ where
         workspace_slug: &str,
         project_id: Uuid,
     ) -> Result<ProjectRoleFacts, CreationError> {
-        let tx = self.dispatch_tx().inner();
         let has_allowed_role = fetch_project_has_allowed_role(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
             Some(user_id),
             workspace_slug,
             project_id,
@@ -472,16 +471,21 @@ where
         )
         .await
         .map_err(db)?;
-        let tx = self.dispatch_tx().inner();
-        let is_project_member =
-            fetch_project_is_member(&mut **tx, Some(user_id), workspace_slug, project_id)
-                .await
-                .map_err(db)?;
-        let tx = self.dispatch_tx().inner();
-        let is_workspace_admin =
-            fetch_workspace_admin_by_slug(&mut **tx, Some(user_id), workspace_slug)
-                .await
-                .map_err(db)?;
+        let is_project_member = fetch_project_is_member(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            Some(user_id),
+            workspace_slug,
+            project_id,
+        )
+        .await
+        .map_err(db)?;
+        let is_workspace_admin = fetch_workspace_admin_by_slug(
+            &pidash_db::orm_tx::TxConn::new(self.dispatch_tx().inner()),
+            Some(user_id),
+            workspace_slug,
+        )
+        .await
+        .map_err(db)?;
         Ok(ProjectRoleFacts {
             authenticated: true,
             has_allowed_role,
