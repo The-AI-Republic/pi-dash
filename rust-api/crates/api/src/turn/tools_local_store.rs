@@ -1013,6 +1013,30 @@ fn unscoped_issue_select(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
         .filter(issues::Column::Id.eq(issue_id))
 }
 
+/// The `update_issue_row` row lock (`issues.py:336`): the `issues` row
+/// alone, `FOR UPDATE` (single table — `FOR UPDATE` over the
+/// `issues LEFT JOIN states` read fails at runtime: "cannot be applied
+/// to the nullable side of an outer join"; Django's `select_for_update`
+/// likewise locks only the issues table). The pre-save state name/group
+/// are read in a second query under the same lock.
+fn locked_issue_query(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find_by_id(issue_id)
+        .filter(issues::Column::DeletedAt.is_null())
+        .lock_exclusive()
+}
+
+/// The identifier-lookup sequence predicate (`sequence_id = $N::int`):
+/// the DB-side cast keeps out-of-int4 tails raising exactly as Django's
+/// int4 bind does (miss-vs-500 parity). A Rust-side `as i32` truncation
+/// would wrap instead (e.g. 4294967297 → 1) and silently look up the
+/// wrong issue.
+fn sequence_filter(sequence_id: i64) -> Condition {
+    Condition::all().add(
+        Expr::col((issues::Entity, issues::Column::SequenceId))
+            .eq(Expr::val(sequence_id).cast_as(sea_orm::sea_query::Alias::new("int"))),
+    )
+}
+
 fn issue_row_projection(query: sea_orm::Select<issues::Entity>) -> sea_orm::Select<issues::Entity> {
     query
         .select_only()
@@ -1349,9 +1373,9 @@ impl ToolStore for PgToolStore {
         // The `issue_objects` manager without the member joins: slug +
         // identifier + sequence, triage/archived/draft excluded.
         // `.first()` under `Issue.Meta.ordering` (`-created_at`); the
-        // `::int` cast makes out-of-int4 tails raise exactly as
-        // Django's int4 bind does (miss-vs-500 parity). SeaORM binds the
-        // i64 onto the int4 column with a typed value instead.
+        // DB-side `::int` cast makes out-of-int4 tails raise exactly as
+        // Django's int4 bind does (miss-vs-500 parity, see
+        // `sequence_filter`).
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
         let row = issue_row_projection(
             issues::Entity::find()
@@ -1369,7 +1393,7 @@ impl ToolStore for PgToolStore {
             ))))
             .eq(Func::upper(Expr::val(project_ident.to_owned()))),
         )
-        .filter(issues::Column::SequenceId.eq(sequence_id as i32))
+        .filter(sequence_filter(sequence_id))
         .order_by_desc(issues::Column::CreatedAt)
         .into_model::<IssueJoinedRow>()
         .one(&db)
@@ -1534,9 +1558,9 @@ impl ToolStore for PgToolStore {
         sequence_id: i64,
     ) -> Result<Option<IssueRow>, StoreError> {
         // `.first()` under `Issue.Meta.ordering` (`-created_at`);
-        // the `::int` cast keeps int4-range parity with Django's bind
-        // (out-of-range tails raise instead of missing). SeaORM binds the
-        // i64 onto the int4 column with a typed value instead.
+        // the DB-side `::int` cast keeps int4-range parity with Django's
+        // bind (out-of-range tails raise instead of missing, see
+        // `sequence_filter`).
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
         let row = issue_row_projection(scoped_issues_base(deps.user_id, &deps.workspace_slug))
             .filter(
@@ -1546,7 +1570,7 @@ impl ToolStore for PgToolStore {
                 ))))
                 .eq(Func::upper(Expr::val(project_ident.to_owned()))),
             )
-            .filter(issues::Column::SequenceId.eq(sequence_id as i32))
+            .filter(sequence_filter(sequence_id))
             .order_by_desc(issues::Column::CreatedAt)
             .into_model::<IssueJoinedRow>()
             .one(&db)
@@ -2080,22 +2104,36 @@ impl ToolStore for PgToolStore {
         // the same tx by value (the `tools_exec` precedent).
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool).await?;
         // `Issue.objects.select_for_update().get(pk)` (`issues.py:336`);
-        // missing is `DoesNotExist` → internal. The states join reads
-        // the locked row's pre-save name/group (`from_state =
-        // locked.state`, `issues.py:339`) — the pre-lock read may be
-        // stale under a concurrent edit.
-        let locked = issue_row_projection(unscoped_issue_select(*issue_id))
-            .filter(issues::Column::DeletedAt.is_null())
-            .lock_exclusive()
-            .into_model::<IssueJoinedRow>()
+        // missing is `DoesNotExist` → internal. The lock is the single
+        // `issues` row; the pre-save name/group (`from_state =
+        // locked.state`, `issues.py:339`) are read under the same lock
+        // in a second query — a join-lock over the LEFT JOIN states
+        // read fails at runtime, and a pre-lock read may be stale
+        // under a concurrent edit.
+        let locked = locked_issue_query(*issue_id)
             .one(&pidash_db::orm_tx::TxConn::new(tx.inner()))
             .await
             .map_err(orm_err)?;
         let Some(locked) = locked else {
             return Err(StoreError::Missing { model: "Issue" });
         };
-        let (from_id, from_name, from_group) =
-            (locked.state_id, locked.state_name, locked.state_group);
+        let from_id = locked.state_id;
+        let (from_name, from_group) = match from_id {
+            Some(state_id) => {
+                let row: Option<(String, String)> = states::Entity::find_by_id(state_id)
+                    .select_only()
+                    .columns([states::Column::Name, states::Column::Group])
+                    .into_tuple()
+                    .one(&pidash_db::orm_tx::TxConn::new(tx.inner()))
+                    .await
+                    .map_err(orm_err)?;
+                match row {
+                    Some((name, group)) => (Some(name), Some(group)),
+                    None => (None, None),
+                }
+            }
+            None => (None, None),
+        };
         // `locked.save(update_fields=...)` (`issues.py:337-361`):
         // exactly the tool's columns (the write itself lives in
         // `domain::issues`, on this same fused transaction).
@@ -3248,6 +3286,34 @@ async fn enqueue_best_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    /// The identifier sequence predicate keeps the DB-side `::int` cast
+    /// (out-of-int4 tails raise; a Rust `as i32` would wrap 4294967297
+    /// to 1 and look up the wrong issue).
+    #[test]
+    fn sequence_filter_keeps_db_side_int_cast() {
+        let sql = issues::Entity::find()
+            .filter(sequence_filter(4294967297))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("CAST(4294967297 AS int)"),
+            "sequence predicate must cast in the DB, got: {sql}"
+        );
+    }
+
+    /// The issue row lock is single-table `FOR UPDATE` (a join-lock over
+    /// the `issues LEFT JOIN states` read fails at runtime: "cannot be
+    /// applied to the nullable side of an outer join").
+    #[test]
+    fn locked_issue_query_locks_one_table() {
+        let sql = locked_issue_query(Uuid::from_u128(7))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("FOR UPDATE"), "lock missing: {sql}");
+        assert!(!sql.contains("JOIN"), "lock must not join: {sql}");
+    }
 
     /// The event envelope carries `role: "tool_result"` (`kind` →
     /// `role`, `events.message_envelope`), with the full 9-key shape
