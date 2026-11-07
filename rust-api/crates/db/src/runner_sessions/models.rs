@@ -785,6 +785,7 @@ pub mod machine_session {
             last_seen_at: Set(Some(last_seen_at.into())),
             revoked_at: Set(None),
             revoked_reason: Set(DEFAULT_REVOKED_REASON.to_owned()),
+            machine_token_id: Set(None),
         }
     }
 
