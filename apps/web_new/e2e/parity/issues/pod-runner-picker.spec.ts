@@ -315,7 +315,6 @@ test(
             id: crypto.randomUUID(),
             status: "queued",
             executor_kind: "local_runner",
-            queue_position: null,
             runner: null,
             runner_name: null,
             pinned_runner: busy.id,

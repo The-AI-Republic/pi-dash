@@ -27,7 +27,6 @@ function runSummary(overrides: Partial<AgentRunSummary> = {}): AgentRunSummary {
     id: "123e4567-e89b-12d3-a456-426614174000",
     status: "queued",
     executor_kind: "local_runner",
-    queue_position: null,
     runner: null,
     runner_name: null,
     pinned_runner: "223e4567-e89b-12d3-a456-426614174001",

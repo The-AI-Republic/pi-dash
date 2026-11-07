@@ -111,7 +111,6 @@ export const AgentRun = z.object({
   owner: nullableUuid(),
   created_at: dateTime(),
   assigned_at: nullableDateTime(),
-  queue_position: z.nullable(z.number()),
   started_at: nullableDateTime(),
   ended_at: nullableDateTime(),
   done_payload: z.nullable(z.record(z.string(), z.unknown())),

@@ -3,7 +3,9 @@
 // See the LICENSE file for details.
 // Paginated runs list (NEWFRONT-545, RUN-016). The page lives in the
 // address, every row preserves the page query when selected, and the
-// footer turns pages with history-replace so Back leaves the tab.
+// footer turns pages with history-replace so Back leaves the tab. A
+// failed read (transport or contract) shows an error with a retry rather
+// than the empty text.
 
 import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
@@ -15,14 +17,26 @@ import { RunStatusBadge } from "./RunStatusBadge.js";
 export interface RunsListProps {
   data: AgentRunPage | undefined;
   loading: boolean;
+  /** The page could not be read or did not match its contract. */
+  failed?: boolean;
   page: number;
   onPage: (page: number) => void;
   onSelect: (runId: string) => void;
+  onRetry?: () => void;
 }
 
 export const RUNS_EMPTY_TEXT = "No runs yet.";
+export const RUNS_LOAD_FAILED_TEXT = "Could not load runs.";
 
-export function RunsList({ data, loading, page, onPage, onSelect }: RunsListProps): React.ReactElement {
+export function RunsList({
+  data,
+  loading,
+  failed = false,
+  page,
+  onPage,
+  onSelect,
+  onRetry,
+}: RunsListProps): React.ReactElement {
   const runs = data?.results ?? [];
   const totalCount = data?.total_count ?? 0;
   const totalPages = Math.max(1, data?.total_pages ?? 1);
@@ -73,7 +87,21 @@ export function RunsList({ data, loading, page, onPage, onSelect }: RunsListProp
                   </td>
                 </tr>
               ))}
-              {runs.length === 0 ? (
+              {runs.length === 0 && failed ? (
+                <tr>
+                  <td colSpan={3} className="px-(--space-3) py-(--space-8) text-center">
+                    <div role="alert" data-testid="runs-error" className="flex flex-col items-center gap-(--space-2)">
+                      <span className="text-(--danger)">{RUNS_LOAD_FAILED_TEXT}</span>
+                      {onRetry === undefined ? null : (
+                        <Button size="small" onClick={onRetry}>
+                          Try again
+                        </Button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ) : null}
+              {runs.length === 0 && !failed ? (
                 <tr>
                   <td
                     colSpan={3}

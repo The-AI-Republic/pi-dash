@@ -10,7 +10,7 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { RUNS_EMPTY_TEXT, RunsList } from "./RunsList.js";
+import { RUNS_EMPTY_TEXT, RUNS_LOAD_FAILED_TEXT, RunsList } from "./RunsList.js";
 
 const run = (overrides: Partial<AgentRun> = {}): AgentRun =>
   ({
@@ -32,11 +32,22 @@ const page = (overrides: Partial<AgentRunPage> = {}): AgentRunPage => ({
   ...overrides,
 });
 
-function renderList(data: AgentRunPage | undefined, pageNo = 2, loading = false) {
+function renderList(data: AgentRunPage | undefined, pageNo = 2, loading = false, failed = false) {
   const onPage = vi.fn();
   const onSelect = vi.fn();
-  render(<RunsList data={data} loading={loading} page={pageNo} onPage={onPage} onSelect={onSelect} />);
-  return { onPage, onSelect };
+  const onRetry = vi.fn();
+  render(
+    <RunsList
+      data={data}
+      loading={loading}
+      failed={failed}
+      page={pageNo}
+      onPage={onPage}
+      onSelect={onSelect}
+      onRetry={onRetry}
+    />
+  );
+  return { onPage, onSelect, onRetry };
 }
 
 describe("RunsList", () => {
@@ -103,5 +114,15 @@ describe("RunsList", () => {
   it("keeps the pager hidden while there are no runs at all", () => {
     renderList(page({ results: [], total_count: 0, total_pages: 1, page: 1 }));
     expect(screen.queryByTestId("runs-pager")).toBeNull();
+  });
+
+  it("shows a load error with a retry instead of the empty text when the page failed", async () => {
+    const { onRetry } = renderList(undefined, 1, false, true);
+    expect(screen.getByRole("alert")).toHaveTextContent(RUNS_LOAD_FAILED_TEXT);
+    expect(screen.queryByText(RUNS_EMPTY_TEXT)).toBeNull();
+    expect(screen.queryByTestId("runs-empty")).toBeNull();
+    expect(screen.queryByTestId("runs-pager")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });

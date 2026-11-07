@@ -913,7 +913,6 @@ describe("SidebarProperties", () => {
       id: "a23e4567-e89b-12d3-a456-42661417400a",
       status: "queued",
       executor_kind: "local_runner",
-      queue_position: null,
       runner: null,
       runner_name: null,
       pinned_runner: RUNNER_GPU,

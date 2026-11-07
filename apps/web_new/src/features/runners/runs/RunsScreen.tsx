@@ -65,7 +65,15 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <RunsList data={list.data} loading={list.isPending} page={page} onPage={goToPage} onSelect={selectRun} />
+      <RunsList
+        data={list.data}
+        loading={list.isPending}
+        failed={list.isError && list.data === undefined}
+        page={page}
+        onPage={goToPage}
+        onSelect={selectRun}
+        onRetry={() => void list.refetch()}
+      />
       <div className="min-h-0 flex-1 overflow-auto border-t border-(--border) p-(--space-6)">
         <RunDetail
           state={state}
