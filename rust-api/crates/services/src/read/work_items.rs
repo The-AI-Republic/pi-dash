@@ -18,8 +18,8 @@ use pidash_db::entity::{
     project_members, projects, states, users, workspaces,
 };
 use sea_orm::{
-    ColumnTrait, Condition, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
-    QuerySelect, RelationTrait,
+    ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType,
+    QueryFilter, QueryOrder, QuerySelect, RelationTrait,
 };
 
 use super::{DbError, Error};
@@ -420,6 +420,99 @@ pub fn requested_names(specs: Option<&[FieldSpec]>) -> Vec<&str> {
         .collect()
 }
 
+/// The `has_open_blockers` arm of [`fetch_blocker_rows`]: a single
+/// `SELECT 1 ... LIMIT 1` presence check over the open-blocker set
+/// (orm-migration §3.3), kept as a builder so statement-shape tests
+/// pin the join, scope and open-group predicates without a database.
+/// The `CASE`-selected other end stays in the `ON` clause (`CASE WHEN
+/// relation_type = 'blocked_by' THEN related_issue_id ELSE issue_id
+/// END`) — the former raw shape, one statement, same row set.
+fn has_open_blockers_statement(issue_id: &Uuid) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::{Alias, Cond, Expr, Query as SeaQuery};
+    let r = Alias::new("r");
+    let t = Alias::new("t");
+    let s = Alias::new("s");
+    let p = Alias::new("p");
+    let mut select = SeaQuery::select();
+    select
+        .expr_as(Expr::val(1), Alias::new("a"))
+        .from_as(issue_relations::Entity, r.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            issues::Entity,
+            t.clone(),
+            Expr::col((t.clone(), issues::Column::Id)).eq(
+                Expr::case(
+                    Expr::col((r.clone(), issue_relations::Column::RelationType)).eq("blocked_by"),
+                    Expr::col((r.clone(), issue_relations::Column::RelatedIssueId)),
+                )
+                .finally(Expr::col((r.clone(), issue_relations::Column::IssueId))),
+            ),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            states::Entity,
+            s.clone(),
+            Expr::col((t.clone(), issues::Column::StateId)).equals((s.clone(), states::Column::Id)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            p.clone(),
+            Expr::col((t.clone(), issues::Column::ProjectId))
+                .equals((p.clone(), projects::Column::Id)),
+        )
+        .cond_where(
+            Cond::all()
+                .add(Expr::col((r.clone(), issue_relations::Column::DeletedAt)).is_null())
+                .add(
+                    Expr::col((r.clone(), issue_relations::Column::IssueId))
+                        .ne(Expr::col((r.clone(), issue_relations::Column::RelatedIssueId))),
+                )
+                .add(Expr::col((t.clone(), issues::Column::DeletedAt)).is_null())
+                .add(Expr::col((t.clone(), issues::Column::ArchivedAt)).is_null())
+                .add(Expr::col((t.clone(), issues::Column::IsDraft)).eq(false))
+                .add(
+                    Expr::col((t.clone(), issues::Column::WorkspaceId))
+                        .eq(Expr::col((r.clone(), issue_relations::Column::WorkspaceId))),
+                )
+                .add(Expr::col((s.clone(), states::Column::Group)).ne("triage"))
+                .add(Expr::col((p.clone(), projects::Column::ArchivedAt)).is_null())
+                .add(
+                    Cond::any()
+                        .add(
+                            Cond::all()
+                                .add(
+                                    Expr::col((r.clone(), issue_relations::Column::IssueId))
+                                        .eq(*issue_id),
+                                )
+                                .add(
+                                    Expr::col((r.clone(), issue_relations::Column::RelationType))
+                                        .eq("blocked_by"),
+                                ),
+                        )
+                        .add(
+                            Cond::all()
+                                .add(
+                                    Expr::col((r.clone(), issue_relations::Column::RelatedIssueId))
+                                        .eq(*issue_id),
+                                )
+                                .add(
+                                    Expr::col((r.clone(), issue_relations::Column::RelationType))
+                                        .eq("blocking"),
+                                ),
+                        ),
+                )
+                .add(
+                    Expr::col((s.clone(), states::Column::Group))
+                        .is_in(["completed", "cancelled"])
+                        .not(),
+                ),
+        )
+        .limit(1);
+    select
+}
+
 /// `relations_summary` (`orchestration/blockers.py:186-198`): per-direction
 /// `{identifier, state, state_group}` lists, open first, capped at 100
 /// (`SUMMARY_LIMIT`), plus the uncapped `has_open_blockers`. Mirrors the
@@ -523,28 +616,12 @@ pub async fn fetch_blocker_rows(pool: &PgPool, issue_id: &Uuid) -> Result<Blocke
     }
     let blocked_by = direction(pool, issue_id, true).await?;
     let blocking = direction(pool, issue_id, false).await?;
-    // raw-sql: SeaORM cannot express CASE JOIN ON for the open-blocker EXISTS (CASE WHEN relation_type = 'blocked_by' THEN related_issue_id ELSE issue_id END as join target). Single-statement EXISTS with CASE join must stay raw to preserve statement count and exact join.
-    let has_open_blockers: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(
-             SELECT 1 FROM "issue_relations" r
-             INNER JOIN "issues" t ON t."id" = CASE WHEN r."relation_type" = 'blocked_by' THEN r."related_issue_id" ELSE r."issue_id" END
-             INNER JOIN "states" s ON s."id" = t."state_id"
-             INNER JOIN "projects" p ON p."id" = t."project_id"
-             WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
-               AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND t."is_draft" = FALSE
-               AND t."workspace_id" = r."workspace_id"
-               AND s."group" <> 'triage' AND p."archived_at" IS NULL
-               AND (
-                 (r."issue_id" = $1 AND r."relation_type" = 'blocked_by')
-                 OR (r."related_issue_id" = $1 AND r."relation_type" = 'blocking')
-               )
-               AND s."group" NOT IN ('completed', 'cancelled')
-           )"#,
-    )
-    .bind(issue_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| DbError::new("expand-open-blockers", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let has_open_blockers = db
+        .query_one(DbBackend::Postgres.build(&has_open_blockers_statement(issue_id)))
+        .await
+        .map_err(|error| DbError::from_orm("expand-open-blockers", error))?
+        .is_some();
     Ok(BlockerRows {
         blocked_by,
         blocking,
@@ -1832,6 +1909,29 @@ mod tests {
     }
 
     #[test]
+    fn open_blocker_presence_keeps_case_join_and_open_scope() {
+        let sql = has_open_blockers_statement(&Uuid::nil())
+            .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        // The CASE-selected other end stays in the join target, and the
+        // blockers' two directions plus the open-group exclusion and
+        // the limit-1 presence shape are all in the statement.
+        assert!(sql.contains("CASE WHEN"), "{sql}");
+        assert!(
+            sql.contains(r#""r"."relation_type" = 'blocked_by') THEN "r"."related_issue_id" ELSE "r"."issue_id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"NOT "s"."group" IN ('completed', 'cancelled')"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""s"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#""t"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""t"."archived_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""t"."is_draft" = FALSE"#), "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
+    }
+
+    #[test]
     fn assignee_and_label_subqueries_preserve_order() {
         let sql = users::Entity::find()
             .filter(
@@ -2035,5 +2135,54 @@ mod live {
         assert_eq!(one.len(), 1);
         let only: Uuid = one[0].try_get("id").expect("id");
         assert_eq!(only, world.comment_id);
+    }
+
+    #[tokio::test]
+    async fn blocker_open_presence_tracks_open_blocker() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        // No relations: nothing open.
+        let rows = fetch_blocker_rows(&db, &world.issue_id)
+            .await
+            .expect("reads");
+        assert!(!rows.has_open_blockers);
+        // A blocked by B, B in the seeded open (`backlog`) state: open.
+        let blocker_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issues (id, created_at, updated_at, name, description_json, priority,\
+             sequence_id, project_id, state_id, workspace_id, description_html, sort_order,\
+             is_draft, git_work_branch, workpad, complexity_score) \
+             VALUES ($1, now(), now(), 'Blocker', '{}', 'high', 102, $2, $3, $4, '', 65535, \
+             false, '', '', 0)",
+        )
+        .bind(blocker_id)
+        .bind(world.project_id)
+        .bind(world.state_id)
+        .bind(world.workspace_id)
+        .execute(&db)
+        .await
+        .expect("seed blocker issue");
+        sqlx::query(
+            "INSERT INTO issue_relations (id, relation_type, issue_id, project_id, \
+             related_issue_id, workspace_id, created_at, updated_at) \
+             VALUES ($1, 'blocked_by', $2, $3, $4, $5, now(), now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(world.issue_id)
+        .bind(world.project_id)
+        .bind(blocker_id)
+        .bind(world.workspace_id)
+        .execute(&db)
+        .await
+        .expect("seed blocked_by relation");
+        let rows = fetch_blocker_rows(&db, &world.issue_id)
+            .await
+            .expect("reads");
+        assert!(rows.has_open_blockers);
+        // The blocker itself blocks nothing.
+        let reverse = fetch_blocker_rows(&db, &blocker_id)
+            .await
+            .expect("reads");
+        assert!(!reverse.has_open_blockers);
     }
 }
