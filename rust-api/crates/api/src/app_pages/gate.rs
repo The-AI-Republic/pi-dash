@@ -955,20 +955,22 @@ mod tests {
         let project_id = uuid::Uuid::new_v4();
         let page_id = uuid::Uuid::new_v4();
         let now = chrono::Utc::now();
-        sqlx::query("INSERT INTO users (id, username, email, created_at, updated_at) VALUES ($1,$2,$3,$4,$4) ON CONFLICT (id) DO NOTHING")
+        // NOT NULL columns without defaults (Django-migrated schema): every
+        // required column is listed explicitly.
+        sqlx::query("INSERT INTO users (id, username, email, password, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, token, user_timezone, last_login_ip, is_password_reset_required, is_email_valid, display_name, is_bot, last_login_uagent, last_login_medium, last_logout_ip) VALUES ($1,$2,$3,'x','','','', $4,$4,$4,'','',false,false,false,false,false,false,false,'x','UTC','127.0.0.1',false,false,'x',false,'','', '') ON CONFLICT (id) DO NOTHING")
             .bind(user_id).bind(format!("u-{user_id}")).bind(format!("{user_id}@example.com")).bind(now)
             .execute(&pool).await.expect("seed user");
-        sqlx::query("INSERT INTO workspaces (id, slug, name, created_at, updated_at) VALUES ($1,$2,$3,$4,$4) ON CONFLICT (id) DO NOTHING")
-            .bind(workspace_id).bind(&slug).bind("Gate Workspace").bind(now)
+        sqlx::query("INSERT INTO workspaces (id, slug, name, background_color, timezone, owner_id, created_at, updated_at) VALUES ($1,$2,$3,'','', $4,$5,$5) ON CONFLICT (id) DO NOTHING")
+            .bind(workspace_id).bind(&slug).bind("Gate Workspace").bind(user_id).bind(now)
             .execute(&pool).await.expect("seed workspace");
-        sqlx::query("INSERT INTO projects (id, workspace_id, name, identifier, created_at, updated_at, guest_view_all_features) VALUES ($1,$2,$3,$4,$4,$4,$5) ON CONFLICT (id) DO NOTHING")
-            .bind(project_id).bind(workspace_id).bind("Gate Project").bind(format!("G{project_id}")).bind(now).bind(false)
+        sqlx::query("INSERT INTO projects (id, workspace_id, name, description, network, identifier, page_view, cycle_view, module_view, issue_views_view, intake_view, archive_in, close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, guest_view_all_features, timezone, members_can_edit_states, repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, agent_ticking_enabled, is_default, agent_review_default_interval_seconds, default_agent_executor, agent_test_default_interval_seconds, created_at, updated_at) VALUES ($1,$2,$3,'',0,$4,false,false,false,false,false,0,0,'{}'::jsonb,false,false,$5,'',false,'','',0,0,false,false,0,'',0, $6,$6) ON CONFLICT (id) DO NOTHING")
+            .bind(project_id).bind(workspace_id).bind("Gate Project").bind("G65PROBE").bind(false).bind(now)
             .execute(&pool).await.expect("seed project");
-        sqlx::query("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$4,$4) ON CONFLICT (id) DO NOTHING")
+        sqlx::query("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, preferences, default_props, view_props, sort_order, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,0,$7,$7) ON CONFLICT (id) DO NOTHING")
             .bind(uuid::Uuid::new_v4()).bind(workspace_id).bind(project_id).bind(user_id).bind(5i16).bind(true).bind(now)
             .execute(&pool).await.expect("seed member");
-        sqlx::query("INSERT INTO pages (id, workspace_id, name, description_json, description_html, owned_by_id, access, color, created_at, updated_at, view_props, logo_props, is_global, sort_order) VALUES ($1,$2,$3,'{}'::jsonb,'', $4,$5,'',$4,$4,'{}'::jsonb,'{}'::jsonb,$6,$7) ON CONFLICT (id) DO NOTHING")
-            .bind(page_id).bind(workspace_id).bind("Gate Page").bind(user_id).bind(1i16).bind(false).bind(0f64)
+        sqlx::query("INSERT INTO pages (id, workspace_id, name, description_json, description_html, owned_by_id, access, color, created_at, updated_at, view_props, logo_props, is_global, is_locked, sort_order) VALUES ($1,$2,$3,'{}'::jsonb,'', $4,$5,'',$8,$8,'{}'::jsonb,'{}'::jsonb,$6,false,$7) ON CONFLICT (id) DO NOTHING")
+            .bind(page_id).bind(workspace_id).bind("Gate Page").bind(user_id).bind(1i16).bind(false).bind(0f64).bind(now)
             .execute(&pool).await.expect("seed page");
 
         let role: Option<i16> = role_query(&project_id, &user_id, &slug)
