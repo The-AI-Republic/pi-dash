@@ -1,15 +1,15 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write ``(route, method)`` pairs: **593** total, **493** covered by the corpus.
+Write ``(route, method)`` pairs: **593** total, **494** covered by the corpus.
 
 | bucket | pairs |
 | --- | --- |
-| covered | 493 |
+| covered | 494 |
 | proxied by design | 94 |
 | debug toolbar (dev-only) | 0 |
 | missing with fix issue | 3 |
 | excluded with reason | 0 |
-| owned, no session yet | 3 |
+| owned, no session yet | 2 |
 
 ## Covered
 
@@ -69,6 +69,7 @@ Write ``(route, method)`` pairs: **593** total, **493** covered by the corpus.
 - `POST /api/runners/chat/sessions/{}/messages/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/chat/sessions/{}/warm/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `DELETE /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle (owned)
+- `PATCH /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/create-runner/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/revoke/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/rotate/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
@@ -82,7 +83,7 @@ Write ``(route, method)`` pairs: **593** total, **493** covered by the corpus.
 - `POST /api/runners/runs/{}/cancel/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/runs/{}/release-pin/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `DELETE /api/runners/{}/` (runner_web) — runner_web_lifecycle (owned)
-- `PATCH /api/runners/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `PATCH /api/runners/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/{}/pause/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/{}/resume/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/{}/revive/` (runner_web) — runner_web_lifecycle (owned)
@@ -620,6 +621,5 @@ Write ``(route, method)`` pairs: **593** total, **493** covered by the corpus.
 
 ## Owned, no session yet
 
-- `PATCH /api/runners/dev-machines/{}/` (runner_web) — NEWPIDASH-52: web machine-controls PATCH landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner_web corpus session.
 - `PATCH /api/v1/runner/dev-machines/{}/` (runner) — NEWPIDASH-52: daemon machine PATCH landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.
 - `POST /api/v1/runner/dev-machines/{}/merge-into/` (runner) — NEWPIDASH-52: daemon merge-into landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.
