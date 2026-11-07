@@ -57,8 +57,7 @@ use crate::task_message::TaskMessage;
 use pidash_db::entity::{instance_configurations, instances};
 use pidash_db::pool::sea_orm_connection;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
 /// What the command layer reports as failure. Messages mirror Django's
@@ -895,6 +894,20 @@ pub async fn register_instance<E: Env, S: InstanceStore>(
 // Postgres stores (for the worker once this module is wired in)
 // ---------------------------------------------------------------------------
 
+/// Whether a SeaORM insert failure is a unique-violation conflict
+/// (Postgres SQLSTATE 23505, via `pidash_compat::db::is_unique_violation`
+/// over the driver error the `DbErr` wraps).
+fn is_unique_insert_conflict(error: &sea_orm::DbErr) -> bool {
+    match error {
+        sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => {
+            pidash_compat::db::is_unique_violation(inner)
+        }
+        _ => false,
+    }
+}
+
 /// Postgres [`SeedStore`]: the exact Django query shapes. Reads use the
 /// default-manager scope (`deleted_at IS NULL`); note the unique index on
 /// `key` is soft-delete-unaware (ported quirk from the models layer), so a
@@ -980,9 +993,14 @@ impl SeedStore for PgSeedStore {
                 },
                 true,
             )),
-            Err(_) => {
-                // Lost a race (or hit a soft-deleted row shadowing the key):
-                // resolve to the conflicting row, like Django's retry-`get`.
+            Err(error) => {
+                // Unique conflict only (lost a race, or a soft-deleted row
+                // shadows the key): resolve to the conflicting row, like
+                // Django's retry-`get`. Every other insert failure
+                // (connect, constraint, decode) propagates as `Store`.
+                if !is_unique_insert_conflict(&error) {
+                    return Err(CommandError::Store(error.to_string()));
+                }
                 let row = instance_configurations::Entity::find()
                     .filter(instance_configurations::Column::Key.eq(&seed.key))
                     .one(&db)

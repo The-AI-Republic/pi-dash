@@ -398,7 +398,9 @@ impl PgTraceDb {
     }
 
     /// `Model.objects.count()` over `table`, soft-delete-aware except for
-    /// `users` (no soft-delete manager there).
+    /// `users` (no soft-delete manager there: the `users` table has no
+    /// `deleted_at` column, so the flag is intentionally ignored there).
+    /// Unknown table names are an error, never a silent `0`.
     async fn count(
         pool: &sqlx::PgPool,
         table: &str,
@@ -411,9 +413,7 @@ impl PgTraceDb {
                 if soft_deleted {
                     q = q.filter(workspaces::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "users" => users::Entity::find()
                 .count(&db)
@@ -424,77 +424,61 @@ impl PgTraceDb {
                 if soft_deleted {
                     q = q.filter(projects::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "issues" => {
                 let mut q = issues::Entity::find();
                 if soft_deleted {
                     q = q.filter(issues::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "modules" => {
                 let mut q = modules::Entity::find();
                 if soft_deleted {
                     q = q.filter(modules::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "cycles" => {
                 let mut q = cycles::Entity::find();
                 if soft_deleted {
                     q = q.filter(cycles::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "cycle_issues" => {
                 let mut q = cycle_issues::Entity::find();
                 if soft_deleted {
                     q = q.filter(cycle_issues::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "module_issues" => {
                 let mut q = module_issues::Entity::find();
                 if soft_deleted {
                     q = q.filter(module_issues::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "pages" => {
                 let mut q = pages::Entity::find();
                 if soft_deleted {
                     q = q.filter(pages::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             "workspace_members" => {
                 let mut q = workspace_members::Entity::find();
                 if soft_deleted {
                     q = q.filter(workspace_members::Column::DeletedAt.is_null());
                 }
-                q.count(&db)
-                    .await
-                    .map_err(pidash_db::orm_tx::into_sqlx)?
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
             }
             _ => {
-                // Unknown table: all known tables above cover this batch.
-                // Return 0 for unrecognized names (no raw SQL fallback).
-                0
+                return Err(sqlx::Error::Protocol(format!(
+                    "PgTraceDb::count: unknown table {table}"
+                )));
             }
         };
         Ok(count as i64)
@@ -559,7 +543,11 @@ impl PgTraceDb {
                 .count(&db)
                 .await
                 .map_err(pidash_db::orm_tx::into_sqlx)?,
-            _ => 0,
+            _ => {
+                return Err(sqlx::Error::Protocol(format!(
+                    "PgTraceDb::count_for_workspace: unknown table {table}"
+                )));
+            }
         };
         Ok(count as i64)
     }
