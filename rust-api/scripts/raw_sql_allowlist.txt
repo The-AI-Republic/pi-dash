@@ -70,8 +70,6 @@ crates/db/src/ops/users.rs 12
 crates/db/src/runner_runs/pod.rs 3
 crates/db/src/runner_sessions/machine_outbox.rs 1
 crates/db/src/runner_sessions/outbox.rs 1
-crates/jobs/src/dispatch/dispatch.rs 11
-crates/jobs/src/dispatch/execute.rs 19
 crates/jobs/src/integrations/git_sync.rs 26
 crates/jobs/src/integrations/github_signals.rs 4
 crates/jobs/src/integrations/github_sync.rs 33
