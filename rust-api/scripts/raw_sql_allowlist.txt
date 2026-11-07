@@ -65,12 +65,7 @@ crates/api/src/v1_openapi/mod.rs 1
 crates/api/src/v1_schedulers/handlers.rs 7
 crates/api/src/v1_schedulers/mod.rs 7
 crates/api/src/v1_schedulers/writes.rs 12
-crates/api/src/v1_work_items/handlers_actions.rs 24
-crates/api/src/v1_work_items/handlers_activity.rs 29
-crates/api/src/v1_work_items/handlers_core.rs 17
-crates/api/src/v1_work_items/handlers_labels_pages.rs 47
 crates/api/src/v1_work_items/handlers_pr_links.rs 38
-crates/api/src/v1_work_items/handlers_social.rs 29
 crates/compat/src/db.rs 1
 crates/db/src/app_intake/queries.rs 14
 crates/db/src/config/accessor.rs 1
