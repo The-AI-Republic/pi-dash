@@ -3,8 +3,8 @@
 //! Verbatim moves of the `pidash-api` handler helpers (OVL-05 pattern,
 //! PIDASHCONV-1661); the handlers call these and map
 //! [`Error`](super::Error) onto their denial type. The MCP-semantics
-//! variants share the v1 SQL builders and differ only where the MCP
-//! queryset itself differs (BUG-944-1 member scope, explicit ordering).
+//! variants differ only where the MCP queryset itself differs
+//! (BUG-944-1 member scope, explicit ordering).
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -34,36 +34,32 @@ pub async fn fetch_project_rows(
     Ok(rows)
 }
 
-/// `list_states` rows (`pi_dash_cloud/mcp/tools.py:777-789`): live
+/// `list_states` states (`pi_dash_cloud/mcp/tools.py:777-789`): live
 /// non-triage states of the project in the slug where the caller holds
 /// an active project membership, the project unarchived,
-/// sequence-ordered, distinct. Shares the v1 list builder
-/// (`pidash_db::v1_projects::queries_stateest::state_list_sql_with`)
-/// with the `project_members` soft-delete guard off (BUG-944-1: only
-/// the base model's manager applies across the MCP traversal, so a
-/// soft-deleted membership row still authorizes this read); every
-/// other clause and the bind order are the v1 scope. Ordering is in
-/// SQL (`.order_by("sequence")`), unlike the v1 handler which sorts
-/// the shared builder's unordered rows itself. Rows stay raw: the
-/// caller decodes and renders them.
+/// sequence-ordered, distinct. Runs on the MCP scope
+/// (`pidash_db::v1_projects::queries_stateest::fetch_state_list_mcp`):
+/// the v1 list scope with the `project_members` soft-delete guard off
+/// (BUG-944-1: only the base model's manager applies across the MCP
+/// traversal, so a soft-deleted membership row still authorizes this
+/// read); every other clause is the v1 scope. Ordering is in SQL
+/// (`.order_by("sequence")`), unlike the v1 handler which sorts its
+/// unordered rows itself.
 pub async fn fetch_state_columns(
     pool: &PgPool,
     workspace_slug: &str,
     project_id: Uuid,
     user_id: Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
-    let sql = format!(
-        "{} ORDER BY \"states\".\"sequence\" ASC",
-        pidash_db::v1_projects::queries_stateest::state_list_sql_with(false)
-    );
-    let rows = sqlx::query(&sql)
-        .bind(workspace_slug)
-        .bind(project_id)
-        .bind(user_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| DbError::new("state-columns", error))?;
-    Ok(rows)
+) -> Result<Vec<pidash_db::v1_projects::models::state::State>, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    pidash_db::v1_projects::queries_stateest::fetch_state_list_mcp(
+        &db,
+        workspace_slug,
+        project_id,
+        user_id,
+    )
+    .await
+    .map_err(|error| DbError::from_orm("state-columns", error).into())
 }
 
 #[cfg(test)]
@@ -128,8 +124,7 @@ mod live {
             .await
             .expect("hit");
         assert_eq!(rows.len(), 1);
-        let name: String = rows[0].try_get("name").expect("name");
-        assert_eq!(name, "Seed Backlog");
+        assert_eq!(rows[0].name, "Seed Backlog");
         // BUG-944-1: a soft-deleted membership row still authorizes the
         // MCP read (no `project_members.deleted_at` guard).
         sqlx::query("UPDATE project_members SET deleted_at = now() WHERE member_id = $1")
@@ -141,27 +136,5 @@ mod live {
             .await
             .expect("hit after member soft-delete");
         assert_eq!(rows.len(), 1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn state_columns_sql_is_mcp_scope_sequence_ordered() {
-        // The service SQL is the shared v1 list builder with the member
-        // deleted guard off (BUG-944-1) plus the MCP `.order_by`.
-        let sql = format!(
-            "{} ORDER BY \"states\".\"sequence\" ASC",
-            pidash_db::v1_projects::queries_stateest::state_list_sql_with(false)
-        );
-        assert!(sql.contains("SELECT DISTINCT"), "{sql}");
-        assert!(sql.contains(r#""states"."is_triage" = FALSE"#), "{sql}");
-        assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
-        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
-        assert!(!sql.contains(r#""project_members"."deleted_at""#), "{sql}");
-        assert!(
-            sql.ends_with(r#"ORDER BY "states"."sequence" ASC"#),
-            "{sql}"
-        );
     }
 }

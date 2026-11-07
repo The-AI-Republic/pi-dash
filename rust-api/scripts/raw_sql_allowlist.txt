@@ -93,9 +93,6 @@ crates/api/src/v1_assets/intake.rs 37
 crates/api/src/v1_assets/sticky.rs 17
 crates/api/src/v1_cli_auth/runner.rs 3
 crates/api/src/v1_openapi/mod.rs 1
-crates/api/src/v1_projects/handlers_members.rs 26
-crates/api/src/v1_projects/handlers_project.rs 34
-crates/api/src/v1_projects/handlers_state_estimate.rs 20
 crates/api/src/v1_schedulers/handlers.rs 7
 crates/api/src/v1_schedulers/mod.rs 7
 crates/api/src/v1_schedulers/writes.rs 12
@@ -125,8 +122,6 @@ crates/db/src/runner_sessions/outbox.rs 1
 crates/db/src/v1_assets/asset_queries.rs 14
 crates/db/src/v1_assets/sticky_queries.rs 3
 crates/db/src/v1_cli_auth/queries.rs 1
-crates/db/src/v1_projects/queries_projmem.rs 14
-crates/db/src/v1_projects/queries_stateest.rs 32
 crates/jobs/src/assistant/run_turn.rs 1
 crates/jobs/src/assistant/sweep.rs 7
 crates/jobs/src/dispatch/dispatch.rs 11
@@ -173,7 +168,7 @@ crates/services/src/read/comment.rs 5
 crates/services/src/read/identity.rs 3
 crates/services/src/read/issues.rs 7
 crates/services/src/read/pr_links.rs 3
-crates/services/src/read/projects.rs 2
+crates/services/src/read/projects.rs 1
 crates/services/src/read/relations.rs 1
 crates/services/src/read/search.rs 1
 crates/services/src/read/work_items.rs 20
