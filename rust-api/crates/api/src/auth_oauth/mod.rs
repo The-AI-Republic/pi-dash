@@ -43,6 +43,7 @@ pub mod oauth_github;
 pub mod oauth_gitlab;
 pub mod oauth_google;
 
+use pidash_db::entity::file_assets;
 use pidash_services::domain::identity;
 
 pub use guards::{
@@ -77,17 +78,29 @@ pub(crate) async fn soft_delete_avatar_asset(
     asset_id: uuid::Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    if sqlx::query(
-        r#"UPDATE "file_assets"
-           SET "deleted_at" = $1, "updated_at" = $1,
-               "created_by_id" = NULL, "updated_by_id" = NULL
-           WHERE "id" = $2"#,
-    )
-    .bind(now)
-    .bind(asset_id)
-    .execute(pool)
-    .await
-    .is_err()
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    if file_assets::Entity::update_many()
+        .col_expr(
+            file_assets::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            file_assets::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .col_expr(
+            file_assets::Column::CreatedById,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            file_assets::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .filter(file_assets::Column::Id.eq(asset_id))
+        .exec(&db)
+        .await
+        .is_err()
     {
         return;
     }
@@ -371,31 +384,40 @@ pub(crate) async fn insert_avatar_file_asset(
     storage_metadata: Option<serde_json::Value>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
+    use sea_orm::{ActiveModelTrait, Set};
     let attributes =
         pidash_storage::avatar_attributes(provider, extension, content_type, file_size);
-    sqlx::query(
-        r#"INSERT INTO file_assets
-           (id, created_at, updated_at, attributes, asset,
-            created_by_id, updated_by_id, workspace_id,
-            is_deleted, deleted_at, is_archived,
-            comment_id, entity_type, external_id, external_source,
-            is_uploaded, issue_id, page_id, project_id,
-            size, storage_metadata, user_id, draft_issue_id, entity_identifier)
-           VALUES ($1,$2,$2,$3,$4,$5,NULL,NULL,
-                   FALSE,NULL,FALSE,
-                   NULL,'USER_AVATAR',NULL,NULL,
-                   TRUE,NULL,NULL,NULL,
-                   $6,$7,$5,NULL,NULL)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(attributes)
-    .bind(stored_key)
-    .bind(user_id)
-    .bind(file_size as f64)
-    .bind(storage_metadata)
-    .execute(pool)
-    .await?;
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    file_assets::ActiveModel {
+        id: Set(id),
+        created_at: Set(now_tz),
+        updated_at: Set(now_tz),
+        attributes: Set(attributes),
+        asset: Set(stored_key.to_owned()),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        workspace_id: Set(None),
+        is_deleted: Set(false),
+        deleted_at: Set(None),
+        is_archived: Set(false),
+        comment_id: Set(None),
+        entity_type: Set(Some("USER_AVATAR".to_owned())),
+        external_id: Set(None),
+        external_source: Set(None),
+        is_uploaded: Set(true),
+        issue_id: Set(None),
+        page_id: Set(None),
+        project_id: Set(None),
+        size: Set(file_size as f64),
+        storage_metadata: Set(storage_metadata),
+        user_id: Set(Some(user_id)),
+        draft_issue_id: Set(None),
+        entity_identifier: Set(None),
+    }
+    .insert(&db)
+    .await
+    .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(())
 }
 
@@ -427,15 +449,19 @@ pub(crate) async fn delete_old_avatar(
     avatar_asset_id: Option<uuid::Uuid>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let Some(asset_id) = avatar_asset_id else {
         return;
     };
-    let row: Option<(String,)> = match sqlx::query_as(
-        "SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<String> = match file_assets::Entity::find_by_id(asset_id)
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .column(file_assets::Column::Asset)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
     {
         Ok(row) => row,
         Err(error) => {
@@ -443,7 +469,7 @@ pub(crate) async fn delete_old_avatar(
             return;
         }
     };
-    let Some((key,)) = row else {
+    let Some(key) = row else {
         return;
     };
     if pidash_storage::validate_storage(storage).is_err() {
