@@ -19,11 +19,16 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
+use sea_orm::sea_query::{Alias, Expr};
+use sea_orm::{
+    ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+};
 use serde_json::Value;
 use uuid::Uuid;
 
-use pidash_db::runner_runs::approval;
+use pidash_db::entity as orm;
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::ApprovalRequest;
 use pidash_services::runner_runs::shape;
 use pidash_types::runner_runs::{ApprovalKind, ApprovalStatus};
@@ -39,74 +44,62 @@ use crate::state::AppState;
 use pidash_compat::response::server_error;
 
 /// Approval list (`approvals.py:31-40`): creator-routed PENDING rows,
-/// `-requested_at`, `LIMIT 200`. Params: `$1` requester; `$2` the raw
-/// project scope when present (`::uuid` cast: invalid text errors like
-/// Django's `ValidationError`, a 500 either way).
-pub fn approvals_list_sql(has_project_scope: bool) -> String {
-    let columns = approval::COLUMNS
-        .iter()
-        .map(|column| format!(r#""agent_run_approval"."{column}""#))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut from = r#"FROM "agent_run_approval" INNER JOIN "agent_run" ON ("agent_run_approval"."agent_run_id" = "agent_run"."id")"#.to_owned();
-    let mut extra = String::new();
-    if has_project_scope {
-        // `agent_run__pod__project_id`: Django joins the pod table.
-        from.push_str(r#" INNER JOIN "pod" ON ("agent_run"."pod_id" = "pod"."id")"#);
-        extra.push_str(r#" AND "pod"."project_id" = $3::uuid"#);
+/// `-requested_at`, `LIMIT 200`. `project_scope` is the raw
+/// `?project=` string, compared through a `uuid` cast
+/// (`agent_run__pod__project_id`, so the pod joins): invalid text
+/// errors like Django's `ValidationError`, a 500 either way.
+pub fn approvals_list_select(
+    actor_id: Uuid,
+    project_scope: Option<&str>,
+) -> sea_orm::Select<orm::agent_run_approval::Entity> {
+    use orm::agent_run_approval::{Column, Entity, Relation};
+    let mut select = Entity::find()
+        .join(JoinType::InnerJoin, Relation::AgentRun.def())
+        .filter(orm::agent_run::Column::CreatedById.eq(actor_id))
+        .filter(Column::Status.eq(ApprovalStatus::Pending.value()));
+    if let Some(raw) = project_scope {
+        select = select
+            .join(
+                JoinType::InnerJoin,
+                orm::agent_run::Entity::belongs_to(orm::pod::Entity)
+                    .from(orm::agent_run::Column::PodId)
+                    .to(orm::pod::Column::Id)
+                    .into(),
+            )
+            .filter(
+                Expr::col((orm::pod::Entity, orm::pod::Column::ProjectId))
+                    .eq(Expr::val(raw.to_owned()).cast_as(Alias::new("uuid"))),
+            );
     }
-    format!(
-        concat!(
-            r#"SELECT {columns} {from} "#,
-            r#"WHERE ("agent_run"."created_by_id" = $1 AND "agent_run_approval"."status" = $2){extra} "#,
-            r#"ORDER BY "agent_run_approval"."requested_at" DESC LIMIT 200"#,
-        ),
-        columns = columns,
-        from = from,
-        extra = extra,
-    )
+    select.order_by_desc(Column::RequestedAt).limit(200)
 }
 
-/// One approval row in [`approval::COLUMNS`] order.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ApprovalRecord {
-    pub id: Uuid,
-    pub agent_run_id: Uuid,
-    pub kind: String,
-    pub payload: Value,
-    pub reason: String,
-    pub status: String,
-    pub decision_source: String,
-    pub decided_by_id: Option<Uuid>,
-    pub requested_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub decided_at: Option<DateTime<Utc>>,
-}
-
-impl ApprovalRecord {
-    pub fn into_approval(self) -> Result<ApprovalRequest, RowError> {
-        let kind = ApprovalKind::from_value(&self.kind).ok_or_else(|| RowError::Choice {
-            column: "approval.kind",
-            value: self.kind.clone(),
-        })?;
-        let status = ApprovalStatus::from_value(&self.status).ok_or_else(|| RowError::Choice {
-            column: "approval.status",
-            value: self.status.clone(),
-        })?;
-        Ok(ApprovalRequest {
-            id: self.id,
-            agent_run_id: self.agent_run_id,
-            kind,
-            payload: self.payload,
-            reason: self.reason,
-            status,
-            decision_source: self.decision_source,
-            decided_by_id: self.decided_by_id,
-            requested_at: self.requested_at,
-            expires_at: self.expires_at,
-            decided_at: self.decided_at,
-        })
-    }
+/// The L2 approval off its entity row (the choice columns parse to
+/// their enums; a model-violating value is [`RowError::Choice`]).
+pub fn approval_from_model(
+    model: orm::agent_run_approval::Model,
+) -> Result<ApprovalRequest, RowError> {
+    let kind = ApprovalKind::from_value(&model.kind).ok_or_else(|| RowError::Choice {
+        column: "approval.kind",
+        value: model.kind.clone(),
+    })?;
+    let status = ApprovalStatus::from_value(&model.status).ok_or_else(|| RowError::Choice {
+        column: "approval.status",
+        value: model.status.clone(),
+    })?;
+    Ok(ApprovalRequest {
+        id: model.id,
+        agent_run_id: model.agent_run_id,
+        kind,
+        payload: model.payload,
+        reason: model.reason,
+        status,
+        decision_source: model.decision_source,
+        decided_by_id: model.decided_by_id,
+        requested_at: model.requested_at.with_timezone(&Utc),
+        expires_at: model.expires_at.map(|at| at.with_timezone(&Utc)),
+        decided_at: model.decided_at.map(|at| at.with_timezone(&Utc)),
+    })
 }
 
 /// 401 for anonymous callers (DRF `NotAuthenticated`).
@@ -143,20 +136,16 @@ async fn list_approvals_inner(
     };
     // `if project_id:` — an empty string scopes nothing.
     let project_scope = query_last(&query, "project").filter(|value| !value.is_empty());
-    let list_sql = approvals_list_sql(project_scope.is_some());
-    let mut list_query = sqlx::query_as::<_, ApprovalRecord>(&list_sql)
-        .bind(actor.id)
-        .bind(ApprovalStatus::Pending.value());
-    if let Some(scope) = &project_scope {
-        list_query = list_query.bind(scope.as_str());
-    }
-    let records: Vec<ApprovalRecord> = match list_query.fetch_all(pool).await {
+    let records = match approvals_list_select(actor.id, project_scope.as_deref())
+        .all(&sea_orm_connection(pool))
+        .await
+    {
         Ok(records) => records,
         Err(_) => return server_error(),
     };
     let mut body = Vec::with_capacity(records.len());
     for record in records {
-        let row = match record.into_approval() {
+        let row = match approval_from_model(record) {
             Ok(row) => row,
             Err(_) => return server_error(),
         };
@@ -229,26 +218,36 @@ mod tests {
     }
 
     #[test]
-    fn list_sql_shapes() {
-        let bare = approvals_list_sql(false);
-        assert!(bare.contains(
-            r#"INNER JOIN "agent_run" ON ("agent_run_approval"."agent_run_id" = "agent_run"."id")"#
-        ));
-        assert!(bare.contains(
-            r#"WHERE ("agent_run"."created_by_id" = $1 AND "agent_run_approval"."status" = $2)"#
-        ));
-        assert!(bare.ends_with(r#"ORDER BY "agent_run_approval"."requested_at" DESC LIMIT 200"#));
-        assert!(!bare.contains("$3"));
-        let scoped = approvals_list_sql(true);
-        assert!(scoped.contains(r#""pod"."project_id" = $3::uuid"#));
-        // All 11 approval columns selected, fixture order.
-        for column in approval::COLUMNS {
-            assert!(
-                bare.contains(&format!(r#""agent_run_approval"."{column}""#)),
-                "selects {column}"
-            );
-        }
-        assert_eq!(approval::COLUMNS.len(), 11);
+    fn list_statement_shapes() {
+        let pg = |select: sea_orm::Select<orm::agent_run_approval::Entity>| {
+            sea_orm::QueryTrait::build(&select, sea_orm::DbBackend::Postgres).to_string()
+        };
+        let bare = pg(approvals_list_select(Uuid::nil(), None));
+        // All 11 approval columns selected (the entity's), then the run
+        // join and the creator / pending predicates.
+        assert!(bare.starts_with(
+            "SELECT \"agent_run_approval\".\"id\", \"agent_run_approval\".\"kind\", \
+             \"agent_run_approval\".\"payload\", \"agent_run_approval\".\"reason\", \
+             \"agent_run_approval\".\"status\", \"agent_run_approval\".\"decision_source\", \
+             \"agent_run_approval\".\"requested_at\", \"agent_run_approval\".\"expires_at\", \
+             \"agent_run_approval\".\"decided_at\", \"agent_run_approval\".\"agent_run_id\", \
+             \"agent_run_approval\".\"decided_by_id\" FROM \"agent_run_approval\" \
+             INNER JOIN \"agent_run\" ON \"agent_run_approval\".\"agent_run_id\" = \"agent_run\".\"id\" \
+             WHERE \"agent_run\".\"created_by_id\" = '00000000-0000-0000-0000-000000000000' AND \
+             \"agent_run_approval\".\"status\" = 'pending'"
+        ), "{bare}");
+        assert!(bare.ends_with("ORDER BY \"agent_run_approval\".\"requested_at\" DESC LIMIT 200"));
+        assert!(!bare.contains("\"pod\""));
+        let scoped = pg(approvals_list_select(Uuid::nil(), Some("pr")));
+        assert!(
+            scoped
+                .contains("INNER JOIN \"pod\" ON \"agent_run\".\"pod_id\" = \"pod\".\"id\" WHERE"),
+            "{scoped}"
+        );
+        assert!(
+            scoped.contains("AND \"pod\".\"project_id\" = CAST('pr' AS uuid)"),
+            "{scoped}"
+        );
     }
 
     #[test]

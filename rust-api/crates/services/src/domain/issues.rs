@@ -5606,7 +5606,12 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("seed issue");
-        assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get fresh"), "");
+        assert_eq!(
+            fetch_workpad(&pidash_db::orm_tx::TxConn::new(&mut tx), issue)
+                .await
+                .expect("get fresh"),
+            ""
+        );
         let now: chrono::DateTime<chrono::Utc> = "2026-10-03T12:00:00+00:00".parse().expect("T0");
         update_workpad_save(
             &pidash_db::orm_tx::TxConn::new(&mut tx),
@@ -5617,7 +5622,9 @@ mod tests {
         .await
         .expect("set");
         assert_eq!(
-            fetch_workpad(&mut *tx, issue).await.expect("get set"),
+            fetch_workpad(&pidash_db::orm_tx::TxConn::new(&mut tx), issue)
+                .await
+                .expect("get set"),
             "## Agent Workpad\n\n- implementing\n"
         );
         let stamp: chrono::DateTime<chrono::Utc> =
@@ -5638,7 +5645,9 @@ mod tests {
         .await
         .expect("overwrite");
         assert_eq!(
-            fetch_workpad(&mut *tx, issue).await.expect("get overwrite"),
+            fetch_workpad(&pidash_db::orm_tx::TxConn::new(&mut tx), issue)
+                .await
+                .expect("get overwrite"),
             "second"
         );
         update_workpad_save(
@@ -5650,13 +5659,20 @@ mod tests {
         .await
         .expect("clear");
         assert_eq!(
-            fetch_workpad(&mut *tx, issue).await.expect("get cleared"),
+            fetch_workpad(&pidash_db::orm_tx::TxConn::new(&mut tx), issue)
+                .await
+                .expect("get cleared"),
             ""
         );
         update_workpad_save(&pidash_db::orm_tx::TxConn::new(&mut tx), issue, None, now)
             .await
             .expect("set none");
-        assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get none"), "");
+        assert_eq!(
+            fetch_workpad(&pidash_db::orm_tx::TxConn::new(&mut tx), issue)
+                .await
+                .expect("get none"),
+            ""
+        );
         // A `NULL` workpad (unreachable on the real `NOT NULL`
         // column) still reads as `""`, like `issue.workpad or ""`.
         sqlx::query("UPDATE issues SET workpad = NULL WHERE id = $1")
@@ -5664,9 +5680,18 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("null out");
-        assert_eq!(fetch_workpad(&mut *tx, issue).await.expect("get null"), "");
+        assert_eq!(
+            fetch_workpad(&pidash_db::orm_tx::TxConn::new(&mut tx), issue)
+                .await
+                .expect("get null"),
+            ""
+        );
         assert!(matches!(
-            fetch_workpad(&mut *tx, live_workpad_uuid("000000009999")).await,
+            fetch_workpad(
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
+                live_workpad_uuid("000000009999")
+            )
+            .await,
             Err(sqlx::Error::RowNotFound)
         ));
     }

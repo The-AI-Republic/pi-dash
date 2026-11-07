@@ -46,8 +46,22 @@ pub(crate) fn advisory_lock_key(project_id: &Uuid) -> i64 {
 
 /// `Pod.default_for_project_id` (`runner/models.py:174-176`):
 /// `Pod.objects` (live only), project-default first.
-const DEFAULT_POD_SQL: &str = "SELECT id FROM pod WHERE project_id = $1 AND is_default \
-    AND deleted_at IS NULL ORDER BY is_default DESC, created_at ASC LIMIT 1";
+async fn default_pod<C: ConnectionTrait>(db: &C, project_id: Uuid) -> Result<Option<Uuid>, DbErr> {
+    use super::pod;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    pod::Entity::find()
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .filter(pod::Column::IsDefault.eq(true))
+        .filter(pod::Column::DeletedAt.is_null())
+        .order_by_desc(pod::Column::IsDefault)
+        .order_by_asc(pod::Column::CreatedAt)
+        .limit(1)
+        .select_only()
+        .column(pod::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(db)
+        .await
+}
 
 /// The NULL-state default assignment (`issue.py:288-301`): the default
 /// state first, else the first non-triage state, both `ORDER BY sequence`.
@@ -59,104 +73,109 @@ const DEFAULT_POD_SQL: &str = "SELECT id FROM pod WHERE project_id = $1 AND is_d
 /// (`NOT (s."group" = 'triage')` vs `s."group" != 'triage'`); the forms
 /// agree on every input including NULL (both exclude it), so one spelling
 /// serves both.
-const DEFAULT_STATE_SQL: &str = "SELECT s.id FROM states AS s WHERE s.project_id = $1 \
-    AND s.deleted_at IS NULL AND NOT (s.\"group\" = 'triage') AND NOT s.is_triage \
-    ORDER BY s.sequence ASC LIMIT 1";
+async fn default_state_first<C: ConnectionTrait>(
+    db: &C,
+    project_id: Uuid,
+) -> Result<Option<Uuid>, DbErr> {
+    use super::states;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    states::Entity::find()
+        .filter(states::Column::ProjectId.eq(project_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsTriage.eq(false))
+        .order_by_asc(states::Column::Sequence)
+        .limit(1)
+        .select_only()
+        .column(states::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(db)
+        .await
+}
 
-const DEFAULT_STATE_FALLBACK_SQL: &str = "SELECT s.id FROM states AS s WHERE s.project_id = $1 \
-    AND s.deleted_at IS NULL AND NOT (s.\"group\" = 'triage') AND NOT s.is_triage \
-    AND s.\"default\" ORDER BY s.sequence ASC LIMIT 1";
+async fn default_state_marked<C: ConnectionTrait>(
+    db: &C,
+    project_id: Uuid,
+) -> Result<Option<Uuid>, DbErr> {
+    use super::states;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    states::Entity::find()
+        .filter(states::Column::ProjectId.eq(project_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsTriage.eq(false))
+        .filter(states::Column::Default.eq(true))
+        .order_by_asc(states::Column::Sequence)
+        .limit(1)
+        .select_only()
+        .column(states::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(db)
+        .await
+}
 
 /// `self.state` on a save (`issue.py:306`): a forward-FK read, which Django
 /// 4.2 resolves through `State._base_manager` (a plain `Manager` — `State`
 /// sets no `base_manager_name`), so triage and soft-deleted states still
 /// resolve and only a dangling FK misses.
-const STATE_GROUP_SQL: &str = "SELECT \"group\" FROM states WHERE id = $1";
+async fn state_group<C: ConnectionTrait>(db: &C, state_id: Uuid) -> Result<Option<String>, DbErr> {
+    use super::states;
+    use sea_orm::{EntityTrait, QuerySelect};
+    states::Entity::find_by_id(state_id)
+        .select_only()
+        .column(states::Column::Group)
+        .into_tuple::<String>()
+        .one(db)
+        .await
+}
 
 /// `IssueSequence.objects.filter(project=...).aggregate(Max("sequence"))`
 /// (`issue.py:325-327`): the default manager excludes soft-deleted rows.
-const MAX_SEQUENCE_SQL: &str =
-    "SELECT MAX(sequence) AS largest FROM issue_sequences WHERE project_id = $1 \
-     AND deleted_at IS NULL";
+async fn largest_sequence<C: ConnectionTrait>(
+    db: &C,
+    project_id: Uuid,
+) -> Result<Option<i64>, DbErr> {
+    use super::issue_sequences;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    use sea_query::Expr;
+    issue_sequences::Entity::find()
+        .filter(issue_sequences::Column::ProjectId.eq(project_id))
+        .filter(issue_sequences::Column::DeletedAt.is_null())
+        .select_only()
+        .column_as(
+            Expr::col(issue_sequences::Column::Sequence).max(),
+            "largest",
+        )
+        .into_tuple::<Option<i64>>()
+        .one(db)
+        .await
+        .map(Option::flatten)
+}
 
 /// `Issue.objects.filter(project=..., state=...).aggregate(Max("sort_order"))`
 /// (`issue.py:335-337`), plus the NULL-state leg the queryset implies.
-const MAX_SORT_SQL: &str = "SELECT MAX(sort_order) AS largest FROM issues \
-    WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL";
-
-const MAX_SORT_NULL_STATE_SQL: &str = "SELECT MAX(sort_order) AS largest FROM issues \
-    WHERE project_id = $1 AND state_id IS NULL AND deleted_at IS NULL";
-
-async fn query_uuid<C: ConnectionTrait>(
+async fn largest_sort<C: ConnectionTrait>(
     db: &C,
-    sql: &str,
-    values: Vec<Value>,
-) -> Result<Option<Uuid>, DbErr> {
-    let row = db
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await?;
-    match row {
-        None => Ok(None),
-        Some(row) => row.try_get("", "id").map(Some),
-    }
-}
-
-async fn query_string<C: ConnectionTrait>(
-    db: &C,
-    sql: &str,
-    values: Vec<Value>,
-) -> Result<Option<String>, DbErr> {
-    let row = db
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await?;
-    match row {
-        None => Ok(None),
-        Some(row) => row.try_get("", "group").map(Some),
-    }
-}
-
-async fn query_max_i64<C: ConnectionTrait>(
-    db: &C,
-    sql: &str,
-    values: Vec<Value>,
-) -> Result<Option<i64>, DbErr> {
-    let row = db
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await?;
-    match row {
-        None => Ok(None),
-        Some(row) => row.try_get("", "largest"),
-    }
-}
-
-async fn query_max_f64<C: ConnectionTrait>(
-    db: &C,
-    sql: &str,
-    values: Vec<Value>,
+    project_id: Uuid,
+    state_id: Option<Uuid>,
 ) -> Result<Option<f64>, DbErr> {
-    let row = db
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await?;
-    match row {
-        None => Ok(None),
-        Some(row) => row.try_get("", "largest"),
-    }
+    use super::issues;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    use sea_query::Expr;
+    let query = issues::Entity::find()
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null());
+    let query = match state_id {
+        // `.eq(None)` renders `= NULL` (never true); the NULL-state leg
+        // needs `IS NULL` (`MAX_SORT_NULL_STATE_SQL`).
+        Some(id) => query.filter(issues::Column::StateId.eq(id)),
+        None => query.filter(issues::Column::StateId.is_null()),
+    };
+    let query = query
+        .select_only()
+        .column_as(Expr::col(issues::Column::SortOrder).max(), "largest")
+        .into_tuple::<Option<f64>>();
+    query.one(db).await.map(Option::flatten)
 }
 
 fn active_uuid(value: &ActiveValue<Uuid>) -> Option<Uuid> {
@@ -198,8 +217,7 @@ impl ActiveModelBehavior for ActiveModel {
         // (`issue.py:277-286`): creation only; PATCH-driven changes ride
         // the validated overlay instead.
         if insert && active_opt_uuid(&self.assigned_pod_id).is_none() {
-            let pod = query_uuid(db, DEFAULT_POD_SQL, vec![Value::from(project_id)]).await?;
-            if let Some(pod) = pod {
+            if let Some(pod) = default_pod(db, project_id).await? {
                 self.assigned_pod_id = Set(Some(pod));
             }
         }
@@ -211,24 +229,17 @@ impl ActiveModelBehavior for ActiveModel {
         // value persists, exactly as Django's `if/else` falls.
         match active_opt_uuid(&self.state_id) {
             None => {
-                let default = query_uuid(
-                    db,
-                    DEFAULT_STATE_FALLBACK_SQL,
-                    vec![Value::from(project_id)],
-                )
-                .await?;
+                let default = default_state_marked(db, project_id).await?;
                 let default = match default {
                     Some(id) => Some(id),
-                    None => {
-                        query_uuid(db, DEFAULT_STATE_SQL, vec![Value::from(project_id)]).await?
-                    }
+                    None => default_state_first(db, project_id).await?,
                 };
                 if let Some(id) = default {
                     self.state_id = Set(Some(id));
                 }
             }
             Some(state_id) => {
-                let group = query_string(db, STATE_GROUP_SQL, vec![Value::from(state_id)])
+                let group = state_group(db, state_id)
                     .await?
                     .ok_or_else(|| DbErr::RecordNotFound("state for issue save".to_owned()))?;
                 if group == "completed" {
@@ -251,14 +262,16 @@ impl ActiveModelBehavior for ActiveModel {
         // sort order. The sequence assignment is unconditional — a passed
         // `sequence_id` is ignored on create, in Django and here.
         if insert {
+            // pg_advisory_xact_lock has no SeaORM/sea-query builder
+            // form (orm-migration.md §6: advisory locks stay raw).
+            // raw-sql: advisory lock has no builder form (playbook §6)
             db.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "SELECT pg_advisory_xact_lock($1)",
                 [Value::from(advisory_lock_key(&project_id))],
             ))
             .await?;
-            let largest =
-                query_max_i64(db, MAX_SEQUENCE_SQL, vec![Value::from(project_id)]).await?;
+            let largest = largest_sequence(db, project_id).await?;
             // `last_sequence + 1 if last_sequence else 1`: `0` and `None`
             // both fall to `1` (Python falsiness).
             let next = match largest {
@@ -268,20 +281,7 @@ impl ActiveModelBehavior for ActiveModel {
             self.sequence_id = Set(i32::try_from(next)
                 .map_err(|_| DbErr::Custom("issue sequence_id out of i32 range".to_owned()))?);
             let state_id = active_opt_uuid(&self.state_id);
-            let largest = match state_id {
-                Some(state_id) => {
-                    query_max_f64(
-                        db,
-                        MAX_SORT_SQL,
-                        vec![Value::from(project_id), Value::from(state_id)],
-                    )
-                    .await?
-                }
-                None => {
-                    query_max_f64(db, MAX_SORT_NULL_STATE_SQL, vec![Value::from(project_id)])
-                        .await?
-                }
-            };
+            let largest = largest_sort(db, project_id, state_id).await?;
             if let Some(largest) = largest {
                 self.sort_order = Set(largest + 10000.0);
             }
@@ -331,6 +331,110 @@ mod tests {
     use sea_orm::{ActiveModelTrait, EntityTrait, TransactionTrait};
 
     use super::super::issues::Entity as IssueEntity;
+
+    #[test]
+    fn statement_shapes_pin_filters_order_and_output_names() {
+        use super::super::{issue_sequences, issues, pod, states};
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        use sea_query::Expr;
+
+        // DEFAULT_POD_SQL: project + default + live, default-first, oldest.
+        let sql = pod::Entity::find()
+            .filter(pod::Column::ProjectId.eq(Uuid::nil()))
+            .filter(pod::Column::IsDefault.eq(true))
+            .filter(pod::Column::DeletedAt.is_null())
+            .order_by_desc(pod::Column::IsDefault)
+            .order_by_asc(pod::Column::CreatedAt)
+            .limit(1)
+            .select_only()
+            .column(pod::Column::Id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("ORDER BY \"pod\".\"is_default\" DESC")
+                && sql.contains("\"pod\".\"created_at\" ASC")
+                && sql.ends_with("LIMIT 1")
+                && !sql.contains("MAX("),
+            "default pod shape: {sql}"
+        );
+
+        // DEFAULT_STATE_*_SQL: live + non-triage group + non-triage flag,
+        // least sequence first; marked-default adds the default column.
+        for marked in [false, true] {
+            let query = states::Entity::find()
+                .filter(states::Column::ProjectId.eq(Uuid::nil()))
+                .filter(states::Column::DeletedAt.is_null())
+                .filter(states::Column::Group.ne("triage"))
+                .filter(states::Column::IsTriage.eq(false));
+            let query = if marked {
+                query.filter(states::Column::Default.eq(true))
+            } else {
+                query
+            };
+            let sql = query
+                .order_by_asc(states::Column::Sequence)
+                .limit(1)
+                .select_only()
+                .column(states::Column::Id)
+                .build(DbBackend::Postgres)
+                .to_string();
+            assert!(
+                sql.contains("\"states\".\"group\" <> 'triage'")
+                    && sql.contains("\"states\".\"is_triage\" = FALSE")
+                    && sql.contains("ORDER BY \"states\".\"sequence\" ASC"),
+                "default state shape (marked={marked}): {sql}"
+            );
+            if marked {
+                assert!(
+                    sql.contains("\"states\".\"default\" = TRUE"),
+                    "marked: {sql}"
+                );
+            } else {
+                assert!(!sql.contains("\"default\""), "unmarked: {sql}");
+            }
+        }
+
+        // Aggregates: MAX under a unique `largest` alias; NULL-state leg
+        // is `IS NULL`, never a bind.
+        let sql = issue_sequences::Entity::find()
+            .filter(issue_sequences::Column::ProjectId.eq(Uuid::nil()))
+            .filter(issue_sequences::Column::DeletedAt.is_null())
+            .select_only()
+            .column_as(
+                Expr::col(issue_sequences::Column::Sequence).max(),
+                "largest",
+            )
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("MAX(\"sequence\") AS \"largest\"")
+                && sql.contains("\"deleted_at\" IS NULL"),
+            "max sequence shape: {sql}"
+        );
+        for (label, state, expect) in [
+            ("some", Some(Uuid::nil()), "\"issues\".\"state_id\" = "),
+            ("none", None, "\"issues\".\"state_id\" IS NULL"),
+        ] {
+            let query = issues::Entity::find()
+                .filter(issues::Column::ProjectId.eq(Uuid::nil()))
+                .filter(issues::Column::DeletedAt.is_null());
+            let query = match state {
+                Some(id) => query.filter(issues::Column::StateId.eq(id)),
+                None => query.filter(issues::Column::StateId.is_null()),
+            };
+            let sql = query
+                .select_only()
+                .column_as(Expr::col(issues::Column::SortOrder).max(), "largest")
+                .build(DbBackend::Postgres)
+                .to_string();
+            assert!(
+                sql.contains("MAX(\"sort_order\") AS \"largest\"") && sql.contains(expect),
+                "max sort shape ({label}): {sql}"
+            );
+        }
+    }
 
     #[test]
     fn lock_key_matches_uuid_vector() {

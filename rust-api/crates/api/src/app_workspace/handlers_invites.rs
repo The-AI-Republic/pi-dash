@@ -92,6 +92,17 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use chrono::{DateTime, SubsecRound, Utc};
 use http_body_util::BodyExt;
+use pidash_db::entity::{
+    file_assets, users, workspace_join_requests, workspace_member_invites, workspace_members,
+    workspaces,
+};
+use pidash_db::orm_tx;
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Set,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 
@@ -736,12 +747,12 @@ fn member_default_json(text: &str) -> Result<Value, Denial> {
 }
 
 // ---------------------------------------------------------------------------
-// Rows (`sqlx::FromRow` maps by column name)
+// Rows (SeaORM fetch + row structs; UTC normalization at the boundary)
 // ---------------------------------------------------------------------------
 
 /// One `workspace_member_invites` row: every column the invite shape or a
 /// write path reads (`db/models/workspace.py:236-243` over `AuditModel`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 struct InviteRow {
     id: uuid::Uuid,
     workspace_id: uuid::Uuid,
@@ -758,8 +769,28 @@ struct InviteRow {
     updated_by_id: Option<uuid::Uuid>,
 }
 
+impl From<workspace_member_invites::Model> for InviteRow {
+    fn from(model: workspace_member_invites::Model) -> Self {
+        Self {
+            id: model.id,
+            workspace_id: model.workspace_id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            deleted_at: model.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+            email: model.email,
+            accepted: model.accepted,
+            token: model.token,
+            message: model.message,
+            responded_at: model.responded_at.map(|dt| dt.with_timezone(&Utc)),
+            role: model.role,
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+        }
+    }
+}
+
 /// One `workspace_join_requests` row (`db/models/workspace.py:264-304`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 struct JoinRequestRow {
     id: uuid::Uuid,
     workspace_id: Option<uuid::Uuid>,
@@ -777,10 +808,31 @@ struct JoinRequestRow {
     responded_by_id: Option<uuid::Uuid>,
 }
 
+impl From<workspace_join_requests::Model> for JoinRequestRow {
+    fn from(model: workspace_join_requests::Model) -> Self {
+        Self {
+            id: model.id,
+            workspace_id: model.workspace_id,
+            requester_id: model.requester_id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            deleted_at: model.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+            admin_email: model.admin_email,
+            message: model.message,
+            role: model.role,
+            status: model.status,
+            responded_at: model.responded_at.map(|dt| dt.with_timezone(&Utc)),
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+            responded_by_id: model.responded_by_id,
+        }
+    }
+}
+
 /// One `workspace_members` row for the already-member 400
 /// (`db/models/workspace.py:196-211`): the full `WorkSpaceMemberSerializer`
 /// core plus the scope columns.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 struct MemberRow {
     id: uuid::Uuid,
     workspace_id: uuid::Uuid,
@@ -801,8 +853,32 @@ struct MemberRow {
     updated_by_id: Option<uuid::Uuid>,
 }
 
+impl From<workspace_members::Model> for MemberRow {
+    fn from(model: workspace_members::Model) -> Self {
+        Self {
+            id: model.id,
+            workspace_id: model.workspace_id,
+            member_id: model.member_id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            deleted_at: model.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+            role: model.role,
+            company_role: model.company_role,
+            view_props: model.view_props,
+            default_props: model.default_props,
+            issue_props: model.issue_props,
+            is_active: model.is_active,
+            getting_started_checklist: model.getting_started_checklist,
+            tips: model.tips,
+            explored_features: model.explored_features,
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+        }
+    }
+}
+
 /// The `UserLite` columns (`user.py:141-154`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct UserLiteRow {
     id: uuid::Uuid,
     first_name: String,
@@ -814,7 +890,7 @@ struct UserLiteRow {
 }
 
 /// The `WorkspaceLite` columns (`workspace.py:79-83`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct WorkspaceLiteRow {
     id: uuid::Uuid,
     name: String,
@@ -824,7 +900,7 @@ struct WorkspaceLiteRow {
 }
 
 /// The `file_assets` columns the invite-path asset lookup selects.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct AssetRow {
     id: uuid::Uuid,
     entity_type: Option<String>,
@@ -837,35 +913,92 @@ struct AssetRow {
 // Auth + gates (DRF `initial()` order: authN, then `permission_classes`)
 // ---------------------------------------------------------------------------
 
-/// Gate/fetch SQL with a `workspace__slug` traversal. Django ignores
-/// the workspace soft-delete scope on forward-FK traversal (probed),
-/// so these carry NO `w.deleted_at` filter — while the member/invite/
-/// request-side scopes stay. Pinned by
-/// `forward_fk_traversal_ignores_workspace_scope`.
-const ADMIN_GATE_SQL: &str = "SELECT w.id, wm.role FROM workspace_members wm \
-     JOIN workspaces w ON w.id = wm.workspace_id \
-     WHERE w.slug = $1 AND wm.member_id = $2 \
-     AND wm.is_active = TRUE AND wm.deleted_at IS NULL AND wm.role IN (20, 15)";
+/// Admint-gate shape returned by [`admin_gate_select`]: the workspace id
+/// plus the member role.
+#[derive(Debug, FromQueryResult)]
+struct GateRow {
+    workspace_id: uuid::Uuid,
+    role: i16,
+}
 
-/// [`ADMIN_GATE_SQL`] for the owner gate (role Admin, no `is_active`).
-const OWNER_GATE_SQL: &str = "SELECT w.id FROM workspace_members wm \
-     JOIN workspaces w ON w.id = wm.workspace_id \
-     WHERE w.slug = $1 AND wm.member_id = $2 \
-     AND wm.deleted_at IS NULL AND wm.role = 20";
+/// The `WorkSpaceAdminPermission` gate (`permissions/workspace.py:61-71`):
+/// `workspace__slug` traversal, so the workspace side carries NO
+/// `deleted_at` filter (Django ignores the soft-delete scope on forward-FK
+/// traversal, probed), while the member side keeps `is_active` and
+/// `deleted_at`. Pinned by `forward_fk_traversal_ignores_workspace_scope`.
+pub(super) fn admin_gate_select(
+    slug: &str,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column_as(workspaces::Column::Id, "workspace_id")
+        .column_as(workspace_members::Column::Role, "role")
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::Role.is_in([20i16, 15i16]))
+}
 
-/// One invite by pk + workspace slug (`invite.py:145,164,239`).
-const FETCH_INVITE_SQL: &str = "SELECT i.id, i.workspace_id, i.created_at, i.updated_at, \
-    i.deleted_at, i.email, i.accepted, i.token, i.message, i.responded_at, i.role, \
-    i.created_by_id, i.updated_by_id \
-    FROM workspace_member_invites i JOIN workspaces w ON w.id = i.workspace_id \
-    WHERE i.id = $1 AND w.slug = $2 AND i.deleted_at IS NULL";
+/// Owner-gate shape: only the workspace id.
+#[derive(Debug, FromQueryResult)]
+struct OwnerGateRow {
+    workspace_id: uuid::Uuid,
+}
+
+/// [`admin_gate_select`] for the owner gate (role Admin, no `is_active`).
+pub(super) fn owner_gate_select(
+    slug: &str,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column_as(workspaces::Column::Id, "workspace_id")
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::Role.eq(20i16))
+}
+
+/// One invite by pk + workspace slug (`invite.py:145,164,239`): the invite
+/// side keeps its `deleted_at` scope, the workspace traversal does not.
+pub(super) fn fetch_invite_select(
+    pk: uuid::Uuid,
+    slug: &str,
+) -> sea_orm::Select<workspace_member_invites::Entity> {
+    workspace_member_invites::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_member_invites::Relation::Workspaces.def(),
+        )
+        .filter(workspace_member_invites::Column::Id.eq(pk))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+}
 
 /// One join request by pk + workspace slug (`join_request.py:188,242`).
-const FETCH_JOIN_REQUEST_SQL: &str = "SELECT jr.id, jr.workspace_id, jr.requester_id, \
-    jr.created_at, jr.updated_at, jr.deleted_at, jr.admin_email, jr.message, jr.role, \
-    jr.status, jr.responded_at, jr.created_by_id, jr.updated_by_id, jr.responded_by_id \
-    FROM workspace_join_requests jr JOIN workspaces w ON w.id = jr.workspace_id \
-    WHERE jr.id = $1 AND w.slug = $2 AND jr.deleted_at IS NULL";
+pub(super) fn fetch_join_request_select(
+    pk: uuid::Uuid,
+    slug: &str,
+) -> sea_orm::Select<workspace_join_requests::Entity> {
+    workspace_join_requests::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_join_requests::Relation::Workspaces.def(),
+        )
+        .filter(workspace_join_requests::Column::Id.eq(pk))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_join_requests::Column::DeletedAt.is_null())
+}
 
 /// The caller's workspace row for admin-gated routes: role (for the
 /// invite cap) plus the scoped workspace id.
@@ -891,20 +1024,20 @@ async fn resolve_class_admin(
             .await
             .map_err(|_| Denial::ServerError)?
             .ok_or(Denial::Unauthorized)?;
-    let row: Option<(uuid::Uuid, i16)> = sqlx::query_as(ADMIN_GATE_SQL)
-        .bind(slug)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = admin_gate_select(slug, actor.id)
+        .into_model::<GateRow>()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id, role)) = row else {
+    let Some(row) = row else {
         return Err(Denial::ForbiddenClass);
     };
     Ok((
         actor,
         AdminGate {
-            role: i32::from(role),
-            workspace_id,
+            role: i32::from(row.role),
+            workspace_id: row.workspace_id,
         },
     ))
 }
@@ -924,16 +1057,16 @@ async fn resolve_class_owner(
             .await
             .map_err(|_| Denial::ServerError)?
             .ok_or(Denial::Unauthorized)?;
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(OWNER_GATE_SQL)
-        .bind(slug)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = owner_gate_select(slug, actor.id)
+        .into_model::<OwnerGateRow>()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = row else {
+    let Some(row) = row else {
         return Err(Denial::ForbiddenClass);
     };
-    Ok((actor, workspace_id))
+    Ok((actor, row.workspace_id))
 }
 
 /// Session auth only (the `IsAuthenticated` default on the `users/me/`
@@ -1422,21 +1555,24 @@ async fn fetch_user_lites(
     if user_ids.is_empty() {
         return Ok(out);
     }
-    let placeholders: Vec<String> = (1..=user_ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "SELECT u.id, u.first_name, u.last_name, u.avatar, u.avatar_asset_id, u.is_bot, u.display_name \
-         FROM users u WHERE u.id IN ({})",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query_as::<_, UserLiteRow>(&sql);
-    for id in user_ids {
-        query = query.bind(*id);
-    }
-    for row in query
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Avatar,
+            users::Column::AvatarAssetId,
+            users::Column::IsBot,
+            users::Column::DisplayName,
+        ])
+        .filter(users::Column::Id.is_in(user_ids.iter().copied()))
+        .into_model::<UserLiteRow>()
+        .all(&db)
         .await
-        .map_err(|_| Denial::ServerError)?
-    {
+        .map_err(|_| Denial::ServerError)?;
+    for row in rows {
         out.insert(row.id, row);
     }
     Ok(out)
@@ -1455,21 +1591,22 @@ async fn fetch_workspace_lites(
     if workspace_ids.is_empty() {
         return Ok(out);
     }
-    let placeholders: Vec<String> = (1..=workspace_ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "SELECT w.id, w.name, w.slug, w.logo, w.logo_asset_id FROM workspaces w \
-         WHERE w.id IN ({})",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query_as::<_, WorkspaceLiteRow>(&sql);
-    for id in workspace_ids {
-        query = query.bind(*id);
-    }
-    for row in query
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+            workspaces::Column::Logo,
+            workspaces::Column::LogoAssetId,
+        ])
+        .filter(workspaces::Column::Id.is_in(workspace_ids.iter().copied()))
+        .into_model::<WorkspaceLiteRow>()
+        .all(&db)
         .await
-        .map_err(|_| Denial::ServerError)?
-    {
+        .map_err(|_| Denial::ServerError)?;
+    for row in rows {
         out.insert(row.id, row);
     }
     Ok(out)
@@ -1489,22 +1626,23 @@ async fn fetch_assets(
     if asset_ids.is_empty() {
         return Ok(out);
     }
-    let placeholders: Vec<String> = (1..=asset_ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "SELECT a.id, a.entity_type, w.slug AS workspace_slug, a.project_id, a.issue_id \
-         FROM file_assets a LEFT JOIN workspaces w ON w.id = a.workspace_id \
-         WHERE a.id IN ({})",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query_as::<_, AssetRow>(&sql);
-    for id in asset_ids {
-        query = query.bind(*id);
-    }
-    for row in query
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::Id,
+            file_assets::Column::EntityType,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .join(JoinType::LeftJoin, file_assets::Relation::Workspaces.def())
+        .filter(file_assets::Column::Id.is_in(asset_ids.iter().copied()))
+        .into_model::<AssetRow>()
+        .all(&db)
         .await
-        .map_err(|_| Denial::ServerError)?
-    {
+        .map_err(|_| Denial::ServerError)?;
+    for row in rows {
         let asset = AssetRef {
             id: row.id,
             entity_type: row.entity_type,
@@ -2329,11 +2467,17 @@ async fn validate_patch_user(pool: &PgPool, value: &Value) -> Result<Option<uuid
         Value::Null => unreachable!("null returned above"),
     };
     // `queryset.get(pk=...)`: `users` has no soft-delete scope.
-    let known: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(parsed)
-        .fetch_one(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit: Option<uuid::Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(parsed))
+        .into_tuple()
+        .one(&db)
         .await
-        .unwrap_or(false);
+        .ok()
+        .flatten();
+    let known = hit.is_some();
     if !known {
         // `pk_value=data`: the ORIGINAL input, not the normalized UUID.
         let display = match value {
@@ -2476,11 +2620,11 @@ async fn fetch_invite(
     pk: &uuid::Uuid,
     slug: &str,
 ) -> Result<Option<InviteRow>, Denial> {
-    sqlx::query_as::<_, InviteRow>(FETCH_INVITE_SQL)
-        .bind(pk)
-        .bind(slug)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    fetch_invite_select(*pk, slug)
+        .one(&db)
         .await
+        .map(|opt| opt.map(InviteRow::from))
         .map_err(|_| Denial::ServerError)
 }
 
@@ -2500,18 +2644,15 @@ async fn invite_list(
         Ok(resolved) => resolved,
         Err(denial) => return denial.into_response(),
     };
-    let rows: Vec<InviteRow> = match sqlx::query_as::<_, InviteRow>(
-        "SELECT i.id, i.workspace_id, i.created_at, i.updated_at, i.deleted_at, i.email, \
-         i.accepted, i.token, i.message, i.responded_at, i.role, i.created_by_id, i.updated_by_id \
-         FROM workspace_member_invites i \
-         WHERE i.workspace_id = $1 AND i.deleted_at IS NULL \
-         ORDER BY i.created_at DESC",
-    )
-    .bind(gate.workspace_id)
-    .fetch_all(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<InviteRow> = match workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::WorkspaceId.eq(gate.workspace_id))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_member_invites::Column::CreatedAt)
+        .all(&db)
+        .await
     {
-        Ok(rows) => rows,
+        Ok(models) => models.into_iter().map(InviteRow::from).collect(),
         Err(_) => return Denial::ServerError.into_response(),
     };
     let workspaces = match fetch_workspace_lites(pool, &[gate.workspace_id]).await {
@@ -2623,48 +2764,50 @@ async fn invite_create(
     // The workspace (`:70`): a direct `Workspace.objects.get` (live-only
     // base manager — the scope stays). On a deleted workspace the
     // unscoped gate passed and this 404s late, exactly like Django.
-    let workspace_id = match sqlx::query_scalar::<_, uuid::Uuid>(
-        "SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL",
-    )
-    .bind(&slug)
-    .fetch_optional(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let workspace_id_opt: Option<uuid::Uuid> = match workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
     {
-        Ok(Some(id)) => id,
-        Ok(None) => return Denial::MissingObject.into_response(),
+        Ok(id) => id,
         Err(_) => return Denial::ServerError.into_response(),
+    };
+    let Some(workspace_id) = workspace_id_opt else {
+        return Denial::MissingObject.into_response();
     };
     debug_assert_eq!(workspace_id, gate.workspace_id);
     // The already-member check (`:73-86`): `if queryset:` fetches ALL
     // matching rows (not `EXISTS`), rendered with
     // `WorkSpaceMemberSerializer(many=True)`.
-    let addresses: Vec<&str> = entries
+    let addresses: Vec<String> = entries
         .iter()
         .filter_map(|entry| entry.get("email"))
         .filter_map(Value::as_str)
+        .map(|s| s.to_owned())
         .collect();
     if !addresses.is_empty() {
-        let placeholders: Vec<String> = (1..=addresses.len())
-            .map(|i| format!("${}", i + 1))
-            .collect();
-        let sql = format!(
-            "SELECT wm.id, wm.workspace_id, wm.member_id, wm.created_at, wm.updated_at, \
-             wm.deleted_at, wm.role, wm.company_role, wm.view_props, wm.default_props, \
-             wm.issue_props, wm.is_active, wm.getting_started_checklist, wm.tips, \
-             wm.explored_features, wm.created_by_id, wm.updated_by_id \
-             FROM workspace_members wm JOIN users u ON u.id = wm.member_id \
-             WHERE wm.workspace_id = $1 AND u.email IN ({}) AND wm.is_active = TRUE \
-             AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC",
-            placeholders.join(", ")
-        );
-        let mut query = sqlx::query_as::<_, MemberRow>(&sql).bind(workspace_id);
-        for address in &addresses {
-            query = query.bind(*address);
-        }
-        let members: Vec<MemberRow> = match query.fetch_all(pool).await {
-            Ok(members) => members,
+        let models = match workspace_members::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspace_members::Relation::Users2.def(),
+            )
+            .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+            .filter(users::Column::Email.is_in(addresses.clone()))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_members::Column::CreatedAt)
+            .all(&db)
+            .await
+        {
+            Ok(models) => models,
             Err(_) => return Denial::ServerError.into_response(),
         };
+        let members: Vec<MemberRow> = models.into_iter().map(MemberRow::from).collect();
         if !members.is_empty() {
             return already_member_response(pool, &members, &actor.timezone).await;
         }
@@ -2732,46 +2875,38 @@ async fn invite_create(
     // `save()` audit stamp so `updated_by`/`deleted_at` NULL) and no
     // column carries a DB default — the literals below are required,
     // not cosmetic (PIDASHCONV-751: omitting `accepted` 400s).
-    for batch in pending.chunks(queries::INVITE_BULK_BATCH_SIZE as usize) {
-        let mut values: Vec<String> = Vec::with_capacity(batch.len());
-        for index in 0..batch.len() {
-            let base = index * 8;
-            values.push(format!(
-                "(${}, ${}, ${}, ${}, NULL, NULL, ${}, FALSE, ${}, ${}, NULL, NULL, ${})",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4,
-                base + 5,
-                base + 6,
-                base + 7,
-                base + 8
-            ));
-        }
-        let sql = format!(
-            "INSERT INTO workspace_member_invites \
-             (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-             email, accepted, workspace_id, token, message, responded_at, role) \
-             VALUES {} ON CONFLICT DO NOTHING",
-            values.join(", ")
-        );
-        let mut query = sqlx::query(&sql);
-        for invite in batch.iter() {
-            query = query
-                .bind(uuid::Uuid::new_v4())
-                .bind(now)
-                .bind(now)
-                .bind(actor.id)
-                .bind(&invite.email)
-                .bind(workspace_id)
-                .bind(&invite.token)
-                .bind(invite.role);
-        }
-        if let Err(error) = query.execute(pool).await {
-            if is_integrity_error(&error) {
-                return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+    {
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_sea: DateTimeWithTimeZone = now.into();
+        for batch in pending.chunks(queries::INVITE_BULK_BATCH_SIZE as usize) {
+            let rows: Vec<workspace_member_invites::ActiveModel> = batch
+                .iter()
+                .map(|invite| workspace_member_invites::ActiveModel {
+                    id: Set(uuid::Uuid::new_v4()),
+                    created_at: Set(now_sea),
+                    updated_at: Set(now_sea),
+                    created_by_id: Set(Some(actor.id)),
+                    updated_by_id: Set(None),
+                    deleted_at: Set(None),
+                    email: Set(invite.email.clone()),
+                    accepted: Set(false),
+                    token: Set(invite.token.clone()),
+                    message: Set(None),
+                    responded_at: Set(None),
+                    role: Set(invite.role),
+                    workspace_id: Set(workspace_id),
+                })
+                .collect();
+            if let Err(error) = workspace_member_invites::Entity::insert_many(rows)
+                .on_conflict(OnConflict::new().do_nothing().to_owned())
+                .exec_without_returning(&db)
+                .await
+            {
+                if orm_tx::is_integrity_violation(&error) {
+                    return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+                }
+                return Denial::ServerError.into_response();
             }
-            return Denial::ServerError.into_response();
         }
     }
     // Per-row enqueues (`:117-140`): the invitation mail plus the track
@@ -2959,24 +3094,44 @@ async fn invite_patch(
     let deleted_at = patch.deleted_at.unwrap_or(row.deleted_at);
     let created_by_id = patch.created_by.unwrap_or(row.created_by_id);
     let updated_by_id = Some(actor.id);
-    if let Err(error) = sqlx::query(
-        "UPDATE workspace_member_invites SET role = $1, accepted = $2, deleted_at = $3, \
-         created_by_id = $4, updated_by_id = $5, updated_at = $6 WHERE id = $7",
-    )
-    .bind(role)
-    .bind(accepted)
-    .bind(deleted_at)
-    .bind(created_by_id)
-    .bind(updated_by_id)
-    .bind(now)
-    .bind(id)
-    .execute(pool)
-    .await
     {
-        if is_integrity_error(&error) {
-            return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_sea: DateTimeWithTimeZone = now.into();
+        let deleted_sea: Option<DateTimeWithTimeZone> = deleted_at.map(|dt| dt.into());
+        if let Err(error) = workspace_member_invites::Entity::update_many()
+            .col_expr(
+                workspace_member_invites::Column::Role,
+                sea_orm::sea_query::Expr::value(role),
+            )
+            .col_expr(
+                workspace_member_invites::Column::Accepted,
+                sea_orm::sea_query::Expr::value(accepted),
+            )
+            .col_expr(
+                workspace_member_invites::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(deleted_sea),
+            )
+            .col_expr(
+                workspace_member_invites::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(created_by_id),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(updated_by_id),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .filter(workspace_member_invites::Column::Id.eq(id))
+            .exec(&db)
+            .await
+        {
+            if orm_tx::is_integrity_violation(&error) {
+                return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+            }
+            return Denial::ServerError.into_response();
         }
-        return Denial::ServerError.into_response();
     }
     let saved = InviteRow {
         role,
@@ -3023,20 +3178,31 @@ async fn invite_destroy(
     // pk, using=None)` — stamp first, enqueue after, same order as
     // the mixin.
     let now = Utc::now();
-    if let Err(error) = sqlx::query(
-        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $3 \
-         WHERE id = $2",
-    )
-    .bind(now)
-    .bind(id)
-    .bind(actor.id)
-    .execute(pool)
-    .await
     {
-        if is_integrity_error(&error) {
-            return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_sea: DateTimeWithTimeZone = now.into();
+        if let Err(error) = workspace_member_invites::Entity::update_many()
+            .col_expr(
+                workspace_member_invites::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(actor.id)),
+            )
+            .filter(workspace_member_invites::Column::Id.eq(id))
+            .exec(&db)
+            .await
+        {
+            if orm_tx::is_integrity_violation(&error) {
+                return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+            }
+            return Denial::ServerError.into_response();
         }
-        return Denial::ServerError.into_response();
     }
     enqueue_soft_delete(pool, &id).await;
     StatusCode::NO_CONTENT.into_response()
@@ -3133,22 +3299,42 @@ async fn join_post(
     let responder_id: Option<uuid::Uuid> = actor.as_ref().map(|actor| actor.id);
     let (updated_by_id, created_by_id) =
         audit_columns_on_update(responder_id, invite.created_by_id);
-    if let Err(error) = sqlx::query(
-        "UPDATE workspace_member_invites SET accepted = $1, responded_at = $2, updated_at = $2, \
-         updated_by_id = $3, created_by_id = $4 WHERE id = $5",
-    )
-    .bind(stored)
-    .bind(now)
-    .bind(updated_by_id)
-    .bind(created_by_id)
-    .bind(id)
-    .execute(pool)
-    .await
     {
-        if is_integrity_error(&error) {
-            return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_sea: DateTimeWithTimeZone = now.into();
+        // `accepted` is NOT NULL but the prep can be None (explicit null) — the
+        // DB must see NULL to raise the IntegrityError 400.
+        let accepted_val: Option<bool> = stored;
+        if let Err(error) = workspace_member_invites::Entity::update_many()
+            .col_expr(
+                workspace_member_invites::Column::Accepted,
+                sea_orm::sea_query::Expr::value(accepted_val),
+            )
+            .col_expr(
+                workspace_member_invites::Column::RespondedAt,
+                sea_orm::sea_query::Expr::value(Some(now_sea)),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(updated_by_id),
+            )
+            .col_expr(
+                workspace_member_invites::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(created_by_id),
+            )
+            .filter(workspace_member_invites::Column::Id.eq(id))
+            .exec(&db)
+            .await
+        {
+            if orm_tx::is_integrity_violation(&error) {
+                return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+            }
+            return Denial::ServerError.into_response();
         }
-        return Denial::ServerError.into_response();
     }
     if !accept {
         // Rejected: the invite is KEPT (with `responded_at` set — stuck).
@@ -3160,17 +3346,20 @@ async fn join_post(
     }
     // Accepted: the invitee may have no account yet (`:183`) — then the
     // accepted message still answers and the invite is KEPT (stuck).
-    let user: Option<(uuid::Uuid,)> = match sqlx::query_as(
-        "SELECT u.id FROM users u WHERE u.email = $1 ORDER BY u.created_at DESC LIMIT 1",
-    )
-    .bind(&invite.email)
-    .fetch_optional(pool)
-    .await
+    let db_join = pidash_db::pool::sea_orm_connection(pool);
+    let user_id_opt: Option<uuid::Uuid> = match users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Email.eq(Some(invite.email.clone())))
+        .order_by_desc(users::Column::CreatedAt)
+        .into_tuple()
+        .one(&db_join)
+        .await
     {
-        Ok(user) => user,
+        Ok(id) => id,
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let Some((user_id,)) = user else {
+    let Some(user_id) = user_id_opt else {
         return (
             StatusCode::OK,
             Json(message_envelope(JOIN_ACCEPTED_MESSAGE)),
@@ -3183,19 +3372,25 @@ async fn join_post(
     // the create stamps `created_by` with the responder and leaves
     // `updated_by` NULL when authed (`db/models/base.py:37-39`),
     // nulling both when anonymous (`:31-33`).
-    let existing: Option<(uuid::Uuid, Option<uuid::Uuid>)> = match sqlx::query_as(
-        "SELECT wm.id, wm.created_by_id FROM workspace_members wm \
-         WHERE wm.workspace_id = $1 AND wm.member_id = $2 \
-         AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC LIMIT 1",
-    )
-    .bind(invite.workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(existing) => existing,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
+    let existing_opt: Option<(uuid::Uuid, Option<uuid::Uuid>)> =
+        match workspace_members::Entity::find()
+            .select_only()
+            .columns([
+                workspace_members::Column::Id,
+                workspace_members::Column::CreatedById,
+            ])
+            .filter(workspace_members::Column::WorkspaceId.eq(invite.workspace_id))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_members::Column::CreatedAt)
+            .into_tuple()
+            .one(&db_join)
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+    let existing = existing_opt;
     // Django-side member defaults for the create arm below: no member
     // column carries a DB default, so the INSERT must supply every
     // NOT NULL field (`workspace.py:207-213`; PIDASHCONV-751).
@@ -3218,7 +3413,7 @@ async fn join_post(
         let (updated_by_id, created_by_id) =
             audit_columns_on_update(responder_id, member_created_by);
         if let Err(error) = members::update_role(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::RoleUpdate {
                 id: member_id,
                 role: invite.role,
@@ -3235,7 +3430,7 @@ async fn join_post(
             return Denial::ServerError.into_response();
         }
     } else if let Err(error) = members::add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &members::NewMember {
             workspace_id: invite.workspace_id,
             user_id: Some(user_id),
@@ -3260,7 +3455,7 @@ async fn join_post(
     // `user.last_workspace_id = ...; user.save()` (`:204-205`): `User`
     // has no such column, so Django drops the pointer and the save only
     // stamps `updated_at` ([`queries::user_touch_sql`]).
-    if identity::touch_user_updated_at(pool, user_id, now)
+    if identity::touch_user_updated_at(&pidash_db::pool::sea_orm_connection(pool), user_id, now)
         .await
         .is_err()
     {
@@ -3285,19 +3480,32 @@ async fn join_post(
     // — after the track enqueue, the same order as `invite.py`.
     let (accept_updated_by, accept_created_by) =
         audit_columns_on_update(responder_id, invite.created_by_id);
-    if sqlx::query(
-        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $3, \
-         created_by_id = $4 WHERE id = $2",
-    )
-    .bind(now)
-    .bind(id)
-    .bind(accept_updated_by)
-    .bind(accept_created_by)
-    .execute(pool)
-    .await
-    .is_err()
     {
-        return Denial::ServerError.into_response();
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_sea: DateTimeWithTimeZone = now.into();
+        let res = workspace_member_invites::Entity::update_many()
+            .col_expr(
+                workspace_member_invites::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .col_expr(
+                workspace_member_invites::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(accept_updated_by),
+            )
+            .col_expr(
+                workspace_member_invites::Column::CreatedById,
+                sea_orm::sea_query::Expr::value(accept_created_by),
+            )
+            .filter(workspace_member_invites::Column::Id.eq(id))
+            .exec(&db)
+            .await;
+        if res.is_err() {
+            return Denial::ServerError.into_response();
+        }
     }
     super::handlers_workspace::enqueue_soft_delete_related(
         pool,
@@ -3376,17 +3584,15 @@ async fn my_invites_list(
     let Some(email) = actor.email.as_deref() else {
         return (StatusCode::OK, Json(Value::Array(vec![]))).into_response();
     };
-    let rows: Vec<InviteRow> = match sqlx::query_as::<_, InviteRow>(
-        "SELECT i.id, i.workspace_id, i.created_at, i.updated_at, i.deleted_at, i.email, \
-         i.accepted, i.token, i.message, i.responded_at, i.role, i.created_by_id, i.updated_by_id \
-         FROM workspace_member_invites i \
-         WHERE i.email = $1 AND i.deleted_at IS NULL ORDER BY i.created_at DESC",
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<InviteRow> = match workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_member_invites::Column::CreatedAt)
+        .all(&db)
+        .await
     {
-        Ok(rows) => rows,
+        Ok(models) => models.into_iter().map(InviteRow::from).collect(),
         Err(_) => return Denial::ServerError.into_response(),
     };
     render_invite_list(pool, &rows, &actor.timezone).await
@@ -3567,22 +3773,16 @@ async fn my_invites_create(
     if ids.is_empty() {
         return StatusCode::NO_CONTENT.into_response();
     }
-    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "SELECT i.id, i.workspace_id, i.created_at, i.updated_at, i.deleted_at, i.email, \
-         i.accepted, i.token, i.message, i.responded_at, i.role, i.created_by_id, i.updated_by_id \
-         FROM workspace_member_invites i \
-         WHERE i.id IN ({}) AND i.email = ${} AND i.deleted_at IS NULL \
-         ORDER BY i.created_at DESC",
-        placeholders.join(", "),
-        ids.len() + 1
-    );
-    let mut query = sqlx::query_as::<_, InviteRow>(&sql);
-    for id in &ids {
-        query = query.bind(*id);
-    }
-    let invites: Vec<InviteRow> = match query.bind(email).fetch_all(pool).await {
-        Ok(invites) => invites,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let invites: Vec<InviteRow> = match workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Id.is_in(ids.clone()))
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_member_invites::Column::CreatedAt)
+        .all(&db)
+        .await
+    {
+        Ok(models) => models.into_iter().map(InviteRow::from).collect(),
         Err(_) => return Denial::ServerError.into_response(),
     };
     let now = Utc::now();
@@ -3601,8 +3801,13 @@ async fn my_invites_create(
             continue;
         };
         bust_members_key(&state, &workspace_row.slug).await;
-        if let Err(error) =
-            members::activate_by_membership(pool, invite.workspace_id, user_id, invite.role).await
+        if let Err(error) = members::activate_by_membership(
+            &pidash_db::pool::sea_orm_connection(pool),
+            invite.workspace_id,
+            user_id,
+            invite.role,
+        )
+        .await
         {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
@@ -3652,25 +3857,34 @@ async fn my_invites_create(
                 created_by: Some(user_id),
             })
             .collect();
-        if let Err(error) = members::bulk_add(pool, &rows, &view_props, &issue_props, now).await {
+        if let Err(error) = members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        {
             if is_integrity_error(&error) {
                 return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
             }
             return Denial::ServerError.into_response();
         }
-        let placeholders: Vec<String> =
-            (1..=invites.len()).map(|i| format!("${}", i + 1)).collect();
-        let sql = format!(
-            "UPDATE workspace_member_invites SET deleted_at = $1 \
-             WHERE id IN ({}) AND email = ${} AND deleted_at IS NULL",
-            placeholders.join(", "),
-            invites.len() + 2
-        );
-        let mut query = sqlx::query(&sql).bind(now);
-        for invite in invites.iter() {
-            query = query.bind(invite.id);
-        }
-        if query.bind(email).execute(pool).await.is_err() {
+        let invite_ids: Vec<uuid::Uuid> = invites.iter().map(|i| i.id).collect();
+        let now_sea: DateTimeWithTimeZone = now.into();
+        let db2 = pidash_db::pool::sea_orm_connection(pool);
+        let upd = workspace_member_invites::Entity::update_many()
+            .col_expr(
+                workspace_member_invites::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .filter(workspace_member_invites::Column::Id.is_in(invite_ids))
+            .filter(workspace_member_invites::Column::Email.eq(email))
+            .filter(workspace_member_invites::Column::DeletedAt.is_null())
+            .exec(&db2)
+            .await;
+        if upd.is_err() {
             return Denial::ServerError.into_response();
         }
     }
@@ -3718,18 +3932,15 @@ async fn user_join_requests_list(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let rows: Vec<JoinRequestRow> = match sqlx::query_as::<_, JoinRequestRow>(
-        "SELECT jr.id, jr.workspace_id, jr.requester_id, jr.created_at, jr.updated_at, \
-         jr.deleted_at, jr.admin_email, jr.message, jr.role, jr.status, jr.responded_at, \
-         jr.created_by_id, jr.updated_by_id, jr.responded_by_id \
-         FROM workspace_join_requests jr \
-         WHERE jr.requester_id = $1 AND jr.deleted_at IS NULL ORDER BY jr.created_at DESC",
-    )
-    .bind(actor.id)
-    .fetch_all(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<JoinRequestRow> = match workspace_join_requests::Entity::find()
+        .filter(workspace_join_requests::Column::RequesterId.eq(actor.id))
+        .filter(workspace_join_requests::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_join_requests::Column::CreatedAt)
+        .all(&db)
+        .await
     {
-        Ok(rows) => rows,
+        Ok(models) => models.into_iter().map(JoinRequestRow::from).collect(),
         Err(_) => return Denial::ServerError.into_response(),
     };
     // Every row's requester is the caller: one user fetch.
@@ -3807,37 +4018,77 @@ async fn user_join_requests_create(
         MessageValue::Text(text) => Some(text),
     };
     // Admin resolution (`:70-75`): active Admin memberships of the typed
-    // email, UNION workspaces it owns.
-    let targets: Vec<uuid::Uuid> = match sqlx::query_scalar(
-        "SELECT wm.workspace_id FROM workspace_members wm JOIN users u ON u.id = wm.member_id \
-         WHERE u.email = $1 AND wm.role = 20 AND wm.is_active = TRUE AND wm.deleted_at IS NULL \
-         UNION SELECT w.id FROM workspaces w WHERE w.owner_id IN \
-         (SELECT u2.id FROM users u2 WHERE u2.email = $1) AND w.deleted_at IS NULL",
-    )
-    .bind(&admin_email)
-    .fetch_all(pool)
-    .await
+    // email, UNION workspaces it owns. UNION is split into two SeaORM
+    // reads and deduped in Rust (one UNION statement has no single-entity
+    // form; two reads preserve exact set semantics without raw SQL).
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let via_member: Vec<uuid::Uuid> = match workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::WorkspaceId)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Users2.def(),
+        )
+        .filter(users::Column::Email.eq(Some(admin_email.clone())))
+        .filter(workspace_members::Column::Role.eq(20i16))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&db)
+        .await
     {
-        Ok(targets) => targets,
+        Ok(v) => v,
         Err(_) => return Denial::ServerError.into_response(),
     };
+    let user_ids: Vec<uuid::Uuid> = match users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Email.eq(Some(admin_email.clone())))
+        .into_tuple()
+        .all(&db)
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let via_own: Vec<uuid::Uuid> = if user_ids.is_empty() {
+        Vec::new()
+    } else {
+        match workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Id)
+            .filter(workspaces::Column::OwnerId.is_in(user_ids))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => return Denial::ServerError.into_response(),
+        }
+    };
+    let mut targets: Vec<uuid::Uuid> = via_member;
+    for id in via_own {
+        if !targets.contains(&id) {
+            targets.push(id);
+        }
+    }
     // Minus workspaces the requester already belongs to (`:78-83`).
     let already: Vec<uuid::Uuid> = if targets.is_empty() {
         vec![]
     } else {
-        let placeholders: Vec<String> =
-            (1..=targets.len()).map(|i| format!("${}", i + 1)).collect();
-        let sql = format!(
-            "SELECT wm.workspace_id FROM workspace_members wm WHERE wm.member_id = $1 \
-             AND wm.workspace_id IN ({}) AND wm.is_active = TRUE AND wm.deleted_at IS NULL",
-            placeholders.join(", ")
-        );
-        let mut query = sqlx::query_scalar::<_, uuid::Uuid>(&sql).bind(actor.id);
-        for target in &targets {
-            query = query.bind(*target);
-        }
-        match query.fetch_all(pool).await {
-            Ok(already) => already,
+        match workspace_members::Entity::find()
+            .select_only()
+            .column(workspace_members::Column::WorkspaceId)
+            .filter(workspace_members::Column::MemberId.eq(actor.id))
+            .filter(workspace_members::Column::WorkspaceId.is_in(targets.clone()))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+        {
+            Ok(v) => v,
             Err(_) => return Denial::ServerError.into_response(),
         }
     };
@@ -3848,18 +4099,17 @@ async fn user_join_requests_create(
     // All-already (`:90-100`): route into the earliest-created existing
     // workspace (200 with the slug — safe to name, they belong).
     if targets.is_empty() && !already.is_empty() {
-        let placeholders: Vec<String> = (1..=already.len()).map(|i| format!("${i}")).collect();
-        let sql = format!(
-            "SELECT w.slug FROM workspaces w WHERE w.id IN ({}) AND w.deleted_at IS NULL \
-             ORDER BY w.created_at ASC LIMIT 1",
-            placeholders.join(", ")
-        );
-        let mut query = sqlx::query_scalar::<_, String>(&sql);
-        for id in &already {
-            query = query.bind(*id);
-        }
-        let slug: Option<String> = match query.fetch_optional(pool).await {
-            Ok(slug) => slug,
+        let slug: Option<String> = match workspaces::Entity::find()
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.is_in(already.clone()))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_asc(workspaces::Column::CreatedAt)
+            .into_tuple()
+            .one(&db)
+            .await
+        {
+            Ok(v) => v,
             Err(_) => return Denial::ServerError.into_response(),
         };
         let mut body = Map::new();
@@ -3879,39 +4129,44 @@ async fn user_join_requests_create(
             // Idempotent per-workspace create (`:105-125`): the pending
             // `exists()` skips, and a concurrent loser is swallowed as
             // `IntegrityError` (any class-23, like Django).
-            let pending: bool = match sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM workspace_join_requests jr \
-                 WHERE jr.requester_id = $1 AND jr.workspace_id = $2 AND jr.status = 'PENDING' \
-                 AND jr.deleted_at IS NULL)",
-            )
-            .bind(actor.id)
-            .bind(workspace_id)
-            .fetch_one(pool)
-            .await
+            let pending_hit: Option<uuid::Uuid> = match workspace_join_requests::Entity::find()
+                .select_only()
+                .column(workspace_join_requests::Column::Id)
+                .filter(workspace_join_requests::Column::RequesterId.eq(actor.id))
+                .filter(workspace_join_requests::Column::WorkspaceId.eq(*workspace_id))
+                .filter(workspace_join_requests::Column::Status.eq("PENDING"))
+                .filter(workspace_join_requests::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await
             {
-                Ok(pending) => pending,
+                Ok(v) => v,
                 Err(_) => return Denial::ServerError.into_response(),
             };
+            let pending = pending_hit.is_some();
             if pending {
                 continue;
             }
-            let result = sqlx::query(
-                "INSERT INTO workspace_join_requests \
-                 (id, created_at, updated_at, created_by_id, requester_id, workspace_id, \
-                 admin_email, message, role, status) \
-                 VALUES ($1, $2, $2, $3, $3, $4, $5, $6, $7, 'PENDING')",
-            )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(actor.id)
-            .bind(workspace_id)
-            .bind(&admin_email)
-            .bind(message.as_deref())
-            .bind(queries::JOIN_REQUEST_DEFAULT_ROLE as i16)
-            .execute(pool)
-            .await;
+            let now_sea: DateTimeWithTimeZone = now.into();
+            let am = workspace_join_requests::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(now_sea),
+                updated_at: Set(now_sea),
+                created_by_id: Set(Some(actor.id)),
+                requester_id: Set(actor.id),
+                workspace_id: Set(Some(*workspace_id)),
+                admin_email: Set(admin_email.clone()),
+                message: Set(message.clone()),
+                role: Set(queries::JOIN_REQUEST_DEFAULT_ROLE as i16),
+                status: Set("PENDING".to_owned()),
+                responded_at: Set(None),
+                responded_by_id: Set(None),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+            };
+            let result = am.insert(&db).await;
             if let Err(error) = result {
-                if !is_integrity_error(&error) {
+                if !orm_tx::is_integrity_violation(&error) {
                     return Denial::ServerError.into_response();
                 }
             }
@@ -3920,36 +4175,42 @@ async fn user_join_requests_create(
         // Unresolved (`:137-150`): record a workspace-less request so the
         // pending state looks identical (the partial unique does NOT
         // cover `NULL` — the `exists()` is the only guard).
-        let pending: bool = match sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM workspace_join_requests jr \
-             WHERE jr.requester_id = $1 AND jr.workspace_id IS NULL AND jr.admin_email = $2 \
-             AND jr.status = 'PENDING' AND jr.deleted_at IS NULL)",
-        )
-        .bind(actor.id)
-        .bind(&admin_email)
-        .fetch_one(pool)
-        .await
+        let pending_hit: Option<uuid::Uuid> = match workspace_join_requests::Entity::find()
+            .select_only()
+            .column(workspace_join_requests::Column::Id)
+            .filter(workspace_join_requests::Column::RequesterId.eq(actor.id))
+            .filter(workspace_join_requests::Column::WorkspaceId.is_null())
+            .filter(workspace_join_requests::Column::AdminEmail.eq(admin_email.clone()))
+            .filter(workspace_join_requests::Column::Status.eq("PENDING"))
+            .filter(workspace_join_requests::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
         {
-            Ok(pending) => pending,
+            Ok(v) => v,
             Err(_) => return Denial::ServerError.into_response(),
         };
+        let pending = pending_hit.is_some();
         if !pending {
-            if let Err(error) = sqlx::query(
-                "INSERT INTO workspace_join_requests \
-                 (id, created_at, updated_at, created_by_id, requester_id, workspace_id, \
-                 admin_email, message, role, status) \
-                 VALUES ($1, $2, $2, $3, $3, NULL, $4, $5, $6, 'PENDING')",
-            )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(actor.id)
-            .bind(&admin_email)
-            .bind(message.as_deref())
-            .bind(queries::JOIN_REQUEST_DEFAULT_ROLE as i16)
-            .execute(pool)
-            .await
-            {
-                if is_integrity_error(&error) {
+            let now_sea2: DateTimeWithTimeZone = now.into();
+            let am = workspace_join_requests::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(now_sea2),
+                updated_at: Set(now_sea2),
+                created_by_id: Set(Some(actor.id)),
+                requester_id: Set(actor.id),
+                workspace_id: Set(None),
+                admin_email: Set(admin_email.clone()),
+                message: Set(message.clone()),
+                role: Set(queries::JOIN_REQUEST_DEFAULT_ROLE as i16),
+                status: Set("PENDING".to_owned()),
+                responded_at: Set(None),
+                responded_by_id: Set(None),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+            };
+            if let Err(error) = am.insert(&db).await {
+                if orm_tx::is_integrity_violation(&error) {
                     return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
                 }
                 return Denial::ServerError.into_response();
@@ -3974,11 +4235,11 @@ async fn fetch_join_request(
     pk: &uuid::Uuid,
     slug: &str,
 ) -> Result<Option<JoinRequestRow>, Denial> {
-    sqlx::query_as::<_, JoinRequestRow>(FETCH_JOIN_REQUEST_SQL)
-        .bind(pk)
-        .bind(slug)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    fetch_join_request_select(*pk, slug)
+        .one(&db)
         .await
+        .map(|opt| opt.map(JoinRequestRow::from))
         .map_err(|_| Denial::ServerError)
 }
 
@@ -3997,19 +4258,16 @@ async fn admin_join_requests_list(
         Ok(resolved) => resolved,
         Err(denial) => return denial.into_response(),
     };
-    let rows: Vec<JoinRequestRow> = match sqlx::query_as::<_, JoinRequestRow>(
-        "SELECT jr.id, jr.workspace_id, jr.requester_id, jr.created_at, jr.updated_at, \
-         jr.deleted_at, jr.admin_email, jr.message, jr.role, jr.status, jr.responded_at, \
-         jr.created_by_id, jr.updated_by_id, jr.responded_by_id \
-         FROM workspace_join_requests jr \
-         WHERE jr.workspace_id = $1 AND jr.status = 'PENDING' AND jr.deleted_at IS NULL \
-         ORDER BY jr.created_at DESC",
-    )
-    .bind(workspace_id)
-    .fetch_all(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<JoinRequestRow> = match workspace_join_requests::Entity::find()
+        .filter(workspace_join_requests::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_join_requests::Column::Status.eq("PENDING"))
+        .filter(workspace_join_requests::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_join_requests::Column::CreatedAt)
+        .all(&db)
+        .await
     {
-        Ok(rows) => rows,
+        Ok(models) => models.into_iter().map(JoinRequestRow::from).collect(),
         Err(_) => return Denial::ServerError.into_response(),
     };
     let workspaces = match fetch_workspace_lites(pool, &[workspace_id]).await {
@@ -4128,19 +4386,25 @@ async fn join_request_approve(
             Err(denial) => return denial.into_response(),
         };
     let approved = async move {
-        let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-            "SELECT wm.id FROM workspace_members wm WHERE wm.workspace_id = $1 AND wm.member_id = $2 \
-             AND wm.deleted_at IS NULL ORDER BY wm.created_at DESC LIMIT 1",
-        )
-        .bind(workspace_id)
-        .bind(requester_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let existing: Option<(uuid::Uuid,)> = {
+            let conn = orm_tx::TxConn::new(&mut tx);
+            workspace_members::Entity::find()
+                .select_only()
+                .column(workspace_members::Column::Id)
+                .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+                .filter(workspace_members::Column::MemberId.eq(requester_id))
+                .filter(workspace_members::Column::DeletedAt.is_null())
+                .order_by_desc(workspace_members::Column::CreatedAt)
+                .into_tuple()
+                .one(&conn)
+                .await
+                .map_err(orm_tx::into_sqlx)?
+        };
         if let Some((member_id,)) = existing {
             // The reactivate `.save()` stamps `updated_by` with the
             // approver (`db/models/base.py:42`).
             members::update_role(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &members::RoleUpdate {
                     id: member_id,
                     role: request_role,
@@ -4155,7 +4419,7 @@ async fn join_request_approve(
             // (`db/models/base.py:37-39`), so the column stays unset —
             // while the JSON props ride the model defaults (`:207-213`).
             members::add(
-                &mut *tx,
+                &pidash_db::orm_tx::TxConn::new(&mut tx),
                 &members::NewMember {
                     workspace_id,
                     user_id: Some(requester_id),
@@ -4172,18 +4436,43 @@ async fn join_request_approve(
             )
             .await?;
         }
-        identity::set_last_workspace(&mut *tx, requester_id, workspace_id).await?;
+        identity::set_last_workspace(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            requester_id,
+            workspace_id,
+        )
+        .await?;
         // The status `.save()` stamps `updated_by` with the approver
         // (`db/models/base.py:42`).
-        sqlx::query(
-            "UPDATE workspace_join_requests SET status = 'APPROVED', responded_at = $1, \
-             responded_by_id = $2, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-        )
-        .bind(now)
-        .bind(approver_id)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+        {
+            let conn = orm_tx::TxConn::new(&mut tx);
+            let now_sea: DateTimeWithTimeZone = now.into();
+            workspace_join_requests::Entity::update_many()
+                .col_expr(
+                    workspace_join_requests::Column::Status,
+                    sea_orm::sea_query::Expr::value("APPROVED".to_owned()),
+                )
+                .col_expr(
+                    workspace_join_requests::Column::RespondedAt,
+                    sea_orm::sea_query::Expr::value(Some(now_sea)),
+                )
+                .col_expr(
+                    workspace_join_requests::Column::RespondedById,
+                    sea_orm::sea_query::Expr::value(Some(approver_id)),
+                )
+                .col_expr(
+                    workspace_join_requests::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now_sea),
+                )
+                .col_expr(
+                    workspace_join_requests::Column::UpdatedById,
+                    sea_orm::sea_query::Expr::value(Some(approver_id)),
+                )
+                .filter(workspace_join_requests::Column::Id.eq(id))
+                .exec(&conn)
+                .await
+                .map_err(orm_tx::into_sqlx)?;
+        }
         tx.commit().await?;
         Ok::<(), sqlx::Error>(())
     }
@@ -4246,20 +4535,39 @@ async fn join_request_deny(
     let now = Utc::now();
     // The deny `.save()` stamps `updated_by` with the denier
     // (`db/models/base.py:42`; same id as `responded_by`, hence `$2`).
-    if let Err(error) = sqlx::query(
-        "UPDATE workspace_join_requests SET status = 'DENIED', responded_at = $1, \
-         responded_by_id = $2, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(id)
-    .execute(pool)
-    .await
     {
-        if is_integrity_error(&error) {
-            return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let now_sea: DateTimeWithTimeZone = now.into();
+        let res = workspace_join_requests::Entity::update_many()
+            .col_expr(
+                workspace_join_requests::Column::Status,
+                sea_orm::sea_query::Expr::value("DENIED".to_owned()),
+            )
+            .col_expr(
+                workspace_join_requests::Column::RespondedAt,
+                sea_orm::sea_query::Expr::value(Some(now_sea)),
+            )
+            .col_expr(
+                workspace_join_requests::Column::RespondedById,
+                sea_orm::sea_query::Expr::value(Some(actor.id)),
+            )
+            .col_expr(
+                workspace_join_requests::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_sea),
+            )
+            .col_expr(
+                workspace_join_requests::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(actor.id)),
+            )
+            .filter(workspace_join_requests::Column::Id.eq(id))
+            .exec(&db)
+            .await;
+        if let Err(error) = res {
+            if orm_tx::is_integrity_violation(&error) {
+                return json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY);
+            }
+            return Denial::ServerError.into_response();
         }
-        return Denial::ServerError.into_response();
     }
     (
         StatusCode::OK,
@@ -5383,24 +5691,33 @@ mod tests {
 
     #[test]
     fn forward_fk_traversal_ignores_workspace_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
         // The gates and fetches traverse `workspace__slug`, which Django
         // does not scope to live workspaces — while the member/invite/
-        // request-side scopes stay.
-        for sql in [
-            ADMIN_GATE_SQL,
-            OWNER_GATE_SQL,
-            FETCH_INVITE_SQL,
-            FETCH_JOIN_REQUEST_SQL,
-        ] {
+        // request-side scopes stay. SeaORM renders the workspace table as
+        // `workspaces`; a scoped filter would appear as `workspaces.deleted_at`.
+        let a = admin_gate_select("acme", uuid::Uuid::new_v4())
+            .build(DbBackend::Postgres)
+            .to_string();
+        let o = owner_gate_select("acme", uuid::Uuid::new_v4())
+            .build(DbBackend::Postgres)
+            .to_string();
+        let fi = fetch_invite_select(uuid::Uuid::new_v4(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        let fj = fetch_join_request_select(uuid::Uuid::new_v4(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        for sql in [&a, &o, &fi, &fj] {
             assert!(
-                !sql.contains("w.deleted_at"),
+                !sql.contains("\"workspaces\".\"deleted_at\""),
                 "workspace scope leaked into traversal SQL: {sql}"
             );
         }
-        assert!(ADMIN_GATE_SQL.contains("wm.deleted_at IS NULL"));
-        assert!(OWNER_GATE_SQL.contains("wm.deleted_at IS NULL"));
-        assert!(FETCH_INVITE_SQL.contains("i.deleted_at IS NULL"));
-        assert!(FETCH_JOIN_REQUEST_SQL.contains("jr.deleted_at IS NULL"));
+        assert!(a.contains("\"workspace_members\".\"deleted_at\" IS NULL"));
+        assert!(o.contains("\"workspace_members\".\"deleted_at\" IS NULL"));
+        assert!(fi.contains("\"workspace_member_invites\".\"deleted_at\""));
+        assert!(fj.contains("\"workspace_join_requests\".\"deleted_at\""));
     }
 
     #[test]
@@ -5683,5 +6000,279 @@ mod tests {
         );
         assert_eq!(parse_django_datetime("2030W23-12:00:00"), Some(expected));
         assert_eq!(parse_django_datetime("2030W23-1"), None);
+    }
+
+    // --- Live DB tests for the SeaORM queries (require DATABASE_URL) ---------
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.workspace_members')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return None;
+        }
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn live_admin_gate_and_fetch_invite() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        for table in [
+            "workspaces",
+            "workspace_members",
+            "workspace_member_invites",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let ws_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        // Seed workspace
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, owner_id, timezone, background_color) \
+             VALUES ($1, $2, $2, 'Acme', 'acme', $3, 'UTC', '#000')",
+        )
+        .bind(ws_id)
+        .bind(now)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("seed workspace");
+        // Seed member
+        sqlx::query(
+            "INSERT INTO workspace_members (id, created_at, updated_at, workspace_id, member_id, role, view_props, default_props, issue_props, getting_started_checklist, tips, explored_features, is_active) \
+             VALUES (gen_random_uuid(), $1, $1, $2, $3, 20, '{}', '{}', '{}', '{}', '{}', '{}', TRUE)",
+        )
+        .bind(now)
+        .bind(ws_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("seed member");
+        // Seed invite
+        let invite_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspace_member_invites (id, created_at, updated_at, email, accepted, token, role, workspace_id) \
+             VALUES ($1, $2, $2, 'a@b.com', FALSE, 'tok', 5, $3)",
+        )
+        .bind(invite_id)
+        .bind(now)
+        .bind(ws_id)
+        .execute(&mut *tx)
+        .await
+        .expect("seed invite");
+
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        #[derive(Debug, sea_orm::FromQueryResult)]
+        #[allow(dead_code)]
+        struct R {
+            workspace_id: uuid::Uuid,
+            role: i16,
+        }
+        let row: Option<R> = pidash_db::entity::workspace_members::Entity::find()
+            .select_only()
+            .column_as(pidash_db::entity::workspaces::Column::Id, "workspace_id")
+            .column_as(pidash_db::entity::workspace_members::Column::Role, "role")
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                pidash_db::entity::workspace_members::Relation::Workspaces.def(),
+            )
+            .filter(pidash_db::entity::workspaces::Column::Slug.eq("acme"))
+            .filter(pidash_db::entity::workspace_members::Column::MemberId.eq(user_id))
+            .filter(pidash_db::entity::workspace_members::Column::IsActive.eq(true))
+            .filter(pidash_db::entity::workspace_members::Column::DeletedAt.is_null())
+            .filter(pidash_db::entity::workspace_members::Column::Role.is_in([20i16, 15i16]))
+            .into_model::<R>()
+            .one(&conn)
+            .await
+            .expect("gate");
+        assert_eq!(row.expect("hit").workspace_id, ws_id);
+        // fetch invite via same join shape as fetch_invite_select
+        let invite = pidash_db::entity::workspace_member_invites::Entity::find()
+            .join(
+                sea_orm::JoinType::InnerJoin,
+                pidash_db::entity::workspace_member_invites::Relation::Workspaces.def(),
+            )
+            .filter(pidash_db::entity::workspace_member_invites::Column::Id.eq(invite_id))
+            .filter(pidash_db::entity::workspaces::Column::Slug.eq("acme"))
+            .filter(pidash_db::entity::workspace_member_invites::Column::DeletedAt.is_null())
+            .one(&conn)
+            .await
+            .expect("fetch invite");
+        assert!(invite.is_some());
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_invite_bulk_on_conflict() {
+        use sea_orm::sea_query::OnConflict;
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "CREATE TEMP TABLE workspace_member_invites AS SELECT * FROM public.workspace_member_invites WITH NO DATA",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp");
+        sqlx::query("ALTER TABLE workspace_member_invites ADD PRIMARY KEY (id)")
+            .execute(&mut *tx)
+            .await
+            .expect("pk");
+        let ws_id = uuid::Uuid::new_v4();
+        let creator = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let now_sea: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+        let id = uuid::Uuid::new_v4();
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            let am = pidash_db::entity::workspace_member_invites::ActiveModel {
+                id: Set(id),
+                created_at: Set(now_sea),
+                updated_at: Set(now_sea),
+                created_by_id: Set(Some(creator)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                email: Set("dup@x.io".to_owned()),
+                accepted: Set(false),
+                token: Set("t1".to_owned()),
+                message: Set(None),
+                responded_at: Set(None),
+                role: Set(5),
+                workspace_id: Set(ws_id),
+            };
+            am.insert(&conn).await.expect("first insert");
+            // Second insert with same id must be ignored by ON CONFLICT DO NOTHING
+            let rows = vec![pidash_db::entity::workspace_member_invites::ActiveModel {
+                id: Set(id),
+                created_at: Set(now_sea),
+                updated_at: Set(now_sea),
+                created_by_id: Set(Some(creator)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                email: Set("dup@x.io".to_owned()),
+                accepted: Set(false),
+                token: Set("t2".to_owned()),
+                message: Set(None),
+                responded_at: Set(None),
+                role: Set(5),
+                workspace_id: Set(ws_id),
+            }];
+            pidash_db::entity::workspace_member_invites::Entity::insert_many(rows)
+                .on_conflict(OnConflict::new().do_nothing().to_owned())
+                .exec_without_returning(&conn)
+                .await
+                .expect("conflict insert");
+            let count: i64 = sea_orm::ConnectionTrait::query_one(
+                &conn,
+                sea_orm::Statement::from_string(
+                    sea_orm::DbBackend::Postgres,
+                    "SELECT COUNT(*) FROM workspace_member_invites",
+                ),
+            )
+            .await
+            .expect("count")
+            .map(|r| r.try_get::<i64>("", "count").expect("decode"))
+            .unwrap_or(0);
+            assert_eq!(count, 1);
+        }
+        tx.rollback().await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn live_join_request_pending_insert() {
+        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "CREATE TEMP TABLE workspace_join_requests AS SELECT * FROM public.workspace_join_requests WITH NO DATA",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp");
+        let requester = uuid::Uuid::new_v4();
+        let ws_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let now_sea: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            let am = pidash_db::entity::workspace_join_requests::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(now_sea),
+                updated_at: Set(now_sea),
+                created_by_id: Set(Some(requester)),
+                requester_id: Set(requester),
+                workspace_id: Set(Some(ws_id)),
+                admin_email: Set("admin@x.io".to_owned()),
+                message: Set(Some("hi".to_owned())),
+                role: Set(15),
+                status: Set("PENDING".to_owned()),
+                responded_at: Set(None),
+                responded_by_id: Set(None),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+            };
+            am.insert(&conn).await.expect("insert");
+            let hit = pidash_db::entity::workspace_join_requests::Entity::find()
+                .select_only()
+                .column(pidash_db::entity::workspace_join_requests::Column::Id)
+                .filter(
+                    pidash_db::entity::workspace_join_requests::Column::RequesterId.eq(requester),
+                )
+                .filter(pidash_db::entity::workspace_join_requests::Column::WorkspaceId.eq(ws_id))
+                .filter(pidash_db::entity::workspace_join_requests::Column::Status.eq("PENDING"))
+                .filter(pidash_db::entity::workspace_join_requests::Column::DeletedAt.is_null())
+                .into_tuple::<uuid::Uuid>()
+                .one(&conn)
+                .await
+                .expect("pending check");
+            assert!(hit.is_some());
+            // Update to APPROVED via update_many
+            pidash_db::entity::workspace_join_requests::Entity::update_many()
+                .col_expr(
+                    pidash_db::entity::workspace_join_requests::Column::Status,
+                    sea_orm::sea_query::Expr::value("APPROVED".to_owned()),
+                )
+                .filter(
+                    pidash_db::entity::workspace_join_requests::Column::RequesterId.eq(requester),
+                )
+                .exec(&conn)
+                .await
+                .expect("approve");
+            let after = pidash_db::entity::workspace_join_requests::Entity::find()
+                .filter(
+                    pidash_db::entity::workspace_join_requests::Column::RequesterId.eq(requester),
+                )
+                .one(&conn)
+                .await
+                .expect("after")
+                .expect("row");
+            assert_eq!(after.status, "APPROVED");
+        }
+        tx.rollback().await.expect("rollback");
     }
 }

@@ -660,7 +660,7 @@ How labels build on this later, without changing the model of this design:
 
 None is changed here. Follow-up issues are filed in their projects and linked from PDASHOSS01-295.
 
-- **Rust port** (`rust-api/`, on `main`; Rust feature work is tracked in project NEWPIDASH, New PI Dash). Rules for the HA work there:
+- **Rust port** (`rust-api/`, on `main`). It is built in the same issues as the Django work, as each issue's New-system PR, following the Pi Dash OSS double-write rule. It is not a separate NEWPIDASH issue. Rules for the HA work there:
   - **Django schema first.** The Django migrations of §6.5 land first; the Rust port adds no migration and reads the new columns through SeaORM entities.
   - **SeaORM for reads and writes.** No new raw SQL (the `rust-api-raw-sql-guard` workflow ratchets it); domain write services own the writes to OSS tables.
   - **Standalone.** The Rust API implements every rule itself and forwards nothing to Django.
@@ -705,6 +705,14 @@ This order is recorded as relations, not only in this text: HA-2b is `blocked_by
 - Rollback: revert HA-2b. Existing assignments keep routing, because dispatch reads the field whoever wrote it. A full rollback also clears `assigned_runner` on every issue with a data migration.
 
 ## 20. Epic map
+
+**Issues (2026-11-06).** The epics below are replaced by three issues by layer, each built as an Old-system PR and a New-system PR:
+
+- PDASHOSS01-297 is the backend: HA-2 and HA-3, plus the backend parts of HA-6.
+- PDASHOSS01-349 is the UI in `apps/web` and `apps/web_new`: HA-4.
+- PDASHOSS01-350 is the CLI, MCP and prompting: HA-5, plus the docs part of HA-6.
+
+The hosted MCP tools are PRIVATEPI1-117. The table is kept as the map of sections to scope.
 
 | Epic                        | Implements                                                                                                                                                  |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -842,5 +850,5 @@ H-10 is decided (ENGINE's PO-10). H-11 to H-14 were proposed on 2026-11-05 with 
 - **HA-3:** the matcher, preflight, `fall_back` and stranded-sweep rules (§23.2); the refusal check before `reconcile` for H-10 and H-11 (§23.3, §11.2); the 12-hour bound and its clock stop (§11.3); the release refusal and the locality-only release paths (§12); `runner_paused` for every runner (§23.5); the `pod_once` run option for every dedicated runner with its authorization, resolver branch and pod preflight (§23.3); the cross-project pod-move refusal and the merge re-assignment as a lifecycle change (§23.4).
 - **HA-4:** the engine label, the `runner_paused` banner text, the refusal notice with "Run on my engine instead" and "Run on any runner in <pod> once", and no release action for a dedicated run, in `apps/web_new` (§14.4, §23.3, §23.6; M3, M4, M7).
 - **HA-5:** `pod_once` on the CLI and MCP run commands, the refusal output, and no release (§14.5, §14.6, §23.3).
-- **Rust port:** every item above, with SeaORM for reads and writes and no new raw SQL, standalone, after the Django migrations, in the files the runner and clock batches changed (§17; tracked in NEWPIDASH).
+- **Rust port:** every item above, with SeaORM for reads and writes and no new raw SQL, standalone, after the Django migrations, in the files the runner and clock batches changed (§17; the New-system PR of the same issue).
 - **Scenarios** (from ENGINE revision 3.4, to add to HA-6): an issue dedicated to an engine gets a person's Run while the engine is offline, and the Run is refused with `assigned_runner_offline` and the `pod_once` offer, nothing queued and the clock unchanged; a tick on the same issue waits as "Waiting for Built-in engine · <machine>", fails after 12 hours with `dedicated_runner_unavailable` and stops the clock; the same with the engine paused for `wallet_empty`, refused with `assigned_runner_paused`; the engine comes back within 12 hours and takes the waiting tick first; an own-agent runner paused by its owner gives the same refusal with `pause_reason = dispatch_paused`; `release-pin` on the waiting run returns 409 `dedicated_pin_not_releasable`; the engine is removed and the lost-runner rule applies; a busy rejection requeues the run still pinned to the engine; a tick on an issue dedicated to a `pinned_only` engine runs on it without a preflight bounce; a teammate's Run is refused with `assigned_runner_not_owner`; a teammate's state move changes the state, creates no run and leaves no tick to start one, and the owner's later Run ticks as usual; a move to another project's pod is refused while issues are dedicated to the runner; two machines merge and the dedicated issues follow the surviving engine, including after the owner left the assignees (H-9) and with a run still `RUNNING` on the retired machine; a teammate who is an assignee uses "Run on any runner in <pod> once", the run goes to another pod member, and the next tick is dedicated to the engine again; the same option in a pod with no eligible runner is refused with `no_eligible_runner_in_pod` and leaves the issue where it was.

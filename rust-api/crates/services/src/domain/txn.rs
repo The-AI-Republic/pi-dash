@@ -166,7 +166,7 @@ impl ConnectionTrait for TxnConn<'_> {
 }
 
 /// `SELECT pg_advisory_xact_lock(<key>)`.
-fn advisory_xact_lock_stmt(key: i64) -> sea_orm::sea_query::SelectStatement {
+pub(crate) fn advisory_xact_lock_stmt(key: i64) -> sea_orm::sea_query::SelectStatement {
     use sea_orm::sea_query::{Alias, Func, Query};
     Query::select()
         .expr(Func::cust(Alias::new("pg_advisory_xact_lock")).arg(key))

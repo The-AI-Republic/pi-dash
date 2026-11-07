@@ -26,8 +26,10 @@
 //! `mod.rs` edits stay additive-only.
 pub mod delete;
 pub mod dispatch_rules;
+pub mod engine_naming;
 pub mod fire;
 pub mod machine_controls;
+pub mod machine_merge;
 pub mod pod_naming;
 pub mod purge;
 pub mod queries;

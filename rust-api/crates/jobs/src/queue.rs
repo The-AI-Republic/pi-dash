@@ -25,16 +25,28 @@
 //! [`ensure_schema`]. Django stays schema owner for its own tables until
 //! switchover — no Django migration is touched.
 //!
-//! The SQL here is static, so it goes through `sqlx::query` (runtime
-//! checked) rather than the `query!` macros: those need a live database
-//! at compile time, which CI does not have. The statement texts are unit
-//! tested against a Postgres-dialect SQL parser instead.
+//! Everything but the DDL and the notify-carrying enqueue goes through
+//! sea-query builders (`DbBackend::Postgres.build` over
+//! [`pidash_db::sea_orm_connection`], or `orm_tx::TxConn` inside the
+//! claim transaction); rows decode by column name. The exempt
+//! statements are pinned by unit tests against rendered SQL; the
+//! builder tests pin the same shapes.
+
+//! The setters and delete sweep bind a client-computed `now` (the
+//! same instant Django's `timezone.now()` took), which keeps clock
+//! skew inside one statement's lease math.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult, TryGetable};
+use sea_query::{
+    extension::postgres::PgExpr, Alias, CaseStatement, Condition, DeleteStatement, Expr, Func,
+    LockBehavior, LockType, Order, Query, SelectStatement, UpdateStatement,
+};
 use serde_json::{Map, Value};
 use sqlx::{FromRow, PgPool};
 
 use crate::json_compact;
+use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::tx::Transaction;
 
 /// Table holding queued, running and failed jobs.
@@ -218,8 +230,11 @@ pub fn ensure_claim_index_sql() -> &'static str {
 
 /// Create both queue tables. Runs at worker boot, never from requests.
 pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
     sqlx::query(ensure_schema_sql()).execute(pool).await?;
+    // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
     sqlx::query(ensure_claim_index_sql()).execute(pool).await?;
+    // raw-sql: Rust-owned DDL passthrough (schedule schema) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
     sqlx::query(crate::schedule::ensure_schedule_schema_sql())
         .execute(pool)
         .await?;
@@ -260,6 +275,7 @@ pub async fn enqueue_exec<'e, E>(executor: E, job: &NewJob) -> Result<i64, sqlx:
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
+    // raw-sql: the enqueue CTE carries a pg_notify LISTEN/NOTIFY push-wake in one prepared statement; sea-query has no CTE-with-side-effect form, and notify is an allowed exception per orm-migration.md §6.
     let id: i64 = sqlx::query_scalar(enqueue_sql())
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&job.task)
@@ -298,19 +314,85 @@ impl<'q> sqlx::Encode<'q, sqlx::Postgres> for DeepJson<'q> {
     }
 }
 
-fn claim_select_sql() -> &'static str {
-    "SELECT id, celery_id, task, args, kwargs, queue, status, attempts, \
-            max_retries, visible_at, claimed_at, claimed_by, created_at, last_error \
-     FROM rust_job_queue \
-     WHERE queue = $1 AND status = 'queued' AND visible_at <= now() \
-     ORDER BY visible_at, id LIMIT 1 \
-     FOR UPDATE SKIP LOCKED"
+/// One claimed row, decoded off a SeaORM `QueryResult` (column names,
+/// order-independent).
+fn map_job_row(row: &QueryResult) -> Result<JobRow, sqlx::Error> {
+    fn get<T: TryGetable>(row: &QueryResult, column: &str) -> Result<T, sqlx::Error> {
+        row.try_get::<T>("", column).map_err(into_sqlx)
+    }
+    Ok(JobRow {
+        id: get(row, "id")?,
+        celery_id: get(row, "celery_id")?,
+        task: get(row, "task")?,
+        args: get(row, "args")?,
+        kwargs: get(row, "kwargs")?,
+        queue: get(row, "queue")?,
+        status: get(row, "status")?,
+        attempts: get(row, "attempts")?,
+        max_retries: get(row, "max_retries")?,
+        visible_at: get(row, "visible_at")?,
+        claimed_at: get(row, "claimed_at")?,
+        claimed_by: get(row, "claimed_by")?,
+        created_at: get(row, "created_at")?,
+        last_error: get(row, "last_error")?,
+    })
 }
 
-fn claim_update_sql() -> &'static str {
-    "UPDATE rust_job_queue \
-     SET status = 'running', claimed_at = now(), claimed_by = $2 \
-     WHERE id = $1"
+/// The claim select: oldest due row for `queue`, locked
+/// `FOR UPDATE SKIP LOCKED` for the claim transaction.
+fn claim_select(queue: &str) -> SelectStatement {
+    let t = Alias::new(QUEUE_TABLE);
+    let mut sel = Query::select();
+    for col in [
+        "id",
+        "celery_id",
+        "task",
+        "args",
+        "kwargs",
+        "queue",
+        "status",
+        "attempts",
+        "max_retries",
+        "visible_at",
+        "claimed_at",
+        "claimed_by",
+        "created_at",
+        "last_error",
+    ] {
+        sel.column((t.clone(), Alias::new(col)));
+    }
+    sel.from(t.clone())
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((t.clone(), Alias::new("queue"))).eq(queue))
+                .add(Expr::col((t.clone(), Alias::new("status"))).eq("queued"))
+                .add(
+                    Expr::col((t.clone(), Alias::new("visible_at")))
+                        .lte(Expr::expr(Func::cust(Alias::new("now")))),
+                ),
+        )
+        .order_by((t.clone(), Alias::new("visible_at")), Order::Asc)
+        .order_by((t.clone(), Alias::new("id")), Order::Asc)
+        .limit(1)
+        .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+    sel
+}
+
+/// The claim write: mark the row `running` for `owner` at the server
+/// clock.
+fn claim_update(id: i64, owner: &str) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(QUEUE_TABLE))
+        .values([
+            (Alias::new("status"), Expr::val("running").into()),
+            (
+                Alias::new("claimed_at"),
+                Expr::expr(Func::cust(Alias::new("now"))).into(),
+            ),
+            (Alias::new("claimed_by"), Expr::val(owner.to_owned()).into()),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(id));
+    stmt
 }
 
 /// Claim the oldest due job for `owner`, holding its row lock only for
@@ -318,36 +400,70 @@ fn claim_update_sql() -> &'static str {
 /// `SKIP LOCKED` skips rows locked by another claim.
 pub async fn claim(pool: &PgPool, queue: &str, owner: &str) -> Result<Option<JobRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let job: Option<JobRow> = sqlx::query_as(claim_select_sql())
-        .bind(queue)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if let Some(ref job) = job {
-        sqlx::query(claim_update_sql())
-            .bind(job.id)
-            .bind(owner)
-            .execute(&mut *tx)
-            .await?;
-    }
+    let job: Option<JobRow> = {
+        let conn = TxConn::new(&mut tx);
+        let found = conn
+            .query_one(DbBackend::Postgres.build(&claim_select(queue)))
+            .await
+            .map_err(into_sqlx)?;
+        let job = found.map(|row| map_job_row(&row)).transpose()?;
+        if let Some(ref job) = job {
+            conn.execute(DbBackend::Postgres.build(&claim_update(job.id, owner)))
+                .await
+                .map_err(into_sqlx)?;
+        }
+        job
+    };
     tx.commit().await?;
     Ok(job)
 }
 
-fn ack_sql() -> &'static str {
-    "DELETE FROM rust_job_queue WHERE id = $1"
+/// The ack delete: the finished row is removed (no result backend).
+fn ack_delete(id: i64) -> DeleteStatement {
+    let mut stmt = Query::delete();
+    stmt.from_table(Alias::new(QUEUE_TABLE))
+        .and_where(Expr::col(Alias::new("id")).eq(id));
+    stmt
 }
 
 /// Acknowledge a finished job: the row is deleted (no result backend).
 pub async fn ack(pool: &PgPool, id: i64) -> Result<(), sqlx::Error> {
-    sqlx::query(ack_sql()).bind(id).execute(pool).await?;
+    let db = pidash_db::sea_orm_connection(pool);
+    db.execute(DbBackend::Postgres.build(&ack_delete(id)))
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
-fn retry_sql() -> &'static str {
-    "UPDATE rust_job_queue \
-     SET status = 'queued', attempts = attempts + 1, visible_at = $2, \
-         claimed_at = NULL, claimed_by = NULL, last_error = $3 \
-     WHERE id = $1"
+/// The retry write: requeue with `attempts + 1` computed server-side.
+fn retry_update(id: i64, visible_at: DateTime<Utc>, last_error: &str) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(QUEUE_TABLE))
+        .values([
+            (Alias::new("status"), Expr::val("queued").into()),
+            (
+                Alias::new("attempts"),
+                Expr::col(Alias::new("attempts")).add(1),
+            ),
+            (
+                Alias::new("visible_at"),
+                Expr::val(visible_at.fixed_offset()).into(),
+            ),
+            (
+                Alias::new("claimed_at"),
+                Expr::val(Option::<DateTime<Utc>>::None).into(),
+            ),
+            (
+                Alias::new("claimed_by"),
+                Expr::val(Option::<String>::None).into(),
+            ),
+            (
+                Alias::new("last_error"),
+                Expr::val(last_error.to_owned()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(id));
+    stmt
 }
 
 /// Return a job to the queue with a future `visible_at` and the failure
@@ -359,41 +475,122 @@ pub async fn retry(
     visible_at: DateTime<Utc>,
     last_error: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(retry_sql())
-        .bind(id)
-        .bind(visible_at)
-        .bind(last_error)
-        .execute(pool)
-        .await?;
+    let db = pidash_db::sea_orm_connection(pool);
+    db.execute(DbBackend::Postgres.build(&retry_update(id, visible_at, last_error)))
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
-fn fail_sql() -> &'static str {
-    "UPDATE rust_job_queue \
-     SET status = 'failed', claimed_at = NULL, claimed_by = NULL, last_error = $2 \
-     WHERE id = $1"
+/// The fail write: park the row as `failed` with claim cleared.
+fn fail_update(id: i64, last_error: &str) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(QUEUE_TABLE))
+        .values([
+            (Alias::new("status"), Expr::val("failed").into()),
+            (
+                Alias::new("claimed_at"),
+                Expr::val(Option::<DateTime<Utc>>::None).into(),
+            ),
+            (
+                Alias::new("claimed_by"),
+                Expr::val(Option::<String>::None).into(),
+            ),
+            (
+                Alias::new("last_error"),
+                Expr::val(last_error.to_owned()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(id));
+    stmt
 }
 
 /// Park a job as failed after its retries are exhausted. The row stays
 /// for diagnosis until [`purge_failed`] removes it.
 pub async fn fail(pool: &PgPool, id: i64, last_error: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(fail_sql())
-        .bind(id)
-        .bind(last_error)
-        .execute(pool)
-        .await?;
+    let db = pidash_db::sea_orm_connection(pool);
+    db.execute(DbBackend::Postgres.build(&fail_update(id, last_error)))
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
-fn reclaim_sql() -> &'static str {
-    "UPDATE rust_job_queue \
-     SET status = CASE WHEN attempts < max_retries THEN 'queued' ELSE 'failed' END, \
-         attempts = CASE WHEN attempts < max_retries THEN attempts + 1 ELSE attempts END, \
-         visible_at = CASE WHEN attempts < max_retries THEN now() ELSE visible_at END, \
-         claimed_at = NULL, claimed_by = NULL, \
-         last_error = 'reclaimed stale running job claimed by ' \
-             || COALESCE(claimed_by, 'unknown') \
-     WHERE status = 'running' AND claimed_at < now() - make_interval(secs => $1)"
+/// The reclaim cutoff (`now() - lease`): the `claimed_at` bound,
+/// computed client-side so the lease math stays inside one value
+/// (Django's `timezone.now()` is client-computed too, so rules and
+/// probes that pin `now - lease` keep reading the same instant).
+fn lease_cutoff(lease_secs: f64, now: DateTime<Utc>) -> Result<DateTime<Utc>, sqlx::Error> {
+    if !lease_secs.is_finite() {
+        return Err(sqlx::Error::Protocol("seconds must be finite".to_owned()));
+    }
+    let millis = (lease_secs * 1000.0) as i64;
+    now.checked_sub_signed(ChronoDuration::milliseconds(millis))
+        .ok_or_else(|| sqlx::Error::Protocol("lease outside the representable range".to_owned()))
+}
+
+/// The reclaim write: stale `running` rows return to `queued` with
+/// `attempts + 1` and an immediate `visible_at` while budget lasts,
+/// else park as `failed` with attempts untouched. One statement, so
+/// concurrent reclaimers cannot double-move a row.
+fn reclaim_update(cutoff: DateTime<Utc>) -> UpdateStatement {
+    let budget_left = Condition::all()
+        .add(Expr::col(Alias::new("attempts")).lt(Expr::col(Alias::new("max_retries"))));
+    let mut stmt = Query::update();
+    stmt.table(Alias::new(QUEUE_TABLE))
+        .values([
+            (
+                Alias::new("status"),
+                Expr::expr(
+                    CaseStatement::new()
+                        .case(budget_left.clone(), "queued")
+                        .finally("failed"),
+                )
+                .into(),
+            ),
+            (
+                Alias::new("attempts"),
+                Expr::expr(
+                    CaseStatement::new()
+                        .case(
+                            budget_left.clone(),
+                            Expr::col(Alias::new("attempts")).add(1),
+                        )
+                        .finally(Expr::col(Alias::new("attempts"))),
+                )
+                .into(),
+            ),
+            (
+                Alias::new("visible_at"),
+                Expr::expr(
+                    CaseStatement::new()
+                        .case(budget_left, Expr::expr(Func::cust(Alias::new("now"))))
+                        .finally(Expr::col(Alias::new("visible_at"))),
+                )
+                .into(),
+            ),
+            (
+                Alias::new("claimed_at"),
+                Expr::val(Option::<DateTime<Utc>>::None).into(),
+            ),
+            (
+                Alias::new("claimed_by"),
+                Expr::val(Option::<String>::None).into(),
+            ),
+            (
+                Alias::new("last_error"),
+                Expr::val("reclaimed stale running job claimed by ").concatenate(Func::coalesce([
+                    Expr::col(Alias::new("claimed_by")).into(),
+                    Expr::val("unknown").into(),
+                ])),
+            ),
+        ])
+        .and_where(
+            Condition::all()
+                .add(Expr::col(Alias::new("status")).eq("running"))
+                .add(Expr::col(Alias::new("claimed_at")).lt(Expr::val(cutoff.fixed_offset())))
+                .into(),
+        );
+    stmt
 }
 
 /// Reclaim rows orphaned by a worker that died before settlement (panic
@@ -404,25 +601,37 @@ fn reclaim_sql() -> &'static str {
 /// [`fail`]. Single statement, so concurrent workers reclaiming at once
 /// are safe (the loser matches nothing). Returns the rows moved.
 pub async fn reclaim_stale_running(pool: &PgPool, lease_secs: f64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(reclaim_sql())
-        .bind(lease_secs)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
+    let db = pidash_db::sea_orm_connection(pool);
+    let cutoff = lease_cutoff(lease_secs, Utc::now())?;
+    let moved = db
+        .execute(DbBackend::Postgres.build(&reclaim_update(cutoff)))
+        .await
+        .map_err(into_sqlx)?;
+    Ok(moved.rows_affected())
 }
 
-fn purge_failed_sql() -> &'static str {
-    "DELETE FROM rust_job_queue \
-     WHERE status = 'failed' AND created_at < now() - make_interval(secs => $1)"
+/// The purge delete: `failed` rows created before the retention
+/// cutoff go away.
+fn purge_delete(cutoff: DateTime<Utc>) -> DeleteStatement {
+    let mut stmt = Query::delete();
+    stmt.from_table(Alias::new(QUEUE_TABLE)).and_where(
+        Condition::all()
+            .add(Expr::col(Alias::new("status")).eq("failed"))
+            .add(Expr::col(Alias::new("created_at")).lt(Expr::val(cutoff.fixed_offset())))
+            .into(),
+    );
+    stmt
 }
 
 /// Delete failures older than `retention_secs`.
 pub async fn purge_failed(pool: &PgPool, retention_secs: f64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(purge_failed_sql())
-        .bind(retention_secs)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
+    let db = pidash_db::sea_orm_connection(pool);
+    let cutoff = lease_cutoff(retention_secs, Utc::now())?;
+    let removed = db
+        .execute(DbBackend::Postgres.build(&purge_delete(cutoff)))
+        .await
+        .map_err(into_sqlx)?;
+    Ok(removed.rows_affected())
 }
 
 #[cfg(test)]
@@ -474,13 +683,6 @@ mod tests {
             ensure_schema_sql(),
             ensure_claim_index_sql(),
             enqueue_sql(),
-            claim_select_sql(),
-            claim_update_sql(),
-            ack_sql(),
-            retry_sql(),
-            fail_sql(),
-            reclaim_sql(),
-            purge_failed_sql(),
             crate::schedule::ensure_schedule_schema_sql(),
             crate::schedule::fetch_last_runs_sql(),
             crate::schedule::mark_run_sql(),
@@ -492,9 +694,95 @@ mod tests {
 
     #[test]
     fn claim_skips_locked_rows() {
-        assert!(claim_select_sql().contains("FOR UPDATE SKIP LOCKED"));
-        assert!(claim_select_sql().contains("visible_at <= now()"));
-        assert!(claim_select_sql().contains("ORDER BY visible_at, id LIMIT 1"));
+        let sql = claim_select("celery").to_string(sea_query::PostgresQueryBuilder);
+        assert!(sql.contains("FOR UPDATE SKIP LOCKED"), "{sql}");
+        assert!(sql.contains(r#""visible_at" <= now()"#), "{sql}");
+        assert!(
+            sql.contains(
+                r#"ORDER BY "rust_job_queue"."visible_at" ASC, "rust_job_queue"."id" ASC LIMIT 1"#
+            ),
+            "order+limit: {sql}"
+        );
+        assert!(
+            sql.contains(
+                r#""rust_job_queue"."queue" = 'celery' AND "rust_job_queue"."status" = 'queued'"#
+            ),
+            "filters: {sql}"
+        );
+        // The full row rides back for the worker render (no aliasing:
+        // one table means no output-name collisions).
+        assert!(sql.contains(r#""celery_id""#), "cols: {sql}");
+        assert!(sql.contains(r#""last_error""#), "cols: {sql}");
+    }
+
+    #[test]
+    fn claim_update_names_running_and_owner() {
+        let sql = claim_update(7, "worker-1").to_string(sea_query::PostgresQueryBuilder);
+        assert!(sql.contains(r#"UPDATE "rust_job_queue" SET"#), "{sql}");
+        assert!(sql.contains(r#""status" = 'running'"#), "{sql}");
+        assert!(sql.contains(r#""claimed_at" = now()"#), "{sql}");
+        assert!(sql.contains(r#""claimed_by" = 'worker-1'"#), "{sql}");
+        assert!(sql.contains(r#""id" = 7"#), "{sql}");
+    }
+
+    #[test]
+    fn retry_increments_attempts_server_side() {
+        let now = Utc::now();
+        let sql = retry_update(9, now, "boom").to_string(sea_query::PostgresQueryBuilder);
+        assert!(sql.contains(r#""status" = 'queued'"#), "{sql}");
+        assert!(
+            sql.contains(r#""attempts" = "attempts" + 1"#),
+            "server-side +1: {sql}"
+        );
+        assert!(sql.contains(r#""claimed_at" = NULL"#), "{sql}");
+        assert!(sql.contains(r#""claimed_by" = NULL"#), "{sql}");
+        assert!(sql.contains(r#""last_error" = 'boom'"#), "{sql}");
+        assert!(sql.contains(r#""id" = 9"#), "{sql}");
+    }
+
+    #[test]
+    fn fail_parks_with_claim_cleared() {
+        let sql = fail_update(4, "dead").to_string(sea_query::PostgresQueryBuilder);
+        assert!(sql.contains(r#""status" = 'failed'"#), "{sql}");
+        assert!(sql.contains(r#""claimed_at" = NULL"#), "{sql}");
+        assert!(sql.contains(r#""claimed_by" = NULL"#), "{sql}");
+        // `fail` spends no attempt.
+        assert!(!sql.contains(r#""attempts""#), "{sql}");
+        assert!(sql.contains(r#""last_error" = 'dead'"#), "{sql}");
+    }
+
+    #[test]
+    fn ack_deletes_by_id() {
+        let sql = ack_delete(11).to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.contains(r#"DELETE FROM "rust_job_queue" WHERE "id" = 11"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn purge_deletes_only_old_failures() {
+        let cutoff = Utc::now() - ChronoDuration::hours(2);
+        let sql = purge_delete(cutoff).to_string(sea_query::PostgresQueryBuilder);
+        assert!(
+            sql.contains(
+                r#"DELETE FROM "rust_job_queue" WHERE "status" = 'failed' AND "created_at" < "#
+            ),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn lease_cutoff_rejects_non_finite_and_bounds() {
+        let now = Utc::now();
+        assert!(lease_cutoff(f64::INFINITY, now).is_err());
+        assert!(lease_cutoff(f64::NEG_INFINITY, now).is_err());
+        assert!(lease_cutoff(f64::NAN, now).is_err());
+        let cutoff = lease_cutoff(3600.0, now).expect("finite lease bounds");
+        assert_eq!(cutoff, now - ChronoDuration::seconds(3600));
+        // A negative lease bounds in the future (same as make_interval).
+        let future = lease_cutoff(-60.0, now).expect("negative lease bounds");
+        assert_eq!(future, now + ChronoDuration::seconds(60));
     }
 
     #[test]
@@ -517,13 +805,34 @@ mod tests {
         // PIDASHCONV-1327: fresh claims and non-running rows must never
         // move; the budget branch mirrors `retry` (requeue + 1) and
         // `fail` (park, attempts untouched).
-        let sql = reclaim_sql();
-        assert!(sql.contains("status = 'running'"));
-        assert!(sql.contains("claimed_at < now() - make_interval(secs => $1)"));
-        assert!(sql
-            .contains("status = CASE WHEN attempts < max_retries THEN 'queued' ELSE 'failed' END"));
-        assert!(sql.contains("claimed_at = NULL, claimed_by = NULL"));
-        assert!(sql.contains("reclaimed stale running job claimed by"));
+        let cutoff = Utc::now() - ChronoDuration::hours(1);
+        let sql = reclaim_update(cutoff).to_string(sea_query::PostgresQueryBuilder);
+        assert!(sql.contains(r#""status" = 'running'"#), "{sql}");
+        assert!(sql.contains(r#""claimed_at" < "#), "cutoff bound: {sql}");
+        assert!(
+            sql.contains(
+                r#"CASE WHEN ("attempts" < "max_retries") THEN 'queued' ELSE 'failed' END"#
+            ),
+            "status budget branch: {sql}"
+        );
+        assert!(
+            sql.contains(
+                r#"CASE WHEN ("attempts" < "max_retries") THEN "attempts" + 1 ELSE "attempts" END"#
+            ),
+            "attempts budget branch: {sql}"
+        );
+        assert!(
+            sql.contains(r#"THEN now() ELSE "visible_at" END"#),
+            "visible_at branch: {sql}"
+        );
+        assert!(sql.contains(r#""claimed_at" = NULL"#), "{sql}");
+        assert!(sql.contains(r#""claimed_by" = NULL"#), "{sql}");
+        assert!(
+            sql.contains(
+                r#"'reclaimed stale running job claimed by ' || COALESCE("claimed_by", 'unknown')"#
+            ),
+            "cause concat: {sql}"
+        );
     }
 
     /// Reclaim settlement (PIDASHCONV-1327): a stale `running` row with

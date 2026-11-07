@@ -599,7 +599,7 @@ async fn save_user_data(
 ) -> Result<(), sqlx::Error> {
     let token = fresh_user_token();
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         &identity::LoginStamps {
             medium: Some("email"),
@@ -661,7 +661,7 @@ async fn redirection_path(
     user_email: &str,
 ) -> Result<String, sqlx::Error> {
     let path = identity::get_or_create_profile(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         chrono::Utc::now(),
         &profile_background_color(),
@@ -858,9 +858,15 @@ async fn insert_project_arm_workspace_members(
             },
         )
         .collect();
-    members::bulk_add(pool, &bulk_rows, &default_props, &issue_props, now)
-        .await
-        .map_err(|_| server_error())?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &default_props,
+        &issue_props,
+        now,
+    )
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -899,7 +905,7 @@ async fn insert_project_arm_project_members(
         })
         .collect();
     pidash_services::domain::projects::members::bulk_add(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &bulk,
         &default_props,
         &preferences,
@@ -937,7 +943,7 @@ async fn post_user_auth_workflow(
         .map_err(|_| server_error())?;
     for (workspace_id, role, _slug) in &workspace_invites {
         members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::NewMember {
                 workspace_id: *workspace_id,
                 user_id: Some(user_id),
@@ -1306,9 +1312,13 @@ async fn provider_outcome(
             if let Some(new_hash) =
                 pidash_auth::password::rehash_if_outdated(raw_password, &user.password)
             {
-                identity::rehash_password(pool, user.id, &new_hash)
-                    .await
-                    .map_err(|_| server_error())?;
+                identity::rehash_password(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    user.id,
+                    &new_hash,
+                )
+                .await
+                .map_err(|_| server_error())?;
                 user.password = new_hash;
             }
             Ok(kernel::ProviderOutcome::Ok)
@@ -1469,7 +1479,7 @@ async fn run_authenticated(
     // `user_login` AFTER `provider.authenticate()` returns
     // (`app/email.py:109-111`) — so the stamp lands after the invitation
     // workflow, never on its 500 path.
-    identity::stamp_last_login(pool, user_id, now)
+    identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), user_id, now)
         .await
         .map_err(|_| server_error())?;
     let device_info = serde_json::json!({
@@ -2141,7 +2151,13 @@ async fn serve_signout(state: &AppState, req: axum::extract::Request, space: boo
         return bare();
     };
     let now = chrono::Utc::now();
-    let stamped = identity::stamp_logout(pool, user_id, prov.ip.as_deref(), now).await;
+    let stamped = identity::stamp_logout(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user_id,
+        prov.ip.as_deref(),
+        now,
+    )
+    .await;
     if stamped.is_err() {
         return bare();
     }

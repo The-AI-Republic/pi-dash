@@ -72,6 +72,12 @@ use crate::state::AppState;
 
 use super::gates::{FORBIDDEN_BODY, NOT_FOUND_BODY};
 use pidash_compat::response::json_response;
+use pidash_db::entity::{project_members, projects, users, workspace_members, workspaces};
+use sea_orm::{
+    sea_query::{Alias, Asterisk},
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, RelationTrait,
+};
 
 /// DRF `IsAuthenticated` denial, same body as every other D-35 route.
 pub const UNAUTHENTICATED_BODY: &str = super::gates::ANON_BODY;
@@ -160,6 +166,12 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// `table`.`column` as a sea-query expression (the 1c services-builder idiom).
+fn col(table: &str, column: &str) -> sea_orm::sea_query::Expr {
+    use sea_orm::sea_query::Expr;
+    Expr::col((Alias::new(table), Alias::new(column)))
+}
+
 /// Session auth (`BaseSessionAuthentication` + `IsAuthenticated`):
 /// anonymous answers 401 before the gate or the body runs.
 async fn actor(
@@ -181,17 +193,24 @@ async fn allow_workspace(
     slug: &str,
     user_id: &uuid::Uuid,
 ) -> Result<(), Denial> {
-    let row: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    match row.and_then(|row| row.0) {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<i16>> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    match row.flatten() {
         Some(20) | Some(15) => Ok(()),
         _ => Err(Denial::Forbidden),
     }
@@ -199,13 +218,17 @@ async fn allow_workspace(
 
 /// `Workspace.objects.get(slug=slug)` → 404 `ObjectDoesNotExist` branch.
 async fn workspace_by_slug(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// Map a paginator-kernel error to its HTTP fate (the app_issues
@@ -285,9 +308,9 @@ async fn list_inner(
     }
     let order_by =
         crate::app_issues::query_last(query, "order_by").unwrap_or(DEFAULT_ORDER.to_owned());
-    let order_sql = resolve_export_order(&order_by)?;
+    let order = resolve_export_order(&order_by)?;
     let total = exporter_total_count(&pool, slug).await?;
-    let rows = fetch_exporter_page(&pool, slug, &order_sql, offset, per_page).await?;
+    let rows = fetch_exporter_page(&pool, slug, order, offset, per_page).await?;
     let has_more = rows.len() as i64 > per_page;
     let page_rows: Vec<ExportRow> = rows.into_iter().take(per_page as usize).collect();
     // `avatar_url` model property (`db/models/user.py:142-151`): asset
@@ -334,11 +357,12 @@ async fn list_inner(
 /// Resolve the paginate `order_by` param. Django splices the field path
 /// into the queryset ordering; an unknown name raises `FieldError` (the
 /// generic 500). Only the default and its ascending form are reachable
-/// in this domain's suite.
-fn resolve_export_order(raw: &str) -> Result<String, Denial> {
+/// in this domain's suite. The column is always `e.created_at`.
+fn resolve_export_order(raw: &str) -> Result<sea_orm::sea_query::Order, Denial> {
+    use sea_orm::sea_query::Order;
     match raw {
-        "-created_at" => Ok("e.created_at DESC".to_owned()),
-        "created_at" => Ok("e.created_at ASC".to_owned()),
+        "-created_at" => Ok(Order::Desc),
+        "created_at" => Ok(Order::Asc),
         _ => Err(Denial::ServerError),
     }
 }
@@ -367,93 +391,161 @@ struct ExportRow {
 /// `ExporterHistory.objects.filter(workspace__slug=slug,
 /// type="issue_exports").select_related("workspace", "initiated_by")`
 /// count (`queryset.count()` in `get_result`).
+/// `SELECT COUNT(*) FROM exporters e WHERE e.workspace_id IN (SELECT
+/// w.id FROM workspaces w WHERE w.slug = $1) AND e.type = $2 AND
+/// e.deleted_at IS NULL`. The workspace subquery carries no soft-delete
+/// guard of its own (the Django `workspace__slug` lookup does not filter
+/// deleted workspaces here).
+fn exporter_total_count_stmt(slug: &str) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::{Expr, Func, Query as SeaQuery, SimpleExpr};
+    let mut sub = SeaQuery::select();
+    sub.column(workspaces::Column::Id)
+        .from_as(workspaces::Entity, Alias::new("w"))
+        .and_where(col("w", "slug").eq(slug));
+    SeaQuery::select()
+        .expr_as(
+            Func::count::<SimpleExpr>(Expr::col(Asterisk).into()),
+            Alias::new("count"),
+        )
+        .from_as(pidash_db::entity::exporters::Entity, Alias::new("e"))
+        .and_where(col("e", "workspace_id").in_subquery(sub))
+        .and_where(col("e", "type").eq(EXPORT_TYPE))
+        .and_where(col("e", "deleted_at").is_null())
+        .to_owned()
+}
+
 async fn exporter_total_count(pool: &sqlx::PgPool, slug: &str) -> Result<i64, Denial> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        r#"SELECT COUNT(*) FROM exporters e
-           WHERE e.workspace_id IN (SELECT w.id FROM workspaces w WHERE w.slug = $1)
-           AND e.type = $2 AND e.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(EXPORT_TYPE)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ServerError)
+    let stmt = exporter_total_count_stmt(slug);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let row = rows.first().ok_or(Denial::ServerError)?;
+    row.try_get::<i64>("", "count")
+        .map_err(|_| Denial::ServerError)
+}
+
+/// One `fetch_exporter_page` output row, decoded by alias name (every
+/// selected column is aliased to its `ExportRow` field below, so names
+/// are unique and `try_get` never resolves a missing alias to NULL).
+#[derive(Debug, FromQueryResult)]
+struct ExporterPageRow {
+    id: uuid::Uuid,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    project: Option<Vec<uuid::Uuid>>,
+    provider: String,
+    status: String,
+    url: Option<String>,
+    initiated_by: uuid::Uuid,
+    token: String,
+    created_by: Option<uuid::Uuid>,
+    updated_by: Option<uuid::Uuid>,
+    user_first_name: Option<String>,
+    user_last_name: Option<String>,
+    user_avatar: Option<String>,
+    user_avatar_asset_id: Option<uuid::Uuid>,
+    user_is_bot: Option<bool>,
+    user_display_name: Option<String>,
 }
 
 /// The `[offset, offset + limit + 1)` slice the paginator reads (the
 /// extra row decides `next_page_results`, like `OffsetPaginator`).
 #[allow(clippy::too_many_lines)]
-async fn fetch_exporter_page(
-    pool: &sqlx::PgPool,
+/// The history page slice as a select statement: 17 columns aliased to
+/// `ExportRow` fields, the `users` LEFT JOIN for `select_related`, the
+/// workspace `IN` subquery, soft-delete + type guards, and the
+/// caller-resolved `ORDER BY` + `LIMIT`/`OFFSET` window.
+fn exporter_page_stmt(
     slug: &str,
-    order_sql: &str,
+    order: sea_orm::sea_query::Order,
     offset: i64,
     limit: i64,
-) -> Result<Vec<ExportRow>, Denial> {
+) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::Query as SeaQuery;
     // `avatar_url` is a model property (`db/models/user.py:142-151`),
     // not a column: fetch `avatar_asset_id` and resolve through the
     // `file_assets` batch helper below (the v1_projects precedent).
-    let sql = format!(
-        r#"SELECT e.id, e.created_at, e.updated_at, e.project, e.provider, e.status, e.url,
-           e.initiated_by_id, e.token, e.created_by_id, e.updated_by_id,
-           u.first_name, u.last_name, u.avatar, u.avatar_asset_id, u.is_bot, u.display_name
-           FROM exporters e
-           LEFT OUTER JOIN workspaces ON (e.workspace_id = workspaces.id)
-           LEFT OUTER JOIN users u ON (e.initiated_by_id = u.id)
-           WHERE (e.workspace_id IN (SELECT w.id FROM workspaces w WHERE w.slug = $1)
-           AND e.type = $2 AND e.deleted_at IS NULL)
-           ORDER BY {order_sql} LIMIT $3 OFFSET $4"#
-    );
-    // Seventeen columns exceed the `FromRow` tuple impls, so decode by
-    // index (`sqlx::Row::try_get`).
-    use sqlx::Row as _;
-    let rows = sqlx::query(&sql)
-        .bind(slug)
-        .bind(EXPORT_TYPE)
-        .bind(limit + 1)
-        .bind(offset)
-        .fetch_all(pool)
+    // The hand-written `LEFT OUTER JOIN workspaces` carried no selected
+    // column and no predicate (a PK-matched leg can neither filter nor
+    // fan out), so the statement drops it — same rows.
+    let mut sub = SeaQuery::select();
+    sub.column(workspaces::Column::Id)
+        .from_as(workspaces::Entity, Alias::new("w"))
+        .and_where(col("w", "slug").eq(slug));
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(col("e", "id"), Alias::new("id"))
+        .expr_as(col("e", "created_at"), Alias::new("created_at"))
+        .expr_as(col("e", "updated_at"), Alias::new("updated_at"))
+        .expr_as(col("e", "project"), Alias::new("project"))
+        .expr_as(col("e", "provider"), Alias::new("provider"))
+        .expr_as(col("e", "status"), Alias::new("status"))
+        .expr_as(col("e", "url"), Alias::new("url"))
+        .expr_as(col("e", "initiated_by_id"), Alias::new("initiated_by"))
+        .expr_as(col("e", "token"), Alias::new("token"))
+        .expr_as(col("e", "created_by_id"), Alias::new("created_by"))
+        .expr_as(col("e", "updated_by_id"), Alias::new("updated_by"))
+        .expr_as(col("u", "first_name"), Alias::new("user_first_name"))
+        .expr_as(col("u", "last_name"), Alias::new("user_last_name"))
+        .expr_as(col("u", "avatar"), Alias::new("user_avatar"))
+        .expr_as(
+            col("u", "avatar_asset_id"),
+            Alias::new("user_avatar_asset_id"),
+        )
+        .expr_as(col("u", "is_bot"), Alias::new("user_is_bot"))
+        .expr_as(col("u", "display_name"), Alias::new("user_display_name"))
+        .from_as(pidash_db::entity::exporters::Entity, Alias::new("e"))
+        .join_as(
+            JoinType::LeftJoin,
+            users::Entity,
+            Alias::new("u"),
+            col("e", "initiated_by_id").equals(("u", "id")),
+        )
+        .and_where(col("e", "workspace_id").in_subquery(sub))
+        .and_where(col("e", "type").eq(EXPORT_TYPE))
+        .and_where(col("e", "deleted_at").is_null())
+        .order_by((Alias::new("e"), Alias::new("created_at")), order)
+        .limit((limit + 1) as u64)
+        .offset(offset as u64)
+        .to_owned()
+}
+
+async fn fetch_exporter_page(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    order: sea_orm::sea_query::Order,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<ExportRow>, Denial> {
+    let stmt = exporter_page_stmt(slug, order, offset, limit);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&stmt))
         .await
         .map_err(|_| Denial::ServerError)?;
-    rows.iter()
+    rows.into_iter()
         .map(|row| {
+            let decoded =
+                ExporterPageRow::from_query_result(&row, "").map_err(|_| Denial::ServerError)?;
             Ok(ExportRow {
-                id: row.try_get(0).map_err(|_| Denial::ServerError)?,
-                created_at: row.try_get(1).map_err(|_| Denial::ServerError)?,
-                updated_at: row.try_get(2).map_err(|_| Denial::ServerError)?,
-                project: row
-                    .try_get::<Option<Vec<uuid::Uuid>>, _>(3)
-                    .map_err(|_| Denial::ServerError)?
-                    .unwrap_or_default(),
-                provider: row.try_get(4).map_err(|_| Denial::ServerError)?,
-                status: row.try_get(5).map_err(|_| Denial::ServerError)?,
-                url: row.try_get(6).map_err(|_| Denial::ServerError)?,
-                initiated_by: row.try_get(7).map_err(|_| Denial::ServerError)?,
-                token: row.try_get(8).map_err(|_| Denial::ServerError)?,
-                created_by: row.try_get(9).map_err(|_| Denial::ServerError)?,
-                updated_by: row.try_get(10).map_err(|_| Denial::ServerError)?,
-                user_first_name: row
-                    .try_get::<Option<String>, _>(11)
-                    .map_err(|_| Denial::ServerError)?
-                    .ok_or(Denial::ServerError)?,
-                user_last_name: row
-                    .try_get::<Option<String>, _>(12)
-                    .map_err(|_| Denial::ServerError)?
-                    .ok_or(Denial::ServerError)?,
-                user_avatar: row
-                    .try_get::<Option<String>, _>(13)
-                    .map_err(|_| Denial::ServerError)?
-                    .ok_or(Denial::ServerError)?,
-                user_avatar_asset_id: row.try_get(14).map_err(|_| Denial::ServerError)?,
-                user_is_bot: row
-                    .try_get::<Option<bool>, _>(15)
-                    .map_err(|_| Denial::ServerError)?
-                    .ok_or(Denial::ServerError)?,
-                user_display_name: row
-                    .try_get::<Option<String>, _>(16)
-                    .map_err(|_| Denial::ServerError)?
-                    .ok_or(Denial::ServerError)?,
+                id: decoded.id,
+                created_at: decoded.created_at,
+                updated_at: decoded.updated_at,
+                project: decoded.project.unwrap_or_default(),
+                provider: decoded.provider,
+                status: decoded.status,
+                url: decoded.url,
+                initiated_by: decoded.initiated_by,
+                token: decoded.token,
+                created_by: decoded.created_by,
+                updated_by: decoded.updated_by,
+                user_first_name: decoded.user_first_name.ok_or(Denial::ServerError)?,
+                user_last_name: decoded.user_last_name.ok_or(Denial::ServerError)?,
+                user_avatar: decoded.user_avatar.ok_or(Denial::ServerError)?,
+                user_avatar_asset_id: decoded.user_avatar_asset_id,
+                user_is_bot: decoded.user_is_bot.ok_or(Denial::ServerError)?,
+                user_display_name: decoded.user_display_name.ok_or(Denial::ServerError)?,
             })
         })
         .collect()
@@ -658,27 +750,29 @@ async fn create_inner(
     // `ExporterHistory.objects.create(...)` (`base.py:41-47`):
     // `created_by` is the requesting user (`BaseModel.save` via crum),
     // `updated_by` stays null; `status` defaults to `queued`.
-    sqlx::query(
-        r#"INSERT INTO exporters
-           (id, created_at, updated_at, deleted_at, created_by_id, updated_by_id,
-            name, type, workspace_id, project, provider, status, reason, key,
-            url, token, initiated_by_id, filters, rich_filters)
-           VALUES ($1, $2, $3, NULL, $4, NULL, NULL, $5, $6, $7, $8, 'queued', '', '',
-            NULL, $9, $10, NULL, '{}'::jsonb)"#,
-    )
-    .bind(row_id)
-    .bind(now)
-    .bind(now)
-    .bind(resolved.id)
-    .bind(EXPORT_TYPE)
-    .bind(workspace_id)
-    .bind(&project_uuids)
-    .bind(&provider)
-    .bind(&token)
-    .bind(resolved.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    {
+        use sea_orm::{ActiveModelTrait, ActiveValue, Set};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let active = pidash_db::entity::exporters::ActiveModel {
+            id: Set(row_id),
+            created_at: Set(chrono::DateTime::<chrono::FixedOffset>::from(now)),
+            updated_at: Set(chrono::DateTime::<chrono::FixedOffset>::from(now)),
+            created_by_id: Set(Some(resolved.id)),
+            initiated_by_id: Set(resolved.id),
+            r#type: Set(EXPORT_TYPE.to_owned()),
+            workspace_id: Set(workspace_id),
+            project: Set(Some(project_uuids)),
+            provider: Set(provider.clone()),
+            status: Set("queued".to_owned()),
+            reason: Set(String::new()),
+            key: Set(String::new()),
+            token: Set(token.clone()),
+            filters: ActiveValue::NotSet,
+            rich_filters: Set(Some(serde_json::json!({}))),
+            ..Default::default()
+        };
+        active.insert(&db).await.map_err(|_| Denial::ServerError)?;
+    }
     // `issue_export_task.delay(provider, workspace_id, project_ids,
     // token_id=token, multiple, slug)` (`base.py:49-56`): the Celery v2
     // body (all kwargs, no positional args) onto the Postgres queue. Rust
@@ -723,24 +817,57 @@ async fn create_inner(
 /// Empty-project fallback (`base.py:34-38`):
 /// `Project.objects.filter(workspace__slug, member=user, is_active,
 /// archived null).values_list("id", flat=True)`, stringified per row.
+/// The empty-`project` fallback list as a select statement: the user's
+/// active, non-archived projects in the workspace, soft-deletes excluded
+/// on every table.
+fn exporter_project_fallback_stmt(
+    slug: &str,
+    user_id: &uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::{Expr, Query as SeaQuery};
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(col("p", "id"), Alias::new("id"))
+        .from_as(projects::Entity, Alias::new("p"))
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            Alias::new("w"),
+            col("w", "id").equals(("p", "workspace_id")),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            project_members::Entity,
+            Alias::new("pm"),
+            col("pm", "project_id").equals(("p", "id")),
+        )
+        .and_where(col("w", "deleted_at").is_null())
+        .and_where(col("w", "slug").eq(slug))
+        .and_where(col("pm", "member_id").eq(Expr::val(*user_id)))
+        .and_where(col("pm", "is_active").eq(true))
+        .and_where(col("pm", "deleted_at").is_null())
+        .and_where(col("p", "deleted_at").is_null())
+        .and_where(col("p", "archived_at").is_null())
+        .to_owned()
+}
+
 async fn exporter_project_fallback(
     pool: &sqlx::PgPool,
     slug: &str,
     user_id: &uuid::Uuid,
 ) -> Result<Vec<String>, Denial> {
-    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id AND w.deleted_at IS NULL
-           JOIN project_members pm ON pm.project_id = p.id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.is_active
-           AND pm.deleted_at IS NULL AND p.deleted_at IS NULL AND p.archived_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(rows.into_iter().map(|row| row.0.to_string()).collect())
+    let stmt = exporter_project_fallback_stmt(slug, user_id);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    rows.into_iter()
+        .map(|row| {
+            row.try_get::<uuid::Uuid>("", "id")
+                .map(|id| id.to_string())
+                .map_err(|_| Denial::ServerError)
+        })
+        .collect()
 }
 
 /// Best-effort deferred publish (the D-02 intake precedent): without the
@@ -749,5 +876,191 @@ async fn enqueue_best_effort(pool: &sqlx::PgPool, task: &str, args: Value, kwarg
     let job = pidash_jobs::queue::NewJob::new(task.to_owned(), args, kwargs);
     if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
         tracing::warn!(%error, task, "task enqueue failed; response stands");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::DbBackend;
+
+    fn sql_of(stmt: &sea_orm::sea_query::SelectStatement) -> String {
+        DbBackend::Postgres.build(stmt).sql.to_lowercase()
+    }
+
+    #[test]
+    fn export_statement_shapes_pin_queries() {
+        let count = sql_of(&exporter_total_count_stmt("acme"));
+        assert!(count.contains("count(*)"), "count shape: {count}");
+        assert!(count.contains("from \"exporters\""), "count from: {count}");
+        assert!(count.contains("in (select"), "count in-subquery: {count}");
+        assert!(
+            count.contains("\"workspaces\""),
+            "count sub workspace: {count}"
+        );
+        assert!(
+            count.contains("deleted_at\" is null"),
+            "count soft delete: {count}"
+        );
+
+        let page = sql_of(&exporter_page_stmt(
+            "acme",
+            sea_orm::sea_query::Order::Desc,
+            0,
+            10,
+        ));
+        assert!(page.contains("left join"), "page users join: {page}");
+        assert!(page.contains("\"users\""), "page users table: {page}");
+        assert!(
+            page.contains("as \"user_first_name\""),
+            "page alias: {page}"
+        );
+        assert!(page.contains("in (select"), "page in-subquery: {page}");
+        assert!(page.contains("limit"), "page limit: {page}");
+        assert!(page.contains("offset"), "page offset: {page}");
+        assert!(page.contains("desc"), "page order: {page}");
+        assert!(
+            !page.contains("join \"workspaces\""),
+            "page drops no-op join: {page}"
+        );
+
+        let page_asc = sql_of(&exporter_page_stmt(
+            "acme",
+            sea_orm::sea_query::Order::Asc,
+            0,
+            10,
+        ));
+        assert!(page_asc.contains("asc"), "page asc order: {page_asc}");
+
+        let fallback = sql_of(&exporter_project_fallback_stmt("acme", &uuid::Uuid::nil()));
+        assert!(
+            fallback.contains("join \"project_members\""),
+            "fallback member join: {fallback}"
+        );
+        assert!(
+            fallback.contains("\"archived_at\" is null"),
+            "fallback archived guard: {fallback}"
+        );
+    }
+
+    /// TEMP tables shadow public (no FKs needed for statement execution).
+    #[tokio::test]
+    async fn live_export_queries() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "workspace_members",
+            "exporters",
+            "users",
+            "projects",
+            "project_members",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, other_ws, user, stranger, proj, proj2) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug, deleted_at) VALUES ('{ws}', 'acme_export', NULL)"),
+            format!("INSERT INTO workspaces (id, slug, deleted_at) VALUES ('{other_ws}', 'other_export', NULL)"),
+            format!("INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{user}', 20, true, NULL)"),
+            format!("INSERT INTO users (id, first_name, last_name, avatar, display_name, is_bot) VALUES ('{user}', 'Ada', 'Lovelace', '', 'Ada', false)"),
+            format!("INSERT INTO users (id, first_name, last_name, avatar, display_name, is_bot) VALUES ('{stranger}', 'Bob', 'Noexp', '', 'Bob', false)"),
+            format!("INSERT INTO projects (id, workspace_id, identifier, deleted_at, archived_at) VALUES ('{proj}', '{ws}', 'EXP', NULL, NULL)"),
+            format!("INSERT INTO projects (id, workspace_id, identifier, deleted_at, archived_at) VALUES ('{proj2}', '{ws}', 'EXP2', NULL, now())"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user}', 20, true, NULL)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj2}', '{user}', 20, true, NULL)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // role gate: ADMIN allows, stranger forbids, deleted member forbids.
+        allow_workspace(&pool, "acme_export", &user)
+            .await
+            .expect("admin ok");
+        assert!(matches!(
+            allow_workspace(&pool, "acme_export", &stranger).await,
+            Err(Denial::Forbidden)
+        ));
+        sqlx::query(&format!(
+            "UPDATE workspace_members SET deleted_at = now() WHERE member_id = '{user}'"
+        ))
+        .execute(&pool)
+        .await
+        .expect("soft delete");
+        assert!(matches!(
+            allow_workspace(&pool, "acme_export", &user).await,
+            Err(Denial::Forbidden)
+        ));
+        // workspace lookup: hit + miss.
+        assert_eq!(
+            workspace_by_slug(&pool, "acme_export").await.expect("ws"),
+            ws
+        );
+        assert!(matches!(
+            workspace_by_slug(&pool, "missing").await,
+            Err(Denial::NotFound)
+        ));
+        // fallback: only the non-archived project.
+        let fallback = exporter_project_fallback(&pool, "acme_export", &user)
+            .await
+            .expect("fallback");
+        assert_eq!(fallback, vec![proj.to_string()]);
+        // count + page over two live rows (one soft-deleted out).
+        let (e1, e2, e3) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO exporters (id, created_at, updated_at, workspace_id, provider, status, reason, key, token, initiated_by_id, type, deleted_at) VALUES ('{e1}', now() - interval '2 days', now(), '{ws}', 'jira', 'queued', '', '', 'tok1', '{user}', 'issue_exports', NULL)"),
+            format!("INSERT INTO exporters (id, created_at, updated_at, workspace_id, provider, status, reason, key, token, initiated_by_id, type, deleted_at) VALUES ('{e2}', now() - interval '1 day', now(), '{ws}', 'jira', 'queued', '', '', 'tok2', '{user}', 'issue_exports', NULL)"),
+            format!("INSERT INTO exporters (id, created_at, updated_at, workspace_id, provider, status, reason, key, token, initiated_by_id, type, deleted_at) VALUES ('{e3}', now(), now(), '{ws}', 'jira', 'queued', '', '', 'tok3', '{user}', 'issue_exports', now())"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed exporters");
+        }
+        assert_eq!(
+            exporter_total_count(&pool, "acme_export")
+                .await
+                .expect("count"),
+            2
+        );
+        let page =
+            fetch_exporter_page(&pool, "acme_export", sea_orm::sea_query::Order::Desc, 0, 10)
+                .await
+                .expect("page");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id, e2);
+        assert_eq!(page[0].user_first_name, "Ada");
+        assert_eq!(page[0].user_display_name, "Ada");
+        // a row whose initiated_by user is missing must 500 (the ok_or arm).
+        let e4 = uuid::Uuid::new_v4();
+        sqlx::query(&format!(
+            "INSERT INTO exporters (id, created_at, updated_at, workspace_id, provider, status, reason, key, token, initiated_by_id, type, deleted_at) VALUES ('{e4}', now(), now(), '{ws}', 'jira', 'queued', '', '', 'tok4', gen_random_uuid(), 'issue_exports', NULL)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed orphan");
+        assert!(matches!(
+            fetch_exporter_page(&pool, "acme_export", sea_orm::sea_query::Order::Asc, 0, 10).await,
+            Err(Denial::ServerError)
+        ));
     }
 }

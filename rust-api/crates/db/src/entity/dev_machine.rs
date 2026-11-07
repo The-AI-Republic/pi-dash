@@ -19,6 +19,14 @@ pub struct Model {
     pub engine_paused_by_owner: bool,
     pub engine_auto_pause_reason: String,
     pub engine_team_runs: bool,
+    pub engine_sign_in_state: String,
+    pub engine_credential_expires_at: Option<DateTimeWithTimeZone>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub engine_state: Json,
+    pub engine_state_reported_at: Option<DateTimeWithTimeZone>,
+    pub merged_into_id: Option<Uuid>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub merge_result: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

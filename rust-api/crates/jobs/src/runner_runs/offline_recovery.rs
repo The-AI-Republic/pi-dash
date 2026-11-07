@@ -34,16 +34,20 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::runner_runs::agent_run;
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_services::runner_runs::finalization;
 use pidash_services::runner_runs::{LifecycleEffect, SetValue};
 use pidash_services::runner_sessions::offline_recovery as kernel;
 use pidash_services::runner_sessions::session_service::RUNNER_OFFLINE_ERROR_CODE;
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
+use pidash_types::runner_runs::AgentRunStatus;
 
 use super::sweeps_chat::{
     apply_agent_run_terminal_effects, terminal_effects_job, RunnerRunsSeams, SweepError,
@@ -111,12 +115,6 @@ pub fn run_fail_secs() -> i64 {
 // Release-pins sweep
 // ---------------------------------------------------------------------------
 
-/// Position of `column` in the L2 `agent_run` list (`None` when the
-/// list drifted).
-fn col_index(column: &str) -> Option<usize> {
-    agent_run::COLUMNS.iter().position(|name| *name == column)
-}
-
 /// One stuck pin's atomic block: lock the still-queued, still-pinned,
 /// still-silent run (`FOR UPDATE OF "agent_run"`), clear the parent's
 /// `thread_id` when set, clear the pin. Returns the run's pod id when
@@ -129,41 +127,40 @@ async fn release_pin_atomic(
     cutoff: DateTime<Utc>,
 ) -> Result<Option<Option<Uuid>>, SweepError> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query(&kernel::release_pin_lock_select())
-        .bind(run_id)
-        .bind(AgentRunStatus::Queued.value())
-        .bind(cutoff)
-        .fetch_optional(&mut *tx)
+    let row = kernel::release_pin_lock_select(run_id, cutoff)
+        .one(&TxConn::new(&mut tx))
         .await?;
     let Some(row) = row else {
         tx.rollback().await?;
         return Ok(None);
     };
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(column).ok_or(SweepError::BadRow("agent_run column"))
-    };
-    let pod_id: Option<Uuid> = row.try_get(at("pod_id")?).map_err(SweepError::Db)?;
-    let parent_run_id: Option<Uuid> = row.try_get(at("parent_run_id")?).map_err(SweepError::Db)?;
-    // The T3 parent projection follows the run projection; the join
-    // is a LEFT OUTER JOIN, so every parent cell is null without one.
-    let thread_at = agent_run::COLUMNS.len() + at("thread_id")?;
-    let parent_thread: Option<String> = row.try_get(thread_at).map_err(SweepError::Db)?;
     // Same as the manual release-pin endpoint: whichever runner takes
     // the run next has no session of the parent's to resume against.
-    // Parent write first, pin write second (source order).
-    if let Some(parent_id) =
-        parent_run_id.filter(|_| parent_thread.as_deref().is_some_and(|t| !t.is_empty()))
-    {
-        sqlx::query(&kernel::clear_parent_thread_sql())
-            .bind(String::new())
-            .bind(parent_id)
-            .execute(&mut *tx)
+    // Parent write first, pin write second (source order). The parent
+    // join is a LEFT OUTER JOIN: no parent, no thread.
+    let conn = TxConn::new(&mut tx);
+    if let Some(parent_id) = row.parent_run_id.filter(|_| {
+        row.parent_thread_id
+            .as_deref()
+            .is_some_and(|t| !t.is_empty())
+    }) {
+        orm::agent_run::Entity::update_many()
+            .col_expr(orm::agent_run::Column::ThreadId, Expr::value(String::new()))
+            .filter(orm::agent_run::Column::Id.eq(parent_id))
+            .exec(&conn)
             .await?;
     }
-    sqlx::query(&kernel::clear_pin_sql())
-        .bind(run_id)
-        .execute(&mut *tx)
+    orm::agent_run::Entity::update_many()
+        .col_expr(
+            orm::agent_run::Column::PinnedRunnerId,
+            Expr::value(Option::<Uuid>::None),
+        )
+        .filter(orm::agent_run::Column::Id.eq(run_id))
+        .exec(&conn)
         .await?;
+    // `pod_id` is NOT NULL: the source's `if run.pod_id is not None`
+    // gate always passes.
+    let pod_id = Some(row.pod_id);
     tx.commit().await?;
     Ok(Some(pod_id))
 }
@@ -182,12 +179,8 @@ pub async fn release_pins_on_offline_runners(
         return Ok(0);
     }
     let cutoff = offline_cutoff(now, grace_secs);
-    let stuck: Vec<Uuid> = sqlx::query_scalar(&kernel::stuck_queued_run_ids_select())
-        .bind(cutoff)
-        .bind(AgentExecutorKind::LocalRunner.value())
-        .bind(AgentRunStatus::Queued.value())
-        .bind(cutoff)
-        .fetch_all(pool)
+    let stuck: Vec<Uuid> = kernel::stuck_queued_run_ids_select(cutoff)
+        .all(&sea_orm_connection(pool))
         .await?;
     let mut released = 0usize;
     let mut pod_ids: Vec<Uuid> = Vec::new();
@@ -267,80 +260,25 @@ async fn finalize_offline_run(
         ],
     )
     .map_err(|_| SweepError::BadRow("finalize plan"))?;
-    let lock_sql = finalization::lock_run_for_finalize_sql(true, false);
-    let mut lock = sqlx::query(&lock_sql).bind(*run_id);
-    for status in TERMINAL_RUN_STATUSES {
-        lock = lock.bind(status.value());
-    }
-    lock = lock.bind(*runner_id);
-    let locked = lock.fetch_optional(&mut **tx).await?;
-    let Some(locked) = locked else {
+    let conn = TxConn::new(tx);
+    let Some(locked) =
+        finalization::lock_run_for_finalize(&conn, *run_id, Some(*runner_id), None).await?
+    else {
         return Ok(false);
     };
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(column).ok_or(SweepError::BadRow("agent_run column"))
-    };
-    let executor_text: String = locked
-        .try_get(at("executor_kind")?)
-        .map_err(SweepError::Db)?;
-    execute_finalize_update(tx, &values, run_id).await?;
-    if AgentExecutorKind::from_value(&executor_text) == Some(AgentExecutorKind::CloudAgent) {
-        let exists = sqlx::query(finalization::terminal_event_exists_sql())
-            .bind(*run_id)
-            .bind("terminal")
-            .fetch_optional(&mut **tx)
-            .await?
-            .is_some();
-        if !exists {
-            let max: Option<i32> = sqlx::query_scalar(finalization::terminal_event_max_seq_sql())
-                .bind(*run_id)
-                .fetch_optional(&mut **tx)
-                .await?
-                .flatten();
-            let plan = finalization::plan_terminal_event(
-                max,
-                AgentRunStatus::Failed,
-                &finalization::finalize_error_code(&values),
-            );
-            sqlx::query(&finalization::terminal_event_insert_sql())
-                .bind(*run_id)
-                .bind(plan.seq)
-                .bind("terminal")
-                .bind(plan.payload)
-                .bind(Utc::now())
-                .execute(&mut **tx)
-                .await?;
-        }
+    let now = Utc::now();
+    finalization::finalize_update(&conn, &values, *run_id, now).await?;
+    if AgentExecutorKind::from_value(&locked.executor_kind) == Some(AgentExecutorKind::CloudAgent) {
+        finalization::append_terminal_event_once(
+            &conn,
+            *run_id,
+            AgentRunStatus::Failed,
+            &finalization::finalize_error_code(&values),
+            now,
+        )
+        .await?;
     }
     Ok(true)
-}
-
-/// The finalize `UPDATE`: binds in clause order, the id last. `NULL`
-/// columns bind typed nulls (the markers are `timestamptz`); `Now`
-/// binds one `now()` per clause.
-async fn execute_finalize_update(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    values: &finalization::FinalizeValues,
-    run_id: &Uuid,
-) -> Result<(), SweepError> {
-    let update_sql = finalization::finalize_update_sql(values);
-    let mut query = sqlx::query(&update_sql);
-    for clause in &values.clauses {
-        match &clause.value {
-            SetValue::Null => match clause.column {
-                "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
-                    query = query.bind(None::<DateTime<Utc>>);
-                }
-                _ => return Err(SweepError::BadRow("null finalize column")),
-            },
-            SetValue::Now => query = query.bind(Utc::now()),
-            SetValue::Text(text) => query = query.bind(text.clone()),
-            SetValue::Json(value) => query = query.bind(value.clone()),
-        }
-    }
-    query = query.bind(*run_id);
-    query.execute(&mut **tx).await?;
-    Ok(())
 }
 
 /// One runner's finish transaction: re-check the silence under the
@@ -357,47 +295,32 @@ async fn fail_runs_txn(
     // The poll takes the same row lock before it writes the
     // heartbeat, so re-checking under it means a runner that came
     // back since the list was read keeps its runs.
-    let locked = sqlx::query(&kernel::runner_silent_lock_select())
-        .bind(runner_id)
-        .bind(cutoff)
-        .fetch_optional(&mut *tx)
+    let conn = TxConn::new(&mut tx);
+    let locked = kernel::runner_silent_lock_select(runner_id, cutoff)
+        .one(&conn)
         .await?;
     if locked.is_none() {
         tx.rollback().await?;
         return Ok(FinishOutcome::empty());
     }
-    let local = AgentExecutorKind::LocalRunner.value();
-    let cancel_ids: Vec<Uuid> = sqlx::query_scalar(&kernel::sweep_stale_cancel_ids_sql())
-        .bind(cutoff)
-        .bind(local)
-        .bind(runner_id)
-        .fetch_all(&mut *tx)
+    let cancel_ids: Vec<Uuid> = kernel::sweep_stale_cancel_ids_sql(cutoff, runner_id)
+        .all(&conn)
         .await?;
-    let cancel_pods: Vec<Option<Uuid>> = sqlx::query_scalar(&kernel::sweep_stale_cancel_pods_sql())
-        .bind(cutoff)
-        .bind(local)
-        .bind(runner_id)
-        .fetch_all(&mut *tx)
+    let cancel_pods: Vec<Uuid> = kernel::sweep_stale_cancel_pods_sql(cutoff, runner_id)
+        .all(&conn)
         .await?;
     if !cancel_ids.is_empty() {
-        let barrier_sql = kernel::sweep_cancel_barrier_stamped_sql(cancel_ids.len());
-        let mut barrier = sqlx::query(&barrier_sql)
-            .bind(Utc::now())
-            .bind(kernel::offline_stamp_patch(RUNNER_OFFLINE_ERROR_CODE));
-        for id in &cancel_ids {
-            barrier = barrier.bind(*id);
-        }
-        barrier.execute(&mut *tx).await?;
+        kernel::sweep_cancel_barrier_stamped_sql(
+            Utc::now(),
+            RUNNER_OFFLINE_ERROR_CODE,
+            &cancel_ids,
+        )
+        .exec(&conn)
+        .await?;
     }
-    let pairs_sql = kernel::sweep_stale_pairs_sql(cancel_ids.len());
-    let mut pairs = sqlx::query_as::<_, (Uuid, Option<Uuid>)>(&pairs_sql)
-        .bind(cutoff)
-        .bind(local)
-        .bind(runner_id);
-    for id in &cancel_ids {
-        pairs = pairs.bind(*id);
-    }
-    let reaped: Vec<(Uuid, Option<Uuid>)> = pairs.fetch_all(&mut *tx).await?;
+    let reaped: Vec<(Uuid, Uuid)> = kernel::sweep_stale_pairs_sql(cutoff, runner_id, &cancel_ids)
+        .all(&conn)
+        .await?;
     if reaped.is_empty() && cancel_ids.is_empty() {
         tx.rollback().await?;
         return Ok(FinishOutcome::empty());
@@ -412,12 +335,7 @@ async fn fail_runs_txn(
     // First-seen pod order: reaped runs, then stopped cancels —
     // skipping nulls. Same membership as the source's set union.
     let mut pods = Vec::new();
-    for maybe in reaped
-        .iter()
-        .map(|(_, pod)| pod)
-        .chain(cancel_pods.iter())
-        .flatten()
-    {
+    for maybe in reaped.iter().map(|(_, pod)| pod).chain(cancel_pods.iter()) {
         if !pods.contains(maybe) {
             pods.push(*maybe);
         }
@@ -495,13 +413,9 @@ pub async fn fail_runs_on_offline_runners(
         return Ok(0);
     }
     let cutoff = offline_cutoff(now, grace_secs);
-    let local = AgentExecutorKind::LocalRunner.value();
     let rows: Vec<(Uuid, Option<DateTime<Utc>>, DateTime<Utc>)> =
-        sqlx::query_as(&kernel::silent_runner_ids_select())
-            .bind(cutoff)
-            .bind(local)
-            .bind(cutoff)
-            .fetch_all(pool)
+        kernel::silent_runner_ids_select(cutoff)
+            .all(&sea_orm_connection(pool))
             .await?;
     // Dedupe the `DISTINCT`-triple rows in first-seen order.
     let mut runner_ids = Vec::new();

@@ -2,104 +2,30 @@
 //!
 //! Verbatim move of the `space::social` comment-render closure (OVL-05,
 //! PIDASHCONV-1543): [`render_comment`] plus the row decoders, the
-//! `row_to_json` fetchers and the leaf renderers it calls. The space
+//! fetchers and the leaf renderers it calls. The space
 //! handlers call [`render_comment`]; the file keeps its own copies of
 //! the shared fetch/getter helpers for its other (non-comment) callers.
+//!
+//! SeaORM conversion (READ-1): leaf reads go through entities, decode
+//! by name, preserving joins, NULLs and soft-delete scopes. The
+//! `row_to_json` helpers are gone; `CommentRow::from_value` stays for
+//! the `Value` API used by the space/SDK callers and tests.
 
 use chrono::DateTime;
+use pidash_db::entity::{
+    comment_reactions, file_assets, git_comment_syncs, github_comment_syncs, issues, projects,
+    users, workspaces,
+};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{DbError, Error};
-
-// ---------------------------------------------------------------------------
-// row_to_json fetching + field access (the project_meta shape)
-// ---------------------------------------------------------------------------
-
-/// One bound `$N` parameter. The comment closure only binds UUID
-/// columns (the file keeps the `Text`/`Null` arms for its other
-/// callers).
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum SqlParam {
-    Uuid(Uuid),
-}
-
-/// Parse a UUID-typed bind. Callers pass path segments Django's `<uuid:>`
-/// converter already validated, or ids read back from the database —
-/// anything else is a 500 like Python's `ValidationError` → fallback.
-fn uuid_param(raw: &str) -> Result<SqlParam, Error> {
-    Uuid::parse_str(raw)
-        .map(SqlParam::Uuid)
-        .map_err(|_| Error::Failed("uuid-param"))
-}
-
-/// Fetch zero or one row of `inner` as a JSON object.
-async fn fetch_optional_object(
-    pool: &PgPool,
-    inner: &str,
-    params: &[SqlParam],
-    site: &'static str,
-) -> Result<Option<Value>, Error> {
-    let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
-    let mut query = sqlx::query(&sql);
-    for param in params {
-        query = match param {
-            SqlParam::Uuid(id) => query.bind(*id),
-        };
-    }
-    let row: Option<sqlx::postgres::PgRow> = query
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| DbError::new(site, error))?;
-    match row {
-        None => Ok(None),
-        Some(row) => {
-            let text: String = row
-                .try_get("__row")
-                .map_err(|_| Error::Failed("row-to-json"))?;
-            let value: Value =
-                serde_json::from_str(&text).map_err(|_| Error::Failed("row-to-json"))?;
-            match value {
-                Value::Object(_) => Ok(Some(value)),
-                _ => Err(Error::Failed("row-to-json")),
-            }
-        }
-    }
-}
-
-/// Fetch every row of `inner` as JSON objects.
-async fn fetch_all_objects(
-    pool: &PgPool,
-    inner: &str,
-    params: &[SqlParam],
-    site: &'static str,
-) -> Result<Vec<Value>, Error> {
-    let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
-    let mut query = sqlx::query(&sql);
-    for param in params {
-        query = match param {
-            SqlParam::Uuid(id) => query.bind(*id),
-        };
-    }
-    let rows: Vec<sqlx::postgres::PgRow> = query
-        .fetch_all(pool)
-        .await
-        .map_err(|error| DbError::new(site, error))?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let text: String = row
-            .try_get("__row")
-            .map_err(|_| Error::Failed("row-to-json"))?;
-        let value: Value = serde_json::from_str(&text).map_err(|_| Error::Failed("row-to-json"))?;
-        match value {
-            Value::Object(_) => out.push(value),
-            _ => return Err(Error::Failed("row-to-json")),
-        }
-    }
-    Ok(out)
-}
 
 fn obj(value: &Value) -> Result<&serde_json::Map<String, Value>, Error> {
     value.as_object().ok_or(Error::Failed("row-object"))
@@ -123,6 +49,7 @@ fn opt_str(
     }
 }
 
+#[allow(dead_code)]
 fn req_bool(obj: &serde_json::Map<String, Value>, key: &'static str) -> Result<bool, Error> {
     match obj.get(key) {
         Some(Value::Bool(b)) => Ok(*b),
@@ -130,6 +57,7 @@ fn req_bool(obj: &serde_json::Map<String, Value>, key: &'static str) -> Result<b
     }
 }
 
+#[allow(dead_code)]
 fn req_json(obj: &serde_json::Map<String, Value>, key: &'static str) -> Result<Value, Error> {
     obj.get(key).cloned().ok_or(Error::Failed(key))
 }
@@ -146,29 +74,99 @@ fn render_dt_opt(raw: Option<String>, tz: &chrono_tz::Tz) -> Result<Option<Strin
     raw.map(|text| render_dt(&text, tz)).transpose()
 }
 
+fn render_sea_dt(
+    dt: &sea_orm::prelude::DateTimeWithTimeZone,
+    tz: &chrono_tz::Tz,
+) -> Result<String, Error> {
+    Ok(super::render_datetime_in(dt, tz))
+}
+
+fn render_sea_dt_opt(
+    dt: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    tz: &chrono_tz::Tz,
+) -> Option<String> {
+    dt.map(|d| super::render_datetime_in(&d, tz))
+}
+
 // ---------------------------------------------------------------------------
 // User / asset lookups behind the nests
 // ---------------------------------------------------------------------------
+
+/// Decoded user row behind `actor_detail`: unguarded `users` read
+/// (`db/models/user.py:56` has no `deleted_at`).
+#[derive(Debug, Clone, FromQueryResult)]
+struct UserDetailRow {
+    id: Uuid,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    avatar: Option<String>,
+    avatar_asset_id: Option<Uuid>,
+    is_bot: bool,
+    display_name: Option<String>,
+}
+
+fn user_detail_query(user_id: Uuid) -> sea_orm::Select<users::Entity> {
+    users::Entity::find_by_id(user_id).select_only().columns([
+        users::Column::Id,
+        users::Column::FirstName,
+        users::Column::LastName,
+        users::Column::Avatar,
+        users::Column::AvatarAssetId,
+        users::Column::IsBot,
+        users::Column::DisplayName,
+    ])
+}
 
 /// `SELECT` for the user row behind `actor_detail` nests. Unlike every
 /// other forward FK here, this carries no soft-deletion guard: `User`
 /// (`db/models/user.py:56`, `AbstractBaseUser` + `PermissionsMixin`) has no
 /// `deleted_at` column, so Django emits no filter for it.
+#[allow(dead_code)]
 fn user_detail_sql() -> String {
+    // Kept for the shape test (no deleted_at) and for callers that pin
+    // the unguarded shape; SeaORM query above is authoritative.
     "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" WHERE (\"users\".\"id\" = $1)".to_string()
 }
 
 /// `SELECT` for the `display_name` behind reaction/vote rows
 /// (`source="actor.display_name"`). Same unguarded `users` read as
 /// [`user_detail_sql`]: no `deleted_at` column exists to filter on.
+#[allow(dead_code)]
 fn display_name_sql() -> String {
     "SELECT display_name FROM users WHERE id = $1".to_string()
 }
 
 /// `SELECT` for the logo/cover asset row behind `*_url` properties (the
 /// project_meta shape).
+#[allow(dead_code)]
 fn logo_asset_sql() -> String {
     "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"deleted_at\" IS NULL AND \"a\".\"id\" = $1)".to_string()
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+#[allow(dead_code)]
+struct LogoAssetRow {
+    id: Uuid,
+    entity_type: Option<String>,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    issue_id: Option<Uuid>,
+    workspace_slug: Option<String>,
+}
+
+fn logo_asset_query(asset_id: Uuid) -> sea_orm::Select<file_assets::Entity> {
+    file_assets::Entity::find_by_id(asset_id)
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            file_assets::Column::Id,
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .join(JoinType::LeftJoin, file_assets::Relation::Workspaces.def())
 }
 
 /// Port of `FileAsset.asset_url` (`db/models/asset.py:80-99`): static-asset
@@ -224,23 +222,21 @@ async fn logo_or_cover_url(
     let Some(asset_id) = asset_id else {
         return Ok(raw.filter(|text| !text.is_empty()));
     };
-    let row = fetch_optional_object(
-        pool,
-        &logo_asset_sql(),
-        &[uuid_param(&asset_id)?],
-        "logo-asset",
-    )
-    .await?
-    .ok_or(Error::Failed("logo-asset"))?;
-    let o = obj(&row)?;
-    let entity_type = opt_str(o, "entity_type")?;
-    let workspace_slug = opt_str(o, "workspace_slug")?;
-    let project_id = opt_str(o, "project_id")?;
-    let issue_id = opt_str(o, "issue_id")?;
-    let id = req_str(o, "id")?;
+    let asset_id = Uuid::parse_str(&asset_id).map_err(|_| Error::Failed("logo-asset"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: LogoAssetRow = logo_asset_query(asset_id)
+        .into_model::<LogoAssetRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("logo-asset", error))?
+        .ok_or(Error::Failed("logo-asset"))?;
+    let id_text = row.id.to_string();
+    let workspace_slug = row.workspace_slug;
+    let project_id = row.project_id.map(|id| id.to_string());
+    let issue_id = row.issue_id.map(|id| id.to_string());
     Ok(asset_url(
-        &id,
-        entity_type.as_deref(),
+        &id_text,
+        row.entity_type.as_deref(),
         workspace_slug.as_deref(),
         project_id.as_deref(),
         issue_id.as_deref(),
@@ -267,29 +263,32 @@ pub struct ActorDetailView {
 /// Render one user row as `actor_detail`. A dangling FK is a 500 like
 /// Python's `DoesNotExist` → fallback envelope.
 pub async fn render_actor_detail(pool: &PgPool, user_id: &str) -> Result<ActorDetailView, Error> {
-    let row = fetch_optional_object(
+    let user_id = Uuid::parse_str(user_id).map_err(|_| Error::Failed("actor-detail"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: UserDetailRow = user_detail_query(user_id)
+        .into_model::<UserDetailRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("actor-detail", error))?
+        .ok_or(Error::Failed("actor-detail"))?;
+    let avatar = row.avatar.clone();
+    let avatar_url = logo_or_cover_url(
         pool,
-        &user_detail_sql(),
-        &[uuid_param(user_id)?],
-        "actor-detail",
+        avatar.clone(),
+        row.avatar_asset_id.map(|id| id.to_string()),
     )
-    .await?
-    .ok_or(Error::Failed("actor-detail"))?;
-    let o = obj(&row)?;
-    let avatar = opt_str(o, "avatar")?;
-    let avatar_url =
-        logo_or_cover_url(pool, avatar.clone(), opt_str(o, "avatar_asset_id")?).await?;
+    .await?;
     Ok(ActorDetailView {
-        id: req_str(o, "id")?,
-        first_name: opt_str(o, "first_name")?.unwrap_or_default(),
-        last_name: opt_str(o, "last_name")?.unwrap_or_default(),
+        id: row.id.to_string(),
+        first_name: row.first_name.unwrap_or_default(),
+        last_name: row.last_name.unwrap_or_default(),
         // `avatar` is the raw column: DRF renders `""` verbatim. Only the
         // `avatar_url` property folds falsy values to `None`
         // (`db/models/user.py:143-151`, via `logo_or_cover_url` above).
         avatar,
         avatar_url,
-        is_bot: req_bool(o, "is_bot")?,
-        display_name: opt_str(o, "display_name")?.unwrap_or_default(),
+        is_bot: row.is_bot,
+        display_name: row.display_name.unwrap_or_default(),
     })
 }
 
@@ -522,6 +521,37 @@ pub async fn render_comment(
     })
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+struct IssueFlatRow {
+    id: Uuid,
+    name: String,
+    description_json: Value,
+    description_html: Option<String>,
+    priority: String,
+    complexity_score: i32,
+    start_date: Option<chrono::NaiveDate>,
+    target_date: Option<chrono::NaiveDate>,
+    sequence_id: i32,
+    sort_order: f64,
+    is_draft: bool,
+}
+
+fn issue_flat_query(issue_id: Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find_by_id(issue_id).select_only().columns([
+        issues::Column::Id,
+        issues::Column::Name,
+        issues::Column::DescriptionJson,
+        issues::Column::DescriptionHtml,
+        issues::Column::Priority,
+        issues::Column::ComplexityScore,
+        issues::Column::StartDate,
+        issues::Column::TargetDate,
+        issues::Column::SequenceId,
+        issues::Column::SortOrder,
+        issues::Column::IsDraft,
+    ])
+}
+
 /// `issue_detail`: the flat leaf over the comment's issue FK. The read
 /// mirrors `_base_manager` (no `deleted_at` filter), so a soft-deleted
 /// issue still renders; only a genuinely missing row is a 500 like
@@ -530,43 +560,59 @@ async fn render_issue_flat(pool: &PgPool, issue_id: Option<&str>) -> Result<Issu
     let Some(issue_id) = issue_id else {
         return Err(Error::Failed("issue-detail"));
     };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"id\" = $1)",
-        &[uuid_param(issue_id)?],
-        "issue-detail",
-    )
-    .await?
-    .ok_or(Error::Failed("issue-detail"))?;
-    let o = obj(&row)?;
-    let sequence_id = match o.get("sequence_id") {
-        Some(Value::Number(n)) => n.as_i64().ok_or(Error::Failed("sequence-id"))?,
-        _ => return Err(Error::Failed("sequence-id")),
-    };
+    let issue_id = Uuid::parse_str(issue_id).map_err(|_| Error::Failed("issue-detail"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: IssueFlatRow = issue_flat_query(issue_id)
+        .into_model::<IssueFlatRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("issue-detail", error))?
+        .ok_or(Error::Failed("issue-detail"))?;
     // DRF `FloatField` renders `65535.0`, never Postgres `float8out`'s
     // `65535` (the project_meta kernel rule).
-    let sort_order = match o.get("sort_order") {
-        Some(Value::Number(n)) => {
-            let float = n.as_f64().ok_or(Error::Failed("sort-order"))?;
-            serde_json::Number::from_f64(float)
-                .map(Value::Number)
-                .ok_or(Error::Failed("sort-order"))?
-        }
-        _ => return Err(Error::Failed("sort-order")),
-    };
+    let sort_order = serde_json::Number::from_f64(row.sort_order)
+        .map(Value::Number)
+        .ok_or(Error::Failed("sort-order"))?;
     Ok(IssueFlatView {
-        id: req_str(o, "id")?,
-        name: req_str(o, "name")?,
-        description_json: req_json(o, "description_json")?,
-        description_html: opt_str(o, "description_html")?,
-        priority: req_str(o, "priority")?,
-        complexity_score: req_json(o, "complexity_score")?,
-        start_date: opt_str(o, "start_date")?,
-        target_date: opt_str(o, "target_date")?,
-        sequence_id,
+        id: row.id.to_string(),
+        name: row.name,
+        description_json: row.description_json,
+        description_html: row.description_html,
+        priority: row.priority,
+        complexity_score: Value::Number(row.complexity_score.into()),
+        start_date: row.start_date.map(|d| d.to_string()),
+        target_date: row.target_date.map(|d| d.to_string()),
+        sequence_id: i64::from(row.sequence_id),
         sort_order,
-        is_draft: req_bool(o, "is_draft")?,
+        is_draft: row.is_draft,
     })
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct ProjectLiteRow {
+    id: Uuid,
+    identifier: String,
+    name: String,
+    cover_image: Option<String>,
+    cover_image_asset_id: Option<Uuid>,
+    logo_props: Value,
+    description: String,
+    is_default: bool,
+}
+
+fn project_lite_query(project_id: Uuid) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find_by_id(project_id)
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::CoverImageAssetId,
+            projects::Column::LogoProps,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+        ])
 }
 
 /// `project_detail`: the app lite leaf over the comment's project FK.
@@ -579,31 +625,51 @@ async fn render_project_lite(
     let Some(project_id) = project_id else {
         return Err(Error::Failed("project-detail"));
     };
-    let row = fetch_optional_object(
-        pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
-        &[uuid_param(project_id)?],
-        "project-detail",
-    )
-    .await?
-    .ok_or(Error::Failed("project-detail"))?;
-    let o = obj(&row)?;
+    let project_id = Uuid::parse_str(project_id).map_err(|_| Error::Failed("project-detail"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: ProjectLiteRow = project_lite_query(project_id)
+        .into_model::<ProjectLiteRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("project-detail", error))?
+        .ok_or(Error::Failed("project-detail"))?;
     let cover_image_url = logo_or_cover_url(
         pool,
-        opt_str(o, "cover_image")?,
-        opt_str(o, "cover_image_asset_id")?,
+        row.cover_image.clone(),
+        row.cover_image_asset_id.map(|id| id.to_string()),
     )
     .await?;
     Ok(ProjectLiteView {
-        id: req_str(o, "id")?,
-        identifier: req_str(o, "identifier")?,
-        name: req_str(o, "name")?,
-        cover_image: opt_str(o, "cover_image")?,
+        id: row.id.to_string(),
+        identifier: row.identifier,
+        name: row.name,
+        cover_image: row.cover_image,
         cover_image_url,
-        logo_props: req_json(o, "logo_props")?,
-        description: opt_str(o, "description")?,
-        is_default: req_bool(o, "is_default")?,
+        logo_props: row.logo_props,
+        description: Some(row.description),
+        is_default: row.is_default,
     })
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct WorkspaceLiteRow {
+    id: Uuid,
+    name: String,
+    slug: String,
+    logo: Option<String>,
+    logo_asset_id: Option<Uuid>,
+}
+
+fn workspace_lite_query(workspace_id: Uuid) -> sea_orm::Select<workspaces::Entity> {
+    workspaces::Entity::find_by_id(workspace_id)
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+            workspaces::Column::Logo,
+            workspaces::Column::LogoAssetId,
+        ])
 }
 
 /// `workspace_detail`: the app lite leaf over the comment's workspace FK.
@@ -616,21 +682,25 @@ async fn render_workspace_lite(
     let Some(workspace_id) = workspace_id else {
         return Err(Error::Failed("workspace-detail"));
     };
-    let row = fetch_optional_object(
+    let workspace_id =
+        Uuid::parse_str(workspace_id).map_err(|_| Error::Failed("workspace-detail"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: WorkspaceLiteRow = workspace_lite_query(workspace_id)
+        .into_model::<WorkspaceLiteRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("workspace-detail", error))?
+        .ok_or(Error::Failed("workspace-detail"))?;
+    let logo_url = logo_or_cover_url(
         pool,
-        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)",
-        &[uuid_param(workspace_id)?],
-        "workspace-detail",
+        row.logo.clone(),
+        row.logo_asset_id.map(|id| id.to_string()),
     )
-    .await?
-    .ok_or(Error::Failed("workspace-detail"))?;
-    let o = obj(&row)?;
-    let logo_url =
-        logo_or_cover_url(pool, opt_str(o, "logo")?, opt_str(o, "logo_asset_id")?).await?;
+    .await?;
     Ok(WorkspaceLiteView {
-        name: req_str(o, "name")?,
-        slug: req_str(o, "slug")?,
-        id: req_str(o, "id")?,
+        name: row.name,
+        slug: row.slug,
+        id: row.id.to_string(),
         logo_url,
     })
 }
@@ -642,18 +712,42 @@ async fn render_comment_reactions(
     comment_id: &str,
     tz: &chrono_tz::Tz,
 ) -> Result<Vec<CommentReactionView>, Error> {
-    let rows = fetch_all_objects(
-        pool,
-        "SELECT \"comment_reactions\".* FROM \"comment_reactions\" WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"comment_id\" = $1) ORDER BY \"comment_reactions\".\"created_at\" DESC",
-        &[uuid_param(comment_id)?],
-        "comment-reactions",
-    )
-    .await?;
+    let comment_id = Uuid::parse_str(comment_id).map_err(|_| Error::Failed("comment-reactions"))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = comment_reactions::Entity::find()
+        .filter(comment_reactions::Column::CommentId.eq(comment_id))
+        .filter(comment_reactions::Column::DeletedAt.is_null())
+        .order_by_desc(comment_reactions::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-reactions", error))?;
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out.push(render_comment_reaction_row(pool, row, tz).await?);
+    for model in &rows {
+        out.push(render_comment_reaction_model(pool, model, tz).await?);
     }
     Ok(out)
+}
+
+async fn render_comment_reaction_model(
+    pool: &PgPool,
+    model: &comment_reactions::Model,
+    tz: &chrono_tz::Tz,
+) -> Result<CommentReactionView, Error> {
+    let display_name = fetch_display_name(pool, &model.actor_id.to_string()).await?;
+    Ok(CommentReactionView {
+        id: model.id.to_string(),
+        actor: model.actor_id.to_string(),
+        comment: model.comment_id.to_string(),
+        reaction: model.reaction.clone(),
+        display_name,
+        deleted_at: render_sea_dt_opt(model.deleted_at, tz),
+        workspace: Some(model.workspace_id.to_string()),
+        project: Some(model.project_id.to_string()),
+        created_at: render_sea_dt(&model.created_at, tz)?,
+        updated_at: render_sea_dt(&model.updated_at, tz)?,
+        created_by: model.created_by_id.map(|id| id.to_string()),
+        updated_by: model.updated_by_id.map(|id| id.to_string()),
+    })
 }
 
 pub async fn render_comment_reaction_row(
@@ -685,13 +779,15 @@ pub async fn render_comment_reaction_row(
 /// `display_name` for reaction rows (`source="actor.display_name"`).
 async fn fetch_display_name(pool: &PgPool, user_id: &str) -> Result<String, Error> {
     let id = Uuid::parse_str(user_id).map_err(|_| Error::Failed("display-name"))?;
-    let row: Option<(Option<String>,)> = sqlx::query_as(&display_name_sql())
-        .bind(id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<String> = users::Entity::find_by_id(id)
+        .select_only()
+        .column(users::Column::DisplayName)
+        .into_tuple::<String>()
+        .one(&db)
         .await
-        .map_err(|error| DbError::new("display-name", error))?;
-    row.map(|row| row.0.unwrap_or_default())
-        .ok_or(Error::Failed("display-name"))
+        .map_err(|error| DbError::from_orm("display-name", error))?;
+    row.ok_or(Error::Failed("display-name"))
 }
 
 /// The synced-comment lock (`app/serializers/issue.py:79-91`): native rows
@@ -705,30 +801,38 @@ pub async fn comment_is_synced(
         return Ok(false);
     }
     let id = Uuid::parse_str(comment_id).map_err(|_| Error::Failed("comment-synced"))?;
-    let git: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM git_comment_syncs WHERE deleted_at IS NULL AND comment_id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("comment-synced-git", error))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let git: Option<Uuid> = git_comment_syncs::Entity::find()
+        .filter(git_comment_syncs::Column::CommentId.eq(id))
+        .filter(git_comment_syncs::Column::DeletedAt.is_null())
+        .select_only()
+        .column(git_comment_syncs::Column::Id)
+        .limit(1)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-synced-git", error))?;
     if git.is_some() {
         return Ok(true);
     }
-    let github: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM github_comment_syncs WHERE deleted_at IS NULL AND comment_id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("comment-synced-github", error))?;
+    let github: Option<Uuid> = github_comment_syncs::Entity::find()
+        .filter(github_comment_syncs::Column::CommentId.eq(id))
+        .filter(github_comment_syncs::Column::DeletedAt.is_null())
+        .select_only()
+        .column(github_comment_syncs::Column::Id)
+        .limit(1)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-synced-github", error))?;
     Ok(github.is_some())
 }
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::{DbBackend, QueryTrait};
+
     use super::*;
-    use crate::read::test_support::{pool, seed_world};
 
     #[test]
     fn moved_user_reads_carry_no_soft_delete_guard() {
@@ -737,6 +841,47 @@ mod tests {
         assert!(!user_detail_sql().contains("deleted_at"));
         assert!(user_detail_sql().contains("\"users\".\"id\" = $1"));
         assert!(!display_name_sql().contains("deleted_at"));
+        // SeaORM builders are likewise unguarded.
+        let sql = user_detail_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!sql.contains("deleted_at"), "{sql}");
+        assert!(sql.contains(r#""users"."id" = "#), "{sql}");
+    }
+
+    #[test]
+    fn logo_asset_query_is_scoped() {
+        let sql = logo_asset_query(Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("LEFT JOIN"), "{sql}");
+        assert!(
+            sql.contains(r#""file_assets"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains("workspace_slug"), "{sql}");
+    }
+
+    #[test]
+    fn comment_reaction_query_is_scoped_and_ordered() {
+        let sql = comment_reactions::Entity::find()
+            .filter(comment_reactions::Column::CommentId.eq(Uuid::nil()))
+            .filter(comment_reactions::Column::DeletedAt.is_null())
+            .order_by_desc(comment_reactions::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#""comment_reactions"."comment_id" = "#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""comment_reactions"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"ORDER BY "comment_reactions"."created_at" DESC"#),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -754,6 +899,13 @@ mod tests {
         assert_eq!(row.is_member, Some(true));
         assert!(row.issue_id.is_none());
     }
+}
+
+#[cfg(test)]
+mod live {
+    use serde_json::Value;
+
+    use crate::read::test_support::{pool, seed_world};
 
     #[tokio::test]
     async fn render_comment_renders_seeded_row() {
@@ -766,8 +918,8 @@ mod tests {
                 .await
                 .expect("comment json");
         let value: Value = serde_json::from_str(&text).expect("parses");
-        let row = CommentRow::from_value(&value).expect("decodes");
-        let view = render_comment(&db, &row, &chrono_tz::UTC, true)
+        let row = super::CommentRow::from_value(&value).expect("decodes");
+        let view = super::render_comment(&db, &row, &chrono_tz::UTC, true)
             .await
             .expect("renders");
         assert_eq!(view.id, world.comment_id.to_string());

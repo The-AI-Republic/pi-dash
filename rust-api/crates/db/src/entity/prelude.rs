@@ -38,6 +38,7 @@ pub use super::draft_issue_labels::Entity as DraftIssueLabels;
 pub use super::draft_issue_modules::Entity as DraftIssueModules;
 pub use super::draft_issues::Entity as DraftIssues;
 pub use super::email_notification_logs::Entity as EmailNotificationLogs;
+pub use super::engine_credential::Entity as EngineCredential;
 pub use super::estimate_points::Entity as EstimatePoints;
 pub use super::estimates::Entity as Estimates;
 pub use super::exporters::Entity as Exporters;
