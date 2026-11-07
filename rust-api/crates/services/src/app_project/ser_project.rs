@@ -1011,6 +1011,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
+    "dedicated_runner_lost_action",
 ];
 
 /// `ProjectListSerializer` wire order (`:136-168` over `fields =
@@ -1072,6 +1073,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
+    "dedicated_runner_lost_action",
 ];
 
 /// `ProjectLiteSerializer.Meta.fields` (`:123-132`), in list order (also
@@ -1143,6 +1145,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
+    "dedicated_runner_lost_action",
 ];
 
 /// `DeployBoardSerializer.Meta.read_only_fields` (`:266`).
@@ -1289,6 +1292,9 @@ pub struct ProjectRead {
     pub estimate: Option<String>,
     /// `State` FK (`PrimaryKeyRelatedField`).
     pub default_state: Option<String>,
+    /// Dedicated-runner lost-runner handling (`__all__` last field).
+    /// Non-Option per Django (a choice with a default).
+    pub dedicated_runner_lost_action: String,
 }
 
 /// `ProjectListSerializer` read shape (`:136-168`,
@@ -1417,6 +1423,8 @@ pub struct ProjectListRead {
     pub estimate: Option<String>,
     /// `State` FK.
     pub default_state: Option<String>,
+    /// Dedicated-runner lost-runner handling (`__all__` last field).
+    pub dedicated_runner_lost_action: String,
 }
 
 /// `ProjectLiteSerializer` read shape (`:120-133`,
@@ -1558,6 +1566,8 @@ pub struct ProjectDetailRead {
     pub estimate: Option<String>,
     /// `State` FK.
     pub default_state: Option<String>,
+    /// Dedicated-runner lost-runner handling (`__all__` last field).
+    pub dedicated_runner_lost_action: String,
 }
 
 /// `DeployBoardSerializer` read shape (`:259-266`,
@@ -2598,7 +2608,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 49);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 50);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2609,7 +2619,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 55);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 56);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2624,7 +2634,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 51);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 52);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(
