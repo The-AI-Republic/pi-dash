@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::explicit_auto_deref)]
 
 //! Beat-equivalent scheduler loop.
 //!
