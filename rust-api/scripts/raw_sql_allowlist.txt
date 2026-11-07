@@ -12,11 +12,6 @@ crates/api/src/app_modules/handlers_module_issues.rs 10
 crates/api/src/app_modules/handlers_module_links.rs 16
 crates/api/src/app_modules/handlers_modules.rs 32
 crates/api/src/app_notifications/mod.rs 15
-crates/api/src/app_scheduler/gate.rs 6
-crates/api/src/app_scheduler/handlers_bind.rs 40
-crates/api/src/app_scheduler/handlers_occ.rs 4
-crates/api/src/app_scheduler/handlers_sched.rs 10
-crates/api/src/app_scheduler/mod.rs 1
 crates/api/src/app_views_search/handlers_search.rs 3
 crates/api/src/app_views_search/handlers_views.rs 29
 crates/api/src/app_views_search/mod.rs 2
@@ -35,40 +30,22 @@ crates/api/src/license/handlers_admin.rs 20
 crates/api/src/license/handlers_config_workspace.rs 8
 crates/api/src/license/handlers_instance.rs 11
 crates/api/src/license/mod.rs 3
-crates/api/src/runner_enroll/delete_cmds.rs 1
-crates/api/src/runner_enroll/teardown.rs 10
-crates/api/src/runner_sessions/machine.rs 9
-crates/api/src/runner_sessions/runner_open.rs 31
-crates/api/src/runner_sessions/runner_poll.rs 20
-crates/api/src/space/assets.rs 12
 crates/api/src/space/intake.rs 27
-crates/api/src/space/issues.rs 5
-crates/api/src/space/project_meta.rs 3
-crates/api/src/space/social.rs 15
 crates/api/src/turn/tools_local_store.rs 2
 crates/api/src/v1_work_items/handlers_pr_links.rs 38
 crates/db/src/config/accessor.rs 1
 crates/db/src/filterset.rs 6
 crates/db/src/license/queries.rs 13
-crates/db/src/ops/instance.rs 5
-crates/db/src/ops/repair.rs 7
-crates/db/src/ops/users.rs 12
 crates/db/src/runner_runs/pod.rs 3
 crates/db/src/runner_sessions/machine_outbox.rs 1
 crates/db/src/runner_sessions/outbox.rs 1
 crates/jobs/src/license/commands.rs 9
 crates/jobs/src/license/tasks.rs 4
-crates/jobs/src/runner_enroll.rs 5
-crates/jobs/src/scheduler.rs 4
+crates/jobs/src/scheduler.rs 2
 crates/jobs/src/tasks_cleanup/dummy_data.rs 34
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
 crates/jobs/src/tasks_export/analytic.rs 9
 crates/services/src/dispatch/execution.rs 7
-crates/services/src/operations/comments.rs 3
-crates/services/src/operations/issues.rs 18
-crates/services/src/operations/pull_requests.rs 1
-crates/services/src/operations/relations.rs 6
-crates/services/src/ops/boot.rs 1
 crates/services/src/read/comment.rs 5
 crates/services/src/read/identity.rs 3
 crates/services/src/read/issues.rs 7
@@ -78,11 +55,8 @@ crates/services/src/read/relations.rs 1
 crates/services/src/read/search.rs 1
 crates/services/src/read/work_items.rs 20
 crates/services/src/read/workspace.rs 3
-crates/services/src/runner_enroll/revoke.rs 1
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1
-crates/services/src/runner_sessions/live_drains.rs 9
-crates/services/src/scheduler/builtins.rs 5
 
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).

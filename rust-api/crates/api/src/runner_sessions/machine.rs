@@ -91,20 +91,21 @@ use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
-use sqlx::Row as _;
-
+use pidash_db::entity::dev_machine;
 use pidash_db::entity::machine_token;
+use pidash_db::orm_tx::TxConn;
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::models::machine_session;
-use pidash_db::runner_sessions::models::machine_session::machine_session_from_row;
+use pidash_db::runner_sessions::models::machine_session::machine_session_from_model;
 use pidash_types::runner_sessions::keys::machine as machine_keys;
 use pidash_types::runner_sessions::{
     dev_machine_mismatch_drf, dev_machine_mismatch_poll, json_parse_error_poll, machine_open_201,
     poll_200, session_evicted_poll, unauthorized_drf, unauthorized_poll, DecodedMessage,
     HttpResponse,
 };
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::runner_enroll::auth::{
     authenticate_machine_token, MachineAuth, ALLOW_DELETE, ALLOW_POST, AUTHENTICATE_HEADER_BEARER,
@@ -120,8 +121,16 @@ const POLL_READ_COUNT: i64 = 100;
 /// `DevMachine.objects.filter(pk=…).update(last_seen_at=…)` (D-13 table;
 /// no provider const exists, so the Django queryset shape is spelled
 /// here — verified against the FX-RSES-02 machine SQL captures).
-const DEV_MACHINE_TOUCH_SQL: &str =
-    "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1 WHERE \"dev_machine\".\"id\" = $2";
+/// `DevMachine.objects.filter(pk=…).update(last_seen_at=now)`
+/// (`:109`, `:201`): the D-13 table's keyed touch.
+fn dev_machine_touch_statement(
+    dev_machine_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<dev_machine::Entity> {
+    dev_machine::Entity::update_many()
+        .col_expr(dev_machine::Column::LastSeenAt, Expr::value(now))
+        .filter(dev_machine::Column::Id.eq(dev_machine_id))
+}
 /// Revoke reason stamped on the prior session at open (`:97`).
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
 /// Revoke reason stamped at delete (`:156`).
@@ -407,26 +416,19 @@ pub async fn machine_session_open(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let prior = match sqlx::query(machine_session::OPEN_PRIOR_SQL)
-        .bind(dev_machine_id)
-        .fetch_optional(&mut *tx)
+    let conn = TxConn::new(&mut tx);
+    let prior = match machine_session::open_prior_select(dev_machine_id)
+        .one(&conn)
         .await
     {
-        Ok(prior) => prior,
+        Ok(prior) => prior.map(machine_session_from_model),
         Err(_) => return server_error(),
     };
     let mut old_session_id: Option<String> = None;
-    if let Some(row) = prior {
-        let prior = match machine_session_from_row(&row) {
-            Ok(prior) => prior,
-            Err(_) => return server_error(),
-        };
+    if let Some(prior) = prior {
         old_session_id = Some(prior.id.to_string());
-        if sqlx::query(machine_session::REVOKE_SQL)
-            .bind(Utc::now())
-            .bind(REASON_EVICTED_BY_NEW_SESSION)
-            .bind(prior.id)
-            .execute(&mut *tx)
+        if machine_session::revoke_statement(prior.id, Utc::now(), REASON_EVICTED_BY_NEW_SESSION)
+            .exec(&conn)
             .await
             .is_err()
         {
@@ -441,25 +443,21 @@ pub async fn machine_session_open(
     let last_seen_at = Utc::now();
     let created_at = Utc::now();
     let opened_token_id = auth.as_ref().map(|auth| auth.token.id);
-    if sqlx::query(machine_session::OPEN_INSERT_SQL)
-        .bind(new_sid)
-        .bind(dev_machine_id)
-        .bind(machine_session::DEFAULT_PROTOCOL_VERSION)
-        .bind(created_at)
-        .bind(last_seen_at)
-        .bind(None::<DateTime<Utc>>)
-        .bind(machine_session::DEFAULT_REVOKED_REASON)
-        .bind(opened_token_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+    if pidash_db::entity::machine_session::Entity::insert(machine_session::open_insert_row(
+        new_sid,
+        dev_machine_id,
+        created_at,
+        last_seen_at,
+        opened_token_id,
+    ))
+    .exec_without_returning(&conn)
+    .await
+    .is_err()
     {
         return server_error();
     }
-    if sqlx::query(DEV_MACHINE_TOUCH_SQL)
-        .bind(Utc::now())
-        .bind(dev_machine_id)
-        .execute(&mut *tx)
+    if dev_machine_touch_statement(dev_machine_id, Utc::now())
+        .exec(&conn)
         .await
         .is_err()
     {
@@ -543,10 +541,9 @@ pub async fn machine_session_delete(
     // Canonical (lowercase) rendering: the marker key must match what
     // the open/poll paths write however the URL spelled the id.
     let sid_str = sid.to_string();
-    let row = match sqlx::query(machine_session::DELETE_GET_SQL)
-        .bind(dev_machine_id)
-        .bind(sid)
-        .fetch_optional(&pool)
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let row = match machine_session::delete_get_select(dev_machine_id, sid)
+        .one(&db)
         .await
     {
         Ok(row) => row,
@@ -561,11 +558,8 @@ pub async fn machine_session_delete(
         }
         return StatusCode::NO_CONTENT.into_response();
     }
-    if sqlx::query(machine_session::REVOKE_SQL)
-        .bind(Utc::now())
-        .bind(REASON_CLEAN_SHUTDOWN)
-        .bind(sid)
-        .execute(&pool)
+    if machine_session::revoke_statement(sid, Utc::now(), REASON_CLEAN_SHUTDOWN)
+        .exec(&db)
         .await
         .is_err()
     {
@@ -778,10 +772,9 @@ pub async fn machine_session_poll(
     // the ack parse run before any write, the session and machine
     // touches share one timestamp, and the plan derives from the PEL
     // marker.
-    let row = match sqlx::query(machine_session::POLL_GET_SQL)
-        .bind(dev_machine_id)
-        .bind(sid)
-        .fetch_optional(&pool)
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let row = match machine_session::poll_get_select(dev_machine_id, sid)
+        .one(&db)
         .await
     {
         Ok(row) => row,
@@ -790,10 +783,8 @@ pub async fn machine_session_poll(
     let Some(row) = row else {
         return render(session_evicted_poll(None));
     };
-    let session = match machine_session_from_row(&row) {
-        Ok(session) => session,
-        Err(_) => return server_error(),
-    };
+    let opened_token_id = row.machine_token_id;
+    let session = machine_session_from_model(row);
     if session.revoked_at.is_some() {
         return render(session_evicted_poll(Some(&session.revoked_reason)));
     }
@@ -802,67 +793,58 @@ pub async fn machine_session_poll(
     // a token delete — both keep the session, exactly like Django's
     // `opened_with is not None` guard. A deleted-then-null token id reads
     // as no opening token here too (the row is gone in both cases).
-    let opened_token_id: Result<Option<Uuid>, sqlx::Error> = row.try_get("machine_token_id");
-    match opened_token_id {
-        Ok(Some(token_id)) => {
-            let sea = pidash_db::pool::sea_orm_connection(&pool);
-            let opened = match machine_token::Entity::find_by_id(token_id).one(&sea).await {
-                Ok(opened) => opened,
-                Err(_) => return server_error(),
-            };
-            if let Some(opened) = opened {
-                let eviction = opened_with_eviction_reason(
-                    opened.revoked_at.map(|instant| instant.with_timezone(&Utc)),
-                    opened.expires_at.map(|instant| instant.with_timezone(&Utc)),
-                    Utc::now(),
-                );
-                if let Some(reason) = eviction {
-                    // Django revokes with a live-only guard
-                    // (`filter(pk=…, revoked_at__isnull=True)`), so a
-                    // session closed concurrently in between is not
-                    // re-revoked under a new reason. SeaORM carries the
-                    // same guard (no extra raw SQL site).
-                    let revoked = pidash_db::entity::machine_session::Entity::update_many()
-                        .col_expr(
-                            pidash_db::entity::machine_session::Column::RevokedAt,
-                            sea_orm::sea_query::Expr::value(Utc::now().fixed_offset()),
-                        )
-                        .col_expr(
-                            pidash_db::entity::machine_session::Column::RevokedReason,
-                            sea_orm::sea_query::Expr::value(reason),
-                        )
-                        .filter(pidash_db::entity::machine_session::Column::Id.eq(sid))
-                        .filter(pidash_db::entity::machine_session::Column::RevokedAt.is_null())
-                        .exec(&sea)
-                        .await;
-                    if revoked.is_err() {
-                        return server_error();
-                    }
-                    return render(session_evicted_poll(Some(reason)));
+    if let Some(token_id) = opened_token_id {
+        let sea = pidash_db::pool::sea_orm_connection(&pool);
+        let opened = match machine_token::Entity::find_by_id(token_id).one(&sea).await {
+            Ok(opened) => opened,
+            Err(_) => return server_error(),
+        };
+        if let Some(opened) = opened {
+            let eviction = opened_with_eviction_reason(
+                opened.revoked_at.map(|instant| instant.with_timezone(&Utc)),
+                opened.expires_at.map(|instant| instant.with_timezone(&Utc)),
+                Utc::now(),
+            );
+            if let Some(reason) = eviction {
+                // Django revokes with a live-only guard
+                // (`filter(pk=…, revoked_at__isnull=True)`), so a
+                // session closed concurrently in between is not
+                // re-revoked under a new reason. SeaORM carries the
+                // same guard (no extra raw SQL site).
+                let revoked = pidash_db::entity::machine_session::Entity::update_many()
+                    .col_expr(
+                        pidash_db::entity::machine_session::Column::RevokedAt,
+                        sea_orm::sea_query::Expr::value(Utc::now().fixed_offset()),
+                    )
+                    .col_expr(
+                        pidash_db::entity::machine_session::Column::RevokedReason,
+                        sea_orm::sea_query::Expr::value(reason),
+                    )
+                    .filter(pidash_db::entity::machine_session::Column::Id.eq(sid))
+                    .filter(pidash_db::entity::machine_session::Column::RevokedAt.is_null())
+                    .exec(&sea)
+                    .await;
+                if revoked.is_err() {
+                    return server_error();
                 }
+                return render(session_evicted_poll(Some(reason)));
             }
         }
-        Ok(None) => {}
-        Err(_) => return server_error(),
     }
     let ack_ids = match ack_ids_from_body(&body) {
         Ok(ids) => ids,
         Err(()) => return server_error(),
     };
     let now = Utc::now();
-    if sqlx::query(machine_session::TOUCH_SQL)
-        .bind(now)
-        .bind(sid)
-        .execute(&pool)
+    if machine_session::touch_statement(sid, now)
+        .exec(&db)
         .await
         .is_err()
     {
         return server_error();
     }
-    if sqlx::query(DEV_MACHINE_TOUCH_SQL)
-        .bind(now)
-        .bind(dev_machine_id)
-        .execute(&pool)
+    if dev_machine_touch_statement(dev_machine_id, now)
+        .exec(&db)
         .await
         .is_err()
     {
@@ -1173,9 +1155,14 @@ mod tests {
     /// FX-RSES-02 machine SQL captures).
     #[test]
     fn dev_machine_touch_keeps_queryset_shape() {
+        use sea_orm::QueryTrait;
+        let now: DateTime<Utc> = "2026-01-02T03:04:05Z".parse().expect("ts");
         assert_eq!(
-            DEV_MACHINE_TOUCH_SQL,
-            "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1 WHERE \"dev_machine\".\"id\" = $2"
+            dev_machine_touch_statement(Uuid::nil(), now)
+                .build(sea_orm::DbBackend::Postgres)
+                .to_string(),
+            "UPDATE \"dev_machine\" SET \"last_seen_at\" = '2026-01-02 03:04:05.000000 +00:00' \
+             WHERE \"dev_machine\".\"id\" = '00000000-0000-0000-0000-000000000000'"
         );
     }
 

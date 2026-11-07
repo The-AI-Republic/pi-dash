@@ -66,15 +66,14 @@
 use std::future::Future;
 
 use chrono::{DateTime, Utc};
-use pidash_db::orm_tx::TxConn;
+use pidash_db::orm_tx::{into_sqlx, TxConn};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::config::RunnerSettings;
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
-use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
@@ -86,7 +85,7 @@ use pidash_services::runner_sessions::live_drains;
 use pidash_services::runner_sessions::pubsub as pubsub_svc;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{AgentRunStatus, TERMINAL_RUN_STATUSES};
+use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::{remove_runner_frame, revoke_frame};
 
 // ---------------------------------------------------------------------------
@@ -435,52 +434,26 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
         }
         // First-writer-wins lock with the expected-runner predicate; a
         // miss is `Ok(())` — Python ignores the `False`.
-        let lock_sql = finalize_kernel::lock_run_for_finalize_sql(true, false);
-        let mut lock = sqlx::query(&lock_sql).bind(run_id);
-        for status in TERMINAL_RUN_STATUSES {
-            lock = lock.bind(status.value());
-        }
-        let locked: Option<sqlx::postgres::PgRow> = lock
-            .bind(runner_id)
-            .fetch_optional(&mut **self.tx)
+        let conn = TxConn::new(self.tx);
+        let Some(locked) = revoke::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
             .await
-            .map_err(store_err)?;
-        let Some(row) = locked else {
+            .map_err(store_err)?
+        else {
             return Ok(());
         };
-        let executor_kind: String = row.try_get("executor_kind").map_err(store_err)?;
-        revoke::execute_revoke_finalize_update(
-            &mut **self.tx,
-            &values,
-            run_id,
-            stored_reason,
-            now_micros(),
-        )
-        .await
-        .map_err(store_err)?;
-        if executor_kind == AgentExecutorKind::CloudAgent.value() {
-            let exists = sqlx::query_scalar::<_, i32>(finalize_kernel::terminal_event_exists_sql())
-                .bind(run_id)
-                .bind("terminal")
-                .fetch_optional(&mut **self.tx)
-                .await
-                .map_err(store_err)?;
-            if exists.is_none() {
-                let max_seq =
-                    sqlx::query_scalar::<_, i32>(finalize_kernel::terminal_event_max_seq_sql())
-                        .bind(run_id)
-                        .fetch_optional(&mut **self.tx)
-                        .await
-                        .map_err(store_err)?;
-                let plan = finalize_kernel::plan_terminal_event(
-                    max_seq,
-                    AgentRunStatus::Cancelled,
-                    &finalize_kernel::finalize_error_code(&values),
-                );
-                finalize_kernel::insert_terminal_event(&mut **self.tx, run_id, plan, now_micros())
-                    .await
-                    .map_err(store_err)?;
-            }
+        revoke::execute_revoke_finalize_update(&conn, &values, run_id, now_micros())
+            .await
+            .map_err(store_err)?;
+        if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
+            revoke::append_terminal_event_once(
+                &conn,
+                run_id,
+                AgentRunStatus::Cancelled,
+                &finalize_kernel::finalize_error_code(&values),
+                now_micros(),
+            )
+            .await
+            .map_err(store_err)?;
         }
         // D-15's terminal-effects `on_commit` (registered in-tx, fires
         // first post-commit).
@@ -608,13 +581,10 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
     /// the re-select would self-deadlock on S2's row locks).
     async fn close_runner_session(&mut self, runner_id: Uuid) -> Result<(), RevokeError> {
         if self.atomic_effects {
-            let rows = sqlx::query(pubsub_svc::CLOSE_ACTIVE_SESSIONS_SQL)
-                .bind(runner_id)
-                .fetch_all(&mut **self.tx)
+            let sessions = pubsub_svc::active_runner_sessions(&TxConn::new(self.tx), runner_id)
                 .await
                 .map_err(store_err)?;
-            for row in rows {
-                let session = runner_session::runner_session_from_row(&row).map_err(store_err)?;
+            for session in sessions {
                 let sid = session.id.to_string();
                 pidash_services::domain::tokens::revoke_runner_session(
                     &pidash_db::orm_tx::TxConn::new(self.tx),
@@ -888,14 +858,12 @@ impl PubsubStore for PoolPubsub<'_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(pubsub_svc::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await?;
-        rows.iter()
-            .map(runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::from)
+        pubsub_svc::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| OutboxError::from(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
