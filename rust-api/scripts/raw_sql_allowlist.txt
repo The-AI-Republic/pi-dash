@@ -3,7 +3,6 @@
 # that migrates sites to SeaORM. Never raise one; mark a justified
 # exception with `// raw-sql: <reason>` instead.
 crates/api/src/app_notifications/mod.rs 15
-crates/api/src/auth_session/magic.rs 14
 
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
