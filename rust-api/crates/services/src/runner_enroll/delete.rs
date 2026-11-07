@@ -927,6 +927,39 @@ mod tests {
         fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
             self.calls.push(Call::Cleanup(runner_id));
         }
+
+        async fn dedicated_issue_ids(
+            &mut self,
+            _runner_id: Uuid,
+        ) -> Result<Vec<Uuid>, RevokeError> {
+            Ok(Vec::new())
+        }
+
+        async fn apply_lost_runner(
+            &mut self,
+            _issue_id: Uuid,
+            _reason: &str,
+        ) -> Result<crate::domain::issue_assignment::LostRunnerOutcome, RevokeError> {
+            Ok(crate::domain::issue_assignment::LostRunnerOutcome::default())
+        }
+
+        fn bounce_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _runner_name: Option<&str>,
+            _reason: &str,
+            _triggered_by: &str,
+        ) {
+        }
+
+        fn recreate_dedicated_after_commit(
+            &mut self,
+            _issue_id: Uuid,
+            _pod_id: Uuid,
+            _trigger: &str,
+            _creator: Option<Uuid>,
+        ) {
+        }
     }
 
     impl RunnerDeleteStore for Fake {

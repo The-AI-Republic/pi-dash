@@ -150,6 +150,22 @@ pub enum RevokeEffect {
     Handoff { runner_id: Uuid, run_id: Uuid },
     /// A pod drain.
     Drain { pod_id: Uuid },
+    /// A §13.1 ticking-issue bounce (`dedicated-runner-revoked` for
+    /// `fail_to_backlog`, `no-eligible-runner` for `fall_back` step 3).
+    Bounce {
+        issue_id: Uuid,
+        runner_name: Option<String>,
+        reason: String,
+        triggered_by: String,
+    },
+    /// A §13.1 `fall_back` step-2 recreate in the default pod
+    /// (Django `_create_and_dispatch_run` arg shape).
+    Recreate {
+        issue_id: Uuid,
+        pod_id: Uuid,
+        trigger: String,
+        creator: Option<Uuid>,
+    },
     /// A runner stream cleanup.
     Cleanup { runner_id: Uuid },
 }
@@ -246,12 +262,14 @@ pub enum RevokeFireError {
 /// member, `apply_inline` one `ApplyTerminalEffectsInline` member,
 /// `handoff` one `(runner_id, run_id)` handoff.
 #[allow(clippy::too_many_arguments)]
-pub async fn fire_revoke_bundle<E, EFut, A, AFut, H, HFut>(
+pub async fn fire_revoke_bundle<E, EFut, A, AFut, H, HFut, B, BFut, R, RFut>(
     ctx: &RevokeCtx,
     bundle: RevokeBundle,
     mut emit_terminal: E,
     mut apply_inline: A,
     mut handoff: H,
+    mut bounce: B,
+    mut recreate: R,
 ) -> Result<(), RevokeFireError>
 where
     E: FnMut(Uuid) -> EFut,
@@ -260,6 +278,10 @@ where
     AFut: Future<Output = ()>,
     H: FnMut(Uuid, Uuid) -> HFut,
     HFut: Future<Output = ()>,
+    B: FnMut(Uuid, Option<String>, String, String) -> BFut,
+    BFut: Future<Output = ()>,
+    R: FnMut(Uuid, Uuid, String, Option<Uuid>) -> RFut,
+    RFut: Future<Output = ()>,
 {
     for effect in bundle.effects {
         match effect {
@@ -281,6 +303,22 @@ where
                     .await
                     .map(|_| ())
                     .map_err(|_| RevokeFireError::Drain)?;
+            }
+            RevokeEffect::Bounce {
+                issue_id,
+                runner_name,
+                reason,
+                triggered_by,
+            } => {
+                bounce(issue_id, runner_name, reason, triggered_by).await;
+            }
+            RevokeEffect::Recreate {
+                issue_id,
+                pod_id,
+                trigger,
+                creator,
+            } => {
+                recreate(issue_id, pod_id, trigger, creator).await;
             }
             RevokeEffect::Cleanup { runner_id } => {
                 runner_outbox::schedule_stream_cleanup_for_runner(
@@ -507,6 +545,35 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
             .map_err(store_err)
     }
 
+    async fn dedicated_issue_ids(&mut self, runner_id: Uuid) -> Result<Vec<Uuid>, RevokeError> {
+        pidash_services::domain::issue_assignment::dedicated_issue_ids_for_runner(
+            &TxConn::new(self.tx),
+            runner_id,
+        )
+        .await
+        .map_err(store_err)
+    }
+
+    async fn apply_lost_runner(
+        &mut self,
+        issue_id: Uuid,
+        reason: &str,
+    ) -> Result<pidash_services::domain::issue_assignment::LostRunnerOutcome, RevokeError> {
+        // Django: `apply_lost_runner_policy(issue, reason=reason)` —
+        // system-attributed (`actor=None` → `get_agent_system_user()`).
+        let actor = pidash_services::domain::identity::agent_system_user_id(self.pool)
+            .await
+            .map_err(store_err)?;
+        pidash_services::domain::issue_assignment::apply_lost_runner_policy(
+            &TxConn::new(self.tx),
+            issue_id,
+            reason,
+            Some(actor),
+        )
+        .await
+        .map_err(store_err)
+    }
+
     fn complete_handoff_after_commit(&mut self, run_id: Uuid) {
         if let Some(runner_id) = self.current_runner {
             self.effects
@@ -520,6 +587,36 @@ impl RevokeStore for PoolRevokeStore<'_, '_, '_> {
 
     fn schedule_stream_cleanup_after_commit(&mut self, runner_id: Uuid) {
         self.effects.push(RevokeEffect::Cleanup { runner_id });
+    }
+
+    fn bounce_dedicated_after_commit(
+        &mut self,
+        issue_id: Uuid,
+        runner_name: Option<&str>,
+        reason: &str,
+        triggered_by: &str,
+    ) {
+        self.effects.push(RevokeEffect::Bounce {
+            issue_id,
+            runner_name: runner_name.map(str::to_owned),
+            reason: reason.to_owned(),
+            triggered_by: triggered_by.to_owned(),
+        });
+    }
+
+    fn recreate_dedicated_after_commit(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        trigger: &str,
+        creator: Option<Uuid>,
+    ) {
+        self.effects.push(RevokeEffect::Recreate {
+            issue_id,
+            pod_id,
+            trigger: trigger.to_owned(),
+            creator,
+        });
     }
 }
 
@@ -988,6 +1085,8 @@ mod tests {
                         .push(format!("handoff {runner_id} {run_id}"));
                 }
             },
+            |_, _, _, _| async {},
+            |_, _, _, _| async {},
         )
         .await;
         assert!(outcome.is_ok());
@@ -1050,6 +1149,8 @@ mod tests {
                         .push(format!("handoff {runner_id} {run_id}"));
                 }
             },
+            |_, _, _, _| async {},
+            |_, _, _, _| async {},
         )
         .await;
         assert!(outcome.is_ok());
@@ -1079,8 +1180,16 @@ mod tests {
                 },
             ],
         };
-        let outcome =
-            fire_revoke_bundle(&ctx, bundle, |_| async {}, |_| async {}, |_, _| async {}).await;
+        let outcome = fire_revoke_bundle(
+            &ctx,
+            bundle,
+            |_| async {},
+            |_| async {},
+            |_, _| async {},
+            |_, _, _, _| async {},
+            |_, _, _, _| async {},
+        )
+        .await;
         assert!(matches!(outcome, Err(RevokeFireError::Drain)));
     }
 
@@ -1097,8 +1206,16 @@ mod tests {
                 runner_id: Uuid::new_v4(),
             }],
         };
-        let outcome =
-            fire_revoke_bundle(&ctx, bundle, |_| async {}, |_| async {}, |_, _| async {}).await;
+        let outcome = fire_revoke_bundle(
+            &ctx,
+            bundle,
+            |_| async {},
+            |_| async {},
+            |_, _| async {},
+            |_, _, _, _| async {},
+            |_, _, _, _| async {},
+        )
+        .await;
         assert!(matches!(outcome, Err(RevokeFireError::Cleanup)));
     }
 }

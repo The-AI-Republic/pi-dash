@@ -4895,7 +4895,7 @@ async fn partial_update_inner(
             orm,
             pk,
             "pod changed",
-            user_id,
+            Some(user_id),
         )
         .await
         .map_err(|_| Denial::ServerError)?;
@@ -5044,7 +5044,7 @@ pub async fn put_update_issue(
             orm,
             pk,
             "pod changed",
-            user_id,
+            Some(user_id),
         )
         .await
         .map_err(|_| Denial::ServerError)?;

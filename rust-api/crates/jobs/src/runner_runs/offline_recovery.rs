@@ -66,6 +66,18 @@ pub const RELEASE_PINS_BEAT_NAME: &str = "runner-release-pins-on-offline-runners
 /// Beat entry for [`FAIL_RUNS_TASK`] (`celery.py`, every minute).
 pub const FAIL_RUNS_BEAT_NAME: &str = "runner-fail-runs-on-offline-runners";
 
+/// `runner.fail_dedicated_runs` (`tasks.py`, PDASHOSS01-297): fail
+/// dedicated runs whose runner is still unavailable after 12h (§11.3).
+pub const FAIL_DEDICATED_TASK: &str = "runner.fail_dedicated_runs";
+/// `runner.sweep_stranded_dedicated_runs` (`tasks.py`, PDASHOSS01-297):
+/// stranded sweep for dedicated pins (§12.1, §9.4).
+pub const SWEEP_STRANDED_TASK: &str = "runner.sweep_stranded_dedicated_runs";
+
+/// Beat entry for [`FAIL_DEDICATED_TASK`] (`celery.py`, every minute).
+pub const FAIL_DEDICATED_BEAT_NAME: &str = "runner-fail-dedicated-runs";
+/// Beat entry for [`SWEEP_STRANDED_TASK`] (`celery.py`, every minute).
+pub const SWEEP_STRANDED_BEAT_NAME: &str = "runner-sweep-stranded-dedicated-runs";
+
 // ---------------------------------------------------------------------------
 // Settings (keys, defaults, readers)
 // ---------------------------------------------------------------------------
@@ -543,6 +555,48 @@ pub async fn fail_runs_on_offline_runners(
 }
 
 // ---------------------------------------------------------------------------
+// Dedicated-runner bounds (§11.3, §12.1, PDASHOSS01-297)
+// ---------------------------------------------------------------------------
+
+/// `runner.fail_dedicated_runs`: fail dedicated runs whose runner is
+/// still unavailable after 12h, with `done_payload.stop_ticking` so
+/// the clock stops. Django's task body is the domain call only.
+pub async fn fail_dedicated_runs(pool: &PgPool) -> Result<u64, SweepError> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let failed = pidash_services::domain::issue_assignment::fail_dedicated_runs(&db)
+        .await
+        .map_err(|error| SweepError::Seam(error.to_string()))?;
+    if failed > 0 {
+        tracing::info!("fail_dedicated_runs failed {failed} dedicated run(s)");
+    }
+    Ok(failed)
+}
+
+/// `runner.sweep_stranded_dedicated_runs`: fail stranded dedicated
+/// pins with `dedicated_runner_not_permitted`. The sweep interval reuses
+/// Django's `RUNNER_OFFLINE_PIN_RELEASE_SECS` grace (300s default,
+/// floored at 300 when disabled).
+pub async fn sweep_stranded_dedicated_runs(pool: &PgPool) -> Result<u64, SweepError> {
+    let grace = pin_release_secs();
+    let sweep_interval_secs = if grace > 0 {
+        grace
+    } else {
+        DEFAULT_PIN_RELEASE_SECS
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let handled = pidash_services::domain::issue_assignment::sweep_stranded_dedicated_runs(
+        &db,
+        sweep_interval_secs,
+    )
+    .await
+    .map_err(|error| SweepError::Seam(error.to_string()))?;
+    if handled > 0 {
+        tracing::info!("sweep_stranded_dedicated_runs swept {handled} stranded run(s)");
+    }
+    Ok(handled)
+}
+
+// ---------------------------------------------------------------------------
 // Handlers + registration
 // ---------------------------------------------------------------------------
 
@@ -598,6 +652,40 @@ pub fn register_offline_recovery_tasks(
             }),
         );
     }
+    {
+        let pool = pool.clone();
+        registry.register(
+            FAIL_DEDICATED_TASK,
+            Arc::new(move |_job: JobRow| {
+                let pool = pool.clone();
+                let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
+                    Box::pin(async move {
+                        fail_dedicated_runs(&pool)
+                            .await
+                            .map(|_| Verdict::Ack)
+                            .map_err(|error| error.to_string())
+                    });
+                fut
+            }),
+        );
+    }
+    {
+        let pool = pool.clone();
+        registry.register(
+            SWEEP_STRANDED_TASK,
+            Arc::new(move |_job: JobRow| {
+                let pool = pool.clone();
+                let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
+                    Box::pin(async move {
+                        sweep_stranded_dedicated_runs(&pool)
+                            .await
+                            .map(|_| Verdict::Ack)
+                            .map_err(|error| error.to_string())
+                    });
+                fut
+            }),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -616,6 +704,8 @@ mod tests {
     fn task_names_match_django() {
         assert_eq!(RELEASE_PINS_TASK, "runner.release_pins_on_offline_runners");
         assert_eq!(FAIL_RUNS_TASK, "runner.fail_runs_on_offline_runners");
+        assert_eq!(FAIL_DEDICATED_TASK, "runner.fail_dedicated_runs");
+        assert_eq!(SWEEP_STRANDED_TASK, "runner.sweep_stranded_dedicated_runs");
         assert_eq!(
             RELEASE_PINS_BEAT_NAME,
             "runner-release-pins-on-offline-runners"

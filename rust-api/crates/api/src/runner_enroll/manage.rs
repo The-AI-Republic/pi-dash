@@ -149,6 +149,20 @@ pub const POD_MISSING_BODY: &str = r#"{"error":"pod does not exist or has been d
 pub const POD_OTHER_WORKSPACE_BODY: &str = r#"{"error":"pod is in a different workspace"}"#;
 /// Runner busy guard — 409 (`runners.py:414-417`).
 pub const RUNNER_BUSY_BODY: &str = r#"{"error":"runner has an in-flight or queued run; wait for it to finish or cancel it first","code":"runner_busy"}"#;
+
+/// Cross-project pod move with dedicated issues — 409 (PDASHOSS01-297,
+/// §13.1): I1/E2 would break. The issue list (max 20) rides along.
+pub fn runner_has_assigned_issues_body(issues: &[(Uuid, String)]) -> String {
+    serde_json::json!({
+        "error": "runner has assigned issues; clear their dedicated runner first",
+        "code": "runner_has_assigned_issues",
+        "issues": issues.iter().map(|(id, name)| serde_json::json!({
+            "id": id.to_string(),
+            "name": name,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
 /// `pod_dispatch` validation — 400 (`runners.py` #2903).
 pub const POD_DISPATCH_INVALID_BODY: &str =
     r#"{"error":"pod_dispatch must be one of: pinned_only, pod_member"}"#;
@@ -1604,6 +1618,34 @@ pub async fn runner_patch(
         if is_engine_runner(&runner) && target.project_id != hit.row.pod_project_id {
             return bad_request(ENGINE_PROJECT_FIXED_BODY);
         }
+        // Cross-project move (§13.1, §23.4): refused while any issue is
+        // dedicated to the runner — I1/E2 would break. Same-project
+        // moves follow the runner (§13.1): the assigned_pod update
+        // below tracks the move.
+        if manage_reads::is_real_move(&target.id, &runner.pod_id)
+            && target.project_id != hit.row.pod_project_id
+        {
+            use pidash_db::entity::issues;
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+            let conn = TxConn::new(&mut tx);
+            let dedicated: Vec<(Uuid, String)> = match issues::Entity::find()
+                .filter(issues::Column::AssignedRunnerId.eq(runner.id))
+                .select_only()
+                .column(issues::Column::Id)
+                .column(issues::Column::Name)
+                .order_by_asc(issues::Column::CreatedAt)
+                .limit(20u64)
+                .into_tuple()
+                .all(&conn)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => return server_error(),
+            };
+            if !dedicated.is_empty() {
+                return conflict(runner_has_assigned_issues_body(&dedicated).as_str());
+            }
+        }
         if manage_reads::is_real_move(&target.id, &runner.pod_id) {
             let busy = match manage_reads::runner_is_busy(&TxConn::new(&mut tx), runner.id).await {
                 Ok(busy) => busy,
@@ -1630,6 +1672,21 @@ pub async fn runner_patch(
         )
         .await
         .is_err()
+        {
+            return server_error();
+        }
+        // §13.1 follow: same-project moves pull the dedicated issues'
+        // assigned_pod to the new pod (the cross-project case is
+        // refused above).
+        if manage_reads::is_real_move(&target.id, &runner.pod_id)
+            && target.project_id == hit.row.pod_project_id
+            && pidash_services::domain::issue_assignment::follow_pod_move(
+                &TxConn::new(&mut tx),
+                runner.id,
+                target.id,
+            )
+            .await
+            .is_err()
         {
             return server_error();
         }

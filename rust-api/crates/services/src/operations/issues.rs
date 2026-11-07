@@ -3797,7 +3797,7 @@ pub async fn update(
             &deps.orm,
             outcome.issue.id,
             "pod changed",
-            actor_id,
+            Some(actor_id),
         )
         .await
         .map_err(|_| Error::ServerError)?;
