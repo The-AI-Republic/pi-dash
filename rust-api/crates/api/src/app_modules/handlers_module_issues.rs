@@ -94,6 +94,12 @@ use crate::app_issues::{
     multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
     FilteredSet, QueryMap,
 };
+use pidash_db::entity::{module_issues, modules, project_members, projects, workspaces};
+use sea_orm::sea_query::{Expr, Query as SeaQuery};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
+
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 pub(crate) use pidash_compat::response::{empty_response, json_response};
@@ -296,31 +302,135 @@ async fn module_issue_context(
 /// created — the same issue-list rule the cycle-issue list ports
 /// (`app_cycles::handlers_cycle_issues::guest_creator_scope`). Returns
 /// the creator to scope to.
+/// The fused single-statement form of the guest scope (one round trip):
+/// `EXISTS` active guest membership `AND NOT EXISTS` the view-all flag,
+/// decoded by name (`list_engine::query_built` precedent).
+#[derive(Debug, FromQueryResult)]
+struct GuestScopeRow {
+    scoped: bool,
+}
+
+/// The guest-scope predicate as one statement: an active role-5
+/// membership without the project `guest_view_all_features` flag.
+fn guest_scope_statement(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    let guest_membership = SeaQuery::select()
+        .from(project_members::Entity)
+        .columns([project_members::Column::Id])
+        .and_where(project_members::Column::MemberId.eq(*user_id))
+        .and_where(project_members::Column::ProjectId.eq(*project_id))
+        .and_where(project_members::Column::Role.eq(5))
+        .and_where(project_members::Column::IsActive.eq(true))
+        .and_where(project_members::Column::DeletedAt.is_null())
+        .and_where(
+            Expr::col((
+                project_members::Entity,
+                project_members::Column::WorkspaceId,
+            ))
+            .in_subquery(
+                SeaQuery::select()
+                    .from(workspaces::Entity)
+                    .columns([workspaces::Column::Id])
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .to_owned();
+    let view_all_flag = SeaQuery::select()
+        .from(projects::Entity)
+        .columns([projects::Column::Id])
+        .and_where(projects::Column::Id.eq(*project_id))
+        .and_where(projects::Column::GuestViewAllFeatures.eq(true))
+        .and_where(projects::Column::DeletedAt.is_null())
+        .and_where(
+            Expr::col((projects::Entity, projects::Column::WorkspaceId)).in_subquery(
+                SeaQuery::select()
+                    .from(workspaces::Entity)
+                    .columns([workspaces::Column::Id])
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .to_owned();
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(
+        Expr::exists(guest_membership).and(Expr::exists(view_all_flag).not()),
+        "scoped",
+    );
+    stmt
+}
+
+/// SeaORM twin of the bridge writes' 23503-only mapping: a dangling
+/// issue/module id violates the FK → 400; anything else 500s (the
+/// `ON CONFLICT DO NOTHING` insert cannot reach its own 23505).
+fn orm_fk_denial(error: sea_orm::DbErr) -> Denial {
+    match error {
+        sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(db_error)))
+        | sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(db_error)))
+            if db_error.code().as_deref() == Some("23503") =>
+        {
+            Denial::BadError("The payload is not valid".to_owned())
+        }
+        _ => Denial::ServerError,
+    }
+}
+
+/// One multi-row `INSERT ... ON CONFLICT DO NOTHING` over a values list
+/// (the old `gen_random_uuid()` + `unnest($N::uuid[])` twin, still one
+/// statement; `replace_members` precedent).
+async fn insert_bridge_rows(
+    pool: &sqlx::PgPool,
+    project_id: &uuid::Uuid,
+    workspace_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    module_ids: &[uuid::Uuid],
+    issue_ids: &[uuid::Uuid],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), Denial> {
+    let models: Vec<module_issues::ActiveModel> = issue_ids
+        .iter()
+        .zip(module_ids.iter())
+        .map(|(issue_id, module_id)| module_issues::ActiveModel {
+            id: sea_orm::Set(uuid::Uuid::new_v4()),
+            project_id: sea_orm::Set(*project_id),
+            workspace_id: sea_orm::Set(*workspace_id),
+            created_by_id: sea_orm::Set(Some(*user_id)),
+            updated_by_id: sea_orm::Set(Some(*user_id)),
+            module_id: sea_orm::Set(*module_id),
+            issue_id: sea_orm::Set(*issue_id),
+            created_at: sea_orm::Set(now.fixed_offset()),
+            updated_at: sea_orm::Set(now.fixed_offset()),
+            deleted_at: sea_orm::Set(None),
+        })
+        .collect();
+    module_issues::Entity::insert_many(models)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::new()
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(orm_fk_denial)?;
+    Ok(())
+}
+
 async fn guest_creator_scope(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Option<uuid::Uuid>, Denial> {
-    let (scoped,): (bool,) = sqlx::query_as(
-        r#"SELECT EXISTS (
-             SELECT 1 FROM project_members pm
-             JOIN workspaces w ON w.id = pm.workspace_id
-             WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-               AND pm.role = 5 AND pm.is_active AND pm.deleted_at IS NULL
-           ) AND NOT EXISTS (
-             SELECT 1 FROM projects p
-             JOIN workspaces w ON w.id = p.workspace_id
-             WHERE p.id = $2 AND w.slug = $3
-               AND p.guest_view_all_features AND p.deleted_at IS NULL
-           )"#,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = crate::app_issues::list_engine::query_built::<GuestScopeRow>(
+        &db,
+        &guest_scope_statement(slug, project_id, user_id),
     )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    .await?;
+    let scoped = rows.into_iter().next().is_some_and(|row| row.scoped);
     Ok(scoped.then_some(*user_id))
 }
 
@@ -1275,13 +1385,18 @@ async fn project_workspace_id(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    // By id alone — no slug or soft-delete filter, exactly as the old
+    // statement (a miss is the `DoesNotExist` 404).
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// One `issue_activity.delay(...)` kwargs map for a module membership
@@ -1460,26 +1575,17 @@ async fn create_module_issues(
     // `IntegrityError` → 400 `The payload is not valid`.
     if !issue_ids.is_empty() {
         let now = chrono::Utc::now();
-        sqlx::query(
-            r#"INSERT INTO module_issues
-                   (id, project_id, workspace_id, created_by_id, updated_by_id, module_id, issue_id, created_at, updated_at)
-                   SELECT gen_random_uuid(), $1, $2, $3, $3, $4, unnest($5::uuid[]), $6, $6
-                   ON CONFLICT DO NOTHING"#,
+        let modules = vec![module_id; issue_ids.len()];
+        insert_bridge_rows(
+            &pool,
+            &project_id,
+            &workspace_id,
+            &user_id,
+            &modules,
+            &issue_ids,
+            now,
         )
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(module_id)
-        .bind(&issue_ids)
-        .bind(now)
-        .execute(&pool)
-        .await
-        .map_err(|error| match error {
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
-                Denial::BadError("The payload is not valid".to_owned())
-            }
-            _ => Denial::ServerError,
-        })?;
+        .await?;
     }
     // Bulk activity: one publish per *input* issue, even for already-linked
     // rows (`:248-261` iterates `issues`, not the created records).
@@ -1665,26 +1771,17 @@ async fn insert_module_bridges(
         return Ok(());
     }
     let now = chrono::Utc::now();
-    sqlx::query(
-        r#"INSERT INTO module_issues
-               (id, project_id, workspace_id, created_by_id, updated_by_id, module_id, issue_id, created_at, updated_at)
-               SELECT gen_random_uuid(), $1, $2, $3, $3, unnest($4::uuid[]), $5, $6, $6
-               ON CONFLICT DO NOTHING"#,
+    let issues = vec![*issue_id; module_ids.len()];
+    insert_bridge_rows(
+        pool,
+        project_id,
+        workspace_id,
+        user_id,
+        module_ids,
+        &issues,
+        now,
     )
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(module_ids)
-    .bind(issue_id)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|error| match error {
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
-            Denial::BadError("The payload is not valid".to_owned())
-        }
-        _ => Denial::ServerError,
-    })?;
+    .await?;
     Ok(())
 }
 
@@ -1700,30 +1797,38 @@ async fn bridge_module_name(
     module_id: &uuid::Uuid,
     issue_id: &uuid::Uuid,
 ) -> Result<Option<Value>, Denial> {
-    let bridge: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT mi.id FROM module_issues mi
-           JOIN workspaces w ON w.id = mi.workspace_id
-           WHERE w.slug = $1 AND mi.project_id = $2 AND mi.module_id = $3 AND mi.issue_id = $4
-           AND mi.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(module_id)
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let bridge: Option<uuid::Uuid> = module_issues::Entity::find()
+        .select_only()
+        .column(module_issues::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            module_issues::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(module_issues::Column::ProjectId.eq(*project_id))
+        .filter(module_issues::Column::ModuleId.eq(*module_id))
+        .filter(module_issues::Column::IssueId.eq(*issue_id))
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if bridge.is_none() {
         return Ok(None);
     }
-    let module_row: Option<(Option<String>,)> =
-        sqlx::query_as(r#"SELECT m.name FROM modules m WHERE m.id = $1"#)
-            .bind(module_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    // No soft-delete filter: the forward-FK fetch sees soft-deleted
+    // modules (documented above).
+    let module_row: Option<Option<String>> = modules::Entity::find()
+        .select_only()
+        .column(modules::Column::Name)
+        .filter(modules::Column::Id.eq(*module_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match module_row {
-        Some((name,)) => Ok(Some(name.map(Value::String).unwrap_or(Value::Null))),
+        Some(name) => Ok(Some(name.map(Value::String).unwrap_or(Value::Null))),
         None => Err(Denial::NotFound),
     }
 }
@@ -1778,19 +1883,30 @@ async fn detach_module_bridge(
     kwargs.insert("notification".to_owned(), Value::Bool(true));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     super::handlers_modules::enqueue_task(pool, tasks::ISSUE_ACTIVITY_TASK, kwargs).await;
-    sqlx::query(
-        r#"UPDATE module_issues SET deleted_at = now()
-           WHERE project_id = $1 AND module_id = $2 AND issue_id = $3
-             AND workspace_id IN (SELECT id FROM workspaces WHERE slug = $4)
-             AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(module_id)
-    .bind(issue_id)
-    .bind(slug)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `module_id` is `Option` (`None` on the null-item removal): binding
+    // NULL matches nothing under `= NULL`, and the `NOT NULL` column
+    // cannot match `IS NULL` either — either spelling answers the same.
+    let workspace_scope = SeaQuery::select()
+        .from(workspaces::Entity)
+        .columns([workspaces::Column::Id])
+        .and_where(workspaces::Column::Slug.eq(slug))
+        .to_owned();
+    module_issues::Entity::update_many()
+        .col_expr(
+            module_issues::Column::DeletedAt,
+            Expr::value(chrono::Utc::now().fixed_offset()),
+        )
+        .filter(module_issues::Column::ProjectId.eq(*project_id))
+        .filter(module_issues::Column::ModuleId.eq(module_id))
+        .filter(module_issues::Column::IssueId.eq(*issue_id))
+        .filter(
+            Expr::col((module_issues::Entity, module_issues::Column::WorkspaceId))
+                .in_subquery(workspace_scope),
+        )
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1832,6 +1948,39 @@ async fn module_issue_destroy(
     )
     .await?;
     Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+#[cfg(test)]
+mod module_issues1_seaorm_tests {
+    use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+
+    #[test]
+    fn guest_scope_statement_pins_fused_exists() {
+        let pid = uuid::Uuid::nil();
+        let uid = uuid::Uuid::nil();
+        let (sql, _values) = guest_scope_statement("acme", &pid, &uid).build(PostgresQueryBuilder);
+        assert!(sql.contains("EXISTS"), "{sql}");
+        assert!(sql.contains(r#""project_members""#), "{sql}");
+        // sea-query binds values as placeholders in this rendering.
+        assert!(sql.contains(r#""project_members"."role" = $"#), "{sql}");
+        assert!(
+            sql.contains(r#""project_members"."is_active" = $"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""project_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""projects""#), "{sql}");
+        assert!(
+            sql.contains(r#""projects"."guest_view_all_features" = $"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains("NOT EXISTS"), "{sql}");
+        assert!(sql.contains(r#"AS "scoped""#), "{sql}");
+    }
 }
 
 #[cfg(test)]
