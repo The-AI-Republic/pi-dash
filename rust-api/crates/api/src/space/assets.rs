@@ -206,7 +206,7 @@ async fn require_user(
 
 struct Board {
     workspace_id: Uuid,
-    project_id: Uuid,
+    project_id: Option<Uuid>,
 }
 
 async fn board_first(
@@ -226,8 +226,21 @@ async fn board_first(
     let row = query.one(&db).await?;
     Ok(row.map(|model| Board {
         workspace_id: model.workspace_id,
-        project_id: model.project_id.unwrap_or_else(Uuid::nil),
+        project_id: model.project_id,
     }))
+}
+
+/// Scoped `project_id` conjunct: Django's `project_id=None` compiles to
+/// `IS NULL`, but SeaORM's `.eq(None)` renders `= NULL` (matches nothing),
+/// so the NULL case must go through `is_null()`.
+fn filter_nullable_project<Q>(query: Q, project_id: Option<Uuid>) -> Q
+where
+    Q: QueryFilter,
+{
+    match project_id {
+        Some(id) => query.filter(file_assets::Column::ProjectId.eq(id)),
+        None => query.filter(file_assets::Column::ProjectId.is_null()),
+    }
 }
 
 struct AssetRow {
@@ -616,7 +629,7 @@ async fn post_asset(
         created_by_id: Set(Some(actor.id)),
         updated_by_id: Set(None),
         entity_type: Set(Some(entity_type.to_owned())),
-        project_id: Set(Some(board.project_id)),
+        project_id: Set(board.project_id),
         comment_id: Set(comment_id),
         is_uploaded: Set(false),
         is_deleted: Set(false),
@@ -635,7 +648,6 @@ async fn post_asset(
         return server_error();
     }
     let slug_model = match workspaces::Entity::find_by_id(board.workspace_id)
-        .filter(workspaces::Column::DeletedAt.is_null())
         .one(&db)
         .await
     {
@@ -678,25 +690,28 @@ async fn post_asset(
 /// handler binds. See `post_asset` above.
 /// `FileAsset.asset_url` (`db/models/asset.py:80-98`): `issue_id` is
 /// always `None` here (POST never sets it), rendered as `None` exactly
-/// like the f-string.
+/// like the f-string; likewise a NULL `project_id` renders as `None`.
 fn asset_url_for(
     entity_type: &str,
     workspace_slug: &str,
-    project_id: &Uuid,
+    project_id: &Option<Uuid>,
     asset_id: &Uuid,
 ) -> Value {
+    let project = project_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "None".to_string());
     match entity_type {
         "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
             Value::String(format!("/api/assets/v2/static/{asset_id}/"))
         }
         "ISSUE_ATTACHMENT" => Value::String(format!(
-            "/api/assets/v2/workspaces/{workspace_slug}/projects/{project_id}/issues/None/attachments/{asset_id}/"
+            "/api/assets/v2/workspaces/{workspace_slug}/projects/{project}/issues/None/attachments/{asset_id}/"
         )),
         "ISSUE_DESCRIPTION"
         | "COMMENT_DESCRIPTION"
         | "PAGE_DESCRIPTION"
         | "DRAFT_ISSUE_DESCRIPTION" => Value::String(format!(
-            "/api/assets/v2/workspaces/{workspace_slug}/projects/{project_id}/{asset_id}/"
+            "/api/assets/v2/workspaces/{workspace_slug}/projects/{project}/{asset_id}/"
         )),
         _ => Value::Null,
     }
@@ -820,13 +835,15 @@ async fn delete_asset(
         Err(_) => return page_not_found(),
     };
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let exists = match file_assets::Entity::find()
-        .filter(file_assets::Column::Id.eq(pk))
-        .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
-        .filter(file_assets::Column::ProjectId.eq(board.project_id))
-        .filter(file_assets::Column::DeletedAt.is_null())
-        .one(&db)
-        .await
+    let exists = match filter_nullable_project(
+        file_assets::Entity::find()
+            .filter(file_assets::Column::Id.eq(pk))
+            .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id)),
+        board.project_id,
+    )
+    .filter(file_assets::Column::DeletedAt.is_null())
+    .one(&db)
+    .await
     {
         Ok(model) => model,
         Err(_) => return server_error(),
@@ -970,14 +987,16 @@ async fn bulk_asset(
         }
     }
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let rows = match file_assets::Entity::find()
-        .filter(file_assets::Column::Id.is_in(asset_ids.clone()))
-        .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
-        .filter(file_assets::Column::ProjectId.eq(board.project_id))
-        .filter(file_assets::Column::DeletedAt.is_null())
-        .order_by_desc(file_assets::Column::CreatedAt)
-        .all(&db)
-        .await
+    let rows = match filter_nullable_project(
+        file_assets::Entity::find()
+            .filter(file_assets::Column::Id.is_in(asset_ids.clone()))
+            .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id)),
+        board.project_id,
+    )
+    .filter(file_assets::Column::DeletedAt.is_null())
+    .order_by_desc(file_assets::Column::CreatedAt)
+    .all(&db)
+    .await
     {
         Ok(rows) => rows,
         Err(_) => return server_error(),
@@ -989,18 +1008,20 @@ async fn bulk_asset(
     };
     let first = asset_row_from_model(first_model.clone());
     if first.entity_type.as_deref() == Some("COMMENT_DESCRIPTION")
-        && file_assets::Entity::update_many()
-            .col_expr(
-                file_assets::Column::CommentId,
-                sea_orm::sea_query::Expr::value(Some(entity_id)),
-            )
-            .filter(file_assets::Column::Id.is_in(asset_ids))
-            .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id))
-            .filter(file_assets::Column::ProjectId.eq(board.project_id))
-            .filter(file_assets::Column::DeletedAt.is_null())
-            .exec(&db)
-            .await
-            .is_err()
+        && filter_nullable_project(
+            file_assets::Entity::update_many()
+                .col_expr(
+                    file_assets::Column::CommentId,
+                    sea_orm::sea_query::Expr::value(Some(entity_id)),
+                )
+                .filter(file_assets::Column::Id.is_in(asset_ids))
+                .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id)),
+            board.project_id,
+        )
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .is_err()
     {
         return server_error();
     }
@@ -2456,5 +2477,244 @@ mod tests {
             .build(sea_orm::DbBackend::Postgres)
             .to_string();
         assert!(bulk_sql.contains("IN"));
+    }
+
+    #[test]
+    fn asset_url_renders_none_for_null_project() {
+        // Django's f-string renders a NULL `project_id` as `None`
+        // (`db/models/asset.py:80-98`); a nil-UUID/`None` collapse would
+        // change the response body (run-2 review, defect 2).
+        let asset_id = uuid::Uuid::nil();
+        let description = asset_url_for("ISSUE_DESCRIPTION", "ws", &None, &asset_id);
+        assert_eq!(
+            description.as_str().unwrap(),
+            "/api/assets/v2/workspaces/ws/projects/None/00000000-0000-0000-0000-000000000000/"
+        );
+        let attachment = asset_url_for("ISSUE_ATTACHMENT", "ws", &None, &asset_id);
+        assert_eq!(
+            attachment.as_str().unwrap(),
+            "/api/assets/v2/workspaces/ws/projects/None/issues/None/attachments/00000000-0000-0000-0000-000000000000/"
+        );
+        let project = uuid::Uuid::nil();
+        let scoped = asset_url_for("COMMENT_DESCRIPTION", "ws", &Some(project), &asset_id);
+        assert_eq!(
+            scoped.as_str().unwrap(),
+            "/api/assets/v2/workspaces/ws/projects/00000000-0000-0000-0000-000000000000/00000000-0000-0000-0000-000000000000/"
+        );
+    }
+
+    #[tokio::test]
+    async fn board_first_null_project_live_db() {
+        // Regression for run-2 defect 2: a deploy board with NULL
+        // `project_id` must read back as `None`, store SQL NULL on the
+        // asset insert, and match the scoped `IS NULL` filter — never a
+        // nil UUID. Live-db, gated like the other DB tests.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let stamp = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        let board_id = uuid::Uuid::new_v4();
+        let asset_id = uuid::Uuid::new_v4();
+        let anchor = format!("nullproj-{stamp}");
+        sqlx::query(
+            "INSERT INTO users (id, password, username, first_name, last_name, avatar, \
+             date_joined, created_at, updated_at, last_location, created_location, \
+             is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, token, user_timezone, \
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
+             is_bot, display_name, is_email_valid, is_password_reset_required) \
+             VALUES ($1, 'x', $2, 'x', 'x', '', NOW(), NOW(), NOW(), '', '', false, false, \
+             false, true, false, false, false, 't', 'UTC', '', '', '', '', false, 'x', false, false)",
+        )
+        .bind(user_id)
+        .bind(format!("nullproj-{stamp}"))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, owner_id, \
+             timezone, background_color) VALUES ($1, NOW(), NOW(), 'x', $2, $3, 'UTC', '#000')",
+        )
+        .bind(workspace_id)
+        .bind(format!("ws-nullproj-{stamp}"))
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO deploy_boards (id, created_at, updated_at, anchor, is_comments_enabled, \
+             is_reactions_enabled, is_votes_enabled, view_props, workspace_id, project_id, \
+             is_activity_enabled, is_disabled, entity_name) \
+             VALUES ($1, NOW(), NOW(), $2, false, false, false, '{}', $3, NULL, true, false, \
+             'project')",
+        )
+        .bind(board_id)
+        .bind(&anchor)
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed board");
+        // Unscoped first-read: NULL survives as None.
+        let board = board_first(&pool, false, &anchor)
+            .await
+            .expect("board query")
+            .expect("board found");
+        assert_eq!(board.workspace_id, workspace_id);
+        assert_eq!(board.project_id, None, "NULL must stay None, not nil UUID");
+        // Scoped read takes the same path.
+        let scoped = board_first(&pool, true, &anchor)
+            .await
+            .expect("scoped board query")
+            .expect("scoped board found");
+        assert_eq!(scoped.project_id, None);
+        // Insert exactly like `post_asset`: SQL NULL lands, not nil UUID.
+        let now = chrono::Utc::now();
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        file_assets::ActiveModel {
+            id: sea_orm::Set(asset_id),
+            created_at: sea_orm::Set(now.fixed_offset()),
+            updated_at: sea_orm::Set(now.fixed_offset()),
+            attributes: sea_orm::Set(serde_json::json!({})),
+            asset: sea_orm::Set(format!("{workspace_id}/{asset_id}-x")),
+            size: sea_orm::Set(0.0),
+            workspace_id: sea_orm::Set(Some(board.workspace_id)),
+            created_by_id: sea_orm::Set(Some(user_id)),
+            updated_by_id: sea_orm::Set(None),
+            entity_type: sea_orm::Set(Some("ISSUE_DESCRIPTION".to_owned())),
+            project_id: sea_orm::Set(board.project_id),
+            comment_id: sea_orm::Set(None),
+            is_uploaded: sea_orm::Set(false),
+            is_deleted: sea_orm::Set(false),
+            is_archived: sea_orm::Set(false),
+            storage_metadata: sea_orm::Set(Some(serde_json::json!({}))),
+            deleted_at: sea_orm::Set(None),
+            external_id: sea_orm::Set(None),
+            external_source: sea_orm::Set(None),
+            issue_id: sea_orm::Set(None),
+            page_id: sea_orm::Set(None),
+            user_id: sea_orm::Set(None),
+            draft_issue_id: sea_orm::Set(None),
+            entity_identifier: sea_orm::Set(None),
+        }
+        .insert(&db)
+        .await
+        .expect("insert asset with NULL project");
+        let is_null: bool =
+            sqlx::query_scalar("SELECT project_id IS NULL FROM file_assets WHERE id = $1")
+                .bind(asset_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read back project_id");
+        assert!(is_null, "asset must store SQL NULL, not a UUID");
+        // Scoped find with the NULL board matches (`IS NULL`, Django's
+        // `project_id=None`), exactly like the delete/bulk paths.
+        let found = filter_nullable_project(
+            file_assets::Entity::find()
+                .filter(file_assets::Column::Id.eq(asset_id))
+                .filter(file_assets::Column::WorkspaceId.eq(board.workspace_id)),
+            board.project_id,
+        )
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .expect("scoped find");
+        assert!(found.is_some(), "IS NULL filter must match the NULL row");
+        // The NULL filter renders `IS NULL`, never `= NULL` or nil UUID.
+        let sql = filter_nullable_project(file_assets::Entity::find(), board.project_id)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.to_lowercase().contains("is null"));
+        assert!(!sql.to_lowercase().contains("= null"));
+        assert!(!sql.contains("00000000-0000-0000-0000-000000000000"));
+        sqlx::query("DELETE FROM file_assets WHERE id = $1")
+            .bind(asset_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup asset");
+        sqlx::query("DELETE FROM deploy_boards WHERE id = $1")
+            .bind(board_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup board");
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
+    }
+
+    #[tokio::test]
+    async fn slug_lookup_ignores_soft_deleted_workspace_live_db() {
+        // Run-2 drift 3: the POST slug hop must not filter soft-deleted
+        // workspaces (pre-PR SQL had no guard). A soft-deleted workspace
+        // still resolves its slug. Live-db, gated.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let stamp = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, password, username, first_name, last_name, avatar, \
+             date_joined, created_at, updated_at, last_location, created_location, \
+             is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, token, user_timezone, \
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
+             is_bot, display_name, is_email_valid, is_password_reset_required) \
+             VALUES ($1, 'x', $2, 'x', 'x', '', NOW(), NOW(), NOW(), '', '', false, false, \
+             false, true, false, false, false, 't', 'UTC', '', '', '', '', false, 'x', false, false)",
+        )
+        .bind(user_id)
+        .bind(format!("slug-{stamp}"))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, owner_id, \
+             timezone, background_color, deleted_at) \
+             VALUES ($1, NOW(), NOW(), 'x', $2, $3, 'UTC', '#000', NOW())",
+        )
+        .bind(workspace_id)
+        .bind(format!("ws-slug-{stamp}"))
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed soft-deleted workspace");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        // The production call shape (`find_by_id` with no guard).
+        let workspace = workspaces::Entity::find_by_id(workspace_id)
+            .one(&db)
+            .await
+            .expect("slug query");
+        assert_eq!(
+            workspace.map(|ws| ws.slug),
+            Some(format!("ws-slug-{stamp}")),
+            "soft-deleted workspace must still resolve its slug"
+        );
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
     }
 }

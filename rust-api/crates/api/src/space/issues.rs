@@ -2540,4 +2540,44 @@ mod tests {
         assert_eq!(shape_retrieve_value("vote_items", items.clone()), items);
         assert_eq!(shape_retrieve_value("label_ids", Value::Null), Value::Null);
     }
+
+    #[test]
+    fn converted_lookup_shapes_pin_filters_and_join() {
+        use sea_orm::{EntityTrait, QueryFilter, QueryTrait};
+        // `request_tz` user lookup: by id alone (`users` has no
+        // `deleted_at` column, so no soft-delete guard is expressible).
+        let user_sql = users::Entity::find_by_id(uuid::Uuid::nil())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(user_sql.contains("users"));
+        assert!(!user_sql.to_lowercase().contains("deleted_at"));
+        // `fetch_workspace_slug` / `load_list_board` liveness: the
+        // forward-FK hop through the soft-deletion manager.
+        let slug_sql = workspaces::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(slug_sql.contains("workspaces"));
+        assert!(slug_sql.to_lowercase().contains("deleted_at"));
+        // `load_retrieve_board`: anchor + both soft-delete guards + the
+        // inner join onto workspaces (the `workspace.slug` hop).
+        let board_sql = deploy_boards::Entity::find()
+            .filter(deploy_boards::Column::Anchor.eq("a"))
+            .filter(deploy_boards::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .join_as(
+                sea_orm::JoinType::InnerJoin,
+                deploy_boards::Entity::belongs_to(workspaces::Entity)
+                    .from(deploy_boards::Column::WorkspaceId)
+                    .to(workspaces::Column::Id)
+                    .into(),
+                "workspaces",
+            )
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(board_sql.contains("deploy_boards"));
+        assert!(board_sql.to_lowercase().contains("join"));
+        assert!(board_sql.to_lowercase().contains("workspaces"));
+        assert!(board_sql.to_lowercase().contains("deleted_at"));
+    }
 }

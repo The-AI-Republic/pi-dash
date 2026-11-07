@@ -1467,4 +1467,16 @@ mod tests {
             .expect("serve");
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
+
+    #[test]
+    fn converted_user_lookup_shape_pins_by_id() {
+        use sea_orm::{EntityTrait, QueryTrait};
+        // `request_tz` user lookup: by id alone (`users` has no
+        // `deleted_at` column, so no soft-delete guard is expressible).
+        let sql = users::Entity::find_by_id(uuid::Uuid::nil())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("users"));
+        assert!(!sql.to_lowercase().contains("deleted_at"));
+    }
 }
