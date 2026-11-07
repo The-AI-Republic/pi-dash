@@ -148,7 +148,7 @@ pub use comment::{
 pub use identity::{fetch_asset, fetch_profile, fetch_user, AssetRow, ProfileRow, UserShape};
 pub use issues::{
     comment_url, fetch_blocker_summary, fetch_workpad, fetch_workpad_by_id, resolve_workpad_state,
-    workpad_stripped,
+    workpad_stripped, WorkpadDbRow,
 };
 pub use pr_links::{
     fetch_pr_detail_row, fetch_pr_link_by_id, fetch_pr_link_list, PR_DETAIL_SQL, PR_LINK_BY_ID_SQL,
@@ -158,8 +158,8 @@ pub use projects::{fetch_project_rows, fetch_state_columns};
 pub use relations::fetch_live_relation_ids;
 pub use render::{render_state, state_row_from, StateRow, StateRowTuple};
 pub use search::{
-    search_issues, search_issues_sql, IssueSearchParams, IssueSearchSort, IssueSearchStatus,
-    FULL_ROW_COLUMNS,
+    search_issues, search_issues_statement, IssueSearchParams, IssueSearchRow, IssueSearchSort,
+    IssueSearchStatus,
 };
 pub use work_items::{
     decode_comment, decode_issue, expand_estimate_point, expand_parent, expand_project,
@@ -168,8 +168,9 @@ pub use work_items::{
     fetch_comment_list_rows, fetch_expanded_labels, fetch_grouped_rows, fetch_issue_for_write,
     fetch_label_ids, fetch_project_for_write, render_decoded, render_write_response,
     requested_names, row_datetime, row_datetime_opt, row_string, row_string_opt, row_uuid,
-    row_uuid_opt, BlockerRows, DecodedComment, DecodedIssue, OwnedAssigneeRow, OwnedRelationItem,
-    RenderRequest, WriteProject, COMMENT_COLUMNS, ISSUE_EXTRA_COLS, ISSUE_SELECT_COLS,
+    row_uuid_opt, BlockerRows, CommentDbRow, DecodedComment, DecodedIssue, OwnedAssigneeRow,
+    OwnedRelationItem, RenderRequest, WriteProject, COMMENT_COLUMNS, ISSUE_EXTRA_COLS,
+    ISSUE_SELECT_COLS,
 };
 pub use workspace::{workspace_of, workspace_row, workspace_slug};
 

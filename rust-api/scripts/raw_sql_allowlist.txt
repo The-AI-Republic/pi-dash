@@ -30,7 +30,6 @@ crates/jobs/src/tasks_export/analytic.rs 9
 crates/services/src/dispatch/execution.rs 7
 crates/services/src/read/pr_links.rs 3
 crates/services/src/read/projects.rs 1
-crates/services/src/read/search.rs 1
 crates/services/src/runner_runs/chat.rs 2
 crates/services/src/runner_runs/finalization.rs 1
 

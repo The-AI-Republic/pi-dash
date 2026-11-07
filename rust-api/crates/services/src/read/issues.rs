@@ -4,14 +4,17 @@
 //! PIDASHCONV-1543); the handlers call these and map [`Error`](super::Error)
 //! onto their denial type.
 //!
-//! SeaORM conversion (READ-1, Part 2): scalar and transactional reads
-//! go through entities; the `PgRow` workpad fetchers stay raw until the
-//! V1WI caller migrations land (Group B).
+//! SeaORM conversion (READ-1): scalar, transactional and workpad
+//! reads go through entities with typed rows.
 
 use chrono::{DateTime, Utc};
 use pidash_db::entity::{issues, projects, states, workspaces};
 use pidash_db::orm_tx::TxConn;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -134,6 +137,45 @@ pub async fn resolve_workpad_state(
     }
 }
 
+/// The two columns the workpad GET reads: the issue's workpad body
+/// and its `updated_at` (decoded by name; `updated_at` keeps the
+/// `DateTime<Utc>` instant the old `PgRow` read produced).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct WorkpadDbRow {
+    pub workpad: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The scoped workpad statement (`views/issue.py:3275-3279`): the
+/// live, non-triage, unarchived, non-draft issue in the slug's
+/// project. One statement, same join and scope as the old hand SQL
+/// (LEFT join on `states`, INNER on `projects`/`workspaces`, the
+/// null-safe triage exclusion).
+fn workpad_select(
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((states::Entity, states::Column::Group))
+                .is_null()
+                .or(Expr::col((states::Entity, states::Column::Group)).ne("triage")),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::Id.eq(*issue_id))
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .select_only()
+        .columns([issues::Column::Workpad, issues::Column::UpdatedAt])
+}
+
 /// `GET .../workpad/` (`views/issue.py:3275-3279`): the scoped
 /// workpad read — live, non-triage, unarchived, non-draft issue in the
 /// slug's project. Moved from `v1_work_items::handlers_relations`
@@ -143,29 +185,13 @@ pub async fn fetch_workpad(
     slug: &str,
     project_id: &Uuid,
     issue_id: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Error> {
-    // raw-sql: Group B — returns PgRow for handlers_relations; conversion to a typed row requires the V1WI caller migration (PR 2958). Keeps byte-identical join/scope until then.
-    let row = sqlx::query(
-        r#"SELECT "issues"."workpad", "issues"."updated_at"
-           FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
-           WHERE ("issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "workspaces"."slug" = $1
-             AND "issues"."project_id" = $2
-             AND "issues"."id" = $3)"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("workpad-get", error))?;
+) -> Result<Option<WorkpadDbRow>, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workpad_select(slug, project_id, issue_id)
+        .into_model::<WorkpadDbRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("workpad-get", error))?;
     Ok(row)
 }
 
@@ -178,15 +204,15 @@ pub async fn fetch_workpad(
 pub async fn fetch_workpad_by_id(
     pool: &PgPool,
     issue_id: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Error> {
-    // raw-sql: Group B — returns PgRow for MCP/workpad callers; typed-row conversion requires caller migration.
-    let row = sqlx::query(
-        r#"SELECT "issues"."workpad", "issues"."updated_at" FROM "issues" WHERE "issues"."id" = $1"#,
-    )
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("workpad-by-id", error))?;
+) -> Result<Option<WorkpadDbRow>, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = issues::Entity::find_by_id(*issue_id)
+        .select_only()
+        .columns([issues::Column::Workpad, issues::Column::UpdatedAt])
+        .into_model::<WorkpadDbRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("workpad-by-id", error))?;
     Ok(row)
 }
 
@@ -224,6 +250,36 @@ mod tests {
     use sea_orm::{DbBackend, QueryTrait};
 
     use super::*;
+
+    #[test]
+    fn workpad_statement_keeps_scoped_join_shape() {
+        let sql = workpad_select("acme", &Uuid::nil(), &Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with(r#"SELECT "issues"."workpad", "issues"."updated_at" FROM "issues""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"JOIN "projects" ON "issues"."project_id" = "projects"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#""issues"."archived_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""issues"."is_draft" = FALSE"#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = "#), "{sql}");
+    }
 
     #[test]
     fn workpad_state_queries_scope_to_live_non_triage() {
@@ -421,7 +477,6 @@ mod live {
 
     #[tokio::test]
     async fn workpad_reads_hit_and_miss() {
-        use sqlx::Row as _;
         let Some(db) = pool().await else { return };
         let world = seed_world(&db).await;
         let row = fetch_workpad(
@@ -433,10 +488,8 @@ mod live {
         .await
         .expect("scoped hit")
         .expect("row");
-        let body: String = row.try_get("workpad").expect("workpad");
-        assert_eq!(body, "");
-        let _updated: chrono::DateTime<chrono::Utc> =
-            row.try_get("updated_at").expect("updated_at");
+        assert_eq!(row.workpad, "");
+        let _updated: chrono::DateTime<chrono::Utc> = row.updated_at;
         let missing = fetch_workpad(
             &db,
             &world.workspace_slug,
@@ -450,8 +503,7 @@ mod live {
             .await
             .expect("by-id hit")
             .expect("row");
-        let body: String = row.try_get("workpad").expect("workpad");
-        assert_eq!(body, "");
+        assert_eq!(row.workpad, "");
         let missing = fetch_workpad_by_id(&db, &Uuid::new_v4())
             .await
             .expect("by-id miss");

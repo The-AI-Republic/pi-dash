@@ -223,7 +223,7 @@ pub mod read {
     pub use pidash_services::read::requested_names;
     pub use pidash_services::read::resolve_workpad_state;
     pub use pidash_services::read::search_issues;
-    pub use pidash_services::read::search_issues_sql;
+    pub use pidash_services::read::search_issues_statement;
     pub use pidash_services::read::state_row_from;
     pub use pidash_services::read::workpad_stripped;
     pub use pidash_services::read::workspace_of;
@@ -232,6 +232,7 @@ pub mod read {
     pub use pidash_services::read::ActorDetailView;
     pub use pidash_services::read::AssetRow;
     pub use pidash_services::read::BlockerRows;
+    pub use pidash_services::read::CommentDbRow;
     pub use pidash_services::read::CommentReactionView;
     pub use pidash_services::read::CommentRow;
     pub use pidash_services::read::CommentView;
@@ -241,6 +242,7 @@ pub mod read {
     pub use pidash_services::read::Error;
     pub use pidash_services::read::IssueFlatView;
     pub use pidash_services::read::IssueSearchParams;
+    pub use pidash_services::read::IssueSearchRow;
     pub use pidash_services::read::IssueSearchSort;
     pub use pidash_services::read::IssueSearchStatus;
     pub use pidash_services::read::OwnedAssigneeRow;
@@ -251,10 +253,10 @@ pub mod read {
     pub use pidash_services::read::StateRow;
     pub use pidash_services::read::StateRowTuple;
     pub use pidash_services::read::UserShape;
+    pub use pidash_services::read::WorkpadDbRow;
     pub use pidash_services::read::WorkspaceLiteView;
     pub use pidash_services::read::WriteProject;
     pub use pidash_services::read::COMMENT_COLUMNS;
-    pub use pidash_services::read::FULL_ROW_COLUMNS;
     pub use pidash_services::read::ISSUE_EXTRA_COLS;
     pub use pidash_services::read::ISSUE_SELECT_COLS;
     pub use pidash_services::read::PR_DETAIL_SQL;

@@ -14,9 +14,10 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    estimate_points, file_assets, issue_assignees, issue_labels, issue_relations, issues,
-    project_members, projects, states, users, workspaces,
+    estimate_points, file_assets, issue_assignees, issue_comments, issue_labels, issue_relations,
+    issues, project_members, projects, states, users, workspaces,
 };
+use sea_orm::sea_query::{Alias, Expr, Func, SimpleExpr};
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType,
     QueryFilter, QueryOrder, QuerySelect, RelationTrait,
@@ -441,13 +442,11 @@ fn has_open_blockers_statement(issue_id: &Uuid) -> sea_orm::sea_query::SelectSta
             JoinType::InnerJoin,
             issues::Entity,
             t.clone(),
-            Expr::col((t.clone(), issues::Column::Id)).eq(
-                Expr::case(
-                    Expr::col((r.clone(), issue_relations::Column::RelationType)).eq("blocked_by"),
-                    Expr::col((r.clone(), issue_relations::Column::RelatedIssueId)),
-                )
-                .finally(Expr::col((r.clone(), issue_relations::Column::IssueId))),
-            ),
+            Expr::col((t.clone(), issues::Column::Id)).eq(Expr::case(
+                Expr::col((r.clone(), issue_relations::Column::RelationType)).eq("blocked_by"),
+                Expr::col((r.clone(), issue_relations::Column::RelatedIssueId)),
+            )
+            .finally(Expr::col((r.clone(), issue_relations::Column::IssueId)))),
         )
         .join_as(
             JoinType::InnerJoin,
@@ -466,8 +465,10 @@ fn has_open_blockers_statement(issue_id: &Uuid) -> sea_orm::sea_query::SelectSta
             Cond::all()
                 .add(Expr::col((r.clone(), issue_relations::Column::DeletedAt)).is_null())
                 .add(
-                    Expr::col((r.clone(), issue_relations::Column::IssueId))
-                        .ne(Expr::col((r.clone(), issue_relations::Column::RelatedIssueId))),
+                    Expr::col((r.clone(), issue_relations::Column::IssueId)).ne(Expr::col((
+                        r.clone(),
+                        issue_relations::Column::RelatedIssueId,
+                    ))),
                 )
                 .add(Expr::col((t.clone(), issues::Column::DeletedAt)).is_null())
                 .add(Expr::col((t.clone(), issues::Column::ArchivedAt)).is_null())
@@ -562,20 +563,26 @@ pub async fn fetch_blocker_rows(pool: &PgPool, issue_id: &Uuid) -> Result<Blocke
             let rows: Vec<DirRow> = issue_relations::Entity::find()
                 .filter(issue_relations::Column::DeletedAt.is_null())
                 .filter(
-                    Expr::col(issue_relations::Column::IssueId)
-                        .ne(Expr::col(issue_relations::Column::RelatedIssueId)),
+                    Expr::col((issue_relations::Entity, issue_relations::Column::IssueId)).ne(
+                        Expr::col((
+                            issue_relations::Entity,
+                            issue_relations::Column::RelatedIssueId,
+                        )),
+                    ),
                 )
                 .filter(issue_relations::Column::RelationType.eq(relation_type))
-                .filter(Expr::col(anchor).eq(*issue_id))
-                .filter(issues::Column::DeletedAt.is_null())
-                .filter(issues::Column::ArchivedAt.is_null())
-                .filter(issues::Column::IsDraft.eq(false))
+                .filter(Expr::col((issue_relations::Entity, anchor)).eq(*issue_id))
+                .filter(Expr::col((issues::Entity, issues::Column::DeletedAt)).is_null())
+                .filter(Expr::col((issues::Entity, issues::Column::ArchivedAt)).is_null())
+                .filter(Expr::col((issues::Entity, issues::Column::IsDraft)).eq(false))
                 .filter(
-                    Expr::col(issues::Column::WorkspaceId)
-                        .eq(Expr::col(issue_relations::Column::WorkspaceId)),
+                    Expr::col((issues::Entity, issues::Column::WorkspaceId)).eq(Expr::col((
+                        issue_relations::Entity,
+                        issue_relations::Column::WorkspaceId,
+                    ))),
                 )
-                .filter(Expr::col(states::Column::Group).ne("triage"))
-                .filter(Expr::col(projects::Column::ArchivedAt).is_null())
+                .filter(Expr::col((states::Entity, states::Column::Group)).ne("triage"))
+                .filter(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
                 .join(JoinType::InnerJoin, to_t)
                 .join(JoinType::InnerJoin, issues::Relation::States.def())
                 .join(JoinType::InnerJoin, issues::Relation::Projects.def())
@@ -1642,6 +1649,172 @@ pub async fn render_write_response(
 // by OVL-14, PIDASHCONV-1649).
 // ---------------------------------------------------------------------------
 
+/// One `issue_comments` row: every column the comment renderers and
+/// the patch/delete ops read, decoded by name, plus the list's
+/// `is_member` annotation (`None` on the un-annotated direct
+/// lookups). Datetimes keep the `DateTime<Utc>` instant the old
+/// `PgRow` read produced. The array columns arrive as JSON arrays
+/// ([`array_to_json`], so nullable elements survive as `null` —
+/// sea-orm's `Vec<String>` decode errors on them); they decode to
+/// `Vec<Option<String>>` in [`decode_comment`].
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct CommentDbRow {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub comment_stripped: String,
+    pub attachments: Value,
+    pub created_by_id: Option<Uuid>,
+    pub issue_id: Uuid,
+    pub project_id: Uuid,
+    pub updated_by_id: Option<Uuid>,
+    pub workspace_id: Uuid,
+    pub actor_id: Option<Uuid>,
+    pub comment_html: String,
+    pub comment_json: Value,
+    pub access: String,
+    pub external_id: Option<String>,
+    pub external_source: Option<String>,
+    pub edited_at: Option<DateTime<Utc>>,
+    pub description_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
+    pub speaker_type: String,
+    pub speaker_label: String,
+    pub speaker_agent_run_id: Option<Uuid>,
+    pub labels: Value,
+    pub is_member: Option<bool>,
+}
+
+/// The `issue_comments` columns, in entity order: every non-array
+/// column the renderers or the patch/delete ops read. The array
+/// columns (`attachments`, `labels`) are picked as JSON alongside
+/// (see [`comment_columns`]).
+pub const COMMENT_COLUMNS: [issue_comments::Column; 22] = [
+    issue_comments::Column::Id,
+    issue_comments::Column::CreatedAt,
+    issue_comments::Column::UpdatedAt,
+    issue_comments::Column::DeletedAt,
+    issue_comments::Column::CommentStripped,
+    issue_comments::Column::CreatedById,
+    issue_comments::Column::IssueId,
+    issue_comments::Column::ProjectId,
+    issue_comments::Column::UpdatedById,
+    issue_comments::Column::WorkspaceId,
+    issue_comments::Column::ActorId,
+    issue_comments::Column::CommentHtml,
+    issue_comments::Column::CommentJson,
+    issue_comments::Column::Access,
+    issue_comments::Column::ExternalId,
+    issue_comments::Column::ExternalSource,
+    issue_comments::Column::EditedAt,
+    issue_comments::Column::DescriptionId,
+    issue_comments::Column::ParentId,
+    issue_comments::Column::SpeakerType,
+    issue_comments::Column::SpeakerLabel,
+    issue_comments::Column::SpeakerAgentRunId,
+];
+
+/// The comment columns with the array columns as JSON: `SELECT`
+/// picks `array_to_json(attachments)` / `array_to_json(labels)` (the
+/// `Func::cust` precedent in `app_views_search::queries_search` —
+/// `PgFunc` has no array-to-JSON form) so nullable elements decode
+/// as `null` instead of erroring, and every other column by name.
+fn comment_columns(
+    select: sea_orm::Select<issue_comments::Entity>,
+) -> sea_orm::Select<issue_comments::Entity> {
+    select
+        .columns(COMMENT_COLUMNS)
+        .column_as(
+            SimpleExpr::from(Func::cust("array_to_json").arg(Expr::col((
+                issue_comments::Entity,
+                issue_comments::Column::Attachments,
+            ))))
+            .cast_as(Alias::new("jsonb")),
+            "attachments",
+        )
+        .column_as(
+            SimpleExpr::from(Func::cust("array_to_json").arg(Expr::col((
+                issue_comments::Entity,
+                issue_comments::Column::Labels,
+            ))))
+            .cast_as(Alias::new("jsonb")),
+            "labels",
+        )
+}
+
+/// `SELECT "id" FROM "workspaces" WHERE "slug" = $1`: the workspace
+/// the comment scope resolves through (subquery, not a join — the
+/// old SQL binds the slug as the subquery predicate).
+fn workspace_id_subquery(slug: &str) -> SimpleExpr {
+    use sea_orm::sea_query::Query as SeaQuery;
+    SimpleExpr::SubQuery(
+        None,
+        Box::new(
+            SeaQuery::select()
+                .column(workspaces::Column::Id)
+                .from(workspaces::Entity)
+                .and_where(workspaces::Column::Slug.eq(slug))
+                .take()
+                .into_sub_query_statement(),
+        ),
+    )
+}
+
+/// `EXISTS (SELECT 1 FROM "project_members" pm WHERE pm."project_id" =
+/// <project_col> AND pm."member_id" = $user AND pm."is_active")`: the
+/// caller's active membership on the row's project, no `deleted_at`
+/// scope on the join span (fixture-verbatim).
+fn member_exists(project_col: (impl EntityTrait, impl ColumnTrait), user_id: &Uuid) -> SimpleExpr {
+    use sea_orm::sea_query::Query as SeaQuery;
+    let pm = || Alias::new("pm");
+    Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from_as(project_members::Entity, pm())
+            .and_where(Expr::col((pm(), project_members::Column::ProjectId)).equals(project_col))
+            .and_where(Expr::col((pm(), project_members::Column::MemberId)).eq(*user_id))
+            .and_where(Expr::col((pm(), project_members::Column::IsActive)).eq(true))
+            .take(),
+    )
+}
+
+/// `EXISTS (SELECT 1 FROM "projects" p WHERE p."id" = <project_col> AND
+/// p."archived_at" IS NULL)`: a live (unarchived) project.
+fn project_unarchived_exists(project_col: (impl EntityTrait, impl ColumnTrait)) -> SimpleExpr {
+    use sea_orm::sea_query::Query as SeaQuery;
+    let p = || Alias::new("p");
+    Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from_as(projects::Entity, p())
+            .and_where(Expr::col((p(), projects::Column::Id)).equals(project_col))
+            .and_where(Expr::col((p(), projects::Column::ArchivedAt)).is_null())
+            .take(),
+    )
+}
+
+/// The comment direct statement (`:2040`, `:2109`): live + slug +
+/// project + issue + pk, no member/archived guards and no
+/// annotation (the `is_member` output is NULL, decoded to `None`).
+fn comment_direct_select(
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    pk: &Uuid,
+) -> sea_orm::Select<issue_comments::Entity> {
+    comment_columns(issue_comments::Entity::find().select_only())
+        .column_as(Expr::val(None::<bool>), "is_member")
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((issue_comments::Entity, issue_comments::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(issue_comments::Column::ProjectId.eq(*project_id))
+        .filter(issue_comments::Column::IssueId.eq(*issue_id))
+        .filter(issue_comments::Column::Id.eq(*pk))
+}
+
 /// Comment patch/delete direct lookup (`:2040`, `:2109`): live + slug +
 /// project + issue + pk. (Moved from the v1 work-items handlers by
 /// OVL-14, PIDASHCONV-1649.)
@@ -1651,22 +1824,62 @@ pub async fn fetch_comment_direct(
     project_id: &Uuid,
     issue_id: &Uuid,
     pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Error> {
-    // raw-sql: Group B — returns PgRow for handlers_social/operations/comments; typed-row conversion needs V1WI caller migration (PR 2955).
-    let row = sqlx::query(
-        r#"SELECT c.* FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND c."project_id" = $2 AND c."issue_id" = $3 AND c."id" = $4"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("comment-direct", error))?;
+) -> Result<Option<CommentDbRow>, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = comment_direct_select(slug, project_id, issue_id, pk)
+        .into_model::<CommentDbRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-direct", error))?;
     Ok(row)
+}
+
+/// The comment list statement (`views/issue.py:1805-1828`): the link
+/// predicates plus the `is_member=Exists(...)` annotation (explicit
+/// `ProjectMember.objects` filter — WITH the manager's `deleted_at IS
+/// NULL`, unlike the guard) plus the unguarded member and
+/// unarchived-project `EXISTS` scope guards. DISTINCT, newest first.
+fn comment_list_select(
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+) -> sea_orm::Select<issue_comments::Entity> {
+    use sea_orm::sea_query::Query as SeaQuery;
+    let pm = || Alias::new("pm");
+    let is_member = Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from_as(project_members::Entity, pm())
+            .and_where(Expr::col((pm(), project_members::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((pm(), project_members::Column::IsActive)).eq(true))
+            .and_where(Expr::col((pm(), project_members::Column::MemberId)).eq(*user_id))
+            .and_where(Expr::col((pm(), project_members::Column::ProjectId)).eq(*project_id))
+            .and_where(
+                Expr::col((pm(), project_members::Column::WorkspaceId))
+                    .eq(workspace_id_subquery(slug)),
+            )
+            .take(),
+    );
+    comment_columns(issue_comments::Entity::find().select_only())
+        .column_as(is_member, "is_member")
+        .distinct()
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((issue_comments::Entity, issue_comments::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(issue_comments::Column::ProjectId.eq(*project_id))
+        .filter(issue_comments::Column::IssueId.eq(*issue_id))
+        .filter(member_exists(
+            (issue_comments::Entity, issue_comments::Column::ProjectId),
+            user_id,
+        ))
+        .filter(project_unarchived_exists((
+            issue_comments::Entity,
+            issue_comments::Column::ProjectId,
+        )))
+        .order_by_desc(issue_comments::Column::CreatedAt)
 }
 
 /// Comment list rows (`views/issue.py:1805-1828`): the link predicates
@@ -1680,45 +1893,15 @@ pub async fn fetch_comment_list_rows(
     project_id: &Uuid,
     issue_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
-    // raw-sql: Group B — returns PgRow for handlers_social; typed-row conversion needs V1WI caller migration (PR 2955).
-    let rows = sqlx::query(
-        r#"SELECT DISTINCT c.*, EXISTS (
-             SELECT 1 FROM "project_members" pm
-             WHERE pm."deleted_at" IS NULL AND pm."is_active"
-               AND pm."member_id" = $4 AND pm."project_id" = $2
-               AND pm."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-           ) AS "is_member"
-           FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND c."project_id" = $2 AND c."issue_id" = $3
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = c."project_id" AND pm."member_id" = $4 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = c."project_id" AND p."archived_at" IS NULL)
-           ORDER BY c."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| DbError::new("comment-list", error))?;
+) -> Result<Vec<CommentDbRow>, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = comment_list_select(slug, project_id, issue_id, user_id)
+        .into_model::<CommentDbRow>()
+        .all(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-list", error))?;
     Ok(rows)
 }
-
-/// The comment columns, in table order (moved from the MCP read tools
-/// with the queryset below, PIDASHCONV-1661).
-pub const COMMENT_COLUMNS: &str = "issue_comments.id, issue_comments.created_at, \
-     issue_comments.updated_at, issue_comments.created_by_id, issue_comments.updated_by_id, \
-     issue_comments.project_id, issue_comments.workspace_id, issue_comments.comment_stripped, \
-     issue_comments.comment_json, issue_comments.comment_html, issue_comments.description_id, \
-     issue_comments.attachments, issue_comments.labels, issue_comments.issue_id, \
-     issue_comments.actor_id, issue_comments.access, issue_comments.external_source, \
-     issue_comments.external_id, issue_comments.speaker_type, issue_comments.speaker_label, \
-     issue_comments.speaker_agent_run_id, issue_comments.edited_at, issue_comments.parent_id";
 
 /// `IssueComment.objects.filter(workspace__slug=..., project_id=...,
 /// issue_id=...).order_by("created_at")[:limit]`
@@ -1733,23 +1916,29 @@ pub async fn fetch_comment_list_ascending(
     project_id: Uuid,
     issue_id: Uuid,
     limit: i64,
-) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
-    let sql = format!(
-        "SELECT {COMMENT_COLUMNS} FROM issue_comments \
-         JOIN workspaces ON workspaces.id = issue_comments.workspace_id \
-         WHERE workspaces.slug = $1 AND issue_comments.project_id = $2 \
-           AND issue_comments.issue_id = $3 AND issue_comments.deleted_at IS NULL \
-         ORDER BY issue_comments.created_at ASC LIMIT $4"
-    );
-    // raw-sql: Group B — returns PgRow for MCP/space callers; typed-row conversion needs caller migration.
-    let rows = sqlx::query(&sql)
-        .bind(workspace_slug)
-        .bind(project_id)
-        .bind(issue_id)
-        .bind(limit)
-        .fetch_all(pool)
+) -> Result<Vec<CommentDbRow>, Error> {
+    // Django slices `[:limit]` and raises on a negative limit (the old
+    // driver also errored); keep the failure instead of clamping.
+    if limit < 0 {
+        return Err(Error::Failed("comment-list-ascending"));
+    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = comment_columns(issue_comments::Entity::find().select_only())
+        .column_as(Expr::val(None::<bool>), "is_member")
+        .join(
+            JoinType::InnerJoin,
+            issue_comments::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .filter(issue_comments::Column::ProjectId.eq(project_id))
+        .filter(issue_comments::Column::IssueId.eq(issue_id))
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .order_by_asc(issue_comments::Column::CreatedAt)
+        .limit(u64::try_from(limit).unwrap_or(u64::MAX))
+        .into_model::<CommentDbRow>()
+        .all(&db)
         .await
-        .map_err(|error| DbError::new("comment-list-ascending", error))?;
+        .map_err(|error| DbError::from_orm("comment-list-ascending", error))?;
     Ok(rows)
 }
 
@@ -1781,53 +1970,121 @@ pub struct DecodedComment {
     pub parent: Option<String>,
 }
 
-pub fn decode_comment(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedComment, Error> {
-    let attachments: Vec<Option<String>> = row
-        .try_get("attachments")
-        .map_err(|_| Error::Failed("row-attachments"))?;
-    let labels: Vec<Option<String>> = row
-        .try_get("labels")
-        .map_err(|_| Error::Failed("row-labels"))?;
-    let comment_json: Value = row
-        .try_get("comment_json")
-        .map_err(|_| Error::Failed("row-comment-json"))?;
-    let is_member: Option<bool> = row.try_get("is_member").unwrap_or(None);
+/// A `array_to_json` output into the old `Vec<Option<String>>`
+/// decode: `null` elements stay `None`; anything else than a string
+/// fails like the old by-name read did.
+fn comment_strings(value: &Value, site: &'static str) -> Result<Vec<Option<String>>, Error> {
+    let items = value.as_array().ok_or(Error::Failed(site))?;
+    items
+        .iter()
+        .map(|item| match item {
+            Value::Null => Ok(None),
+            Value::String(text) => Ok(Some(text.clone())),
+            _ => Err(Error::Failed(site)),
+        })
+        .collect()
+}
+
+pub fn decode_comment(row: &CommentDbRow, tz: &Tz) -> Result<DecodedComment, Error> {
     Ok(DecodedComment {
-        id: row_uuid(row, "id")?.to_string(),
-        is_member,
-        created_at: super::render_datetime_in(&row_datetime(row, "created_at")?, tz),
-        updated_at: super::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
-        deleted_at: row_datetime_opt(row, "deleted_at")?
-            .map(|dt| super::render_datetime_in(&dt, tz)),
-        comment_json,
-        comment_html: row_string(row, "comment_html")?,
-        attachments,
-        labels,
-        access: row_string(row, "access")?,
-        external_source: row_string_opt(row, "external_source")?,
-        external_id: row_string_opt(row, "external_id")?,
-        speaker_type: row_string(row, "speaker_type")?,
-        speaker_label: row_string(row, "speaker_label")?,
-        speaker_agent_run_id: row_uuid_opt(row, "speaker_agent_run_id")?.map(|id| id.to_string()),
-        edited_at: row_datetime_opt(row, "edited_at")?.map(|dt| super::render_datetime_in(&dt, tz)),
-        created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
-        updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
-        project: row_uuid(row, "project_id")?.to_string(),
-        workspace: row_uuid(row, "workspace_id")?.to_string(),
-        description: row_uuid_opt(row, "description_id")?.map(|id| id.to_string()),
-        issue: row_uuid(row, "issue_id")?.to_string(),
-        actor: row_uuid_opt(row, "actor_id")?.map(|id| id.to_string()),
-        parent: row_uuid_opt(row, "parent_id")?.map(|id| id.to_string()),
+        id: row.id.to_string(),
+        is_member: row.is_member,
+        created_at: super::render_datetime_in(&row.created_at, tz),
+        updated_at: super::render_datetime_in(&row.updated_at, tz),
+        deleted_at: row
+            .deleted_at
+            .as_ref()
+            .map(|dt| super::render_datetime_in(dt, tz)),
+        comment_json: row.comment_json.clone(),
+        comment_html: row.comment_html.clone(),
+        attachments: comment_strings(&row.attachments, "row-attachments")?,
+        labels: comment_strings(&row.labels, "row-labels")?,
+        access: row.access.clone(),
+        external_source: row.external_source.clone(),
+        external_id: row.external_id.clone(),
+        speaker_type: row.speaker_type.clone(),
+        speaker_label: row.speaker_label.clone(),
+        speaker_agent_run_id: row.speaker_agent_run_id.map(|id| id.to_string()),
+        edited_at: row
+            .edited_at
+            .as_ref()
+            .map(|dt| super::render_datetime_in(dt, tz)),
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        project: row.project_id.to_string(),
+        workspace: row.workspace_id.to_string(),
+        description: row.description_id.map(|id| id.to_string()),
+        issue: row.issue_id.to_string(),
+        actor: row.actor_id.map(|id| id.to_string()),
+        parent: row.parent_id.map(|id| id.to_string()),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use sea_orm::sea_query::Iden;
     use sea_orm::{
         ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
     };
 
     use super::*;
+
+    #[test]
+    fn comment_statements_keep_scope_and_annotations() {
+        // Direct lookup: no DISTINCT, NULL annotation, array JSON.
+        let sql = comment_direct_select("acme", &Uuid::nil(), &Uuid::nil(), &Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.starts_with(r#"SELECT "issue_comments"."id""#), "{sql}");
+        assert!(!sql.contains("DISTINCT"), "{sql}");
+        assert!(
+            sql.contains(r#"array_to_json("issue_comments"."attachments")"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"array_to_json("issue_comments"."labels")"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"AS "is_member""#), "{sql}");
+        assert!(
+            sql.contains(r#""issue_comments"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issue_comments"."project_id" = "#), "{sql}");
+        assert!(sql.contains(r#""issue_comments"."issue_id" = "#), "{sql}");
+        assert!(sql.contains(r#""issue_comments"."id" = "#), "{sql}");
+        // List: DISTINCT + is_member EXISTS + member/archived EXISTS.
+        let sql = comment_list_select("acme", &Uuid::nil(), &Uuid::nil(), &Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with(r#"SELECT DISTINCT "issue_comments"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"EXISTS(SELECT 1 FROM "project_members" AS "pm""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""pm"."deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.contains(r#"EXISTS(SELECT 1 FROM "projects" AS "p""#),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(r#"ORDER BY "issue_comments"."created_at" DESC"#),
+            "{sql}"
+        );
+        // Every output name is selected exactly once: the row decodes
+        // by name.
+        let select_list = sql
+            .split(r#" FROM "issue_comments""#)
+            .next()
+            .expect("select");
+        for column in COMMENT_COLUMNS {
+            let name = format!(r#""issue_comments"."{}""#, column.to_string());
+            assert_eq!(select_list.matches(&name).count(), 1, "{name} in {sql}");
+        }
+    }
 
     #[test]
     fn file_asset_and_id_queries_are_scoped() {
@@ -2083,10 +2340,8 @@ mod live {
         .await
         .expect("hit");
         assert_eq!(rows.len(), 1);
-        let id: Uuid = rows[0].try_get("id").expect("id");
-        assert_eq!(id, world.comment_id);
-        let is_member: Option<bool> = rows[0].try_get("is_member").expect("is_member");
-        assert_eq!(is_member, Some(true));
+        assert_eq!(rows[0].id, world.comment_id);
+        assert_eq!(rows[0].is_member, Some(true));
     }
 
     #[tokio::test]
@@ -2119,10 +2374,8 @@ mod live {
         .await
         .expect("hit");
         assert_eq!(rows.len(), 2);
-        let first: Uuid = rows[0].try_get("id").expect("id");
-        let last: Uuid = rows[1].try_get("id").expect("id");
-        assert_eq!(first, world.comment_id);
-        assert_eq!(last, second);
+        assert_eq!(rows[0].id, world.comment_id);
+        assert_eq!(rows[1].id, second);
         let one = fetch_comment_list_ascending(
             &db,
             &world.workspace_slug,
@@ -2133,8 +2386,7 @@ mod live {
         .await
         .expect("limited");
         assert_eq!(one.len(), 1);
-        let only: Uuid = one[0].try_get("id").expect("id");
-        assert_eq!(only, world.comment_id);
+        assert_eq!(one[0].id, world.comment_id);
     }
 
     #[tokio::test]
@@ -2180,9 +2432,7 @@ mod live {
             .expect("reads");
         assert!(rows.has_open_blockers);
         // The blocker itself blocks nothing.
-        let reverse = fetch_blocker_rows(&db, &blocker_id)
-            .await
-            .expect("reads");
+        let reverse = fetch_blocker_rows(&db, &blocker_id).await.expect("reads");
         assert!(!reverse.has_open_blockers);
     }
 }

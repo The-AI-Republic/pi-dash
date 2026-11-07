@@ -568,6 +568,7 @@ pidash_sdk::read::CHILDREN_DETACH_SQL
 pidash_sdk::read::COMMENT_COLUMNS
 pidash_sdk::read::COMMENT_IDS_SQL
 pidash_sdk::read::CYCLE_DELETE_SQL
+pidash_sdk::read::CommentDbRow
 pidash_sdk::read::CommentReactionView
 pidash_sdk::read::CommentRow
 pidash_sdk::read::CommentView
@@ -581,7 +582,6 @@ pidash_sdk::read::DecodedIssue
 pidash_sdk::read::Denial
 pidash_sdk::read::DescriptionHtmlFacts
 pidash_sdk::read::Error
-pidash_sdk::read::FULL_ROW_COLUMNS
 pidash_sdk::read::HostSettings
 pidash_sdk::read::HtmlCheck
 pidash_sdk::read::HtmlOutcome
@@ -595,6 +595,7 @@ pidash_sdk::read::IssueFlatView
 pidash_sdk::read::IssueNotFound
 pidash_sdk::read::IssueRow
 pidash_sdk::read::IssueSearchParams
+pidash_sdk::read::IssueSearchRow
 pidash_sdk::read::IssueSearchSort
 pidash_sdk::read::IssueSearchStatus
 pidash_sdk::read::LABEL_DELETE_SQL
@@ -642,6 +643,7 @@ pidash_sdk::read::UserShape
 pidash_sdk::read::ValidateError
 pidash_sdk::read::ValidateInput
 pidash_sdk::read::WORKSPACE_SEED_TASK
+pidash_sdk::read::WorkpadDbRow
 pidash_sdk::read::WorkpadRow
 pidash_sdk::read::WorkpadWriteInput
 pidash_sdk::read::WorkspaceLiteView
@@ -702,7 +704,7 @@ pidash_sdk::read::requested_names
 pidash_sdk::read::resolve_workpad_state
 pidash_sdk::read::run_validate
 pidash_sdk::read::search_issues
-pidash_sdk::read::search_issues_sql
+pidash_sdk::read::search_issues_statement
 pidash_sdk::read::serialize_drf_datetime
 pidash_sdk::read::serialize_iso_datetime
 pidash_sdk::read::shape_issue

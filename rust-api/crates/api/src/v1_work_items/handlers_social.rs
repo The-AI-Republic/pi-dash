@@ -98,14 +98,14 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use sea_orm::sea_query::{
-    Alias, Cond, Expr, JoinType, Query as SeaQuery, SelectStatement, SimpleExpr,
+    Alias, Cond, Expr, Func, JoinType, Query as SeaQuery, SelectStatement, SimpleExpr,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult,
     QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::project;
@@ -886,7 +886,7 @@ async fn fetch_comment_rows(
     project_id: &Uuid,
     issue_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
+) -> Result<Vec<read::CommentDbRow>, Denial> {
     read::fetch_comment_list_rows(pool, slug, project_id, issue_id, user_id)
         .await
         .map_err(|error| match error {
@@ -898,96 +898,31 @@ async fn fetch_comment_rows(
         })
 }
 
-/// The `issue_comments` columns the renderer reads, plus the `is_member`
-/// annotation (absent on the direct lookups).
-#[derive(Debug, Clone, PartialEq, FromQueryResult)]
-struct CommentDbRow {
-    id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    deleted_at: Option<DateTime<Utc>>,
-    comment_html: String,
-    attachments: Vec<String>,
-    labels: Vec<String>,
-    access: String,
-    external_source: Option<String>,
-    external_id: Option<String>,
-    speaker_type: String,
-    speaker_label: String,
-    speaker_agent_run_id: Option<Uuid>,
-    edited_at: Option<DateTime<Utc>>,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
-    project_id: Uuid,
-    workspace_id: Uuid,
-    description_id: Option<Uuid>,
-    issue_id: Uuid,
-    actor_id: Option<Uuid>,
-    parent_id: Option<Uuid>,
-    is_member: Option<bool>,
-}
-
-/// The [`CommentDbRow`] columns of a `c.*` row from the shared list read
-/// (or the direct lookup), decoded by name; `is_member` is tolerant of an
-/// absent annotation.
-fn comment_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<CommentDbRow, Denial> {
-    fn get<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>>(
-        row: &'r sqlx::postgres::PgRow,
-        column: &str,
-    ) -> Result<T, Denial> {
-        row.try_get(column).map_err(|_| Denial::ServerError)
-    }
-    Ok(CommentDbRow {
-        id: get(row, "id")?,
-        created_at: get(row, "created_at")?,
-        updated_at: get(row, "updated_at")?,
-        deleted_at: get(row, "deleted_at")?,
-        comment_html: get(row, "comment_html")?,
-        attachments: get(row, "attachments")?,
-        labels: get(row, "labels")?,
-        access: get(row, "access")?,
-        external_source: get(row, "external_source")?,
-        external_id: get(row, "external_id")?,
-        speaker_type: get(row, "speaker_type")?,
-        speaker_label: get(row, "speaker_label")?,
-        speaker_agent_run_id: get(row, "speaker_agent_run_id")?,
-        edited_at: get(row, "edited_at")?,
-        created_by_id: get(row, "created_by_id")?,
-        updated_by_id: get(row, "updated_by_id")?,
-        project_id: get(row, "project_id")?,
-        workspace_id: get(row, "workspace_id")?,
-        description_id: get(row, "description_id")?,
-        issue_id: get(row, "issue_id")?,
-        actor_id: get(row, "actor_id")?,
-        parent_id: get(row, "parent_id")?,
-        is_member: row.try_get("is_member").unwrap_or(None),
-    })
-}
-
-/// The [`CommentDbRow`] columns of `issue_comments`, in struct order.
+/// The `issue_comments` columns of `issue_comments`, in entity order:
+/// every non-array column the shared [`read::CommentDbRow`] reads.
 const COMMENT_COLUMNS: [issue_comments::Column; 22] = [
     issue_comments::Column::Id,
     issue_comments::Column::CreatedAt,
     issue_comments::Column::UpdatedAt,
     issue_comments::Column::DeletedAt,
+    issue_comments::Column::CommentStripped,
+    issue_comments::Column::CreatedById,
+    issue_comments::Column::IssueId,
+    issue_comments::Column::ProjectId,
+    issue_comments::Column::UpdatedById,
+    issue_comments::Column::WorkspaceId,
+    issue_comments::Column::ActorId,
     issue_comments::Column::CommentHtml,
-    issue_comments::Column::Attachments,
-    issue_comments::Column::Labels,
+    issue_comments::Column::CommentJson,
     issue_comments::Column::Access,
-    issue_comments::Column::ExternalSource,
     issue_comments::Column::ExternalId,
+    issue_comments::Column::ExternalSource,
+    issue_comments::Column::EditedAt,
+    issue_comments::Column::DescriptionId,
+    issue_comments::Column::ParentId,
     issue_comments::Column::SpeakerType,
     issue_comments::Column::SpeakerLabel,
     issue_comments::Column::SpeakerAgentRunId,
-    issue_comments::Column::EditedAt,
-    issue_comments::Column::CreatedById,
-    issue_comments::Column::UpdatedById,
-    issue_comments::Column::ProjectId,
-    issue_comments::Column::WorkspaceId,
-    issue_comments::Column::DescriptionId,
-    issue_comments::Column::IssueId,
-    issue_comments::Column::ActorId,
-    issue_comments::Column::ParentId,
 ];
 
 /// The comment detail statement (`:2008`): the list chain (DISTINCT,
@@ -1017,6 +952,22 @@ fn comment_detail_select(
     issue_comments::Entity::find()
         .select_only()
         .columns(COMMENT_COLUMNS)
+        .column_as(
+            SimpleExpr::from(Func::cust("array_to_json").arg(Expr::col((
+                issue_comments::Entity,
+                issue_comments::Column::Attachments,
+            ))))
+            .cast_as(Alias::new("jsonb")),
+            "attachments",
+        )
+        .column_as(
+            SimpleExpr::from(Func::cust("array_to_json").arg(Expr::col((
+                issue_comments::Entity,
+                issue_comments::Column::Labels,
+            ))))
+            .cast_as(Alias::new("jsonb")),
+            "labels",
+        )
         .column_as(is_member, "is_member")
         .distinct()
         .filter(issue_comments::Column::DeletedAt.is_null())
@@ -1047,39 +998,12 @@ async fn fetch_comment_detail(
     issue_id: &Uuid,
     user_id: &Uuid,
     pk: &Uuid,
-) -> Result<Option<CommentDbRow>, Denial> {
+) -> Result<Option<read::CommentDbRow>, Denial> {
     comment_detail_select(slug, project_id, issue_id, user_id, pk)
-        .into_model::<CommentDbRow>()
+        .into_model::<read::CommentDbRow>()
         .one(&orm(pool))
         .await
         .map_err(|error| db_error(error, "comment-detail"))
-}
-
-/// Comment patch/delete direct lookup (`:2040`, `:2109`): live + slug +
-/// project + issue + pk — BUG-1 bypasses the guards and the annotation.
-/// Stays a `PgRow`: the shared `operations::comments::CommentUpdate`
-/// (`pidash-services`, outside this batch) takes `before: &PgRow`.
-async fn fetch_comment_direct(
-    pool: &PgPool,
-    slug: &str,
-    project_id: &Uuid,
-    issue_id: &Uuid,
-    pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    // raw-sql: the row feeds `pidash_services::operations::comments::CommentUpdate.before: &PgRow` (shared crate); SeaORM cannot yield a PgRow.
-    sqlx::query(
-        r#"SELECT c.* FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND c."project_id" = $2 AND c."issue_id" = $3 AND c."id" = $4"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-direct"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1198,21 +1122,31 @@ struct DecodedComment {
     parent: Option<String>,
 }
 
-/// Decode a `c.*` row from the shared list read / the direct lookup.
-fn decode_comment_pg(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedComment, Denial> {
-    Ok(decode_comment(&comment_row_from_pg(row)?, tz))
+/// A `array_to_json` output into the old `Vec<Option<String>>`
+/// decode: `null` elements stay `None`; anything else than a string
+/// fails like the old by-name read did.
+fn comment_strings(value: &Value) -> Result<Vec<Option<String>>, Denial> {
+    let items = value.as_array().ok_or(Denial::ServerError)?;
+    items
+        .iter()
+        .map(|item| match item {
+            Value::Null => Ok(None),
+            Value::String(text) => Ok(Some(text.clone())),
+            _ => Err(Denial::ServerError),
+        })
+        .collect()
 }
 
-fn decode_comment(row: &CommentDbRow, tz: &Tz) -> DecodedComment {
-    DecodedComment {
+fn decode_comment(row: &read::CommentDbRow, tz: &Tz) -> Result<DecodedComment, Denial> {
+    Ok(DecodedComment {
         id: row.id.to_string(),
         is_member: row.is_member,
         created_at: render_dt(&row.created_at, tz),
         updated_at: render_dt(&row.updated_at, tz),
         deleted_at: row.deleted_at.as_ref().map(|dt| render_dt(dt, tz)),
         comment_html: row.comment_html.clone(),
-        attachments: row.attachments.iter().cloned().map(Some).collect(),
-        labels: row.labels.iter().cloned().map(Some).collect(),
+        attachments: comment_strings(&row.attachments)?,
+        labels: comment_strings(&row.labels)?,
         access: row.access.clone(),
         external_source: row.external_source.clone(),
         external_id: row.external_id.clone(),
@@ -1228,7 +1162,7 @@ fn decode_comment(row: &CommentDbRow, tz: &Tz) -> DecodedComment {
         issue: row.issue_id.to_string(),
         actor: row.actor_id.map(|id| id.to_string()),
         parent: row.parent_id.map(|id| id.to_string()),
-    }
+    })
 }
 
 fn render_comment_value(
@@ -3953,7 +3887,7 @@ async fn comment_list_inner(
     .await?;
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
-        let decoded = decode_comment_pg(row, &tz)?;
+        let decoded = decode_comment(row, &tz)?;
         let expansions = comment_expansions(
             &pre.pool,
             &decoded,
@@ -4033,7 +3967,7 @@ async fn comment_detail_inner(
         state.settings().urls.web_url.as_deref(),
         state.settings().urls.app_base_url.as_deref(),
     );
-    let decoded = decode_comment(&row, &tz);
+    let decoded = decode_comment(&row, &tz)?;
     let url = comment_url(
         &pre.pool,
         &workspace_id,
@@ -4274,7 +4208,15 @@ async fn comment_patch_inner(
     activate_timezone(pre.actor.timezone.as_deref())?;
     // The row fetch precedes body parsing (`:2036-2038`), so a missing
     // comment 404s before a malformed body 400s.
-    let Some(before) = fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk).await?
+    let Some(before) = read::fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })?
     else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
@@ -4360,11 +4302,19 @@ async fn comment_delete_inner(
     )
     .await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let Some(before) = fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk).await?
+    let Some(before) = read::fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })?
     else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
-    let before_decoded = decode_comment_pg(&before, &tz)?;
+    let before_decoded = decode_comment(&before, &tz)?;
     let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
         state.settings().urls.web_url.as_deref(),
         state.settings().urls.app_base_url.as_deref(),
@@ -6417,15 +6367,15 @@ mod orm_tests {
             .await
             .expect("dup"));
 
-        // Comments: the detail annotation and the direct `PgRow` decode.
+        // Comments: the detail annotation and the direct typed decode.
         let detail = fetch_comment_detail(&pool, "acme", &project, &issue, &user, &comment)
             .await
             .expect("comment")
             .expect("found");
         assert_eq!((detail.id, detail.is_member), (comment, Some(true)));
-        assert_eq!(detail.attachments, vec!["x".to_owned()]);
-        assert!(detail.labels.is_empty());
-        let decoded = decode_comment(&detail, &tz);
+        assert_eq!(detail.attachments, serde_json::json!(["x"]));
+        assert!(detail.labels.as_array().expect("labels").is_empty());
+        let decoded = decode_comment(&detail, &tz).expect("decode");
         assert_eq!(decoded.attachments, vec![Some("x".to_owned())]);
         assert_eq!(decoded.speaker_label, "Me");
         assert!(
@@ -6434,11 +6384,11 @@ mod orm_tests {
                 .expect("comment")
                 .is_none()
         );
-        let direct = fetch_comment_direct(&pool, "acme", &project, &issue, &comment)
+        let direct = read::fetch_comment_direct(&pool, "acme", &project, &issue, &comment)
             .await
             .expect("direct")
             .expect("found");
-        let decoded = decode_comment_pg(&direct, &tz).expect("decode");
+        let decoded = decode_comment(&direct, &tz).expect("decode");
         assert_eq!(decoded.id, comment.to_string());
         assert_eq!(decoded.is_member, None);
         assert_eq!(decoded.created_at, "2024-01-01T00:00:00Z");
