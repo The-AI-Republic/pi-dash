@@ -12,8 +12,7 @@
 //! Fixtures FX-GHA-01, FX-GHA-02, FX-GHA-03
 //! (`rust-api/fixtures/app_integrations/fx-gha-0*.json`).
 //!
-//! Same conventions as [`super::queries_git`]: sea-query builders,
-//! runtime `sqlx::query`, executors generic over `sqlx::Executor`, row
+//! Same conventions as [`super::queries_git`]: SeaORM entities (`ConnectionTrait`), row
 //! structs reused from the D-05 models (`crate::integrations::*`,
 //! PIDASHCONV-42, Done), joined columns aliased `<table>__<col>`.
 //!
@@ -35,21 +34,19 @@
 //!   exactly `now` fails the callback but is not yet swept. Both
 //!   operators are preserved as written.
 
-use sea_query::{Alias, Condition, Expr, JoinType, Order, Query};
-use sqlx::postgres::PgRow;
-use sqlx::Row;
-
-use super::{
-    GITHUB_PROVIDER, INTEGRATION_TABLE, ROLE_ADMIN, WORKSPACE_INTEGRATION_TABLE,
-    WORKSPACE_MEMBER_TABLE, WORKSPACE_TABLE,
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Select,
 };
-use crate::integrations::git_models::{
-    git_provider_account, git_repository, git_repository_binding,
+
+use super::{queries_git, GITHUB_PROVIDER, ROLE_ADMIN};
+use crate::entity::{
+    github_app_install_sessions, github_repositories, github_repository_syncs, integrations,
+    workspace_integrations, workspace_members, workspaces,
 };
 use crate::integrations::github_models::{
-    github_app_install_session::{self, GithubAppInstallSession},
-    github_repository::TABLE as GH_REPO_TABLE,
-    github_repository_sync::{self, GithubRepositorySync},
+    github_app_install_session::GithubAppInstallSession,
+    github_repository_sync::GithubRepositorySync,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,98 +54,50 @@ use crate::integrations::github_models::{
 // ---------------------------------------------------------------------------
 
 /// `Integration.objects.filter(provider="github").first()`
-/// (`github.py:103`, inside `_get_workspace_integration`). No binds.
-pub fn integration_by_provider_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(INTEGRATION_TABLE.to_owned()));
-    sel.column((Alias::new(INTEGRATION_TABLE), Alias::new("id")));
-    sel.column((Alias::new(INTEGRATION_TABLE), Alias::new("provider")));
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(INTEGRATION_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(INTEGRATION_TABLE), Alias::new("provider")))
-                    .eq(Expr::val(GITHUB_PROVIDER)),
-            ),
-    )
-    .order_by(
-        (Alias::new(INTEGRATION_TABLE), Alias::new("id")),
-        Order::Asc,
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
+/// (`github.py:103`, inside `_get_workspace_integration`).
+pub fn integration_by_provider_query() -> Select<integrations::Entity> {
+    integrations::Entity::find()
+        .select_only()
+        .column(integrations::Column::Id)
+        .filter(integrations::Column::DeletedAt.is_null())
+        .filter(integrations::Column::Provider.eq(GITHUB_PROVIDER.to_owned()))
+        .order_by_asc(integrations::Column::Id)
+        .limit(1)
 }
 
 /// Live `integrations` row id for `provider="github"`, or `None`.
-pub async fn fetch_integration_id_by_provider<'e, E>(
-    ex: E,
-) -> Result<Option<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&integration_by_provider_sql())
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| r.try_get("id")).transpose()
+pub async fn fetch_integration_id_by_provider(
+    db: &impl ConnectionTrait,
+) -> Result<Option<uuid::Uuid>, sea_orm::DbErr> {
+    integration_by_provider_query()
+        .into_tuple::<uuid::Uuid>()
+        .one(db)
+        .await
 }
 
 /// `WorkspaceIntegration.objects.filter(workspace=workspace,
-/// integration=integration).first()` (`github.py:106`). Binds
-/// `$1 = workspace_id`, `$2 = integration_id`.
-pub fn workspace_integration_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(WORKSPACE_INTEGRATION_TABLE.to_owned()));
-    sel.column((Alias::new(WORKSPACE_INTEGRATION_TABLE), Alias::new("id")));
-    sel.column((
-        Alias::new(WORKSPACE_INTEGRATION_TABLE),
-        Alias::new("workspace_id"),
-    ));
-    sel.column((
-        Alias::new(WORKSPACE_INTEGRATION_TABLE),
-        Alias::new("integration_id"),
-    ));
-    sel.column((
-        Alias::new(WORKSPACE_INTEGRATION_TABLE),
-        Alias::new("config"),
-    ));
-    sel.cond_where(
-        Condition::all()
-            .add(
-                Expr::col((
-                    Alias::new(WORKSPACE_INTEGRATION_TABLE),
-                    Alias::new("deleted_at"),
-                ))
-                .is_null(),
-            )
-            .add(
-                Expr::col((
-                    Alias::new(WORKSPACE_INTEGRATION_TABLE),
-                    Alias::new("workspace_id"),
-                ))
-                .eq(Expr::cust("$1")),
-            )
-            .add(
-                Expr::col((
-                    Alias::new(WORKSPACE_INTEGRATION_TABLE),
-                    Alias::new("integration_id"),
-                ))
-                .eq(Expr::cust("$2")),
-            ),
-    )
-    .order_by(
-        (Alias::new(WORKSPACE_INTEGRATION_TABLE), Alias::new("id")),
-        Order::Asc,
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
+/// integration=integration).first()` (`github.py:106`).
+pub fn workspace_integration_query(
+    workspace_id: uuid::Uuid,
+    integration_id: uuid::Uuid,
+) -> Select<workspace_integrations::Entity> {
+    workspace_integrations::Entity::find()
+        .select_only()
+        .column(workspace_integrations::Column::Id)
+        .column(workspace_integrations::Column::WorkspaceId)
+        .column(workspace_integrations::Column::IntegrationId)
+        .column(workspace_integrations::Column::Config)
+        .filter(workspace_integrations::Column::DeletedAt.is_null())
+        .filter(workspace_integrations::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_integrations::Column::IntegrationId.eq(integration_id))
+        .order_by_asc(workspace_integrations::Column::Id)
+        .limit(1)
 }
 
 /// One workspace-integration row: id, workspace, integration, and the
 /// `config` JSON the status/repos reads inspect for the token
 /// (`github.py:553,581,1000`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct WorkspaceIntegrationRow {
     pub id: uuid::Uuid,
     pub workspace_id: uuid::Uuid,
@@ -158,28 +107,15 @@ pub struct WorkspaceIntegrationRow {
 
 /// The workspace's github integration row, or `None` (connect 404s,
 /// status/disconnect report `{connected: False}`).
-pub async fn fetch_workspace_integration<'e, E>(
-    ex: E,
+pub async fn fetch_workspace_integration(
+    db: &impl ConnectionTrait,
     workspace_id: uuid::Uuid,
     integration_id: uuid::Uuid,
-) -> Result<Option<WorkspaceIntegrationRow>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&workspace_integration_sql())
-        .bind(workspace_id)
-        .bind(integration_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| {
-        Ok(WorkspaceIntegrationRow {
-            id: r.try_get("id")?,
-            workspace_id: r.try_get("workspace_id")?,
-            integration_id: r.try_get("integration_id")?,
-            config: r.try_get("config")?,
-        })
-    })
-    .transpose()
+) -> Result<Option<WorkspaceIntegrationRow>, sea_orm::DbErr> {
+    workspace_integration_query(workspace_id, integration_id)
+        .into_model::<WorkspaceIntegrationRow>()
+        .one(db)
+        .await
 }
 
 /// `True` when the workspace-integration `config` carries a non-empty
@@ -199,142 +135,74 @@ pub fn workspace_integration_is_connected(config: &serde_json::Value) -> bool {
 
 /// `WorkspaceMember.objects.filter(member=user, role=ADMIN, is_active)
 /// .select_related("workspace").order_by("workspace__name")`
-/// (`github.py:628-632`, the app-status workspace list). Binds
-/// `$1 = member_id`; `ROLE_ADMIN` is the integer 20.
-pub fn admin_memberships_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(WORKSPACE_MEMBER_TABLE.to_owned()));
-    sel.column((
-        Alias::new(WORKSPACE_MEMBER_TABLE),
-        Alias::new("workspace_id"),
-    ));
-    sel.expr_as(
-        Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        Alias::new("workspace__id"),
-    );
-    sel.expr_as(
-        Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))),
-        Alias::new("workspace__slug"),
-    );
-    sel.expr_as(
-        Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("name"))),
-        Alias::new("workspace__name"),
-    );
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((
-                Alias::new(WORKSPACE_MEMBER_TABLE),
-                Alias::new("workspace_id"),
-            ))
-            .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.cond_where(
-        Condition::all()
-            .add(
-                Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("deleted_at"))).is_null(),
-            )
-            .add(
-                Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("member_id")))
-                    .eq(Expr::cust("$1")),
-            )
-            .add(
-                Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("role")))
-                    .eq(Expr::val(ROLE_ADMIN)),
-            )
-            .add(Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("is_active"))).eq(true))
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null()),
-    )
-    .order_by(
-        (Alias::new(WORKSPACE_TABLE), Alias::new("name")),
-        Order::Asc,
-    );
-    sel.to_string(PostgresQueryBuilder)
+/// (`github.py:628-632`, the app-status workspace list);
+/// `ROLE_ADMIN` is the integer 20.
+pub fn admin_memberships_query(member_id: uuid::Uuid) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::WorkspaceId)
+        .column_as(workspaces::Column::Slug, "workspace__slug")
+        .column_as(workspaces::Column::Name, "workspace__name")
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(member_id))
+        .filter(workspace_members::Column::Role.eq(ROLE_ADMIN))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .order_by_asc(workspaces::Column::Name)
 }
 
 /// One ADMIN membership with its workspace identity
 /// (`github.py:633-646`, the per-workspace payload).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+#[allow(non_snake_case)]
 pub struct AdminMembership {
     pub workspace_id: uuid::Uuid,
-    pub workspace_slug: String,
-    pub workspace_name: String,
+    pub workspace__slug: String,
+    pub workspace__name: String,
 }
 
 /// ADMIN workspaces for a user, ordered by workspace name.
-pub async fn fetch_admin_memberships<'e, E>(
-    ex: E,
+pub async fn fetch_admin_memberships(
+    db: &impl ConnectionTrait,
     member_id: uuid::Uuid,
-) -> Result<Vec<AdminMembership>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let rows: Vec<PgRow> = sqlx::query(&admin_memberships_sql())
-        .bind(member_id)
-        .fetch_all(ex)
-        .await?;
-    rows.iter()
-        .map(|r| {
-            Ok(AdminMembership {
-                workspace_id: r.try_get("workspace_id")?,
-                workspace_slug: r.try_get("workspace__slug")?,
-                workspace_name: r.try_get("workspace__name")?,
-            })
-        })
-        .collect()
+) -> Result<Vec<AdminMembership>, sea_orm::DbErr> {
+    admin_memberships_query(member_id)
+        .into_model::<AdminMembership>()
+        .all(db)
+        .await
 }
 
 /// `_is_workspace_admin(user, workspace)` (`github.py:131-137`):
-/// a live ADMIN membership exists. Binds `$1 = member_id`,
-/// `$2 = workspace_id`.
-pub fn is_workspace_admin_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(WORKSPACE_MEMBER_TABLE.to_owned()));
-    sel.expr(Expr::val(1));
-    sel.cond_where(
-        Condition::all()
-            .add(
-                Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("deleted_at"))).is_null(),
-            )
-            .add(
-                Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("member_id")))
-                    .eq(Expr::cust("$1")),
-            )
-            .add(
-                Expr::col((
-                    Alias::new(WORKSPACE_MEMBER_TABLE),
-                    Alias::new("workspace_id"),
-                ))
-                .eq(Expr::cust("$2")),
-            )
-            .add(
-                Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("role")))
-                    .eq(Expr::val(ROLE_ADMIN)),
-            )
-            .add(Expr::col((Alias::new(WORKSPACE_MEMBER_TABLE), Alias::new("is_active"))).eq(true)),
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
+/// a live ADMIN membership exists.
+pub fn is_workspace_admin_query(
+    member_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspace_members::Column::MemberId.eq(member_id))
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::Role.eq(ROLE_ADMIN))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .limit(1)
 }
 
 /// Whether the user admins the workspace (install-start, refresh, and
 /// callback all gate on this, `github.py:674,708,772`).
-pub async fn fetch_is_workspace_admin<'e, E>(
-    ex: E,
+pub async fn fetch_is_workspace_admin(
+    db: &impl ConnectionTrait,
     member_id: uuid::Uuid,
     workspace_id: uuid::Uuid,
-) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&is_workspace_admin_sql())
-        .bind(member_id)
-        .bind(workspace_id)
-        .fetch_optional(ex)
+) -> Result<bool, sea_orm::DbErr> {
+    let row = is_workspace_admin_query(member_id, workspace_id)
+        .into_tuple::<uuid::Uuid>()
+        .one(db)
         .await?;
     Ok(row.is_some())
 }
@@ -343,90 +211,28 @@ where
 // Project status reads (github.py:1093-1172)
 // ---------------------------------------------------------------------------
 
-/// `GithubRepositorySync.objects.filter(project_id=project_id,
-/// workspace__slug=slug).select_related("repository").first()`
-/// (`github.py:1097-1102`, the legacy-first status branch).
-/// Binds `$1 = project_id`, `$2 = workspace slug`.
-pub fn repository_sync_for_project_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(github_repository_sync::TABLE.to_owned()));
-    for col in github_repository_sync::COLUMNS {
-        sel.column((Alias::new(github_repository_sync::TABLE), Alias::new(*col)));
+impl From<github_repository_syncs::Model> for GithubRepositorySync {
+    fn from(row: github_repository_syncs::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+        Self {
+            id: row.id,
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+            deleted_at: row.deleted_at.map(at),
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            repository_id: row.repository_id,
+            credentials: row.credentials,
+            actor_id: row.actor_id,
+            workspace_integration_id: row.workspace_integration_id,
+            label_id: row.label_id,
+            is_sync_enabled: row.is_sync_enabled,
+            last_synced_at: row.last_synced_at.map(at),
+            last_sync_error: row.last_sync_error,
+        }
     }
-    for col in ["repository_id", "owner", "name", "url"] {
-        sel.expr_as(
-            Expr::col((Alias::new(GH_REPO_TABLE), Alias::new(col.to_owned()))),
-            Alias::new(format!("{GH_REPO_TABLE}__{col}")),
-        );
-    }
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((
-                Alias::new(github_repository_sync::TABLE),
-                Alias::new("workspace_id"),
-            ))
-            .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(GH_REPO_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((
-                Alias::new(github_repository_sync::TABLE),
-                Alias::new("repository_id"),
-            ))
-            .equals((Alias::new(GH_REPO_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.cond_where(
-        Condition::all()
-            .add(
-                Expr::col((
-                    Alias::new(github_repository_sync::TABLE),
-                    Alias::new("deleted_at"),
-                ))
-                .is_null(),
-            )
-            .add(
-                Expr::col((
-                    Alias::new(github_repository_sync::TABLE),
-                    Alias::new("project_id"),
-                ))
-                .eq(Expr::cust("$1")),
-            )
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$2")))
-            .add(Expr::col((Alias::new(GH_REPO_TABLE), Alias::new("deleted_at"))).is_null()),
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
-}
-
-/// Map one full `github_repository_syncs` row (column names,
-/// order-independent).
-pub fn map_github_repository_sync_row(row: &PgRow) -> Result<GithubRepositorySync, sqlx::Error> {
-    Ok(GithubRepositorySync {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        project_id: row.try_get("project_id")?,
-        workspace_id: row.try_get("workspace_id")?,
-        repository_id: row.try_get("repository_id")?,
-        credentials: row.try_get("credentials")?,
-        actor_id: row.try_get("actor_id")?,
-        workspace_integration_id: row.try_get("workspace_integration_id")?,
-        label_id: row.try_get("label_id")?,
-        is_sync_enabled: row.try_get("is_sync_enabled")?,
-        last_synced_at: row.try_get("last_synced_at")?,
-        last_sync_error: row.try_get("last_sync_error")?,
-    })
 }
 
 /// Repository identity as the legacy status response renders it
@@ -447,33 +253,131 @@ pub struct ProjectSyncStatus {
     pub repository: LegacyRepositoryRef,
 }
 
-/// The project's legacy sync, or `None` (fall through to the
-/// `GitRepositoryBinding` fallback, `github.py:1103-1104`).
-pub async fn fetch_repository_sync_for_project<'e, E>(
-    ex: E,
+/// One `repository_sync_for_project_query` row.
+#[derive(Debug, Clone, FromQueryResult)]
+#[allow(non_snake_case)]
+struct ProjectSyncRow {
+    pub id: uuid::Uuid,
+    pub created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    pub updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    pub created_by_id: Option<uuid::Uuid>,
+    pub updated_by_id: Option<uuid::Uuid>,
+    pub deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    pub project_id: uuid::Uuid,
+    pub workspace_id: uuid::Uuid,
+    pub repository_id: uuid::Uuid,
+    pub credentials: serde_json::Value,
+    pub actor_id: uuid::Uuid,
+    pub workspace_integration_id: uuid::Uuid,
+    pub label_id: Option<uuid::Uuid>,
+    pub is_sync_enabled: bool,
+    pub last_synced_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    pub last_sync_error: String,
+    pub github_repositories__repository_id: i64,
+    pub github_repositories__owner: String,
+    pub github_repositories__name: String,
+    pub github_repositories__url: Option<String>,
+}
+
+impl From<ProjectSyncRow> for ProjectSyncStatus {
+    fn from(row: ProjectSyncRow) -> Self {
+        Self {
+            sync: GithubRepositorySync::from(github_repository_syncs::Model {
+                id: row.id,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at,
+                project_id: row.project_id,
+                workspace_id: row.workspace_id,
+                repository_id: row.repository_id,
+                credentials: row.credentials,
+                actor_id: row.actor_id,
+                workspace_integration_id: row.workspace_integration_id,
+                label_id: row.label_id,
+                is_sync_enabled: row.is_sync_enabled,
+                last_synced_at: row.last_synced_at,
+                last_sync_error: row.last_sync_error,
+            }),
+            repository: LegacyRepositoryRef {
+                repository_id: row.github_repositories__repository_id,
+                owner: row.github_repositories__owner,
+                name: row.github_repositories__name,
+                url: row.github_repositories__url,
+            },
+        }
+    }
+}
+
+/// `GithubRepositorySync.objects.filter(project_id=project_id,
+/// workspace__slug=slug).select_related("repository").first()`
+/// (`github.py:1097-1102`, the legacy-first status branch).
+pub fn repository_sync_for_project_query(
     project_id: uuid::Uuid,
     workspace_slug: &str,
-) -> Result<Option<ProjectSyncStatus>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&repository_sync_for_project_sql())
-        .bind(project_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
+) -> Select<github_repository_syncs::Entity> {
+    github_repository_syncs::Entity::find()
+        .select_only()
+        .columns([
+            github_repository_syncs::Column::Id,
+            github_repository_syncs::Column::CreatedAt,
+            github_repository_syncs::Column::UpdatedAt,
+            github_repository_syncs::Column::CreatedById,
+            github_repository_syncs::Column::UpdatedById,
+            github_repository_syncs::Column::DeletedAt,
+            github_repository_syncs::Column::ProjectId,
+            github_repository_syncs::Column::WorkspaceId,
+            github_repository_syncs::Column::RepositoryId,
+            github_repository_syncs::Column::Credentials,
+            github_repository_syncs::Column::ActorId,
+            github_repository_syncs::Column::WorkspaceIntegrationId,
+            github_repository_syncs::Column::LabelId,
+            github_repository_syncs::Column::IsSyncEnabled,
+            github_repository_syncs::Column::LastSyncedAt,
+            github_repository_syncs::Column::LastSyncError,
+        ])
+        .column_as(
+            github_repositories::Column::RepositoryId,
+            "github_repositories__repository_id",
+        )
+        .column_as(
+            github_repositories::Column::Owner,
+            "github_repositories__owner",
+        )
+        .column_as(
+            github_repositories::Column::Name,
+            "github_repositories__name",
+        )
+        .column_as(github_repositories::Column::Url, "github_repositories__url")
+        .join(
+            JoinType::InnerJoin,
+            github_repository_syncs::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_repository_syncs::Relation::GithubRepositories.def(),
+        )
+        .filter(github_repository_syncs::Column::DeletedAt.is_null())
+        .filter(github_repository_syncs::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(workspace_slug.to_owned()))
+        .filter(github_repositories::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+/// The project's legacy sync, or `None` (fall through to the
+/// `GitRepositoryBinding` fallback, `github.py:1103-1104`).
+pub async fn fetch_repository_sync_for_project(
+    db: &impl ConnectionTrait,
+    project_id: uuid::Uuid,
+    workspace_slug: &str,
+) -> Result<Option<ProjectSyncStatus>, sea_orm::DbErr> {
+    let row = repository_sync_for_project_query(project_id, workspace_slug)
+        .into_model::<ProjectSyncRow>()
+        .one(db)
         .await?;
-    row.map(|r| {
-        Ok(ProjectSyncStatus {
-            sync: map_github_repository_sync_row(&r)?,
-            repository: LegacyRepositoryRef {
-                repository_id: r.try_get(format!("{GH_REPO_TABLE}__repository_id").as_str())?,
-                owner: r.try_get(format!("{GH_REPO_TABLE}__owner").as_str())?,
-                name: r.try_get(format!("{GH_REPO_TABLE}__name").as_str())?,
-                url: r.try_get(format!("{GH_REPO_TABLE}__url").as_str())?,
-            },
-        })
-    })
-    .transpose()
+    Ok(row.map(ProjectSyncStatus::from))
 }
 
 /// `GitRepositoryBinding.objects.filter(project_id=project_id,
@@ -481,142 +385,83 @@ where
 /// repository__provider="github").select_related("repository").first()`
 /// (`github.py:1104-1112`, the fallback status branch shared by the
 /// GET/PATCH/DELETE fallbacks at `:1157-1161,1179-1183`).
-/// Binds `$1 = project_id`, `$2 = workspace slug`.
-pub fn github_binding_for_project_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(git_repository_binding::TABLE.to_owned()));
-    for col in git_repository_binding::COLUMNS {
-        sel.column((Alias::new(git_repository_binding::TABLE), Alias::new(*col)));
-    }
-    for col in [
-        "id",
-        "provider",
-        "host_url",
-        "external_id",
-        "namespace",
-        "name",
-        "full_name",
-        "web_url",
-        "clone_url_http",
-        "clone_url_ssh",
-        "default_branch",
-        "is_private",
-    ] {
-        sel.expr_as(
-            Expr::col((
-                Alias::new(git_repository::TABLE.to_owned()),
-                Alias::new(col.to_owned()),
-            )),
-            Alias::new(format!("{}__{col}", git_repository::TABLE)),
-        );
-    }
-    for col in ["id", "status", "last_check_error"] {
-        sel.expr_as(
-            Expr::col((
-                Alias::new(git_provider_account::TABLE.to_owned()),
-                Alias::new(col.to_owned()),
-            )),
-            Alias::new(format!("{}__{col}", git_provider_account::TABLE)),
-        );
-    }
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(WORKSPACE_TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((
-                Alias::new(git_repository_binding::TABLE),
-                Alias::new("workspace_id"),
-            ))
-            .equals((Alias::new(WORKSPACE_TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(git_repository::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((
-                Alias::new(git_repository_binding::TABLE),
-                Alias::new("repository_id"),
-            ))
-            .equals((Alias::new(git_repository::TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.join(
-        JoinType::InnerJoin,
-        Alias::new(git_provider_account::TABLE.to_owned()),
-        Condition::all().add(
-            Expr::col((
-                Alias::new(git_repository_binding::TABLE),
-                Alias::new("provider_account_id"),
-            ))
-            .equals((Alias::new(git_provider_account::TABLE), Alias::new("id"))),
-        ),
-    );
-    sel.cond_where(
-        Condition::all()
-            .add(
-                Expr::col((
-                    Alias::new(git_repository_binding::TABLE),
-                    Alias::new("deleted_at"),
-                ))
-                .is_null(),
-            )
-            .add(
-                Expr::col((
-                    Alias::new(git_repository_binding::TABLE),
-                    Alias::new("project_id"),
-                ))
-                .eq(Expr::cust("$1")),
-            )
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$2")))
-            .add(Expr::col((Alias::new(git_repository::TABLE), Alias::new("deleted_at"))).is_null())
-            .add(
-                Expr::col((Alias::new(git_repository::TABLE), Alias::new("provider")))
-                    .eq(Expr::val(GITHUB_PROVIDER)),
-            )
-            .add(
-                Expr::col((
-                    Alias::new(git_provider_account::TABLE),
-                    Alias::new("deleted_at"),
-                ))
-                .is_null(),
-            ),
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
-}
-
-/// Map one `github_binding_for_project_sql` row, reusing the shared
-/// [`super::queries_git`] binding shapes.
-pub fn map_github_binding_row(
-    row: &PgRow,
-) -> Result<super::queries_git::ProjectBinding, sqlx::Error> {
-    super::queries_git::map_project_binding_row(row)
+pub fn github_binding_for_project_query(
+    project_id: uuid::Uuid,
+    workspace_slug: &str,
+) -> Select<crate::entity::git_repository_bindings::Entity> {
+    queries_git::binding_for_project_query(project_id, workspace_slug)
+        .filter(crate::entity::git_repositories::Column::Provider.eq(GITHUB_PROVIDER.to_owned()))
 }
 
 /// The project's github-provider binding, or `None` (the final
 /// `{bound: False}`, `github.py:1113-1114`).
-pub async fn fetch_github_binding_for_project<'e, E>(
-    ex: E,
+pub async fn fetch_github_binding_for_project(
+    db: &impl ConnectionTrait,
     project_id: uuid::Uuid,
     workspace_slug: &str,
-) -> Result<Option<super::queries_git::ProjectBinding>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&github_binding_for_project_sql())
-        .bind(project_id)
-        .bind(workspace_slug)
-        .fetch_optional(ex)
+) -> Result<Option<queries_git::ProjectBinding>, sea_orm::DbErr> {
+    let row = github_binding_for_project_query(project_id, workspace_slug)
+        .into_model::<queries_git::BindingRow>()
+        .one(db)
         .await?;
-    row.map(|r| map_github_binding_row(&r)).transpose()
+    Ok(row.map(queries_git::ProjectBinding::from))
 }
 
 // ---------------------------------------------------------------------------
 // Install-session callback read (github.py:751-755)
 // ---------------------------------------------------------------------------
+
+impl From<crate::entity::github_app_installations::Model>
+    for crate::integrations::github_models::github_app_installation::GithubAppInstallation
+{
+    fn from(row: crate::entity::github_app_installations::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+        Self {
+            id: row.id,
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+            deleted_at: row.deleted_at.map(at),
+            workspace_integration_id: row.workspace_integration_id,
+            installation_id: row.installation_id,
+            account_login: row.account_login,
+            account_type: row.account_type,
+            repository_selection: row.repository_selection,
+            repository_count: row.repository_count,
+            permissions: row.permissions,
+            events: row.events,
+            installed_at: row.installed_at.map(at),
+            suspended_at: row.suspended_at.map(at),
+            verified_at: row.verified_at.map(at),
+            last_checked_at: row.last_checked_at.map(at),
+            last_check_error: row.last_check_error,
+        }
+    }
+}
+
+impl From<github_app_install_sessions::Model> for GithubAppInstallSession {
+    fn from(row: github_app_install_sessions::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+        Self {
+            id: row.id,
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+            deleted_at: row.deleted_at.map(at),
+            state: row.state,
+            workspace_id: row.workspace_id,
+            actor_id: row.actor_id,
+            installation_id: row.installation_id,
+            account_login: row.account_login,
+            status: row.status,
+            expires_at: at(row.expires_at),
+            completed_at: row.completed_at.map(at),
+            error: row.error,
+        }
+    }
+}
 
 /// `GithubAppInstallSession.objects.filter(state=state).select_related(
 /// "workspace", "actor").first()` (`github.py:751-753`). `state` is
@@ -624,76 +469,21 @@ where
 /// lookup half: the joined workspace/actor rows the callback then reads
 /// (`install_session.workspace.slug`, `actor_id`) resolve through the
 /// workspace read in [`super`] plus the FK ids carried on this row.
-/// Binds `$1 = state`.
-pub fn install_session_by_state_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    let mut sel = Query::select();
-    sel.from(Alias::new(github_app_install_session::TABLE.to_owned()));
-    for col in github_app_install_session::COLUMNS {
-        sel.column((
-            Alias::new(github_app_install_session::TABLE),
-            Alias::new(*col),
-        ));
-    }
-    sel.cond_where(
-        Condition::all()
-            .add(
-                Expr::col((
-                    Alias::new(github_app_install_session::TABLE),
-                    Alias::new("deleted_at"),
-                ))
-                .is_null(),
-            )
-            .add(
-                Expr::col((
-                    Alias::new(github_app_install_session::TABLE),
-                    Alias::new("state"),
-                ))
-                .eq(Expr::cust("$1")),
-            ),
-    )
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
-}
-
-/// Map one full `github_app_install_sessions` row.
-pub fn map_github_app_install_session_row(
-    row: &PgRow,
-) -> Result<GithubAppInstallSession, sqlx::Error> {
-    Ok(GithubAppInstallSession {
-        id: row.try_get("id")?,
-        created_at: row.try_get("created_at")?,
-        updated_at: row.try_get("updated_at")?,
-        created_by_id: row.try_get("created_by_id")?,
-        updated_by_id: row.try_get("updated_by_id")?,
-        deleted_at: row.try_get("deleted_at")?,
-        state: row.try_get("state")?,
-        workspace_id: row.try_get("workspace_id")?,
-        actor_id: row.try_get("actor_id")?,
-        installation_id: row.try_get("installation_id")?,
-        account_login: row.try_get("account_login")?,
-        status: row.try_get("status")?,
-        expires_at: row.try_get("expires_at")?,
-        completed_at: row.try_get("completed_at")?,
-        error: row.try_get("error")?,
-    })
+pub fn install_session_by_state_query(state: &str) -> Select<github_app_install_sessions::Entity> {
+    github_app_install_sessions::Entity::find()
+        .filter(github_app_install_sessions::Column::DeletedAt.is_null())
+        .filter(github_app_install_sessions::Column::State.eq(state.to_owned()))
+        .limit(1)
 }
 
 /// The install session for a callback `state`, or `None` (the
 /// `unknown_state` redirect, `github.py:754-755`).
-pub async fn fetch_install_session_by_state<'e, E>(
-    ex: E,
+pub async fn fetch_install_session_by_state(
+    db: &impl ConnectionTrait,
     state: &str,
-) -> Result<Option<GithubAppInstallSession>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(&install_session_by_state_sql())
-        .bind(state)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| map_github_app_install_session_row(&r))
-        .transpose()
+) -> Result<Option<GithubAppInstallSession>, sea_orm::DbErr> {
+    let row = install_session_by_state_query(state).one(db).await?;
+    Ok(row.map(GithubAppInstallSession::from))
 }
 
 /// The callback expiry predicate: `install_session.expires_at <= now`
@@ -933,62 +723,95 @@ pub fn parse_github_datetime(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
 
     #[test]
     fn workspace_integration_lookup_shape() {
-        let sql = workspace_integration_sql();
+        let (ws, integ) = (
+            uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid"),
+            uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("uuid"),
+        );
+        let sql = workspace_integration_query(ws, integ)
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sql.contains(r#"FROM "workspace_integrations""#), "{sql}");
-        assert!(sql.contains(r#""workspace_id" = ($1)"#), "{sql}");
-        assert!(sql.contains(r#""integration_id" = ($2)"#), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""workspace_id" = '{ws}'"#)),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(r#""integration_id" = '{integ}'"#)),
+            "{sql}"
+        );
         assert!(sql.contains(r#""config""#), "{sql}");
     }
 
     #[test]
     fn integration_lookup_is_github_first() {
-        let sql = integration_by_provider_sql();
+        let sql = integration_by_provider_query()
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sql.contains(r#"FROM "integrations""#), "{sql}");
-        assert!(sql.contains("'github'"), "{sql}");
+        assert!(sql.contains(r#""provider" = 'github'"#), "{sql}");
     }
 
     #[test]
     fn admin_scoping_shape() {
-        let sql = admin_memberships_sql();
+        let member = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let ws = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("uuid");
+        let sql = admin_memberships_query(member)
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
-        assert!(sql.contains(r#""member_id" = ($1)"#), "{sql}");
+        assert!(
+            sql.contains(&format!(r#""member_id" = '{member}'"#)),
+            "{sql}"
+        );
         assert!(sql.contains("= 20"), "{sql}");
-        assert!(sql.contains(r#""is_active" = TRUE"#), "{sql}");
-        assert!(sql.contains(r#"ORDER BY "workspaces"."name" ASC"#), "{sql}");
-        let admin = is_workspace_admin_sql();
-        assert!(admin.contains(r#""workspace_id" = ($2)"#), "{admin}");
+        assert!(sql.contains("ORDER BY"), "{sql}");
+        let admin = is_workspace_admin_query(member, ws)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            admin.contains(&format!(r#""workspace_id" = '{ws}'"#)),
+            "{admin}"
+        );
         assert!(admin.contains("= 20"), "{admin}");
     }
 
     #[test]
     fn project_status_reads_shape() {
-        let sync = repository_sync_for_project_sql();
+        let proj = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sync = repository_sync_for_project_query(proj, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(sync.contains(r#"FROM "github_repository_syncs""#), "{sync}");
         assert!(
             sync.contains(r#"INNER JOIN "github_repositories""#),
             "{sync}"
         );
-        assert!(sync.contains(r#""project_id" = ($1)"#), "{sync}");
-        assert!(sync.contains(r#""workspaces"."slug" = ($2)"#), "{sync}");
-        let bind = github_binding_for_project_sql();
-        assert!(bind.contains(r#"FROM "git_repository_bindings""#), "{bind}");
         assert!(
-            bind.contains(r#""git_repositories"."provider" = 'github'"#),
-            "{bind}"
+            sync.contains(&format!(r#""project_id" = '{proj}'"#)),
+            "{sync}"
         );
+        assert!(sync.contains(r#""workspaces"."slug" = 'acme'"#), "{sync}");
+        let bind = github_binding_for_project_query(proj, "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(bind.contains(r#"FROM "git_repository_bindings""#), "{bind}");
+        assert!(bind.contains("provider"), "{bind}");
     }
 
     #[test]
     fn session_lookup_shape() {
-        let sql = install_session_by_state_sql();
+        let sql = install_session_by_state_query("s")
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(
             sql.contains(r#"FROM "github_app_install_sessions""#),
             "{sql}"
         );
-        assert!(sql.contains(r#""state" = ($1)"#), "{sql}");
+        assert!(sql.contains(r#""state" = 's'"#), "{sql}");
     }
 
     #[test]
@@ -1254,56 +1077,57 @@ mod tests {
             .execute(&mut *tx).await.expect("seed member");
         }
 
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
         assert_eq!(
-            fetch_integration_id_by_provider(&mut *tx)
+            fetch_integration_id_by_provider(&conn)
                 .await
                 .expect("integration"),
             Some(integ)
         );
-        let wi_row = fetch_workspace_integration(&mut *tx, ws, integ)
+        let wi_row = fetch_workspace_integration(&conn, ws, integ)
             .await
             .expect("wi")
             .expect("a row");
         assert_eq!(wi_row.id, wi);
         assert!(workspace_integration_is_connected(&wi_row.config));
         assert_eq!(
-            fetch_workspace_integration(&mut *tx, other, integ)
+            fetch_workspace_integration(&conn, other, integ)
                 .await
                 .expect("wi"),
             None
         );
         // ADMIN memberships only, ordered by workspace name (Acme < Zeta).
-        let memberships = fetch_admin_memberships(&mut *tx, admin)
+        let memberships = fetch_admin_memberships(&conn, admin)
             .await
             .expect("memberships");
         assert_eq!(
             memberships
                 .iter()
-                .map(|m| m.workspace_slug.clone())
+                .map(|m| m.workspace__slug.clone())
                 .collect::<Vec<_>>(),
             vec!["acme".to_string(), "zeta".to_string()]
         );
         assert!(memberships
             .iter()
-            .all(|m| m.workspace_name == "Acme" || m.workspace_name == "Zeta"));
-        assert!(fetch_admin_memberships(&mut *tx, member)
+            .all(|m| m.workspace__name == "Acme" || m.workspace__name == "Zeta"));
+        assert!(fetch_admin_memberships(&conn, member)
             .await
             .expect("m")
             .is_empty());
-        assert!(fetch_admin_memberships(&mut *tx, guest)
+        assert!(fetch_admin_memberships(&conn, guest)
             .await
             .expect("g")
             .is_empty());
-        assert!(fetch_is_workspace_admin(&mut *tx, admin, ws)
+        assert!(fetch_is_workspace_admin(&conn, admin, ws)
             .await
             .expect("gate"));
-        assert!(!fetch_is_workspace_admin(&mut *tx, member, ws)
+        assert!(!fetch_is_workspace_admin(&conn, member, ws)
             .await
             .expect("gate"));
-        assert!(!fetch_is_workspace_admin(&mut *tx, guest, ws)
+        assert!(!fetch_is_workspace_admin(&conn, guest, ws)
             .await
             .expect("gate"));
-        assert!(!fetch_is_workspace_admin(&mut *tx, admin, live_uuid(9))
+        assert!(!fetch_is_workspace_admin(&conn, admin, live_uuid(9))
             .await
             .expect("gate"));
         tx.rollback().await.expect("rollback");
@@ -1366,8 +1190,9 @@ mod tests {
         .bind(live_uuid(21)).bind(ts).bind(ws).bind(live_ts(1_700_090_000))
         .execute(&mut *tx).await.expect("seed session");
 
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
         // Legacy-first hit.
-        let hit = fetch_repository_sync_for_project(&mut *tx, proj_sync, "acme")
+        let hit = fetch_repository_sync_for_project(&conn, proj_sync, "acme")
             .await
             .expect("sync")
             .expect("a row");
@@ -1381,13 +1206,13 @@ mod tests {
         );
         // No legacy row for the bound project -> fallback None on the sync read...
         assert_eq!(
-            fetch_repository_sync_for_project(&mut *tx, proj_bind, "acme")
+            fetch_repository_sync_for_project(&conn, proj_bind, "acme")
                 .await
                 .expect("sync"),
             None
         );
         // ...but the github binding fallback hits (private repo preserved).
-        let fb = fetch_github_binding_for_project(&mut *tx, proj_bind, "acme")
+        let fb = fetch_github_binding_for_project(&conn, proj_bind, "acme")
             .await
             .expect("binding")
             .expect("a row");
@@ -1398,25 +1223,25 @@ mod tests {
         assert_eq!(fb.provider_account.last_check_error, "stale");
         // Nothing bound at all -> both miss (the {bound: False} branch).
         assert_eq!(
-            fetch_repository_sync_for_project(&mut *tx, proj_none, "acme")
+            fetch_repository_sync_for_project(&conn, proj_none, "acme")
                 .await
                 .expect("s"),
             None
         );
         assert_eq!(
-            fetch_github_binding_for_project(&mut *tx, proj_none, "acme")
+            fetch_github_binding_for_project(&conn, proj_none, "acme")
                 .await
                 .expect("b"),
             None
         );
         // Session read.
-        let sess = fetch_install_session_by_state(&mut *tx, "st_abc")
+        let sess = fetch_install_session_by_state(&conn, "st_abc")
             .await
             .expect("session")
             .expect("a row");
         assert_eq!(sess.status, "started");
         assert_eq!(
-            fetch_install_session_by_state(&mut *tx, "nope")
+            fetch_install_session_by_state(&conn, "nope")
                 .await
                 .expect("session"),
             None

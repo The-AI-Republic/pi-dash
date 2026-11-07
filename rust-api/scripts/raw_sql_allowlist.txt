@@ -15,13 +15,6 @@ crates/api/src/app_intake/intakes.rs 7
 crates/api/src/app_intake/issues.rs 71
 crates/api/src/app_intake/mod.rs 9
 crates/api/src/app_intake/versions.rs 4
-crates/api/src/app_integrations/handlers_external.rs 6
-crates/api/src/app_integrations/handlers_git_accounts.rs 5
-crates/api/src/app_integrations/handlers_git_repo.rs 27
-crates/api/src/app_integrations/handlers_github_app.rs 31
-crates/api/src/app_integrations/handlers_github_proj.rs 34
-crates/api/src/app_integrations/handlers_github_ws.rs 17
-crates/api/src/app_integrations/mod.rs 1
 crates/api/src/app_issues/mod.rs 2
 crates/api/src/app_modules/handlers_archive.rs 5
 crates/api/src/app_modules/handlers_module_issues.rs 10
@@ -101,10 +94,6 @@ crates/api/src/v1_work_items/handlers_pr_links.rs 38
 crates/api/src/v1_work_items/handlers_social.rs 29
 crates/compat/src/db.rs 1
 crates/db/src/app_intake/queries.rs 14
-crates/db/src/app_integrations/mod.rs 2
-crates/db/src/app_integrations/queries_git.rs 14
-crates/db/src/app_integrations/queries_github.rs 17
-crates/db/src/app_integrations/queries_webhook.rs 10
 crates/db/src/config/accessor.rs 1
 crates/db/src/entity/issue_hooks.rs 5
 crates/db/src/filterset.rs 6
