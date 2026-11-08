@@ -207,6 +207,16 @@ any browser requests (for the community server, configure
 `CORS_ALLOWED_ORIGINS`). Changing `SameSite` alone is not a reliable fix
 for platform-specific third-party cookie policies.
 
+On a self-hosted HTTPS server, listing `http://tauri.localhost` in
+`CORS_ALLOWED_ORIGINS` does not disable `Secure` on the session/CSRF cookies.
+Both the Django settings (`apps/api/pi_dash/settings/common.py`) and the
+Rust settings (`rust-api/crates/db/src/config/settings.rs`) treat the desktop
+bundle origins (`tauri://localhost`, `http://tauri.localhost`,
+`https://tauri.localhost`) as local webview asset origins, not plain-HTTP
+deployments, so an HTTPS web origin plus the desktop origin still yields
+`SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` / `cookie_secure` = `True` (pinned
+by `rust-api/contract-tests/foundation/test_cookie_secure_desktop.py`).
+
 Signing in from the desktop requires a server that implements the desktop
 sign-in hand-off: the identity provider redirects to
 `pidash://auth/callback?code=…&state=…`, and `main.rs` navigates the webview
