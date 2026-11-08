@@ -183,7 +183,7 @@ describe("performSignOut", () => {
   it("disposes the runtime before the POST once confirmed", async () => {
     const client = stubClient(async () => ({ url: "https://app.test/" }));
     const queryClient = new QueryClient();
-    const choice = { deleteChatHistory: true };
+    const choice = { deleteChatHistory: true, signOutComputer: false };
     const confirmRuntimeSignOut = vi.fn(async () => choice);
     const disposeRuntimeForSignOut = vi.fn(async () => undefined);
     const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
@@ -227,7 +227,7 @@ describe("performSignOut", () => {
   it("disposes without asking for already-confirmed sign-outs", async () => {
     const client = stubClient(async () => ({ url: "https://app.test/" }));
     const queryClient = new QueryClient();
-    const confirmRuntimeSignOut = vi.fn(async () => ({ deleteChatHistory: true }));
+    const confirmRuntimeSignOut = vi.fn(async () => ({ deleteChatHistory: true, signOutComputer: false }));
     const disposeRuntimeForSignOut = vi.fn(async () => undefined);
     const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
 
@@ -240,7 +240,7 @@ describe("performSignOut", () => {
     }
 
     expect(confirmRuntimeSignOut).not.toHaveBeenCalled();
-    expect(disposeRuntimeForSignOut).toHaveBeenCalledWith({ deleteChatHistory: false });
+    expect(disposeRuntimeForSignOut).toHaveBeenCalledWith({ deleteChatHistory: false, signOutComputer: false });
     expect(client.post).toHaveBeenCalledWith("/auth/sign-out/", {});
   });
 

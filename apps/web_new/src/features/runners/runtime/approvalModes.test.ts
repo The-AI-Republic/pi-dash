@@ -53,6 +53,13 @@ function fakeRuntime(): AgentRuntimeApi {
     reloadCredentials: vi.fn(async () => undefined),
     saveApprovalModes: vi.fn(async () => undefined),
     loadApprovalModes: vi.fn(async () => ({})),
+    scanLegacyTrees: vi.fn(async () => []),
+    finishLegacyTree: vi.fn(async () => undefined),
+    restoreLegacyFolder: vi.fn(async () => undefined),
+    loadNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    recordNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    dismissNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    signOutComputer: vi.fn(async () => undefined),
   };
 }
 

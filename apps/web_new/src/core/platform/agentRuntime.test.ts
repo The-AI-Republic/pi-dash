@@ -119,6 +119,37 @@ describe("desktop agent runtime", () => {
     await expect(platform.agentRuntime?.loadApprovalModes("u1")).resolves.toEqual({});
   });
 
+  it("runs the migration and notices commands", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "legacy_scan") return [];
+      if (
+        command === "desktop_notices_load" ||
+        command === "desktop_notices_record" ||
+        command === "desktop_notices_dismiss"
+      )
+        return { notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] };
+      return undefined;
+    });
+    installBridge(invoke);
+    await expect(platform.agentRuntime?.scanLegacyTrees()).resolves.toEqual([]);
+    await platform.agentRuntime?.finishLegacyTree({ dir: "/d", account: "u1", daemonAccount: "u1" });
+    await platform.agentRuntime?.restoreLegacyFolder({ runner: "r", workingDir: "/w" });
+    await platform.agentRuntime?.loadNotices("u1");
+    await platform.agentRuntime?.recordNotices("u1", { legacy_folders: [], pod_member_projects: [] });
+    await platform.agentRuntime?.dismissNotices("u1", ["folder:/t"]);
+    await platform.agentRuntime?.signOutComputer();
+    expect(invoke).toHaveBeenCalledWith("legacy_scan", undefined);
+    expect(invoke).toHaveBeenCalledWith("legacy_finish", { dir: "/d", account: "u1", daemonAccount: "u1" });
+    expect(invoke).toHaveBeenCalledWith("legacy_restore_folder", { runner: "r", workingDir: "/w" });
+    expect(invoke).toHaveBeenCalledWith("desktop_notices_load", { account: "u1" });
+    expect(invoke).toHaveBeenCalledWith("desktop_notices_record", {
+      account: "u1",
+      notices: { legacy_folders: [], pod_member_projects: [] },
+    });
+    expect(invoke).toHaveBeenCalledWith("desktop_notices_dismiss", { account: "u1", keys: ["folder:/t"] });
+    expect(invoke).toHaveBeenCalledWith("pidash_cli_logout", { engine: false });
+  });
+
   it("rejects runtime calls without the bridge", async () => {
     await expect(platform.agentRuntime?.discover({ userId: "u1", cloudUrl: "https://c.test" })).rejects.toThrow(
       "daemon_discover needs the native bridge"
@@ -126,6 +157,7 @@ describe("desktop agent runtime", () => {
     await expect(platform.agentRuntime?.engineLogin("d")).rejects.toThrow(
       "pidash_cli_engine_login needs the native bridge"
     );
+    await expect(platform.agentRuntime?.signOutComputer()).rejects.toThrow("pidash_cli_logout needs the native bridge");
   });
 });
 

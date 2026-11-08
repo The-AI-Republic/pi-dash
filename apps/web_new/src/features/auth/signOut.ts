@@ -96,7 +96,9 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
   const { client, queryClient, teardown } = args;
   const runtime = getRuntimeSignOutHooks();
   if (runtime) {
-    const choice = args.skipRuntimeConfirm ? { deleteChatHistory: false } : await runtime.confirmRuntimeSignOut();
+    const choice = args.skipRuntimeConfirm
+      ? { deleteChatHistory: false, signOutComputer: false }
+      : await runtime.confirmRuntimeSignOut();
     if (choice === null) return null;
     await runtime.disposeRuntimeForSignOut(choice);
   }
