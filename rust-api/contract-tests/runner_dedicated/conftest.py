@@ -160,6 +160,22 @@ def other_project_runner(seeder, world, project2):
 
 
 @pytest.fixture()
+def pod2(seeder, world):
+    """A second, non-default pod in the same project."""
+    return seeder.create_pod(world["ws"]["id"], world["project"]["id"], name="dr-pod2")
+
+
+@pytest.fixture()
+def doomed_runner(seeder, world, pod2):
+    """An online runner in the non-default pod, to be revoked."""
+    runner = seeder.enroll_runner(
+        world["admin"]["id"], world["ws"]["id"], pod2["id"], "dr-doomed-token"
+    )
+    _online(seeder, runner["id"])
+    return runner
+
+
+@pytest.fixture()
 def dedicated_run(seeder, world, online_runner, dedicated_issue):
     run_id = _uid()
     seeder.db.execute(
