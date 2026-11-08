@@ -10,6 +10,7 @@
 import { Button, Dialog, FieldScaffold } from "@pidash/kit";
 import * as React from "react";
 
+import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { browserPageExportSink, type PageExportSink } from "../lib/downloadSink.js";
 import type { PageExportHost } from "../lib/pageExportDialogRegistry.js";
@@ -63,7 +64,7 @@ export function PageExportDialog({
   const handleExport = async (): Promise<void> => {
     setSaving(true);
     try {
-      await saveFile(host, form, { sink: sink ?? browserPageExportSink(), origin: window.location.origin });
+      await saveFile(host, form, { sink: sink ?? browserPageExportSink(), origin: getAppClient().baseUrl });
       notifySuccess(SUCCESS_TITLE);
       onClose();
     } catch {
