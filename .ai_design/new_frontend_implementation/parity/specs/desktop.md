@@ -2,7 +2,8 @@
 
 Parent epic NEWFRONT-77. Inventory
 `.ai_design/new_frontend_implementation/parity/inventory/desktop.md` (rows
-DESK-001–027, all `oracle green` at split). Oracle scenarios
+DESK-001–031, all `oracle green` at split, plus DESK-032, a packaging row
+added and built by NEWFRONT-92). Oracle scenarios
 `apps/web_new/e2e/parity/desktop/` (agent-runtime, sign-in, updater, shell
 specs; NEWFRONT-207–210), which pin the web-observable side of each row
 (absence or inertness on `apps/web`); the area gate (NEWFRONT-595) proves
@@ -287,6 +288,19 @@ mechanism already exists in `apps/web_new` — the flow keys the step's
 presence off the platform (§8); this slice proves the desktop leg at the
 gate.
 
+DESK-032 — How the app is built is part of the shell's behavior: with no
+frontend switch, `cargo tauri dev` and `cargo tauri build` prepare
+`apps/web_new` built for the desktop target (the kit's built stylesheet
+first, then the app with both origins baked), then swap the result into
+the app's assets. The prep refuses anything that is not a desktop build
+of the new app — no asset wiring, no desktop transport marker, a missing
+baked origin — and an edition's verify hook has the last word. The old
+overlay tree, the tree merger and its test runner no longer exist, and a
+leftover environment asking for them fails instead of quietly building
+the new app. (NEWFRONT-92/M-01 built this and removed the old path.)
+Proven by the packaging tests under `desktop/tests/`, not a parity
+scenario: the parity stack serves a built bundle and never runs the prep.
+
 ## 4. Updater (NEWFRONT-592)
 
 The shell owns the sidebar mount point (SHELL-102); this slice builds the
@@ -395,14 +409,19 @@ navigation policy time and as a post-load fallback. Entirely native (the
 dev hot-reload mode is exempt); no web_new code and no API (§10). Oracle:
 `shell/shell.spec.ts`. Built-marked with justification like DESK-022.
 
-DESK-025 — The desktop bundle ships no web-only routes: marketing and
-other web-only pages are absent and fall through to not-found, while the
-desktop login and sign-in paths render the bare sign-in screen. In
-`apps/web_new` this is the route tree plus the desktop target: web-only
-subtrees mount in the web target only, and the retired sign-in addresses
-fork to the desktop screen under the desktop target (§11). No API. Oracle:
-`shell/shell.spec.ts`. The slice builds the exclusion wiring; the gate
-proves both the fall-through and the sign-in render on the desktop build.
+DESK-025 — The desktop bundle ships only the screens `apps/web_new` owns:
+an address the migrated-route list does not claim (the admin console, a
+public board, a screen the hosted app still serves from the old frontend)
+leaves the window for the system browser at the same address on the
+hosted web app, and an address it does claim but that resolves to nothing
+(an unknown workspace) keeps the in-window not-found page. The desktop
+login and sign-in paths render the bare sign-in screen. In `apps/web_new`
+this is the route tree plus the desktop target: web-only subtrees mount
+in the web target only, and the retired sign-in addresses fork to the
+desktop screen under the desktop target (§11). No API. Oracle:
+`shell/shell.spec.ts`. The slice builds the exclusion wiring and the
+browser hand-off; the gate proves the hand-off, the in-window not-found
+and the sign-in render on the desktop build.
 
 ## 6. Own-code port map per slice (seam 1)
 
@@ -609,20 +628,42 @@ needed versus what the area gate verifies as native behavior:
 - DESK-015 scheme guard: enforced natively and mirrored in the platform
   open (§8, §12); the gate verifies refusal of non-web addresses.
 
-## 11. DESK-025 bundle route exclusions (seam 6)
+## 11. DESK-025 bundle route exclusions and the browser hand-off (seam 6)
 
 In `apps/web_new` there is no overlay file-swap: the route tree plus the
 desktop target produce the exclusion. The desktop bundle is built with the
 desktop target, which selects the desktop platform module at build time
 and excludes web-only route subtrees — the god-mode and public-boards
-subtrees mount in the web target only (decision D13) — so those addresses
-fall through to the normal not-found page on desktop. The retired sign-in
+subtrees mount in the web target only (decision D13). The retired sign-in
 addresses fork the other way: under the desktop target the login and
 sign-in routes render the bare desktop screen (DESK-011) instead of
-redirecting to the entry. Unknown paths keep the healthy catch-all in
-both targets. NEWFRONT-594 builds the exclusion wiring; NEWFRONT-591 owns
-the sign-in fork half; the gate proves the fall-through and the sign-in
-render on the desktop build.
+redirecting to the entry.
+
+An excluded address still exists somewhere — on the hosted app, which is
+the old frontend behind the proxy for every route the migrated-route list
+(`apps/web_new/migrated-routes.json`) does not claim. The desktop window
+cannot render it (the native shell refuses to load a server-hosted page
+remotely, DESK-024), so the surface that would otherwise show not-found
+becomes the hand-off: under the desktop target, when the address on screen
+is not one the migrated list claims, it opens that same path, query and
+fragment on the hosted web app through the platform external open
+(DESK-015's web-address guard applies) and says the screen moved to the
+browser. A build with no hosted origin baked in cannot open anything and
+says so instead. The web target never hands off: it is the hosted app, so
+an address nothing there renders stays the normal not-found page.
+
+An address the migrated list *does* claim keeps the in-window not-found
+page when it resolves to nothing — an unknown workspace slug, for example.
+That distinction is why the decision reads the migrated list rather than
+"did a route match": live screens that have no route of their own yet
+(notifications, profile, archives) still render in the window and must not
+be sent away.
+
+Root keeps the entry in both targets. NEWFRONT-594 builds the exclusion
+wiring; NEWFRONT-591 owns the sign-in fork half; NEWFRONT-92 (M-01)
+builds the hand-off and makes the desktop bundle the default; the gate
+proves the hand-off, the in-window not-found and the sign-in render on the
+desktop build.
 
 ## 12. Transport seam (seam 7)
 

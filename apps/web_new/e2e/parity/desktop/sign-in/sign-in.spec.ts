@@ -475,8 +475,9 @@ async function desk013Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   }
 
   await test.step("the fallback action opens the hosted app through the native browser command", async () => {
-    // The gate serves the desktop dev bundle with PIDASH_WEB_BASE_URL set
-    // to the stack's oracle origin, so the card resolves there.
+    // The gate serves the desktop build with its hosted web origin baked
+    // to the stack's oracle origin (VITE_WEB_BASE_URL, PIDASH_WEB_BASE_URL
+    // accepted), so the card resolves there.
     const hosted = parityOracleUrl(process.env);
     await driver.visit("/");
     await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_UNAVAILABLE_ACTION);

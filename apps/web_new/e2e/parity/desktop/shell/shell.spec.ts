@@ -20,8 +20,12 @@
 // origin is pinned by the resolver's own unit test); live-stream resume
 // on web is webview-EventSource semantics by construction (no native
 // stream command exists without the bridge); the tray/window size
-// defaults are native-only; and both route-extension tables are empty in
-// this build, so no other web-only route exists to pin beyond the entry.
+// defaults are native-only; and the overlay's route-extension table is
+// empty in this build, so no other web-only route exists to pin beyond
+// the entry. The desktop bundle's browser hand-off for screens it does
+// not carry is new-side behavior (M-01) and runs on web_new only; the
+// oracle side keeps pinning that the entry resolves instead of falling
+// through.
 //
 // Overlap: ISS-161 owns the detail copy toast, ISS-187–190 own the
 // attachment widget flows, DESK-011 (NEWFRONT-208) owns entry-route
@@ -472,7 +476,7 @@ test(
 );
 
 test(
-  specTitle(["DESK-025"], "marketing entry renders on web and unknown paths hit the normal catch-all"),
+  specTitle(["DESK-025"], "entry renders on web and desktop; desktop hands screens it does not carry to the browser"),
   { tag: specTags(["DESK-025"]) },
   async ({ driver, seed }) => {
     if (driver.target === "web_new") {
@@ -534,6 +538,11 @@ test(
 /** web_new not-found surface copy (shared shell). */
 const NEW_NOT_FOUND_HEADING = "That page does not exist";
 const NEW_NOT_FOUND_HOME = "Back to home";
+
+/** web_new desktop hand-off card copy (shared coexistence surface). */
+const NEW_HANDOFF_HEADING = "This screen opens in your browser";
+const NEW_HANDOFF_NO_ADDRESS =
+  "This build has no web app address configured, so this screen cannot be opened from the desktop app.";
 
 /** Install the mock bridge, then plant a signed-in session for desktop legs. */
 async function enterShellSignedIn(
@@ -873,6 +882,29 @@ async function desk024Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   });
 }
 
+/**
+ * The desktop hand-off: visiting an address the bundle does not carry shows
+ * the "opens in your browser" card instead of the not-found page, and the
+ * browser is opened through the native opener at the same address on the
+ * hosted app when the build has one baked in.
+ */
+async function expectHandOff(driver: ParityDriver, path: string): Promise<void> {
+  await driver.visit(path);
+  await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_HANDOFF_HEADING);
+  const text = await driver.pageText();
+  expect(text).not.toContain(NEW_NOT_FOUND_HEADING);
+  expect(text).not.toContain(NEW_NOT_FOUND_HOME);
+  if (text.includes(NEW_HANDOFF_NO_ADDRESS)) {
+    // Gate builds without a baked hosted origin say plainly that they
+    // cannot open the screen; nothing is handed to the OS.
+    expect(await desktopInvocations(driver.page, "plugin:opener|open_url")).toEqual([]);
+    return;
+  }
+  const opened = await desktopInvocations(driver.page, "plugin:opener|open_url");
+  const urls = opened.map((entry) => (entry.args as { url?: unknown } | undefined)?.url);
+  expect(urls).toContain(new URL(path, `${parityOracleUrl(process.env)}/`).toString());
+}
+
 async function desk025Positive(driver: ParityDriver, seed: ParitySeedFacts): Promise<void> {
   await installDesktopMock(driver.page);
 
@@ -889,30 +921,40 @@ async function desk025Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     expect(await driver.deskSigninMarketingFrameVisible()).toBe(false);
   });
 
-  await test.step("web-only subtrees fall through to not-found", async () => {
+  await test.step("screens the bundle does not carry leave for the browser", async () => {
     const session = await signInSession(seed.email, seed.password);
     await serverSetTourCompleted(session, true);
     await driver.page.context().addCookies(sessionBrowserCookies(session));
     await driver.openWorkspaceHome(seed.workspaceSlug);
     await expect.poll(() => driver.sidebarLinkTexts(), POLL_60).toContain("Home");
-    // The god-mode route refuses the desktop target, so both spellings
-    // reach the generic catch-all; a spaces path with no board match falls
-    // through to the subtree splat, which renders the same shared
-    // catch-all. No admin surface renders anywhere.
+    // The god-mode route refuses the desktop target and the address is not
+    // one the new app owns, so it leaves the window instead of claiming the
+    // page does not exist. No admin surface renders anywhere.
     for (const route of ["/god-mode", "/god-mode/"]) {
-      await driver.visit(route);
-      await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_NOT_FOUND_HEADING);
-      expect(await driver.pageText()).toContain(NEW_NOT_FOUND_HOME);
+      await expectHandOff(driver, route);
     }
-    await driver.visit("/spaces/parity-anchor/");
-    await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_NOT_FOUND_HEADING);
-    expect(await driver.pageText()).toContain(NEW_NOT_FOUND_HOME);
   });
 
-  await test.step("a genuinely unknown path renders the app not-found page", async () => {
-    await driver.visit(`/${seed.workspaceSlug}/__parity_no_such_page__`);
-    await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_NOT_FOUND_HEADING);
-    expect(await driver.pageText()).toContain(NEW_NOT_FOUND_HOME);
+  await test.step("an address the new app owns keeps the in-window not-found", async () => {
+    // The spaces subtree is in the migrated list: it renders in the window,
+    // and an anchor that does not resolve is a real in-app not-found.
+    await driver.visit("/spaces/parity-anchor/");
+    await expect.poll(() => driver.pageText(), POLL_60).toContain("Workspace not found");
+    expect(await driver.pageText()).toContain("Go Home");
+    expect(await driver.pageText()).not.toContain(NEW_HANDOFF_HEADING);
+    // A single unknown segment is a workspace address, owned and gated: the
+    // workspace-not-found screen, never a browser hand-off.
+    await driver.visit("/__parity_no_such_ws__");
+    await expect.poll(() => driver.pageText(), POLL_60).toContain("Workspace not found");
+    expect(await driver.pageText()).not.toContain(NEW_HANDOFF_HEADING);
+  });
+
+  await test.step("an unknown page under a known workspace leaves for the browser", async () => {
+    // The address is not in the migrated list, so it may be an old-app
+    // screen: the bundle cannot tell it from a typo and hands it over
+    // rather than claiming it does not exist.
+    await expectHandOff(driver, `/${seed.workspaceSlug}/__parity_no_such_page__`);
+    await expectHandOff(driver, "/__parity_no_such_ws__/__parity_no_such_page__");
   });
 
   await test.step("the visits planted no session", async () => {
