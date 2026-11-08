@@ -524,14 +524,23 @@ const desktopWindow: TitleBarApi = {
 
 function trackFocus(callback: (focused: boolean) => void): Unsubscribe {
   if (typeof globalThis.window === "undefined") return () => undefined;
-  const report = (): void => callback(!globalThis.document.hidden);
-  globalThis.window.addEventListener("focus", report);
-  globalThis.window.addEventListener("blur", report);
-  globalThis.document.addEventListener("visibilitychange", report);
+  let last: boolean | undefined;
+  const report = (focused: boolean): void => {
+    if (focused === last) return;
+    last = focused;
+    callback(focused);
+  };
+  const current = (): boolean => !globalThis.document.hidden && globalThis.document.hasFocus();
+  const onFocus = (): void => report(current());
+  const onBlur = (): void => report(false);
+  const onVisibilityChange = (): void => report(current());
+  globalThis.window.addEventListener("focus", onFocus);
+  globalThis.window.addEventListener("blur", onBlur);
+  globalThis.document.addEventListener("visibilitychange", onVisibilityChange);
   return () => {
-    globalThis.window.removeEventListener("focus", report);
-    globalThis.window.removeEventListener("blur", report);
-    globalThis.document.removeEventListener("visibilitychange", report);
+    globalThis.window.removeEventListener("focus", onFocus);
+    globalThis.window.removeEventListener("blur", onBlur);
+    globalThis.document.removeEventListener("visibilitychange", onVisibilityChange);
   };
 }
 
