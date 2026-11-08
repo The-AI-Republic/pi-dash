@@ -900,11 +900,7 @@ async fn relogin(
     if let Some(old) = old {
         use pidash_db::entity::sessions;
         let db = pidash_db::pool::sea_orm_connection(pool);
-        if sessions::Entity::delete_by_id(old)
-            .exec(&db)
-            .await
-            .is_err()
-        {
+        if sessions::Entity::delete_by_id(old).exec(&db).await.is_err() {
             return None;
         }
     }
@@ -1333,16 +1329,15 @@ async fn forgot_user_by_email(
         )>()
         .one(&db)
         .await?;
-    Ok(user.map(
-        |(id, first_name, email, password, last_login)| ForgotUser {
+    Ok(
+        user.map(|(id, first_name, email, password, last_login)| ForgotUser {
             id,
             first_name,
             email: email.unwrap_or_default(),
             password,
-            last_login_unix: last_login
-                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
-        },
-    ))
+            last_login_unix: last_login.map(|dt| dt.with_timezone(&chrono::Utc).timestamp()),
+        }),
+    )
 }
 
 /// `EMAIL_HOST` through the legacy resolver
@@ -1814,9 +1809,7 @@ async fn user_snapshot(
             let utc = value.with_timezone(&chrono::Utc);
             (utc.timestamp(), utc.timestamp_subsec_micros())
         }
-        fn opt_dt(
-            value: &Option<chrono::DateTime<chrono::FixedOffset>>,
-        ) -> Option<(i64, u32)> {
+        fn opt_dt(value: &Option<chrono::DateTime<chrono::FixedOffset>>) -> Option<(i64, u32)> {
             value.as_ref().map(dt)
         }
         pw::UserSnapshot {

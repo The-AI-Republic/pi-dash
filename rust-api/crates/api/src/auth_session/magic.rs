@@ -99,10 +99,10 @@ use crate::auth_session::throttle_ident;
 use crate::license::handlers_auth_forms::{email_is_valid, LOGIN_BACKEND};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
-use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 use pidash_auth::csrf as csrf_kernel;
 use pidash_auth::session as session_kernel;
 use pidash_compat::response::empty_response_no_content_type;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// `POST /auth/magic-generate/`.
 pub const APP_GENERATE_PATH: &str = "/auth/magic-generate/";
@@ -814,22 +814,18 @@ async fn fetch_user(pool: &sqlx::PgPool, email: &str) -> Result<Option<DbUser>, 
             users::Column::IsPasswordAutoset,
             users::Column::IsActive,
         ])
-        .into_tuple::<(
-            uuid::Uuid,
-            Option<String>,
-            String,
-            bool,
-            bool,
-        )>()
+        .into_tuple::<(uuid::Uuid, Option<String>, String, bool, bool)>()
         .one(&db)
         .await?;
-    Ok(row.map(|(id, email, password, is_password_autoset, is_active)| DbUser {
-        id,
-        email: email.unwrap_or_default(),
-        password,
-        is_password_autoset,
-        is_active,
-    }))
+    Ok(row.map(
+        |(id, email, password, is_password_autoset, is_active)| DbUser {
+            id,
+            email: email.unwrap_or_default(),
+            password,
+            is_password_autoset,
+            is_active,
+        },
+    ))
 }
 
 /// `User.objects.filter(email=).exists()` (the magic-code paths
@@ -1315,7 +1311,10 @@ async fn process_workspace_project_invitations(
         use pidash_db::entity::workspace_member_invites as winv;
         let db = pidash_db::pool::sea_orm_connection(pool);
         winv::Entity::update_many()
-            .col_expr(winv::Column::DeletedAt, sea_orm::sea_query::Expr::value(now))
+            .col_expr(
+                winv::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
             .filter(winv::Column::Email.eq(&user.email))
             .filter(winv::Column::Accepted.eq(true))
             .filter(winv::Column::DeletedAt.is_null())
@@ -1327,7 +1326,10 @@ async fn process_workspace_project_invitations(
         use pidash_db::entity::project_member_invites as pinv;
         let db = pidash_db::pool::sea_orm_connection(pool);
         pinv::Entity::update_many()
-            .col_expr(pinv::Column::DeletedAt, sea_orm::sea_query::Expr::value(now))
+            .col_expr(
+                pinv::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
             .filter(pinv::Column::Email.eq(&user.email))
             .filter(pinv::Column::Accepted.eq(true))
             .filter(pinv::Column::DeletedAt.is_null())
@@ -1447,9 +1449,7 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
         if let Some(old) = old {
             use pidash_db::entity::sessions;
             let db = pidash_db::pool::sea_orm_connection(pool);
-            let deleted = sessions::Entity::delete_by_id(old)
-                .exec(&db)
-                .await;
+            let deleted = sessions::Entity::delete_by_id(old).exec(&db).await;
             if deleted.is_err() {
                 return Err(server_error());
             }
@@ -2186,9 +2186,7 @@ mod tests {
     #[test]
     fn migrated_invite_shapes() {
         use pidash_db::entity::{project_member_invites as pinv, workspace_member_invites as winv};
-        use sea_orm::{
-            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QuerySelect, QueryTrait,
-        };
+        use sea_orm::{ColumnTrait, DbBackend, EntityTrait, QueryFilter, QuerySelect, QueryTrait};
         let winv_q = winv::Entity::find()
             .filter(winv::Column::Email.eq("a@b.c"))
             .filter(winv::Column::Accepted.eq(true))

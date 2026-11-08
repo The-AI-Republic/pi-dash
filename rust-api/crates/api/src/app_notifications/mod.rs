@@ -109,15 +109,15 @@ use axum::Extension;
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use serde::Serialize;
-use serde_json::Value;
-use sqlx::PgPool;
-use uuid::Uuid;
 use sea_orm::sea_query::extension::postgres::PgExpr;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
+use serde::Serialize;
+use serde_json::Value;
+use sqlx::PgPool;
+use uuid::Uuid;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
@@ -299,10 +299,7 @@ pub fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
 /// Every workspace id with `(slug)`. The old join semantics read rows
 /// for *each* matching workspace, so the full id list (not one row)
 /// scopes every `is_in` filter below.
-async fn workspace_ids_for_slug(
-    pool: &PgPool,
-    slug: &str,
-) -> Result<Vec<Uuid>, Denial> {
+async fn workspace_ids_for_slug(pool: &PgPool, slug: &str) -> Result<Vec<Uuid>, Denial> {
     use pidash_db::entity::workspaces;
     let db = pidash_db::pool::sea_orm_connection(pool);
     workspaces::Entity::find()
@@ -461,9 +458,7 @@ struct ListFilters {
 
 /// The filtered list select (`get_queryset` + list filters); ordering
 /// and paging are applied by the caller.
-fn list_select(
-    filters: &ListFilters,
-) -> sea_orm::Select<pidash_db::entity::notifications::Entity> {
+fn list_select(filters: &ListFilters) -> sea_orm::Select<pidash_db::entity::notifications::Entity> {
     use pidash_db::entity::notifications as n;
     let mut sel = n::Entity::find()
         .filter(base_cond(&filters.ws_ids, &filters.user_id))
@@ -532,9 +527,7 @@ fn mentioned_cond(param_present: bool) -> Condition {
         Condition::all().add(sender_ilike())
     } else {
         use pidash_db::entity::notifications as n;
-        Condition::all().add(
-            Expr::col((n::Entity, n::Column::Sender)).not_ilike("%mentioned%"),
-        )
+        Condition::all().add(Expr::col((n::Entity, n::Column::Sender)).not_ilike("%mentioned%"))
     }
 }
 
@@ -586,7 +579,10 @@ async fn subscribed_issue_ids(
         .map_err(|_| Denial::ServerError)?;
     use std::collections::HashSet;
     let excluded: HashSet<Uuid> = created.into_iter().chain(assigned).collect();
-    Ok(subs.into_iter().filter(|id| !excluded.contains(id)).collect())
+    Ok(subs
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect())
 }
 
 /// `watching` issue ids (mark-all-read, `base.py:258-262`): the plain
@@ -785,24 +781,29 @@ impl NotificationRow {
         is_intake: bool,
         tu: Option<TriggeredUser>,
     ) -> Self {
-        let mentioned = model
-            .sender
-            .to_lowercase()
-            .contains("mentioned");
-        let (tu_id, tu_first_name, tu_last_name, tu_avatar, tu_avatar_asset_id, tu_avatar_asset_entity, tu_is_bot, tu_display_name) =
-            match tu {
-                Some(user) => (
-                    Some(user.id),
-                    Some(user.first_name),
-                    Some(user.last_name),
-                    Some(user.avatar),
-                    user.avatar_asset_id,
-                    user.avatar_asset_entity,
-                    Some(user.is_bot),
-                    Some(user.display_name),
-                ),
-                None => (None, None, None, None, None, None, None, None),
-            };
+        let mentioned = model.sender.to_lowercase().contains("mentioned");
+        let (
+            tu_id,
+            tu_first_name,
+            tu_last_name,
+            tu_avatar,
+            tu_avatar_asset_id,
+            tu_avatar_asset_entity,
+            tu_is_bot,
+            tu_display_name,
+        ) = match tu {
+            Some(user) => (
+                Some(user.id),
+                Some(user.first_name),
+                Some(user.last_name),
+                Some(user.avatar),
+                user.avatar_asset_id,
+                user.avatar_asset_entity,
+                Some(user.is_bot),
+                Some(user.display_name),
+            ),
+            None => (None, None, None, None, None, None, None, None),
+        };
         Self {
             id: model.id,
             created_at: model.created_at.with_timezone(&Utc),
@@ -871,10 +872,7 @@ async fn stitch_rows(
     // Intake flags: issues in this workspace slice with an intake row
     // in status (0, 2, -2) (the `intake_issues` leg carries no
     // soft-delete conjunct).
-    let entity_ids: Vec<Uuid> = models
-        .iter()
-        .filter_map(|m| m.entity_identifier)
-        .collect();
+    let entity_ids: Vec<Uuid> = models.iter().filter_map(|m| m.entity_identifier).collect();
     let intake: HashSet<Uuid> = if entity_ids.is_empty() {
         HashSet::new()
     } else {
@@ -906,10 +904,7 @@ async fn stitch_rows(
         }
     };
     // `triggered_by` users + live avatar assets.
-    let actor_ids: Vec<Uuid> = models
-        .iter()
-        .filter_map(|m| m.triggered_by_id)
-        .collect();
+    let actor_ids: Vec<Uuid> = models.iter().filter_map(|m| m.triggered_by_id).collect();
     let actors = if actor_ids.is_empty() {
         Vec::new()
     } else {
@@ -926,15 +921,7 @@ async fn stitch_rows(
                 users::Column::IsBot,
                 users::Column::DisplayName,
             ])
-            .into_tuple::<(
-                Uuid,
-                String,
-                String,
-                String,
-                Option<Uuid>,
-                bool,
-                String,
-            )>()
+            .into_tuple::<(Uuid, String, String, String, Option<Uuid>, bool, String)>()
             .all(&db)
             .await
             .map_err(db_err)?
@@ -951,10 +938,7 @@ async fn stitch_rows(
             .filter(file_assets::Column::Id.is_in(asset_ids.iter().copied()))
             .filter(file_assets::Column::DeletedAt.is_null())
             .select_only()
-            .columns([
-                file_assets::Column::Id,
-                file_assets::Column::EntityType,
-            ])
+            .columns([file_assets::Column::Id, file_assets::Column::EntityType])
             .into_tuple::<(Uuid, Option<String>)>()
             .all(&db)
             .await
@@ -964,23 +948,25 @@ async fn stitch_rows(
     let asset_by_id: HashMap<Uuid, Option<String>> = assets.into_iter().collect();
     let actor_by_id: HashMap<Uuid, TriggeredUser> = actors
         .into_iter()
-        .map(|(id, first_name, last_name, avatar, avatar_asset_id, is_bot, display_name)| {
-            let entity = avatar_asset_id
-                .and_then(|asset| asset_by_id.get(&asset).cloned().flatten());
-            (
-                id,
-                TriggeredUser {
+        .map(
+            |(id, first_name, last_name, avatar, avatar_asset_id, is_bot, display_name)| {
+                let entity =
+                    avatar_asset_id.and_then(|asset| asset_by_id.get(&asset).cloned().flatten());
+                (
                     id,
-                    first_name,
-                    last_name,
-                    avatar,
-                    avatar_asset_id,
-                    avatar_asset_entity: entity,
-                    is_bot,
-                    display_name,
-                },
-            )
-        })
+                    TriggeredUser {
+                        id,
+                        first_name,
+                        last_name,
+                        avatar,
+                        avatar_asset_id,
+                        avatar_asset_entity: entity,
+                        is_bot,
+                        display_name,
+                    },
+                )
+            },
+        )
         .collect();
     Ok(models
         .into_iter()
@@ -1287,13 +1273,7 @@ async fn list(
     };
 
     if query_truthy(&query, "per_page") && query_truthy(&query, "cursor") {
-        return paginate_list(
-            pool,
-            filters,
-            &query,
-            &actor.timezone,
-        )
-        .await;
+        return paginate_list(pool, filters, &query, &actor.timezone).await;
     }
 
     // Full-serializer branch (`:148-149`): the whole filtered
@@ -1364,12 +1344,7 @@ fn respond_empty(query: &QueryMap) -> Response {
 /// (default `"-created_at"`) *replaces* the base ordering
 /// (QUIRK-paginate-reorders).
 #[allow(clippy::too_many_arguments)]
-async fn paginate_list(
-    pool: &PgPool,
-    filters: ListFilters,
-    query: &QueryMap,
-    tz: &Tz,
-) -> Response {
+async fn paginate_list(pool: &PgPool, filters: ListFilters, query: &QueryMap, tz: &Tz) -> Response {
     let per_page = match paginator::parse_per_page(
         query_last(query, "per_page").as_deref(),
         MAX_PER_PAGE,
@@ -1398,10 +1373,7 @@ async fn paginate_list(
     let db = pidash_db::pool::sea_orm_connection(pool);
     // `queryset.order_by(F(key).dir(nulls_last=True), "-created_at")`.
     let order = if descending { Order::Desc } else { Order::Asc };
-    let total: i64 = match list_select(&filters)
-        .count(&db)
-        .await
-    {
+    let total: i64 = match list_select(&filters).count(&db).await {
         Ok(total) => total as i64,
         Err(_) => return Denial::ServerError.into_response(),
     };
@@ -1430,10 +1402,7 @@ async fn paginate_list(
         Ok(rows) => rows,
         Err(denial) => return denial.into_response(),
     };
-    let bodies: Vec<NotificationBody> = rows
-        .iter()
-        .map(|parsed| render_row(parsed, tz))
-        .collect();
+    let bodies: Vec<NotificationBody> = rows.iter().map(|parsed| render_row(parsed, tz)).collect();
     let total_pages = match paginator::max_hits(total, limit) {
         Ok(pages) => pages,
         Err(error) => return page_denial(error).into_response(),
@@ -2017,7 +1986,6 @@ async fn unread_get(
     Path(slug): Path<String>,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
-
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -2057,9 +2025,10 @@ async fn unread_get(
         (0, 0)
     } else {
         use pidash_db::entity::notifications as n;
-        let total = match unread_base(Condition::all().add(
-            Expr::col((n::Entity, n::Column::Sender)).not_ilike("%mentioned%"),
-        ))
+        let total = match unread_base(
+            Condition::all()
+                .add(Expr::col((n::Entity, n::Column::Sender)).not_ilike("%mentioned%")),
+        )
         .count(&db)
         .await
         {
@@ -2216,24 +2185,18 @@ async fn mark_all_read_create(
         return json_ok(MARK_ALL_READ_BODY.to_owned());
     }
     let type_ids = match type_param.as_str() {
-        "watching" => Some(
-            match watching_issue_ids(pool, &ws_ids, &actor.id).await {
-                Ok(ids) => ids,
-                Err(denial) => return denial.into_response(),
-            },
-        ),
-        "assigned" => Some(
-            match assigned_issue_ids(pool, &ws_ids, &actor.id).await {
-                Ok(ids) => ids,
-                Err(denial) => return denial.into_response(),
-            },
-        ),
-        "created" => Some(
-            match created_issue_ids(pool, &ws_ids, &actor.id).await {
-                Ok(ids) => ids,
-                Err(denial) => return denial.into_response(),
-            },
-        ),
+        "watching" => Some(match watching_issue_ids(pool, &ws_ids, &actor.id).await {
+            Ok(ids) => ids,
+            Err(denial) => return denial.into_response(),
+        }),
+        "assigned" => Some(match assigned_issue_ids(pool, &ws_ids, &actor.id).await {
+            Ok(ids) => ids,
+            Err(denial) => return denial.into_response(),
+        }),
+        "created" => Some(match created_issue_ids(pool, &ws_ids, &actor.id).await {
+            Ok(ids) => ids,
+            Err(denial) => return denial.into_response(),
+        }),
         _ => None,
     };
     if let Some(ids) = &type_ids {
@@ -2318,7 +2281,9 @@ async fn fetch_preference(pool: &PgPool, user_id: &Uuid) -> Result<Option<Prefer
         .map_err(|_| Denial::ServerError)?;
     match rows.len() {
         0 => Ok(None),
-        1 => Ok(Some(PreferenceRow::from_model(rows.into_iter().next().unwrap()))),
+        1 => Ok(Some(PreferenceRow::from_model(
+            rows.into_iter().next().unwrap(),
+        ))),
         _ => Err(Denial::ServerError),
     }
 }
@@ -3111,7 +3076,10 @@ mod tests {
             .filter(mentioned_cond(true))
             .build(DbBackend::Postgres)
             .to_string();
-        assert!(mentioned.contains("ILIKE") && mentioned.contains("mentioned"), "{mentioned}");
+        assert!(
+            mentioned.contains("ILIKE") && mentioned.contains("mentioned"),
+            "{mentioned}"
+        );
         let not_mentioned = notifications::Entity::find()
             .filter(mentioned_cond(false))
             .build(DbBackend::Postgres)
@@ -3315,7 +3283,9 @@ mod tests {
     #[test]
     fn watching_select_is_plain_subscribers() {
         use pidash_db::entity::issue_subscribers;
-        use sea_orm::{DbBackend, EntityTrait as _, QueryFilter as _, QuerySelect as _, QueryTrait as _};
+        use sea_orm::{
+            DbBackend, EntityTrait as _, QueryFilter as _, QuerySelect as _, QueryTrait as _,
+        };
         let sql = issue_subscribers::Entity::find()
             .filter(issue_subscribers::Column::SubscriberId.eq(Uuid::nil()))
             .filter(issue_subscribers::Column::DeletedAt.is_null())

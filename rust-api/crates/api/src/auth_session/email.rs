@@ -528,14 +528,14 @@ async fn user_by_email(
         .into_tuple::<(uuid::Uuid, String, bool, bool)>()
         .one(&db)
         .await?;
-    Ok(row.map(
-        |(id, password, is_active, is_password_autoset)| UserRow {
+    Ok(
+        row.map(|(id, password, is_active, is_password_autoset)| UserRow {
             id,
             password,
             is_active,
             is_password_autoset,
-        },
-    ))
+        }),
+    )
 }
 
 async fn user_by_pk(
@@ -555,14 +555,14 @@ async fn user_by_pk(
         .into_tuple::<(uuid::Uuid, String, bool, bool)>()
         .one(&db)
         .await?;
-    Ok(row.map(
-        |(id, password, is_active, is_password_autoset)| UserRow {
+    Ok(
+        row.map(|(id, password, is_active, is_password_autoset)| UserRow {
             id,
             password,
             is_active,
             is_password_autoset,
-        },
-    ))
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -807,7 +807,11 @@ async fn accepted_workspace_invites(
     let by_id: HashMap<uuid::Uuid, String> = slugs.into_iter().collect();
     Ok(invites
         .into_iter()
-        .filter_map(|(workspace_id, role)| by_id.get(&workspace_id).map(|slug| (workspace_id, role, slug.clone())))
+        .filter_map(|(workspace_id, role)| {
+            by_id
+                .get(&workspace_id)
+                .map(|slug| (workspace_id, role, slug.clone()))
+        })
         .collect())
 }
 
@@ -1066,7 +1070,7 @@ async fn post_user_auth_workflow(
     // stamp `deleted_at` instead of removing rows (magic.rs twin).
     {
         use pidash_db::entity::workspace_member_invites as inv;
-        use sea_orm::{EntityTrait as _};
+        use sea_orm::EntityTrait as _;
         let db = pidash_db::pool::sea_orm_connection(pool);
         inv::Entity::update_many()
             .col_expr(inv::Column::DeletedAt, sea_orm::sea_query::Expr::value(now))
@@ -1294,9 +1298,7 @@ async fn issue_session(
             {
                 use pidash_db::entity::sessions;
                 let db = pidash_db::pool::sea_orm_connection(pool);
-                sessions::Entity::delete_by_id(old)
-                    .exec(&db)
-                    .await?;
+                sessions::Entity::delete_by_id(old).exec(&db).await?;
             }
         }
     }
@@ -1327,7 +1329,9 @@ async fn issue_session(
             TryInsertResult::Inserted(_) => break key,
             TryInsertResult::Conflicted => {}
             TryInsertResult::Empty => {
-                return Err(sea_orm::DbErr::Custom("session insert had no columns".to_owned()))
+                return Err(sea_orm::DbErr::Custom(
+                    "session insert had no columns".to_owned(),
+                ))
             }
         }
     };
