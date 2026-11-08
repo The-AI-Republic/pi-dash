@@ -1693,6 +1693,7 @@ def test_soft_delete_issue_nulls_agent_run_work_item(db_conn, broker_url):
             "phase_kind": "",
             "agent_metadata": {},
             "usage": {},
+            "pin_kind": "locality",
             "work_item_id": str(issue_id),
         },
     )
