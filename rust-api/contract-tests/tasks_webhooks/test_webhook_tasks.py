@@ -1906,3 +1906,42 @@ def test_issue_activity_triage_state_resolves_to_null(db_conn, broker_url):
     assert activity_block["new_identifier"] == str(todo_state["id"])
     # state_change preference + field=state sends one email log row.
     assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
+def test_issue_activity_deleted_writes_row(db_conn, broker_url):
+    """Issue deleted: one ``deleted the issue`` row (NEWPIDASH-134).
+
+    The app destroy (``base.py:741-753``) enqueues with
+    ``current_instance={}`` (a dict); ``delete_issue_activity``
+    (``issue_activities_task.py:642-663``) ignores it and writes the
+    row. This pins the Django oracle shape the Rust twin must match.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "deletedactivity")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.deleted",
+            "requested_data": json.dumps({"issue_id": str(issue["id"])}),
+            "current_instance": {},
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="deleted issue_activities row",
+    )
+    assert row["comment"] == "deleted the issue"
+    assert row["verb"] == "deleted"
+    assert row["field"] == "issue"
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
