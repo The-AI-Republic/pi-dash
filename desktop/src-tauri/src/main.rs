@@ -18,6 +18,7 @@ mod dist_guard;
 mod migration;
 mod pidash_cli;
 mod setup;
+mod tray_host;
 mod updates;
 
 use std::sync::Mutex;
@@ -452,6 +453,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                // Hiding is only recoverable through the tray icon. Where no
+                // tray is drawn (Linux without a tray host, such as stock
+                // GNOME), a hidden window would leave nothing on screen to
+                // reopen or quit the app from, so close quits instead.
+                if !tray_host::tray_icon_visible() {
+                    window.app_handle().exit(0);
+                    return;
+                }
                 if let Err(e) = window.hide() {
                     eprintln!("window: hide-to-tray failed: {e}");
                 }
