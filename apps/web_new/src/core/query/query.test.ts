@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
 import { createQueryClient, LIST_STALE_TIME_MS, REFERENCE_STALE_TIME_MS, workspaceScope } from "./client.js";
@@ -365,6 +365,7 @@ describe("cache persistence", () => {
     const restored = reader.getQueryCache().find({ queryKey: listKey });
     expect(restored?.state.dataUpdatedAt).toBe(0);
     expect(restored?.isStaleByTime(LIST_STALE_TIME_MS)).toBe(true);
+    expect(restored?.isStaleByTime(Number.POSITIVE_INFINITY)).toBe(true);
   });
 
   it("refetches a restored read on its first subscriber and paints the live rows", async () => {
@@ -390,6 +391,40 @@ describe("cache persistence", () => {
     expect(reads).toEqual(["success"]);
     expect(result).toEqual([{ id: "after" }]);
     expect(reader.getQueryData(listKey)).toEqual([{ id: "after" }]);
+  });
+  it("refetches a restored read that never goes stale by time (staleTime: Infinity)", async () => {
+    // A record read once per session (display prefs, project states) never
+    // ages, so ageing dataUpdatedAt alone cannot make its restore stale.
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    const prefsKey = ["ws", "acme", "issues", "prefs", "project", "p1"];
+    writer.setQueryData(prefsKey, { layout: "list" });
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+
+    let fetches = 0;
+    const observer = new QueryObserver(reader, {
+      queryKey: prefsKey,
+      queryFn: () => {
+        fetches += 1;
+        return Promise.resolve({ layout: "kanban" });
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    const painted: unknown[] = [];
+    const unsubscribe = observer.subscribe((result) => painted.push(result.data));
+    // The saved record paints before the read settles.
+    expect(observer.getCurrentResult().data).toEqual({ layout: "list" });
+    await vi.waitFor(() => expect(reader.getQueryData(prefsKey)).toEqual({ layout: "kanban" }));
+    unsubscribe();
+    expect(fetches).toBe(1);
+    expect(painted.at(-1)).toEqual({ layout: "kanban" });
   });
 });
 
