@@ -21,6 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri::utils::config::BundleType;
+use tauri::utils::platform::bundle_type;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -93,6 +95,73 @@ impl PendingUpdate {
     }
 }
 
+/// The manifest arch token the updater plugin keys entries by (`x86_64`,
+/// …), from the build's target arch. Mirrors the plugin's own mapping so a
+/// manifest entry the binary would resolve to stays resolvable here.
+fn updater_arch_for(build_arch: &str) -> Option<&'static str> {
+    match build_arch {
+        "x86" => Some("i686"),
+        "x86_64" => Some("x86_64"),
+        "arm" => Some("armv7"),
+        "aarch64" => Some("aarch64"),
+        "riscv64" => Some("riscv64"),
+        _ => None,
+    }
+}
+
+/// The install-type-specific manifest key this binary prefers
+/// (`linux-x86_64-deb`, `windows-x86_64-msi`, …), or `None` when the bundle
+/// type is not one of the shipped Linux/Windows ones (macOS bundles,
+/// unstamped dev builds) and the manifest gate should not apply.
+fn specific_platform_key(bundle: Option<BundleType>, arch: Option<&str>) -> Option<String> {
+    let arch = arch?;
+    match bundle? {
+        BundleType::Deb => Some(format!("linux-{arch}-deb")),
+        BundleType::AppImage => Some(format!("linux-{arch}-appimage")),
+        BundleType::Msi => Some(format!("windows-{arch}-msi")),
+        BundleType::Nsis => Some(format!("windows-{arch}-nsis")),
+        _ => None,
+    }
+}
+
+/// Whether the fetched manifest may serve this install type.
+///
+/// The plugin resolves `{os}-{arch}-{installer}` first and falls back to
+/// `{os}-{arch}`. When a catalog only carries the generic key, a deb binary
+/// is handed AppImage bytes (rejected by `install_deb`) and an MSI binary
+/// is handed the NSIS installer (executed as NSIS, which silently converts
+/// the install). In both cases the right behavior is to offer nothing: the
+/// generic entry belongs to the other installer, not to this one. AppImage
+/// and NSIS binaries keep falling back to the generic entry, as today.
+///
+/// Only static manifests (a `platforms` map) are gated: dynamic
+/// (single-URL) endpoints and shapes this gate does not understand keep
+/// today's behavior.
+fn manifest_may_serve(
+    bundle: Option<BundleType>,
+    arch: Option<&str>,
+    manifest: &serde_json::Value,
+) -> bool {
+    let Some(specific) = specific_platform_key(bundle.clone(), arch) else {
+        return true;
+    };
+    let Some(platforms) = manifest.get("platforms").and_then(|p| p.as_object()) else {
+        return true;
+    };
+    if platforms.contains_key(&specific) {
+        return true;
+    }
+    // AppImage and NSIS installs resolve through the generic entry today
+    // (`linux-x86_64`, `windows-x86_64`); the deb and MSI installs must not.
+    // `arch` is `Some` here: without it `specific_platform_key` returned `None`.
+    let arch = arch.unwrap_or_default();
+    match bundle {
+        Some(BundleType::AppImage) => platforms.contains_key(&format!("linux-{arch}")),
+        Some(BundleType::Nsis) => platforms.contains_key(&format!("windows-{arch}")),
+        _ => false,
+    }
+}
+
 async fn check(handle: &AppHandle) -> Option<Update> {
     let updater = match handle.updater() {
         Ok(u) => u,
@@ -102,7 +171,18 @@ async fn check(handle: &AppHandle) -> Option<Update> {
         }
     };
     match updater.check().await {
-        Ok(update) => update,
+        Ok(Some(update)) => {
+            let bundle = bundle_type();
+            let arch = updater_arch_for(std::env::consts::ARCH);
+            if !manifest_may_serve(bundle.clone(), arch, &update.raw_json) {
+                eprintln!(
+                    "updater: skipping update for {bundle:?} install; the manifest has no entry of its own type"
+                );
+                return None;
+            }
+            Some(update)
+        }
+        Ok(None) => None,
         Err(e) => {
             eprintln!("updater: check failed: {e}");
             None
@@ -327,5 +407,102 @@ mod tests {
     fn waking_days_later_schedules_the_next_midnight_after_waking() {
         let woke = NEXT_MIDNIGHT + 3 * DAY_SECS + 60;
         assert_eq!(next_check_secs(woke, 0), NEXT_MIDNIGHT + 4 * DAY_SECS);
+    }
+
+    /// A static-manifest body carrying exactly these platform keys.
+    fn manifest_with(keys: &[&str]) -> serde_json::Value {
+        let platforms: serde_json::Map<String, serde_json::Value> = keys
+            .iter()
+            .map(|k| {
+                (
+                    (*k).to_string(),
+                    serde_json::json!({"url": "https://dl.example.com/x", "signature": "s"}),
+                )
+            })
+            .collect();
+        serde_json::json!({"version": "0.4.0", "platforms": platforms})
+    }
+
+    #[test]
+    fn deb_install_is_not_served_by_the_generic_appimage_entry() {
+        // PIDESKAPP-59: the only Linux entry is the AppImage payload.
+        let manifest = manifest_with(&["linux-x86_64"]);
+        assert!(!manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn deb_install_is_served_by_its_own_entry() {
+        let manifest = manifest_with(&["linux-x86_64", "linux-x86_64-deb"]);
+        assert!(manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn msi_install_is_not_served_by_the_generic_nsis_entry() {
+        // PIDESKAPP-91: the only Windows entry is the NSIS payload.
+        let manifest = manifest_with(&["windows-x86_64"]);
+        assert!(!manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn msi_install_is_served_by_its_own_entry() {
+        let manifest = manifest_with(&["windows-x86_64", "windows-x86_64-msi"]);
+        assert!(manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn appimage_install_keeps_working_via_the_generic_entry() {
+        let manifest = manifest_with(&["linux-x86_64"]);
+        assert!(manifest_may_serve(
+            Some(BundleType::AppImage),
+            Some("x86_64"),
+            &manifest
+        ));
+    }
+
+    #[test]
+    fn nsis_install_keeps_working_via_the_generic_entry() {
+        let manifest = manifest_with(&["windows-x86_64"]);
+        assert!(manifest_may_serve(Some(BundleType::Nsis), Some("x86_64"), &manifest));
+    }
+
+    #[test]
+    fn a_specific_entry_alone_suffices() {
+        for (bundle, key) in [
+            (BundleType::Deb, "linux-x86_64-deb"),
+            (BundleType::AppImage, "linux-x86_64-appimage"),
+            (BundleType::Msi, "windows-x86_64-msi"),
+            (BundleType::Nsis, "windows-x86_64-nsis"),
+        ] {
+            let manifest = manifest_with(&[key]);
+            assert!(
+                manifest_may_serve(Some(bundle.clone()), Some("x86_64"), &manifest),
+                "{bundle:?} should be served by {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_manifests_and_other_bundles_are_not_gated() {
+        // Single-URL (dynamic) manifests have no `platforms` map.
+        for manifest in [
+            serde_json::json!({"version": "0.4.0"}),
+            serde_json::json!({"version": "0.4.0", "url": "https://dl.example.com/x", "signature": "s"}),
+        ] {
+            assert!(manifest_may_serve(Some(BundleType::Deb), Some("x86_64"), &manifest));
+            assert!(manifest_may_serve(Some(BundleType::Msi), Some("x86_64"), &manifest));
+        }
+        // macOS bundles and unstamped dev builds keep today's behavior.
+        let manifest = manifest_with(&["linux-x86_64"]);
+        for bundle in [None, Some(BundleType::App), Some(BundleType::Dmg)] {
+            assert!(manifest_may_serve(bundle, Some("x86_64"), &manifest));
+        }
+    }
+
+    #[test]
+    fn arch_mapping_matches_the_plugin() {
+        assert_eq!(updater_arch_for("x86"), Some("i686"));
+        assert_eq!(updater_arch_for("x86_64"), Some("x86_64"));
+        assert_eq!(updater_arch_for("aarch64"), Some("aarch64"));
+        assert_eq!(updater_arch_for("powerpc64"), None);
     }
 }

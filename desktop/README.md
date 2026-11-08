@@ -259,6 +259,28 @@ generate` creates a keypair). A distributor should also set its own
 local chat history and settings, and where older builds kept their private
 daemon trees, which the migration reads) and the OS install identity.
 
+### Manifest entries each install type needs
+
+The updater plugin resolves the install-type-specific entry first
+(`linux-x86_64-deb`, `windows-x86_64-msi`, …) and falls back to the generic
+`{os}-{arch}` entry. The client treats a static manifest that carries no
+entry of an install's own type as "nothing to update" for that install: a
+deb install is never handed the AppImage payload (it cannot install it),
+and an MSI install is never handed the NSIS installer (it would silently
+convert the install). AppImage and NSIS installs may resolve through the
+generic entries. A distributor that wants every install type to auto-update
+must therefore publish the specific entries too:
+
+| Install type   | Specific entry the client requires                          |
+| -------------- | ----------------------------------------------------------- |
+| Linux `.deb`   | `linux-x86_64-deb` (and per-arch)                           |
+| Linux AppImage | `linux-x86_64-appimage` (generic `linux-x86_64` also works) |
+| Windows MSI    | `windows-x86_64-msi` (and per-arch)                         |
+| Windows NSIS   | `windows-x86_64-nsis` (generic `windows-x86_64` also works) |
+
+Entry names are the plugin's `{os}-{arch}-{installer}` form; `arch` here is
+`x86_64` (see `updates.rs` for the full mapping).
+
 ## Tests
 
 ```bash
