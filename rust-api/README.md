@@ -479,11 +479,6 @@ The Rust container layer (PIDASHCONV-813): `rust-api/Dockerfile.api`,
 
 ### Image build / push
 
-For automated, independently versioned Rust API + new frontend releases, see
-[Rust platform releases](../deployments/rust/README.md). That workflow publishes
-`airepublic/pi-dash-backend-rust` and `airepublic/pi-dash-web-new-rust` from
-`rust-platform-v...` tags. The commands below are for manual image builds.
-
 Build from the repo root (the context needs both `rust-api/` and
 `apps/api/` — the binary embeds templates and fragments from `apps/api`
 at compile time):
