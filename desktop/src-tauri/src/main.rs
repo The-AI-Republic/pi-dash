@@ -37,6 +37,45 @@ const ZOOM_MAX: f64 = 3.0;
 
 struct ZoomState(Mutex<f64>);
 
+/// Ctrl+NumpadPlus zoom-in on Linux and Windows (PIDESKAPP-51). The
+/// `CmdOrCtrl+NumpadPlus` menu accelerator can never fire: muda parses it
+/// to `Code::NumpadAdd` and then immediately collapses that to
+/// `Key::Character("+")`, which the GTK backend turns into the main-row
+/// `+` keyval (0x2B) and the Windows backend into `VK_OEM_PLUS`. The
+/// physical numpad key matches neither, so the stroke falls through to
+/// the page as a plain `+` keydown and nothing zooms. The script catches
+/// the stroke in the page (`NumpadAdd` is exactly that physical key) and
+/// routes it to the `zoom_in` command below, which steps the same
+/// `ZoomState` as the View menu — one zoom level, two triggers. Loaded
+/// on Linux and Windows only (see the setup block); macOS keeps `Cmd+=`.
+///
+/// Present in test builds on every platform so its tests below run on any
+/// CI leg; the binary only loads it on Linux/Windows.
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+const ZOOM_FIX: &str = include_str!("zoom_fix.js");
+
+/// Step the shared zoom level up and apply it to the main window. The
+/// View-menu handler and the `zoom_in` command (the numpad fix) both go
+/// through here so they can never desync.
+fn step_zoom_up(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let state = app.state::<ZoomState>();
+    // Recover from a poisoned mutex rather than crashing every future
+    // menu click — the inner f64 is independently valid.
+    let mut zoom = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    *zoom = (*zoom + ZOOM_STEP).min(ZOOM_MAX);
+    window.set_zoom(*zoom)
+}
+
+/// Zoom in one step; invoked by `zoom_fix.js` when Ctrl+NumpadPlus
+/// reaches the page (the menu accelerator cannot express the numpad key).
+#[tauri::command]
+fn zoom_in(app: tauri::AppHandle) -> Result<(), String> {
+    step_zoom_up(&app).map_err(|e| e.to_string())
+}
+
 /// Compile-time target URL. Lives in app state so the deep-link handler
 /// can derive the `/api/auth/desktop-exchange/` URL on the same origin.
 struct AppConfig {
@@ -468,6 +507,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .manage(<updates::UpdateState>::default())
         .invoke_handler(tauri::generate_handler![
             open_in_browser,
+            zoom_in,
             desktop_http::desktop_api_request,
             desktop_http::desktop_api_stream,
             desktop_http::desktop_api_cancel,
@@ -570,6 +610,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
                 .resizable(true);
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                // PIDESKAPP-51: the numpad-plus accelerator can never fire
+                // (muda collapses NumpadAdd onto the main-row `+`), so the
+                // script asks Rust to zoom in when the physical numpad
+                // key arrives. See the const.
+                window = window.initialization_script(ZOOM_FIX);
+            }
             let open_app = app.handle().clone();
             window = window.on_new_window(move |url, _features| {
                 let config = open_app.state::<AppConfig>();
@@ -618,11 +666,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // View menu: browser-style zoom shortcuts. The Tauri webview
             // doesn't bind these by default, so we register them as menu
             // accelerators. muda's accelerator parser has no `Plus` token
-            // (it would silently bind the `P` key); the numpad `+` is
-            // spelled `NumpadPlus`. We register three variants routed to
-            // the same `zoom_in` id; alternates are Linux/Windows only —
-            // on macOS, `Cmd+=` is the conventional shortcut and the
-            // duplicates would visibly clutter the menubar.
+            // (it would silently bind the `P` key); the numpad `+` would
+            // be spelled `NumpadPlus` — but no accelerator can express it:
+            // muda collapses `NumpadAdd` onto the main-row `+` key, so the
+            // physical numpad stroke never matches (PIDESKAPP-51).
+            // Numpad-plus zoom is handled by the `zoom_fix.js`
+            // initialization script (see ZOOM_FIX) instead. The
+            // main-row alternates are Linux/Windows only — on macOS,
+            // `Cmd+=` is the conventional shortcut and the duplicate
+            // would visibly clutter the menubar.
             let zoom_in = MenuItemBuilder::with_id("zoom_in", "Zoom In")
                 .accelerator("CmdOrCtrl+=")
                 .build(app)?;
@@ -636,15 +688,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let zoom_in_shift = MenuItemBuilder::with_id("zoom_in", "Zoom In")
                 .accelerator("CmdOrCtrl+Shift+=")
                 .build(app)?;
-            #[cfg(not(target_os = "macos"))]
-            let zoom_in_numpad = MenuItemBuilder::with_id("zoom_in", "Zoom In")
-                .accelerator("CmdOrCtrl+NumpadPlus")
-                .build(app)?;
 
             let view = {
                 let b = SubmenuBuilder::new(app, "View").items(&[&zoom_in, &zoom_out, &zoom_reset]);
                 #[cfg(not(target_os = "macos"))]
-                let b = b.items(&[&zoom_in_shift, &zoom_in_numpad]);
+                let b = b.items(&[&zoom_in_shift]);
                 b.build()?
             };
             let menu = MenuBuilder::new(app).items(&[&view]).build()?;
@@ -681,6 +729,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tray_builder.build(app)?;
 
             app.on_menu_event(|app, event| {
+                // Zoom-in goes through step_zoom_up (shared with the zoom_in
+                // command) so the menu and the numpad fix can't desync.
+                if event.id().as_ref() == "zoom_in" {
+                    if let Err(e) = step_zoom_up(app) {
+                        eprintln!("set_zoom failed: {e}");
+                    }
+                    return;
+                }
                 let Some(window) = app.get_webview_window("main") else {
                     return;
                 };
@@ -689,7 +745,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // future menu click — the inner f64 is independently valid.
                 let mut zoom = state.0.lock().unwrap_or_else(|e| e.into_inner());
                 *zoom = match event.id().as_ref() {
-                    "zoom_in" => (*zoom + ZOOM_STEP).min(ZOOM_MAX),
                     "zoom_out" => (*zoom - ZOOM_STEP).max(ZOOM_MIN),
                     "zoom_reset" => 1.0,
                     _ => return,
@@ -973,6 +1028,43 @@ mod tests {
         assert_eq!(
             bundle_url(&root(), "/sign-in").as_str(),
             "tauri://localhost/sign-in"
+        );
+    }
+
+    #[test]
+    fn zoom_fix_catches_numpad_plus_and_routes_to_the_command() {
+        // PIDESKAPP-51: the CmdOrCtrl+NumpadPlus menu accelerator can never
+        // fire (muda collapses NumpadAdd onto the main-row `+`), so the
+        // script catches the physical numpad key in the page and routes it
+        // to the zoom_in command, which steps the shared ZoomState. The
+        // script content is behaviorally covered by
+        // desktop/tests/test_zoom_numpad_fix.py; these assert the
+        // invariants it is built on.
+        let script = ZOOM_FIX;
+        assert!(!script.trim().is_empty(), "empty script");
+        assert!(
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
+            "capture-phase key handler"
+        );
+        assert!(
+            script.contains("NumpadAdd"),
+            "physical numpad key, not the main-row plus"
+        );
+        assert!(
+            script.contains("zoom_in") && script.contains("__TAURI__"),
+            "routes to the Rust command"
+        );
+        assert!(
+            script.contains("preventDefault") && script.contains("stopPropagation"),
+            "page must not apply the key again"
+        );
+        assert!(
+            script.contains("__PIDASH_ZOOM_FIX__"),
+            "idempotency guard against double registration"
+        );
+        assert!(
+            !script.contains("NumpadSubtract"),
+            "zoom-out stays out of scope"
         );
     }
 
