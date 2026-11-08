@@ -1108,12 +1108,10 @@ fn gateway_refusal_code(status: u64) -> Option<&'static str> {
 
 /// Split the engine's `unexpected status 402 Payment Required: <text>, url:
 /// <endpoint>, request id: <id>` into the status and the gateway's text.
+/// Delegates to the shared `codex::gateway` helper so both lanes parse the
+/// same wire shape.
 fn gateway_status_text(raw: &str) -> Option<(u64, String)> {
-    let rest = raw.split_once("unexpected status ")?.1;
-    let status = rest.get(..3)?.parse().ok()?;
-    let text = rest.split_once(": ").map_or("", |(_, text)| text);
-    let text = text.rsplit_once(", url: ").map_or(text, |(text, _)| text);
-    Some((status, text.trim().to_string()))
+    crate::codex::gateway::gateway_status_text(raw)
 }
 
 /// Recognise the engine's "I will retry" notice for a gateway answer that no
@@ -1123,22 +1121,8 @@ fn gateway_status_text(raw: &str) -> Option<(u64, String)> {
 /// `{"responseStreamDisconnected": {"httpStatusCode": 402}}`) and the body in
 /// `additionalDetails`; `message` is only `Reconnecting... 1/5`.
 fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(&'static str, String)> {
-    if method != "error" || params.get("willRetry").and_then(|v| v.as_bool()) != Some(true) {
-        return None;
-    }
-    let error = params.get("error")?;
-    let status = error
-        .get("codexErrorInfo")?
-        .as_object()?
-        .values()
-        .find_map(|info| info.get("httpStatusCode")?.as_u64())?;
+    let (status, text) = crate::codex::gateway::gateway_refusal(method, params)?;
     let code = gateway_refusal_code(status)?;
-    let text = error
-        .get("additionalDetails")
-        .and_then(|v| v.as_str())
-        .and_then(gateway_status_text)
-        .map(|(_, text)| text)
-        .unwrap_or_default();
     Some((code, text))
 }
 
