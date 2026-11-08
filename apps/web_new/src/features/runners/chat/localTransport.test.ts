@@ -568,6 +568,32 @@ describe("local transport", () => {
     expect(h.api.clearHistory).toHaveBeenCalledWith("u-1");
   });
 
+  it("still deletes when the close fails (dead daemon)", async () => {
+    const h = harness({
+      close: vi.fn(async () => {
+        throw new Error("daemon unreachable");
+      }),
+    });
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "first");
+    await expect(transport.deleteChatSession("s-1")).resolves.toBeUndefined();
+    expect(h.api.close).toHaveBeenCalledWith({ workspaceSlug: "acme", sessionId: "s-1" });
+    expect(h.api.deleteSession).toHaveBeenCalledWith("u-1", "s-1");
+  });
+
+  it("still clears when a close fails (dead daemon)", async () => {
+    const h = harness({
+      close: vi.fn(async () => {
+        throw new Error("daemon unreachable");
+      }),
+    });
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "one");
+    await expect(transport.clearChatHistory()).resolves.toBeUndefined();
+    expect(h.api.close).toHaveBeenCalledTimes(1);
+    expect(h.api.clearHistory).toHaveBeenCalledWith("u-1");
+  });
+
   it("clearing requires the same signed-in account as every other store verb", async () => {
     const h = harness();
     await expect(transportFor(h, "").clearChatHistory()).rejects.toThrow(/Sign in/);
