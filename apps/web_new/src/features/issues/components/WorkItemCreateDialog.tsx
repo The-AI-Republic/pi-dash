@@ -984,13 +984,20 @@ export function WorkItemCreateDialog({
             finishClose();
             return;
           }
-          // Keep the project and the route's cycle/module context, then
-          // re-focus the title; everything else is a new item (ISS-119).
+          // Keep the project and the opener's seed, then re-focus the
+          // title; name and description are a new item (ISS-119). The
+          // seed is the listing prefill the dialog opened with plus the
+          // route cycle/module context, as contextForm built the opener.
           // A seeded parent stays attached to the next item (ISS-175).
+          const opener: CreateFormInitialValues = {
+            ...(initialValues ?? {}),
+            ...(context?.cycleId != null ? { cycleId: context.cycleId } : {}),
+            ...(context?.moduleId != null ? { moduleIds: [context.moduleId] } : {}),
+          };
           setForm(
             seededParent === null
-              ? resetForCreateMore(named)
-              : { ...resetForCreateMore(named), parentId: seededParent.id }
+              ? resetForCreateMore(named, "", opener)
+              : { ...resetForCreateMore(named, "", opener), parentId: seededParent.id }
           );
           setFieldError(null);
           setExecutionError(null);

@@ -381,6 +381,42 @@ describe("resetForCreateMore", () => {
     expect(next.moduleIds).toEqual(["module"]);
     expect(next.name).toBe("");
   });
+
+  it("restores the opener prefill even when the submitted item was edited away", () => {
+    const filled = form({
+      name: "First",
+      stateId: "state-2",
+      priority: "urgent",
+      assigneeIds: ["member-2"],
+      labelIds: ["label-2"],
+      targetDate: "2027-01-01",
+    });
+    const next = resetForCreateMore(filled, "", {
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      targetDate: "2026-12-01",
+    });
+    expect(next).toMatchObject({
+      projectId: PROJECT,
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      targetDate: "2026-12-01",
+    });
+    expect(next.name).toBe("");
+    expect(next.descriptionHtml).toBe("");
+  });
+
+  it("lets the opener's cycle and modules win over the submitted form's", () => {
+    const filled = form({ name: "First", cycleId: "cycle-2", moduleIds: ["module-2"] });
+    const next = resetForCreateMore(filled, "", { cycleId: "cycle-1", moduleIds: ["module-1"] });
+    expect(next.cycleId).toBe("cycle-1");
+    expect(next.moduleIds).toEqual(["module-1"]);
+    expect(next.name).toBe("");
+  });
 });
 
 describe("initialCreateForm", () => {

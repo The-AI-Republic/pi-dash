@@ -126,14 +126,24 @@ export function initialCreateForm(
 
 /**
  * The form after a successful create while Create more is on (ISS-119).
- * The project and the route's cycle/module context stay, so the next
- * item lands where the modal opened; everything else is a new item. The
- * old modal merges its route data into the same reset.
+ * The project and the opener's seed stay, so the next item lands where
+ * the modal opened and in the same section the first one did; name and
+ * description are a new item. `opener` is the listing prefill the dialog
+ * opened with (ISS-011/ISS-012), already merged with the route
+ * cycle/module context the dialog received. The old modal spreads its
+ * route data into the same reset.
  */
-export function resetForCreateMore(form: CreateFormState, descriptionDefault = ""): CreateFormState {
-  const state = emptyCreateForm(form.projectId, descriptionDefault);
-  state.cycleId = form.cycleId;
-  state.moduleIds = [...form.moduleIds];
+export function resetForCreateMore(
+  form: CreateFormState,
+  descriptionDefault = "",
+  opener: CreateFormInitialValues = {}
+): CreateFormState {
+  const state = initialCreateForm(form.projectId, opener, descriptionDefault);
+  // When the opener named no membership, keep the membership the just-
+  // filed item carried (the route context contextForm seeded). This
+  // preserves the header-open and cycle/module-page behaviour.
+  if (opener.cycleId === undefined) state.cycleId = form.cycleId;
+  if (opener.moduleIds === undefined) state.moduleIds = [...form.moduleIds];
   return state;
 }
 
