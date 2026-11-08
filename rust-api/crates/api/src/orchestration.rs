@@ -27,9 +27,9 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
