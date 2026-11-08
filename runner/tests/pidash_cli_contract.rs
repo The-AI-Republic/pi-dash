@@ -2196,6 +2196,9 @@ async fn issue_patch_add_label_merges_with_the_issues_current_labels() {
             remove_label: vec![],
             clear_labels: false,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await
@@ -2233,6 +2236,9 @@ async fn issue_patch_clear_labels_sends_an_empty_array() {
             remove_label: vec![],
             clear_labels: true,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await
@@ -2279,6 +2285,9 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
             remove_label: vec!["Frontend".into()],
             clear_labels: false,
             git_work_branch: None,
+            runner: None,
+            clear_runner: false,
+            pod: None,
         },
     )
     .await

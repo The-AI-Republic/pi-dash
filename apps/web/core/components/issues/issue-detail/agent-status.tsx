@@ -165,6 +165,93 @@ function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn
   return null;
 }
 
+/** Dedicated-runner waiting reason (§14.3, §23.5). pause_reason wins. */
+export function formatDispatchWaitReason(
+  wait: { reason: string; pause_reason?: string | null; runner_last_seen_at?: string | null; runs_ahead?: number },
+  now: number,
+  t: TranslationFn
+): string {
+  const lastSeen = wait.runner_last_seen_at ? formatRelativePast(wait.runner_last_seen_at, now, t) : null;
+  switch (wait.reason) {
+    case "runner_offline": {
+      if (lastSeen) return t("offline, last seen {time}", { time: lastSeen });
+      return t("offline");
+    }
+    case "runner_paused": {
+      return formatPauseReason(wait.pause_reason ?? null, t);
+    }
+    case "runner_busy": {
+      const ahead = wait.runs_ahead ?? 0;
+      if (ahead > 0) return t("busy, {count} {runs} ahead", { count: ahead, runs: ahead === 1 ? t("run") : t("runs") });
+      return t("busy");
+    }
+    case "runner_not_permitted": {
+      return t("the runner can't take this issue");
+    }
+    case "dispatching": {
+      return t("dispatching");
+    }
+    default:
+      return wait.reason;
+  }
+}
+
+function formatPauseReason(reason: string | null, t: TranslationFn): string {
+  switch (reason) {
+    case "dispatch_paused":
+      return t("paused by its owner");
+    case "owner_paused":
+      return t("paused by its owner");
+    case "engine_sign_in_required":
+      return t("the engine's sign-in expired");
+    case "gateway_session_revoked":
+      return t("the gateway session was revoked");
+    case "wallet_empty":
+      return t("the wallet is empty");
+    case "profile_unavailable":
+      return t("the profile is unavailable");
+    case "engine_disabled":
+      return t("the engine is disabled");
+    default:
+      return reason ? t("paused: {reason}", { reason }) : t("paused");
+  }
+}
+
+export function formatWaitingRunRecord(
+  run: TIssueAgentRunSummary,
+  ticker: TIssueAgentTicker | null | undefined,
+  runCount: number,
+  now: number,
+  t: TranslationFn
+): AgentStatusView | null {
+  const wait = run.dispatch_wait;
+  if (!wait || run.status !== "queued") return null;
+  const runnerName = run.pinned_runner_name ?? wait.runner_name ?? run.runner_name ?? "runner";
+  const reason = formatDispatchWaitReason(wait, now, t);
+  const expires = wait.expires_at ? formatUntil(wait.expires_at, now, t) : null;
+  const isDedicated = wait.pin_kind === "dedicated";
+  const expiresSuffix =
+    isDedicated && wait.reason !== "runner_busy" && wait.reason !== "dispatching" && expires
+      ? t(" Fails at {time} if it does not reconnect.")
+      : expires && isDedicated
+        ? t(" Fails in {time}.")
+        : "";
+  const title = t("Waiting for runner {name}", { name: runnerName });
+  const detail = `${reason}.${expiresSuffix}`;
+  const badge =
+    wait.reason === "runner_offline"
+      ? t("Offline")
+      : wait.reason === "runner_paused"
+        ? t("Paused")
+        : wait.reason === "runner_busy"
+          ? wait.runs_ahead > 0
+            ? t("{count} ahead", { count: wait.runs_ahead })
+            : t("Busy")
+          : t("Waiting");
+  const badgeVariant = wait.reason === "runner_offline" || wait.reason === "runner_paused" ? "warning" : "neutral";
+  return { title, detail, badge, badgeVariant, icon: Clock3, iconClassName: "text-warning-primary" };
+}
+
 /** Exported for tests — the run view always outranks getTickerOnlyView on
  * the detail page, so the stop_signal precedence lives here. */
 export function getRunView(
@@ -193,7 +280,9 @@ export function getRunView(
     getPayloadString(run.done_payload, "summary");
 
   switch (run.status) {
-    case "queued":
+    case "queued": {
+      const waiting = formatWaitingRunRecord(run, ticker, runCount, now, t);
+      if (waiting) return waiting;
       return {
         title: t("AI agent is queued"),
         detail:
@@ -205,6 +294,7 @@ export function getRunView(
         icon: Clock3,
         iconClassName: "text-tertiary",
       };
+    }
     case "assigned":
       return {
         title: t("AI agent is starting on this issue"),

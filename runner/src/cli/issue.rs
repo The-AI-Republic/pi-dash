@@ -14,7 +14,8 @@ use clap::{Args, Subcommand};
 use serde_json::{Map, Value};
 
 use crate::api_client::{
-    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, report_error,
+    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_NOT_FOUND, EXIT_SERVER, EXIT_UNKNOWN,
+    report_error,
 };
 use crate::cli::runner_ops;
 
@@ -94,11 +95,12 @@ pub enum IssueCommand {
     /// kick an agent that has stalled or not picked up a reply. Prints the
     /// dispatched run as JSON. Exits non-zero when no run could be dispatched
     /// (a 409 whose body carries a machine-readable `reason`:
-    /// `active_run_exists` | `no_pod` | `no_eligible_runner`).
-    RunAi {
-        /// Project-scoped identifier, e.g. `ENG-42`.
-        identifier: String,
-    },
+    /// `active_run_exists` | `no_pod` | `no_eligible_runner`, or one of the
+    /// dedicated-runner refusals: `assigned_runner_offline` |
+    /// `assigned_runner_paused` (with `pause_reason`) |
+    /// `assigned_runner_not_owner`; the 409 body carries the `options`
+    /// to offer next, including `pod_once`).
+    RunAi(RunAiArgs),
     /// Record relations from a work item to others, e.g.
     /// `pidash issue relate ENG-7 --blocked-by ENG-3,ENG-4`. Pass exactly one
     /// relation flag; each takes a comma-separated list of identifiers (or
@@ -251,6 +253,19 @@ pub struct CreateArgs {
     /// ones with `pidash label create`.
     #[arg(long)]
     pub label: Option<String>,
+
+    /// Dedicate the issue to one runner — name or UUID. Names resolve
+    /// within the issue's project, among runners the caller can see; an
+    /// ambiguous name is an error listing the matches. The runner's pod
+    /// must agree with `--pod` (or the issue's pod); the server validates.
+    #[arg(long)]
+    pub runner: Option<String>,
+
+    /// Pod the issue routes to — name or UUID. Names resolve within the
+    /// issue's project (accept the full `<PROJ>_<name>` or the bare
+    /// `<name>`); without `--runner` this clears any dedicated runner.
+    #[arg(long)]
+    pub pod: Option<String>,
 }
 
 /// The description source shared by `create` and `patch`: inline or from a
@@ -377,6 +392,39 @@ pub struct PatchArgs {
     /// branch exists on the remote. `--git-work-branch ""` clears it.
     #[arg(long = "git-work-branch", value_name = "BRANCH")]
     pub git_work_branch: Option<String>,
+
+    /// Dedicate the issue to one runner — name or UUID. Names resolve
+    /// within the issue's project, among runners the caller can see; an
+    /// ambiguous name is an error listing the matches. Mutually exclusive
+    /// with `--clear-runner`. An executor write never clears the runner.
+    #[arg(long, conflicts_with = "clear_runner")]
+    pub runner: Option<String>,
+
+    /// Return the issue to "any runner in the pod" (sends
+    /// `assigned_runner: null`). Mutually exclusive with `--runner`.
+    #[arg(long)]
+    pub clear_runner: bool,
+
+    /// Pod the issue routes to — name or UUID. Names resolve within the
+    /// issue's project (accept the full `<PROJ>_<name>` or the bare
+    /// `<name>`). Without `--runner`, this also clears any dedicated
+    /// runner; with `--runner` the two must agree (server-validated).
+    #[arg(long)]
+    pub pod: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RunAiArgs {
+    /// Project-scoped identifier, e.g. `ENG-42`.
+    pub identifier: String,
+
+    /// Run on any runner in the issue's pod for this run only, instead of
+    /// the issue's dedicated runner (sends `pin: "pod_once"`). The issue
+    /// stays dedicated; only this run is unpinned. Offered by the
+    /// dedicated-runner refusal bodies (`assigned_runner_offline`,
+    /// `assigned_runner_paused`, `assigned_runner_not_owner`).
+    #[arg(long)]
+    pub pod_once: bool,
 }
 
 #[derive(Debug, Args)]
@@ -452,7 +500,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::AttachPr(a) => cmd_attach_review(&client, a).await,
         IssueCommand::ReTick { identifier } => cmd_re_tick(&client, &identifier).await,
         IssueCommand::Wait { identifier } => cmd_wait(&client, &identifier).await,
-        IssueCommand::RunAi { identifier } => cmd_run_ai(&client, &identifier).await,
+        IssueCommand::RunAi(a) => cmd_run_ai(&client, &a.identifier, a.pod_once).await,
         IssueCommand::Relate(a) => cmd_relate(&client, a, RelationOp::Relate).await,
         IssueCommand::Unrelate(a) => cmd_relate(&client, a, RelationOp::Unrelate).await,
         IssueCommand::Relations { identifier } => cmd_relations(&client, &identifier).await,
@@ -510,6 +558,14 @@ async fn cmd_create(
         Some(labels) => Some(resolve_label_refs(client, &project_ref, labels).await?),
         None => None,
     };
+    let assigned_runner = match args.runner.as_deref() {
+        Some(runner) => Some(resolve_runner_ref(client, &project_ref, runner).await?),
+        None => None,
+    };
+    let assigned_pod = match args.pod.as_deref() {
+        Some(pod) => Some(resolve_pod_ref(client, &project_ref, pod).await?),
+        None => None,
+    };
 
     let body = build_create_body(
         args.title,
@@ -518,6 +574,8 @@ async fn cmd_create(
         state_uuid,
         parent_uuid,
         label_uuids,
+        assigned_pod,
+        assigned_runner,
     );
 
     let path = format!(
@@ -535,6 +593,7 @@ async fn cmd_create(
 /// Assemble the `work-items` POST body from already-resolved values. Kept pure
 /// (no network) so the field contract — including the `description_markdown`
 /// key and the `parent` FK the MCP path also sends — is unit-testable.
+#[allow(clippy::too_many_arguments)]
 fn build_create_body(
     title: String,
     description: Option<&str>,
@@ -542,6 +601,8 @@ fn build_create_body(
     state_uuid: Option<String>,
     parent_uuid: Option<String>,
     label_uuids: Option<Vec<String>>,
+    assigned_pod: Option<String>,
+    assigned_runner: Option<String>,
 ) -> Map<String, Value> {
     let mut body: Map<String, Value> = Map::new();
     body.insert("name".into(), Value::String(title));
@@ -565,6 +626,14 @@ fn build_create_body(
     }
     if let Some(uuids) = label_uuids {
         body.insert("labels".into(), label_array(uuids));
+    }
+    if let Some(pod) = assigned_pod {
+        // v1 field name for the pod assignment.
+        body.insert("assigned_pod".into(), Value::String(pod));
+    }
+    if let Some(runner) = assigned_runner {
+        // v1 field name for the dedicated runner.
+        body.insert("assigned_runner".into(), Value::String(runner));
     }
     body
 }
@@ -593,11 +662,219 @@ async fn resolve_parent_id(client: &ApiClient, parent: &str) -> Result<String, C
     }
 }
 
+/// One runner of a project, as the v1 runners list returns it.
+#[derive(Debug, Clone)]
+pub struct ProjectRunner {
+    pub id: String,
+    pub name: String,
+}
+
+/// One pod of a project, as `/api/v1/runner/projects/` embeds it.
+#[derive(Debug, Clone)]
+pub struct ProjectPod {
+    pub id: String,
+    pub name: String,
+}
+
+/// Fetch every runner of a project through the token-accessible v1 list
+/// (`GET workspaces/<slug>/runners/?project=<id>`), accepting a bare list
+/// or the paginated envelope like the states/labels fetchers do.
+pub async fn fetch_project_runners(
+    client: &ApiClient,
+    project_id: &str,
+) -> Result<Vec<ProjectRunner>, CliError> {
+    let path = format!(
+        "workspaces/{}/runners/?project={}",
+        client.env.workspace_slug,
+        percent_encode_value(project_id)
+    );
+    let body = client.get(&path).await?;
+    let rows = body
+        .get("results")
+        .and_then(Value::as_array)
+        .or_else(|| body.as_array())
+        .ok_or_else(|| CliError::new(EXIT_SERVER, "runners response is not a list"))?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            Some(ProjectRunner {
+                id: r.get("id")?.as_str()?.to_string(),
+                name: r.get("name")?.as_str()?.to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Fetch every pod of a project through `/api/v1/runner/projects/`, which
+/// embeds `pods: [{id, name, is_default}]` on each project row.
+pub async fn fetch_project_pods(
+    client: &ApiClient,
+    project_id: &str,
+) -> Result<Vec<ProjectPod>, CliError> {
+    let path = "runner/projects/".to_string();
+    let body = client.get(&path).await?;
+    let rows = body
+        .get("results")
+        .and_then(Value::as_array)
+        .or_else(|| body.as_array())
+        .ok_or_else(|| CliError::new(EXIT_SERVER, "projects response is not a list"))?;
+    let project = rows
+        .iter()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(project_id))
+        .ok_or_else(|| CliError::new(EXIT_NOT_FOUND, "project not found"))?;
+    let pods = project
+        .get("pods")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(pods
+        .iter()
+        .filter_map(|p| {
+            Some(ProjectPod {
+                id: p.get("id")?.as_str()?.to_string(),
+                name: p.get("name")?.as_str()?.to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Match a runner name (case-insensitive, trimmed) against a project's
+/// runners and return the UUID. Pure so the resolution rules — including
+/// the ambiguity error listing the matches — are unit-testable.
+pub fn match_runner(rows: &[ProjectRunner], needle: &str) -> Result<String, CliError> {
+    let needle = needle.trim().to_lowercase();
+    let matches: Vec<&ProjectRunner> = rows
+        .iter()
+        .filter(|r| r.name.trim().to_lowercase() == needle)
+        .collect();
+    match matches.len() {
+        1 => Ok(matches[0].id.clone()),
+        0 => {
+            let available: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
+            Err(
+                CliError::new(EXIT_NOT_FOUND, format!("runner '{needle}' not found"))
+                    .with_detail(format!("available: {}", available.join(", "))),
+            )
+        }
+        n => {
+            let listed: Vec<String> = matches
+                .iter()
+                .map(|r| format!("{} ({})", r.name, r.id))
+                .collect();
+            Err(CliError::new(
+                EXIT_INVALID,
+                format!("runner name '{needle}' matched {n} runners; disambiguate with the UUID"),
+            )
+            .with_detail(format!("matches: {}", listed.join(", "))))
+        }
+    }
+}
+
+/// Match a pod name against a project's pods. Accepts the full
+/// `<PROJ>_<name>` or the bare `<name>` (the suffix after the project
+/// prefix). Pure so the resolution rules are unit-testable.
+pub fn match_pod(rows: &[ProjectPod], needle: &str) -> Result<String, CliError> {
+    let needle = needle.trim();
+    let full: Vec<&ProjectPod> = rows.iter().filter(|p| p.name == needle).collect();
+    let candidates: Vec<&ProjectPod> = if full.is_empty() {
+        rows.iter()
+            .filter(|p| {
+                let bare = p
+                    .name
+                    .split_once('_')
+                    .map(|(_, suffix)| suffix)
+                    .unwrap_or(&p.name);
+                bare == needle
+            })
+            .collect()
+    } else {
+        full
+    };
+    match candidates.len() {
+        1 => Ok(candidates[0].id.clone()),
+        0 => {
+            let available: Vec<String> = rows.iter().map(|p| p.name.clone()).collect();
+            Err(
+                CliError::new(EXIT_NOT_FOUND, format!("pod '{needle}' not found"))
+                    .with_detail(format!("available: {}", available.join(", "))),
+            )
+        }
+        n => {
+            let listed: Vec<String> = candidates
+                .iter()
+                .map(|p| format!("{} ({})", p.name, p.id))
+                .collect();
+            Err(CliError::new(
+                EXIT_INVALID,
+                format!("pod name '{needle}' matched {n} pods; disambiguate with the UUID"),
+            )
+            .with_detail(format!("matches: {}", listed.join(", "))))
+        }
+    }
+}
+
+/// Resolve a `--runner` value to a runner UUID. A raw UUID is accepted
+/// as-is (mirroring `--state`); otherwise the name is resolved within the
+/// project through the v1 runners list.
+pub async fn resolve_runner_ref(
+    client: &ApiClient,
+    project_id: &str,
+    value: &str,
+) -> Result<String, CliError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--runner must not be empty"));
+    }
+    if looks_like_uuid(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    let rows = fetch_project_runners(client, project_id).await?;
+    match_runner(&rows, trimmed)
+}
+
+/// Resolve a `--pod` value to a pod UUID. A raw UUID is accepted as-is;
+/// otherwise the name is resolved within the project through
+/// `/api/v1/runner/projects/`.
+pub async fn resolve_pod_ref(
+    client: &ApiClient,
+    project_id: &str,
+    value: &str,
+) -> Result<String, CliError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::new(EXIT_INVALID, "--pod must not be empty"));
+    }
+    if looks_like_uuid(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    let rows = fetch_project_pods(client, project_id).await?;
+    match_pod(&rows, trimmed)
+}
+
+/// The token-accessible v1 runners list path with the project filter.
+pub fn runners_list_path(
+    workspace_slug: &str,
+    project_id: &str,
+    assignable_for: Option<&str>,
+) -> String {
+    let mut params = vec![("project".to_string(), project_id.to_string())];
+    if let Some(value) = assignable_for {
+        params.push(("assignable_for".to_string(), value.to_string()));
+    }
+    let query = build_query_string(
+        &params
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect::<Vec<_>>(),
+    );
+    format!("workspaces/{workspace_slug}/runners/{query}")
+}
+
 /// Resolve the project a command operates on: the explicit `--project`, else
 /// `PIDASH_PROJECT_ID`, else the local config default, else the workspace
 /// default project. `pub(super)` so the sibling `label` subcommands default
 /// `--project` the same way rather than re-implementing the chain.
-pub(super) async fn resolve_project_ref(
+pub(crate) async fn resolve_project_ref(
     client: &ApiClient,
     paths: &crate::util::paths::Paths,
     explicit: Option<&str>,
@@ -806,6 +1083,22 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
 
     let labels = resolve_label_patch(client, &issue, &args).await?;
 
+    let runner = if args.clear_runner {
+        RunnerPatch::Clear
+    } else if let Some(ref runner) = args.runner {
+        RunnerPatch::Set(resolve_runner_ref(client, &issue.project_id, runner).await?)
+    } else {
+        RunnerPatch::Unchanged
+    };
+    let assigned_pod = match args.pod.as_deref() {
+        Some(pod) => Some(resolve_pod_ref(client, &issue.project_id, pod).await?),
+        None => None,
+    };
+    let execution_target = ExecutionTargetPatch {
+        pod: assigned_pod,
+        runner,
+    };
+
     let body = build_patch_body(
         args.title.as_deref(),
         description.as_deref(),
@@ -814,6 +1107,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         parent,
         labels,
         args.git_work_branch.as_deref(),
+        execution_target,
     )?;
 
     let path = format!(
@@ -929,6 +1223,31 @@ fn merge_labels(
 /// contract — including `parent: null` for `--clear-parent`, `labels: []` for
 /// `--clear-labels`, and the fact that either alone satisfies the guard — is
 /// unit-testable.
+/// The dedicated-runner mutation requested by a `pidash issue patch`.
+///
+/// `clap`'s `conflicts_with` guarantees `--runner` and `--clear-runner` are
+/// never both present, so these three variants are exhaustive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerPatch {
+    /// `--runner` given; the resolved runner UUID.
+    Set(String),
+    /// `--clear-runner` given; return the issue to "any runner in the pod".
+    Clear,
+    /// Neither flag given; leave the dedicated runner untouched.
+    Unchanged,
+}
+
+/// The execution-target mutation (`--pod` / `--runner` / `--clear-runner`).
+///
+/// A `--pod` without `--runner` clears the dedicated runner (design §13.1);
+/// with `--runner` the two must agree (the server validates, E2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionTargetPatch {
+    pub pod: Option<String>,
+    pub runner: RunnerPatch,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_patch_body(
     title: Option<&str>,
     description: Option<&str>,
@@ -937,6 +1256,7 @@ fn build_patch_body(
     parent: ParentPatch,
     label_uuids: Option<Vec<String>>,
     git_work_branch: Option<&str>,
+    execution_target: ExecutionTargetPatch,
 ) -> Result<Map<String, Value>, CliError> {
     let mut body: Map<String, Value> = Map::new();
 
@@ -975,11 +1295,30 @@ fn build_patch_body(
     if let Some(branch) = git_work_branch {
         body.insert("git_work_branch".into(), Value::String(branch.to_string()));
     }
+    if let Some(pod) = execution_target.pod {
+        // v1 field name for the pod assignment.
+        body.insert("assigned_pod".into(), Value::String(pod));
+    }
+    match execution_target.runner {
+        RunnerPatch::Set(runner) => {
+            body.insert("assigned_runner".into(), Value::String(runner));
+        }
+        RunnerPatch::Clear => {
+            body.insert("assigned_runner".into(), Value::Null);
+        }
+        RunnerPatch::Unchanged => {
+            // `--pod` without `--runner` returns the issue to "any runner
+            // in the pod" (§13.1); otherwise the runner is untouched.
+            if body.contains_key("assigned_pod") {
+                body.insert("assigned_runner".into(), Value::Null);
+            }
+        }
+    }
 
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--git-work-branch is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--git-work-branch/--runner/--clear-runner/--pod is required",
         ));
     }
 
@@ -1127,19 +1466,32 @@ async fn cmd_wait(client: &ApiClient, identifier: &str) -> Result<(), CliError> 
 }
 
 /// Build the token-API path for `POST .../work-items/<id>/run-ai/`.
+/// The `run-ai` POST body. Pure so the `pod_once` contract (send
+/// `pin: "pod_once"` only when asked; otherwise the empty body the server
+/// has always accepted) is unit-testable.
+fn run_ai_body(pod_once: bool) -> Value {
+    if pod_once {
+        serde_json::json!({ "pin": "pod_once" })
+    } else {
+        serde_json::json!({})
+    }
+}
+
 fn run_ai_path(workspace_slug: &str, project_id: &str, issue_id: &str) -> String {
     format!("workspaces/{workspace_slug}/projects/{project_id}/work-items/{issue_id}/run-ai/")
 }
 
-async fn cmd_run_ai(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+async fn cmd_run_ai(client: &ApiClient, identifier: &str, pod_once: bool) -> Result<(), CliError> {
     let issue = resolve_issue(client, identifier).await?;
     let path = run_ai_path(&client.env.workspace_slug, &issue.project_id, &issue.id);
     // 201 returns the dispatched run; a 409 (nothing dispatched — active run,
-    // no pod, no eligible runner) or a 403 (requested from inside the issue's
-    // own active agent run) is surfaced by `client.post` as a `CliError` whose
-    // detail carries the response body — including the machine-readable
-    // `reason` — and `?` propagates it to a non-zero exit via `report_error`.
-    let resp = client.post(&path, &serde_json::json!({})).await?;
+    // no pod, no eligible runner, or a dedicated-runner refusal such as
+    // `assigned_runner_offline` with its `pause_reason` and `options`) or a
+    // 403 (requested from inside the issue's own active agent run) is
+    // surfaced by `client.post` as a `CliError` whose detail carries the
+    // response body — including the machine-readable `reason` — and `?`
+    // propagates it to a non-zero exit via `report_error`.
+    let resp = client.post(&path, &run_ai_body(pod_once)).await?;
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
@@ -1315,7 +1667,16 @@ mod tests {
     #[test]
     fn build_create_body_sends_description_markdown_verbatim() {
         let md = "# Title\n\n- [x] done";
-        let body = build_create_body("T".to_string(), Some(md), None, None, None, None);
+        let body = build_create_body(
+            "T".to_string(),
+            Some(md),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(
             body.get("description_markdown").and_then(Value::as_str),
             Some(md)
@@ -1334,6 +1695,10 @@ mod tests {
             ParentPatch::Unchanged,
             None,
             None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
         )
         .expect("description alone is a valid mutation");
         assert_eq!(
@@ -1353,6 +1718,10 @@ mod tests {
             ParentPatch::Unchanged,
             None,
             Some("pi-dash/eng-42"),
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
         )
         .expect("a work branch alone is a valid mutation");
         assert_eq!(
@@ -1370,6 +1739,10 @@ mod tests {
             ParentPatch::Unchanged,
             None,
             Some(""),
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
         )
         .expect("clearing is a valid mutation");
         assert_eq!(
@@ -1597,6 +1970,8 @@ mod tests {
             None,
             Some("11111111-2222-3333-4444-555555555555".to_string()),
             None,
+            None,
+            None,
         );
         assert_eq!(
             body.get("parent").and_then(Value::as_str),
@@ -1607,7 +1982,16 @@ mod tests {
 
     #[test]
     fn build_create_body_omits_parent_when_absent() {
-        let body = build_create_body("Top-level".to_string(), None, None, None, None, None);
+        let body = build_create_body(
+            "Top-level".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(!body.contains_key("parent"));
     }
 
@@ -1621,6 +2005,10 @@ mod tests {
             ParentPatch::Set("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()),
             None,
             None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
         )
         .expect("parent is a valid mutation");
         assert_eq!(
@@ -1631,8 +2019,20 @@ mod tests {
 
     #[test]
     fn build_patch_body_clear_parent_sends_null() {
-        let body = build_patch_body(None, None, None, None, ParentPatch::Clear, None, None)
-            .expect("clear-parent is a valid mutation");
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Clear,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+        )
+        .expect("clear-parent is a valid mutation");
         // `--clear-parent` must emit an explicit JSON null (detach), not omit
         // the key — omitting it would leave the parent unchanged server-side.
         assert_eq!(body.get("parent"), Some(&Value::Null));
@@ -1651,16 +2051,47 @@ mod tests {
                 ParentPatch::Set("x".to_string()),
                 None,
                 None,
+                ExecutionTargetPatch {
+                    pod: None,
+                    runner: RunnerPatch::Unchanged
+                },
             )
             .is_ok()
         );
-        assert!(build_patch_body(None, None, None, None, ParentPatch::Clear, None, None).is_ok());
+        assert!(
+            build_patch_body(
+                None,
+                None,
+                None,
+                None,
+                ParentPatch::Clear,
+                None,
+                None,
+                ExecutionTargetPatch {
+                    pod: None,
+                    runner: RunnerPatch::Unchanged
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn build_patch_body_empty_is_rejected() {
-        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None, None)
-            .expect_err("no mutations must be rejected");
+        let err = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+        )
+        .expect_err("no mutations must be rejected");
         assert_eq!(err.exit_code, EXIT_INVALID);
         // The guard message advertises the parent flags so agents can discover them.
         assert!(err.message.contains("--parent"));
@@ -1718,7 +2149,20 @@ mod tests {
     fn run_ai_parses_positional_identifier() {
         let parsed = TestCli::try_parse_from(["pidash", "run-ai", "ENG-42"]).expect("parse run-ai");
         match parsed.issue.command {
-            IssueCommand::RunAi { identifier } => assert_eq!(identifier, "ENG-42"),
+            IssueCommand::RunAi(a) => {
+                assert_eq!(a.identifier, "ENG-42");
+                assert!(!a.pod_once);
+            }
+            other => panic!("expected run-ai, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_ai_pod_once_parses() {
+        let parsed = TestCli::try_parse_from(["pidash", "run-ai", "ENG-42", "--pod-once"])
+            .expect("parse run-ai --pod-once");
+        match parsed.issue.command {
+            IssueCommand::RunAi(a) => assert!(a.pod_once),
             other => panic!("expected run-ai, got {other:?}"),
         }
     }
@@ -1837,13 +2281,15 @@ mod tests {
             None,
             None,
             Some(vec!["l-bug".to_string(), "l-fe".to_string()]),
+            None,
+            None,
         );
         assert_eq!(body.get("labels"), Some(&json!(["l-bug", "l-fe"])));
     }
 
     #[test]
     fn build_create_body_omits_labels_when_absent() {
-        let body = build_create_body("T".to_string(), None, None, None, None, None);
+        let body = build_create_body("T".to_string(), None, None, None, None, None, None, None);
         assert!(!body.contains_key("labels"));
     }
 
@@ -1857,6 +2303,10 @@ mod tests {
             ParentPatch::Unchanged,
             Some(vec!["l-bug".to_string()]),
             None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
         )
         .expect("labels alone is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!(["l-bug"])));
@@ -1874,15 +2324,282 @@ mod tests {
             ParentPatch::Unchanged,
             Some(vec![]),
             None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
         )
         .expect("clear-labels is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!([])));
     }
 
+    // --- dedicated runner (§14.5) ----------------------------------------
+
+    #[test]
+    fn build_create_body_sends_assigned_pod_and_runner() {
+        let body = build_create_body(
+            "T".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("pod-uuid".to_string()),
+            Some("runner-uuid".to_string()),
+        );
+        assert_eq!(
+            body.get("assigned_pod").and_then(Value::as_str),
+            Some("pod-uuid")
+        );
+        assert_eq!(
+            body.get("assigned_runner").and_then(Value::as_str),
+            Some("runner-uuid")
+        );
+    }
+
+    #[test]
+    fn build_create_body_omits_assignment_when_absent() {
+        let body = build_create_body("T".to_string(), None, None, None, None, None, None, None);
+        assert!(!body.contains_key("assigned_pod"));
+        assert!(!body.contains_key("assigned_runner"));
+    }
+
+    #[test]
+    fn build_patch_body_runner_alone_satisfies_guard_and_sends_uuid() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Set("runner-uuid".to_string()),
+            },
+        )
+        .expect("runner alone is a valid mutation");
+        assert_eq!(
+            body.get("assigned_runner").and_then(Value::as_str),
+            Some("runner-uuid")
+        );
+        assert!(!body.contains_key("assigned_pod"));
+    }
+
+    #[test]
+    fn build_patch_body_clear_runner_sends_explicit_null() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Clear,
+            },
+        )
+        .expect("clear-runner alone is a valid mutation");
+        assert_eq!(body.get("assigned_runner"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn build_patch_body_pod_without_runner_clears_runner() {
+        // Design §13.1: `--pod` alone returns the issue to "any runner in
+        // the pod".
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: Some("pod-uuid".to_string()),
+                runner: RunnerPatch::Unchanged,
+            },
+        )
+        .expect("pod alone is a valid mutation");
+        assert_eq!(
+            body.get("assigned_pod").and_then(Value::as_str),
+            Some("pod-uuid")
+        );
+        assert_eq!(body.get("assigned_runner"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn build_patch_body_pod_and_runner_sends_both() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: Some("pod-uuid".to_string()),
+                runner: RunnerPatch::Set("runner-uuid".to_string()),
+            },
+        )
+        .expect("pod+runner is a valid mutation");
+        assert_eq!(
+            body.get("assigned_pod").and_then(Value::as_str),
+            Some("pod-uuid")
+        );
+        assert_eq!(
+            body.get("assigned_runner").and_then(Value::as_str),
+            Some("runner-uuid")
+        );
+    }
+
+    #[test]
+    fn build_patch_body_untouched_assignment_is_omitted() {
+        let body = build_patch_body(
+            Some("New title"),
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+        )
+        .expect("title alone is a valid mutation");
+        assert!(!body.contains_key("assigned_pod"));
+        assert!(!body.contains_key("assigned_runner"));
+    }
+
+    #[test]
+    fn run_ai_body_pod_once_sends_pin_only_when_asked() {
+        assert_eq!(run_ai_body(true), json!({ "pin": "pod_once" }));
+        assert_eq!(run_ai_body(false), json!({}));
+    }
+
+    #[test]
+    fn match_runner_resolves_exact_name_case_insensitively() {
+        let rows = vec![
+            ProjectRunner {
+                id: "r1".to_string(),
+                name: "gpu-box".to_string(),
+            },
+            ProjectRunner {
+                id: "r2".to_string(),
+                name: "cpu-box".to_string(),
+            },
+        ];
+        assert_eq!(match_runner(&rows, "GPU-BOX").unwrap(), "r1");
+        assert_eq!(match_runner(&rows, " cpu-box ").unwrap(), "r2");
+    }
+
+    #[test]
+    fn match_runner_not_found_lists_available() {
+        let rows = vec![ProjectRunner {
+            id: "r1".to_string(),
+            name: "gpu-box".to_string(),
+        }];
+        let err = match_runner(&rows, "nope").expect_err("unknown runner must fail");
+        assert_eq!(err.exit_code, crate::api_client::EXIT_NOT_FOUND);
+        assert!(err.message.contains("not found"), "{}", err.message);
+    }
+
+    #[test]
+    fn match_runner_ambiguous_lists_matches() {
+        let rows = vec![
+            ProjectRunner {
+                id: "r1".to_string(),
+                name: "box".to_string(),
+            },
+            ProjectRunner {
+                id: "r2".to_string(),
+                name: "BOX".to_string(),
+            },
+        ];
+        let err = match_runner(&rows, "box").expect_err("ambiguous runner must fail");
+        assert!(err.message.contains("matched 2 runners"), "{}", err.message);
+    }
+
+    #[test]
+    fn match_pod_accepts_full_and_bare_names() {
+        let rows = vec![
+            ProjectPod {
+                id: "p1".to_string(),
+                name: "ENG_default".to_string(),
+            },
+            ProjectPod {
+                id: "p2".to_string(),
+                name: "ENG_gpu".to_string(),
+            },
+        ];
+        assert_eq!(match_pod(&rows, "ENG_gpu").unwrap(), "p2");
+        assert_eq!(match_pod(&rows, "default").unwrap(), "p1");
+    }
+
+    #[test]
+    fn match_pod_bare_name_ambiguity_lists_matches() {
+        let rows = vec![
+            ProjectPod {
+                id: "p1".to_string(),
+                name: "ENG_default".to_string(),
+            },
+            ProjectPod {
+                id: "p2".to_string(),
+                name: "X_default".to_string(),
+            },
+        ];
+        let err = match_pod(&rows, "default").expect_err("ambiguous bare pod must fail");
+        assert!(err.message.contains("matched 2 pods"), "{}", err.message);
+    }
+
+    #[test]
+    fn runners_list_path_encodes_project_and_assignable_for() {
+        assert_eq!(
+            runners_list_path("eng", "pid-1", Some("iid-1")),
+            "workspaces/eng/runners/?project=pid-1&assignable_for=iid-1"
+        );
+        assert_eq!(
+            runners_list_path("eng", "pid-1", None),
+            "workspaces/eng/runners/?project=pid-1"
+        );
+    }
+
+    #[test]
+    fn patch_runner_and_clear_runner_conflict() {
+        use clap::Parser;
+        let err = PatchArgsHarness::try_parse_from([
+            "patch",
+            "PROJ-1",
+            "--runner",
+            "gpu-box",
+            "--clear-runner",
+        ])
+        .expect_err("--runner and --clear-runner are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
     #[test]
     fn build_patch_body_guard_advertises_the_label_flags() {
-        let err = build_patch_body(None, None, None, None, ParentPatch::Unchanged, None, None)
-            .expect_err("no mutations must be rejected");
+        let err = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+        )
+        .expect_err("no mutations must be rejected");
         for flag in ["--label", "--add-label", "--remove-label", "--clear-labels"] {
             assert!(
                 err.message.contains(flag),
