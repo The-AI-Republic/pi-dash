@@ -324,39 +324,38 @@ pub fn next_seq_after_max(current_max: Option<i32>) -> i32 {
 }
 
 /// `next_event_seq` (`chat.py:218-224`): one past the session event
-/// max. Executor-generic so endpoint transactions and the overlay
-/// share it. Moved from the api chat endpoints (OVL-06
-/// PIDASHCONV-1544); the endpoints are thin callers. Re-exported
-/// through `pidash-sdk::ops`.
-pub async fn next_event_seq<'e, E>(ex: E, session_id: Uuid) -> Result<i32, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let max: Option<i32> =
-        sqlx::query_scalar(r#"SELECT MAX("seq") FROM "agent_chat_event" WHERE "session_id" = $1"#)
-            .bind(session_id)
-            .fetch_optional(ex)
-            .await?
-            .flatten();
+/// max. Runs on a SeaORM connection — either
+/// `sea_orm_connection(&pool)` for pool callers or
+/// `TxConn::new(&mut tx)` for sqlx-transaction callers. Moved from
+/// the api chat endpoints (OVL-06 PIDASHCONV-1544); the endpoints
+/// are thin callers. Re-exported through `pidash-sdk::ops`.
+pub async fn next_event_seq(
+    db: &impl sea_orm::ConnectionTrait,
+    session_id: Uuid,
+) -> Result<i32, sqlx::Error> {
+    let max: Option<i32> = next_event_seq_select(session_id)
+        .one(db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?
+        .flatten();
     Ok(next_seq_after_max(max))
 }
 
 /// `next_message_seq` (`chat.py:227-233`): one past the session
-/// message max. Executor-generic so endpoint transactions and the
-/// overlay share it. Moved from the api chat endpoints (OVL-06
-/// PIDASHCONV-1544); the endpoints are thin callers. Re-exported
-/// through `pidash-sdk::ops`.
-pub async fn next_message_seq<'e, E>(ex: E, session_id: Uuid) -> Result<i32, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let max: Option<i32> = sqlx::query_scalar(
-        r#"SELECT MAX("seq") FROM "agent_chat_message" WHERE "session_id" = $1"#,
-    )
-    .bind(session_id)
-    .fetch_optional(ex)
-    .await?
-    .flatten();
+/// message max. Runs on a SeaORM connection — either
+/// `sea_orm_connection(&pool)` for pool callers or
+/// `TxConn::new(&mut tx)` for sqlx-transaction callers. Moved from
+/// the api chat endpoints (OVL-06 PIDASHCONV-1544); the endpoints
+/// are thin callers. Re-exported through `pidash-sdk::ops`.
+pub async fn next_message_seq(
+    db: &impl sea_orm::ConnectionTrait,
+    session_id: Uuid,
+) -> Result<i32, sqlx::Error> {
+    let max: Option<i32> = next_message_seq_select(session_id)
+        .one(db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?
+        .flatten();
     Ok(next_seq_after_max(max))
 }
 
@@ -1666,6 +1665,22 @@ pub fn next_event_seq_select(
         .into_tuple::<Option<i32>>()
 }
 
+/// `next_message_seq_locked` ([`next_message_seq_sql`]) as a SeaORM
+/// statement: `MAX(seq)` over the session's messages (`None` for an
+/// empty set; the caller adds one via [`next_seq_after_max`]).
+pub fn next_message_seq_select(
+    session_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<i32>>> {
+    use orm::agent_chat_message::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    Entity::find()
+        .select_only()
+        .column_as(Expr::col((Entity, Column::Seq)).max(), "seq__max")
+        .filter(Column::SessionId.eq(session_id))
+        .into_tuple::<Option<i32>>()
+}
+
 /// The event insert ([`insert_event_sql`]) as a SeaORM statement: every
 /// concrete column, the `BigAutoField` pk from the database (returned as
 /// `last_insert_id`).
@@ -2911,6 +2926,11 @@ mod tests {
             pg_selector(next_event_seq_select(session)),
             "SELECT MAX(\"agent_chat_event\".\"seq\") AS \"seq__max\" FROM \"agent_chat_event\" \
              WHERE \"agent_chat_event\".\"session_id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d'"
+        );
+        assert_eq!(
+            pg_selector(next_message_seq_select(session)),
+            "SELECT MAX(\"agent_chat_message\".\"seq\") AS \"seq__max\" FROM \"agent_chat_message\" \
+             WHERE \"agent_chat_message\".\"session_id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d'"
         );
         let inputs = append_event_inputs(
             "chat_started",

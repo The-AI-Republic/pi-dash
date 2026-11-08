@@ -23,13 +23,12 @@ use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::tx::Transaction;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
 
+use super::admission::managed_runner_probe;
 use super::admission::AdmissionCache;
 use super::admission::CloudAgentAdmissionError;
 use super::admission::DeferredConsume;
 use super::admission::LlmProfile;
-use super::admission::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL;
-use super::admission::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL;
-use super::admission::ONLINE_MANAGED_RUNNER_SQL;
+use super::admission::ManagedRunnerProbe;
 use super::enforce_creation_rate;
 use super::managed_runner_availability;
 use super::policy::build_tool_plan;
@@ -40,7 +39,6 @@ use super::policy::CloudAgentUnavailable;
 use super::policy::CloudCapabilityUnavailable;
 use super::policy::ResolveExecutorError;
 use super::policy::UserFlags;
-use super::policy::GITHUB_BINDING_EXISTS_SQL;
 use super::HEARTBEAT_GRACE_SECS;
 use crate::extensions::CloudAgentToolsetsSeam;
 
@@ -324,96 +322,189 @@ pub enum ExecutionFieldsError {
 }
 
 /// The workspace mutex take, shared with the dispatch engine: `lock_workspace`
-/// runs on the caller-provided executor (span or short transaction).
+/// runs on the caller's transaction connection (the dispatch span's
+/// short transaction or the insertion transaction).
 pub async fn lock_workspace(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, i32>(WORKSPACE_LOCK_SQL)
-        .bind(workspace_id)
-        .fetch_one(executor)
-        .await?;
-    Ok(())
+    use sea_orm::{ConnectionTrait, DbBackend};
+    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
+    let row = tx_conn
+        .query_one(DbBackend::Postgres.build(&workspace_lock_select(workspace_id)))
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    match row {
+        Some(_) => Ok(()),
+        None => Err(sqlx::Error::RowNotFound),
+    }
 }
 
 async fn count_queued_cloud(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar::<_, i64>(QUEUED_CLOUD_COUNT_SQL)
-        .bind(workspace_id)
-        .fetch_one(executor)
+    use sea_orm::{ConnectionTrait, DbBackend};
+    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
+    let row = tx_conn
+        .query_one(DbBackend::Postgres.build(&queued_cloud_count_select(workspace_id)))
         .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    row.try_get("", "n").map_err(pidash_db::orm_tx::into_sqlx)
+}
+
+/// SeaORM form of the `GITHUB_BINDING_EXISTS_SQL` probe (policy.py):
+/// the four-join provider chain, no deleted_at scope on joined
+/// tables (Django filters only the base table).
+fn github_binding_exists_select(
+    project: &ProjectScope,
+) -> sea_orm::Select<pidash_db::entity::git_repository_bindings::Entity> {
+    use pidash_db::entity::{
+        git_provider_accounts, git_repositories, git_repository_bindings, github_app_installations,
+        workspace_integrations,
+    };
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    git_repository_bindings::Entity::find()
+        .select_only()
+        .column(git_repository_bindings::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::GitRepositories.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_repository_bindings::Relation::GitProviderAccounts.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_provider_accounts::Relation::WorkspaceIntegrations.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            workspace_integrations::Relation::GithubAppInstallations.def(),
+        )
+        .filter(git_repository_bindings::Column::ProjectId.eq(project.project_id))
+        .filter(git_repository_bindings::Column::WorkspaceId.eq(project.workspace_id))
+        .filter(git_repository_bindings::Column::DeletedAt.is_null())
+        .filter(git_repositories::Column::Provider.eq("github"))
+        .filter(git_repositories::Column::HostUrl.eq("https://github.com"))
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(project.workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+        .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
+        .filter(git_provider_accounts::Column::Status.eq("connected"))
+        .filter(git_provider_accounts::Column::VerifiedAt.is_not_null())
+        .filter(github_app_installations::Column::VerifiedAt.is_not_null())
+        .filter(github_app_installations::Column::SuspendedAt.is_null())
+        .limit(1)
 }
 
 async fn github_binding_exists(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     project: &ProjectScope,
 ) -> Result<bool, sqlx::Error> {
-    let found = sqlx::query_scalar::<_, i32>(GITHUB_BINDING_EXISTS_SQL)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
-        .await?;
+    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
+    let found = github_binding_exists_select(project)
+        .into_tuple::<Uuid>()
+        .one(&tx_conn)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(found.is_some())
 }
 
 async fn enrolled_exists(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     project: &ProjectScope,
     owner_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let found = sqlx::query_scalar::<_, i32>(ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
-        .await?;
+    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
+    let found = managed_runner_probe(
+        &tx_conn,
+        ManagedRunnerProbe::Enrolled,
+        owner_id,
+        project.project_id,
+        project.workspace_id,
+    )
+    .await
+    .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(found.is_some())
 }
 
 async fn online_managed_runner_id(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     project: &ProjectScope,
     owner_id: Uuid,
     heartbeat_threshold: DateTime<Utc>,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(ONLINE_MANAGED_RUNNER_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .bind(heartbeat_threshold)
-        .fetch_optional(executor)
-        .await
+    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
+    managed_runner_probe(
+        &tx_conn,
+        ManagedRunnerProbe::Online(heartbeat_threshold),
+        owner_id,
+        project.project_id,
+        project.workspace_id,
+    )
+    .await
+    .map_err(pidash_db::orm_tx::into_sqlx)
 }
 
 /// The paused tiebreaker (`policy.py:88-91`, `09738d222`): whether the
 /// viewer owns any paused bundled runner on the project's pod.
 async fn paused_enrolled_exists(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     project: &ProjectScope,
     owner_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let found = sqlx::query_scalar::<_, i32>(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
-        .await?;
+    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
+    let found = managed_runner_probe(
+        &tx_conn,
+        ManagedRunnerProbe::Paused,
+        owner_id,
+        project.project_id,
+        project.workspace_id,
+    )
+    .await
+    .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(found.is_some())
 }
 
+/// SeaORM form of [`ENROLLED_LATEST_RUNNER_SQL`]: newest enrolled
+/// heartbeat wins, bare DESC (NULLs first, exactly as Django).
+fn latest_enrolled_runner_select(
+    project: &ProjectScope,
+    owner_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::runner::Entity> {
+    use pidash_db::entity::{pod, runner};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect};
+    let to_pod: sea_orm::RelationDef = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .join(JoinType::InnerJoin, to_pod)
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
+        .filter(pod::Column::ProjectId.eq(project.project_id))
+        .filter(runner::Column::WorkspaceId.eq(project.workspace_id))
+        .filter(runner::Column::RevokedAt.is_null())
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .limit(1)
+}
+
 async fn latest_enrolled_runner_id(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: &mut sqlx::PgConnection,
     project: &ProjectScope,
     owner_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(ENROLLED_LATEST_RUNNER_SQL)
-        .bind(owner_id)
-        .bind(project.project_id)
-        .bind(project.workspace_id)
-        .fetch_optional(executor)
+    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
+    latest_enrolled_runner_select(project, owner_id)
+        .into_tuple::<Uuid>()
+        .one(&tx_conn)
         .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
 }
 
 /// Resolve the executor-specific `AgentRun` fields for one run creation
@@ -674,8 +765,8 @@ pub async fn lock_cloud_creation_capacity(
     if *executor_kind != AgentExecutorKind::CloudAgent {
         return Ok(None);
     }
-    lock_workspace(&mut **tx.inner(), workspace_id).await?;
-    let queued = count_queued_cloud(&mut **tx.inner(), workspace_id).await?;
+    lock_workspace(tx.inner(), workspace_id).await?;
+    let queued = count_queued_cloud(tx.inner(), workspace_id).await?;
     Ok(quota_verdict(
         queued,
         cloud.max_queued_per_workspace,
@@ -684,4 +775,47 @@ pub async fn lock_cloud_creation_capacity(
     )?
     .into_iter()
     .next())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn scope() -> ProjectScope {
+        ProjectScope {
+            project_id: Uuid::nil(),
+            workspace_id: Uuid::max(),
+            default_agent_executor: String::new(),
+        }
+    }
+
+    #[test]
+    fn github_probe_statement_shape() {
+        let sql = sea_orm::QueryTrait::build(
+            &github_binding_exists_select(&scope()),
+            sea_orm::DbBackend::Postgres,
+        )
+        .to_string();
+        assert!(sql.contains("git_repository_bindings"), "base: {sql}");
+        assert!(sql.contains("git_repositories"), "join r: {sql}");
+        assert!(sql.contains("git_provider_accounts"), "join a: {sql}");
+        assert!(sql.contains("workspace_integrations"), "join w: {sql}");
+        assert!(sql.contains("github_app_installations"), "join i: {sql}");
+        assert!(sql.contains("github"), "provider filter: {sql}");
+        assert!(sql.contains("connected"), "status filter: {sql}");
+        assert!(sql.contains("LIMIT 1"), "first-row: {sql}");
+    }
+
+    #[test]
+    fn latest_runner_statement_shape() {
+        let sql = sea_orm::QueryTrait::build(
+            &latest_enrolled_runner_select(&scope(), Uuid::nil()),
+            sea_orm::DbBackend::Postgres,
+        )
+        .to_string();
+        assert!(sql.contains("\"runner\""), "base: {sql}");
+        assert!(sql.contains("\"pod\""), "pod join: {sql}");
+        assert!(sql.contains("desktop_bundled"), "provisioning: {sql}");
+        assert!(sql.contains("ORDER BY"), "order: {sql}");
+        assert!(sql.contains("LIMIT 1"), "first-row: {sql}");
+    }
 }

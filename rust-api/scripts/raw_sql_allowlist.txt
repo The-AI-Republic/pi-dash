@@ -5,32 +5,14 @@
 crates/api/src/app_assets/handlers_v2_project.rs 22
 crates/api/src/app_assets/handlers_v2_user_workspace.rs 26
 crates/api/src/app_notifications/mod.rs 15
-crates/api/src/auth_oauth/login.rs 2
-crates/api/src/auth_oauth/mod.rs 3
-crates/api/src/auth_oauth/oauth_gitea.rs 15
-crates/api/src/auth_oauth/oauth_github.rs 13
-crates/api/src/auth_oauth/oauth_gitlab.rs 10
-crates/api/src/auth_oauth/oauth_google.rs 12
 crates/api/src/auth_session/email.rs 19
 crates/api/src/auth_session/magic.rs 14
 crates/api/src/auth_session/password.rs 5
 crates/api/src/license/handlers_admin.rs 20
 crates/api/src/license/handlers_config_workspace.rs 8
 crates/api/src/space/intake.rs 27
-crates/api/src/turn/tools_local_store.rs 2
-crates/db/src/config/accessor.rs 1
-crates/db/src/filterset.rs 6
-crates/db/src/runner_runs/pod.rs 3
-crates/db/src/runner_sessions/machine_outbox.rs 1
-crates/db/src/runner_sessions/outbox.rs 1
-crates/jobs/src/scheduler.rs 2
 crates/jobs/src/tasks_cleanup/dummy_data.rs 34
 crates/jobs/src/tasks_cleanup/workspace_seed.rs 28
-crates/jobs/src/tasks_export/analytic.rs 9
-crates/services/src/dispatch/execution.rs 7
-crates/services/src/read/projects.rs 1
-crates/services/src/runner_runs/chat.rs 2
-crates/services/src/runner_runs/finalization.rs 1
 
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
