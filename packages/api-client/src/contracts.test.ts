@@ -684,6 +684,9 @@ describe("auth contracts", () => {
     const startCall = transport.calls.find((call) => call.url.endsWith("/api/v1/auth/device/start/"));
     expect(startCall?.init.method).toBe("POST");
     expect(startCall?.init.body).toBe("{}");
+    await startDeviceGrant(client, { scope: "engine" });
+    const engineCall = transport.calls.filter((call) => call.url.endsWith("/api/v1/auth/device/start/")).at(-1);
+    expect(engineCall?.init.body).toBe(JSON.stringify({ scope: "engine" }));
   });
 
   it("rejects a device grant missing its polling facts", async () => {

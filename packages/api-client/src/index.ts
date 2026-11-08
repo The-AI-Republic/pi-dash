@@ -30,7 +30,7 @@ export type {
 } from "./client.js";
 export { InstanceConfig, deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
 export type { SignOutResult } from "./contracts/auth.js";
-export type { DeviceApproveOptions } from "./contracts/auth-entry.js";
+export type { DeviceApproveOptions, DeviceStartOptions } from "./contracts/auth-entry.js";
 export {
   CsrfTokenResponse,
   DeviceApproveResponse,

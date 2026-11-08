@@ -65,7 +65,7 @@ export function registerRuntimeSignOutLifecycle(runtimeApi: AgentRuntimeApi | nu
       // Disposal follows a confirmed desktop sign-out only, so keep the
       // larger runtime service out of the initial route chain too.
       const { disposeRuntimeForSignOut } = await import("./service.js");
-      await disposeRuntimeForSignOut({ choice, client: getAppClient(), runtime: runtimeApi });
+      await disposeRuntimeForSignOut({ choice, client: getAppClient(), runtime: runtimeApi, chat: platform.localChat });
     },
   });
 }
