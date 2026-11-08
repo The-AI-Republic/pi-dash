@@ -936,11 +936,15 @@ async function desk025Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   });
 
   await test.step("an address the new app owns keeps the in-window not-found", async () => {
-    // A single unknown segment is a workspace address, owned and gated: the
+    // An unknown workspace slug is owned and gated at any depth: the
+    // workspace route rejects the slug before any deeper match (or the
+    // hand-off surface) is reached, so both spellings land on the
     // workspace-not-found screen, never a browser hand-off.
-    await driver.visit("/__parity_no_such_ws__");
-    await expect.poll(() => driver.pageText(), POLL_60).toContain("Workspace not found");
-    expect(await driver.pageText()).not.toContain(NEW_HANDOFF_HEADING);
+    for (const route of ["/__parity_no_such_ws__", "/__parity_no_such_ws__/__parity_no_such_page__"]) {
+      await driver.visit(route);
+      await expect.poll(() => driver.pageText(), POLL_60).toContain("Workspace not found");
+      expect(await driver.pageText()).not.toContain(NEW_HANDOFF_HEADING);
+    }
   });
 
   await test.step("an unknown page under a known workspace leaves for the browser", async () => {
@@ -948,7 +952,6 @@ async function desk025Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     // screen: the bundle cannot tell it from a typo and hands it over
     // rather than claiming it does not exist.
     await expectHandOff(driver, `/${seed.workspaceSlug}/__parity_no_such_page__`);
-    await expectHandOff(driver, "/__parity_no_such_ws__/__parity_no_such_page__");
   });
 
   await test.step("the visits planted no session", async () => {

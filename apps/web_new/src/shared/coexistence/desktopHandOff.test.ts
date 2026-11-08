@@ -93,6 +93,9 @@ describe("classifyDesktopRoute", () => {
       "/acme/projects/archives",
       "/acme/notifications",
       "/acme/profile/1234",
+      // Classifier-level verdict only: in the app the workspace route
+      // rejects the unknown slug first, so this address lands on the
+      // in-window workspace-not-found screen (DESK-025).
       "/__parity_no_such_ws__/__parity_no_such_page__",
     ]) {
       expect(classifyDesktopRoute(path)).toEqual({ kind: "hand-off", path });

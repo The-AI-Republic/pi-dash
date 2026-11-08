@@ -660,10 +660,13 @@ an address nothing there renders stays the normal not-found page.
 
 An address the migrated list *does* claim keeps the in-window not-found
 page when it resolves to nothing — an unknown workspace slug, for example.
-That distinction is why the decision reads the migrated list rather than
-"did a route match": live screens that have no route of their own yet
-(notifications, profile, archives) still render in the window and must not
-be sent away.
+The workspace slug gate preempts the hand-off at any depth, so an unknown
+slug under a longer address (which the list does not claim) still lands on
+the in-window workspace-not-found screen: the workspace route rejects the
+slug before the hand-off surface is reached. That distinction is why the
+decision reads the migrated list rather than "did a route match": live
+screens that have no route of their own yet (notifications, profile,
+archives) still render in the window and must not be sent away.
 
 Root keeps the entry in both targets. NEWFRONT-594 builds the exclusion
 wiring; NEWFRONT-591 owns the sign-in fork half; NEWFRONT-92 (M-01)
