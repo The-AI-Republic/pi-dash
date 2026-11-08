@@ -9,6 +9,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::schema::{Config, canonical_for_compare};
+use crate::util::fs::create_dir_all_private;
 use crate::util::paths::Paths;
 
 /// `<daemon data>/engine/workdirs`: the root while `[engine] task_root` is
@@ -103,7 +104,7 @@ pub fn validate_task_root_for(
     if lexical.parent().is_none() {
         return Err(RootError::FilesystemRoot(shown));
     }
-    std::fs::create_dir_all(candidate).map_err(|e| RootError::NotCreatable {
+    create_dir_all_private(candidate).map_err(|e| RootError::NotCreatable {
         path: shown.clone(),
         why: e.to_string(),
     })?;
@@ -195,8 +196,7 @@ pub fn allocate_engine_folder(
     let cfg = crate::config::file::load_config(paths)?;
     let root = task_root(paths, &cfg);
     let dir = allocate_working_dir(&root, workspace, project, &cfg)?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
+    create_dir_all_private(&dir).map_err(|e| anyhow::anyhow!("creating {}: {e}", dir.display()))?;
     Ok(dir)
 }
 
@@ -437,6 +437,55 @@ mod tests {
         assert!(ok.is_ok(), "{ok:?}");
         let ok = check(&tmp.path().join("tasks"), false).unwrap();
         assert!(ok.warnings.is_empty());
+    }
+
+    /// A task root the daemon creates must be owner-only: engine runs hold
+    /// source checkouts and generated output under it, and a configured root
+    /// may sit outside the daemon's data dir, where no other hardening
+    /// applies.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_task_root_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let candidate = tmp.path().join("tasks");
+        let valid = validate_task_root_for(&p, &cfg(vec![]), &candidate, false, None).unwrap();
+        let mode = std::fs::metadata(&valid.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "created task root must be owner-only");
+    }
+
+    /// An allocated engine folder (`<root>/<ws>/<project>/`, daemon-created)
+    /// is owner-only, including the parents created along the way. The root
+    /// itself is left alone when it already exists.
+    #[cfg(unix)]
+    #[test]
+    fn an_allocated_engine_folder_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        std::fs::create_dir_all(&p.config_dir).unwrap();
+        std::fs::create_dir_all(&p.data_dir).unwrap();
+        std::fs::write(
+            p.config_path(),
+            "version = 2\n\n[daemon]\ncloud_url = \"https://x\"\n",
+        )
+        .unwrap();
+        let dir = allocate_engine_folder(&p, "acme", "WEB").unwrap();
+        for dir in [
+            p.data_dir.join("engine"),
+            p.data_dir.join("engine/workdirs"),
+            p.data_dir.join("engine/workdirs/acme"),
+            dir.clone(),
+        ] {
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "created dir {} must be owner-only",
+                dir.display()
+            );
+        }
     }
 
     #[cfg(unix)]

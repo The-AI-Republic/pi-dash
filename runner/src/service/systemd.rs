@@ -78,6 +78,7 @@ ExecStart={exe} __run
 Environment=PIDASH_CONFIG_DIR={config_dir}{data_line}{path_line}
 Restart=on-failure
 RestartSec=5
+Umask=0077
 
 [Install]
 WantedBy=default.target
@@ -363,6 +364,19 @@ mod tests {
         // Only a shell passing the same override reaches it.
         let shell = Paths::resolve(None, Some(custom)).unwrap();
         assert_eq!(daemon.ipc_socket_path(), shell.ipc_socket_path());
+    }
+
+    #[test]
+    fn unit_body_sets_owner_only_umask() {
+        // Every file and directory the daemon creates (agent work products
+        // in working dirs and engine task folders, service logs, runner
+        // histories) must be owner-only even when the daemon runs outside
+        // `Paths::ensure`'s secure creation (e.g. a test or a manual start).
+        let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
+        assert!(
+            body.contains("\nUmask=0077"),
+            "unit body must set Umask=0077; got:\n{body}"
+        );
     }
 
     #[test]
