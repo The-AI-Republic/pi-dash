@@ -184,6 +184,7 @@ def handle_issue_state_transition(
     *,
     dispatch_immediate: bool = True,
     moved_by_run: Optional[AgentRun] = None,
+    pod_once: bool = False,
 ) -> TransitionOutcome:
     """React to an issue state change.
 
@@ -247,7 +248,9 @@ def handle_issue_state_transition(
         from pi_dash.runner.services.issue_assignment import dedicated_run_refusal
 
         _refusal_creator = actor or _resolve_fallback_creator(issue)
-        refusal, _detail = dedicated_run_refusal(issue, human=True, user=_refusal_creator)
+        refusal, _detail = dedicated_run_refusal(
+            issue, human=True, user=_refusal_creator, pod_once=pod_once
+        )
         if refusal is not None:
             logger.info(
                 "orchestration: skip run creation for issue %s — %s",
@@ -299,7 +302,26 @@ def handle_issue_state_transition(
         )
         return TransitionOutcome(reason="no-pod-available")
 
-    if not scheduling.preflight_eligibility_or_bounce(
+    if pod_once:
+        # §23.3: a pod_once state move runs unpinned, for this run only.
+        # Authorization (§12.2: creator + current assignees) and the
+        # pod-branch preflight mirror the Run AI path; failures create
+        # nothing and bounce nothing (the move itself already stands).
+        from pi_dash.runner.services.issue_assignment import pod_once_auth_code
+        from pi_dash.runner.services.matcher import pod_has_runner_for_issue_principal
+
+        auth = pod_once_auth_code(issue, user=creator)
+        if auth is not None:
+            return TransitionOutcome(reason=auth)
+        if not pod_has_runner_for_issue_principal(
+            pod,
+            issue,
+            getattr(creator, "id", None),
+            human=True,
+            pod_once=True,
+        ):
+            return TransitionOutcome(reason=scheduling.RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD)
+    elif not scheduling.preflight_eligibility_or_bounce(
         issue,
         run_creator=creator,
         pod=pod,
@@ -308,16 +330,20 @@ def handle_issue_state_transition(
         return TransitionOutcome(reason="no-eligible-runner")
 
     # A state move takes the dedicated pin (§9.2); pod_once is an explicit
-    # Run AI option after a refusal (§23.3), never the state-move default.
-    return _create_and_dispatch_run(
+    # option (Run AI retry after a refusal, §23.3) and is never the
+    # state-move default.
+    outcome = _create_and_dispatch_run(
         issue=issue,
         parent=parent,
         creator=creator,
         pod=pod,
         fresh_session=fresh_session,
         trigger=AgentRunTrigger.STATE_TRANSITION,
-        pod_once=False,
+        pod_once=pod_once,
     )
+    if pod_once and outcome.created_run is not None:
+        scheduling._post_pod_once_started_comment(issue, pod=pod, actor=actor or creator)
+    return outcome
 
 
 def _resolve_fallback_creator(issue: Issue):

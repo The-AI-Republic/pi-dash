@@ -155,6 +155,15 @@ class IssueSerializer(BaseSerializer):
     # field via ``Meta.exclude`` below, mirroring ``assigned_pod``.
     assigned_runner_detail = serializers.SerializerMethodField()
 
+    # Waiting state (design §14.3) for token/MCP/CLI readers: the
+    # ``dispatch_wait`` object of the issue's active QUEUED pinned run,
+    # else ``null``. The app serializer exposes the same object under
+    # ``agent_status.active_run.dispatch_wait``; v1 has no
+    # ``agent_status`` block, so this top-level field is its counterpart.
+    # Null on list rows (no per-row query); computed on single-item
+    # payloads only (see ``get_dispatch_wait``).
+    dispatch_wait = serializers.SerializerMethodField()
+
     class Meta:
         model = Issue
         read_only_fields = ["id", "workspace", "project", "updated_by", "updated_at"]
@@ -509,6 +518,24 @@ class IssueSerializer(BaseSerializer):
 
             runner = Runner.objects.filter(pk=obj.assigned_runner_id).first()
         return assigned_runner_detail(runner)
+
+    def get_dispatch_wait(self, obj):
+        if isinstance(self.parent, serializers.ListSerializer):
+            return None
+        from pi_dash.runner.models import AgentRun, AgentRunStatus
+        from pi_dash.runner.services.issue_assignment import build_dispatch_wait
+
+        run = (
+            AgentRun.objects.filter(work_item=obj, status=AgentRunStatus.QUEUED)
+            .exclude(pinned_runner__isnull=True)
+            .order_by("-created_at")
+            .first()
+        )
+        viewer = None
+        request = self.context.get("request") if isinstance(self.context, dict) else None
+        if request is not None:
+            viewer = getattr(request, "user", None)
+        return build_dispatch_wait(run, viewer=viewer)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
