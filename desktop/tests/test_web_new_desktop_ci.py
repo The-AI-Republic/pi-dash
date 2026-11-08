@@ -8,9 +8,11 @@ web-new.yml builds the web_new SPA with Vite and check:no-tauri, but never
 runs desktop/scripts/dev-prep.sh with PIDASH_DESKTOP_WEB=web_new and never
 compiles desktop/src-tauri in release against that dist/ — so a break in the
 desktop bundle or the shell release guards merges green (PIDESKAPP-184/185
-are the breaks this gap allowed). pull-request-test-desktop.yml runs cargo
-clippy/test in debug against the committed placeholder dist/ and does not
-fire on frontend changes at all.
+are the breaks this gap allowed). pull-request-test-desktop.yml ran cargo
+clippy/test in debug against the committed placeholder dist/ and did not
+fire on frontend changes at all. The desktop parity specs
+(apps/web_new/e2e/parity/desktop/*, runners/desktop-runtime.spec.ts) were
+not run by any workflow either.
 
 This reads the workflows as text (no YAML dependency: the CI image's Python
 has no PyYAML guaranteed), matching test_ci_path_filters.py.
@@ -70,6 +72,58 @@ class WebNewDesktopCiTests(unittest.TestCase):
         # Debug clippy/test never run build.rs's release guards, so they
         # cannot catch a release-only panic against the web_new dist/.
         self.assertRegex(self.text, r"cargo build --release|cargo tauri build")
+
+    def test_a_job_runs_the_desktop_parity_specs(self):
+        # The desktop rows assert the bundled desktop behavior (tauri-mock
+        # driver) against a seeded stack. The job must bring the stack up
+        # and run every desktop spec file through run-parity.mjs on the
+        # `new` project, in two serve phases: RUN rows assert web-observable
+        # behavior and need the web build (on the desktop build the app
+        # renders the desktop-unavailable card instead of the sign-in form,
+        # so their entry flow never starts), DESK rows need the desktop
+        # build.
+        self.assertIn("parity-up.sh", self.text)
+        # parity-env.sh omits the container names, but the server helpers
+        # shell into the API container by name: without this derivation the
+        # specs exec into the default parity19-api and fail.
+        self.assertIn("PARITY_API_CONTAINER", self.text)
+        self.assertIn("PARITY_NEW_DIST=web", self.text)
+        self.assertIn("PARITY_NEW_DIST=desktop", self.text)
+        self.assertIn("pnpm build:web", self.text)
+        self.assertIn("parity:serve-new", self.text)
+        # Via the pnpm script: run-parity.mjs spawns the bare `playwright`
+        # binary, which is only on PATH in a pnpm script's environment.
+        self.assertIn("test:parity:new --", self.text)
+        for spec in (
+            "e2e/parity/desktop/shell/shell.spec.ts",
+            "e2e/parity/desktop/sign-in/sign-in.spec.ts",
+            "e2e/parity/desktop/updater/updater.spec.ts",
+            "e2e/parity/desktop/agent-runtime/agent-runtime.spec.ts",
+            "e2e/parity/runners/desktop-runtime.spec.ts",
+        ):
+            with self.subTest(spec=spec):
+                self.assertIn(spec, self.text)
+        # Browsers are required for Playwright to start at all.
+        self.assertIn("playwright install", self.text)
+        # The scratch stack must be torn down even when specs fail.
+        self.assertIn("parity-down.sh", self.text)
+
+    def test_desktop_build_bakes_the_stack_origin_not_a_placeholder(self):
+        # DESK rows assert shareable links and opener hand-offs resolve
+        # against the seeded stack's oracle URL, so dev-prep must bake
+        # that URL (derived from PARITY_NS) rather than a placeholder.
+        self.assertIn("parity-env.sh", self.text)
+        self.assertIn("VITE_WEB_BASE_URL=\"$PARITY_ORACLE_URL\"", self.text)
+
+    def test_stale_parity_legs_are_excluded_explicitly(self):
+        # DESK-002/DESK-025/RUN-044 are stale against current web_new
+        # behavior (NEWFRONT-1056). They are excluded by code, not silently
+        # skipped: the exclusion names the legs.
+        self.assertIn("--grep-invert", self.text)
+        self.assertIn("DESK-002", self.text)
+        self.assertIn("DESK-025", self.text)
+        self.assertIn("RUN-044", self.text)
+        self.assertIn("NEWFRONT-1056", self.text)
 
 
 if __name__ == "__main__":
