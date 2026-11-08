@@ -121,9 +121,10 @@ use sqlx::Row;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_db::entity::{deploy_boards, users, workspaces};
 use pidash_services::space::guards::{self, AnchorLookup, ErrorBody, ExceptionKind};
 use pidash_services::space::queries::issue_list as list_q;
-use pidash_services::space::queries::project_meta::BOARD_COLUMNS;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
 use super::{guards_error, owned, QueryMap};
 use crate::paginator::{self, Cursor, PageError, PageResponse};
@@ -266,16 +267,15 @@ async fn request_tz(
         Some(id) => id,
         None => return Ok(chrono_tz::UTC),
     };
-    let row: Option<(bool, Option<String>)> =
-        sqlx::query_as("SELECT is_active, user_timezone FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
-    match row {
-        Some((true, timezone)) => timezone
-            .as_deref()
-            .unwrap_or("")
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    match user {
+        Some(user) if user.is_active => user
+            .user_timezone
+            .as_str()
             .parse::<chrono_tz::Tz>()
             .map_err(|_| HandlerError::ServerError),
         _ => Ok(chrono_tz::UTC),
@@ -303,6 +303,7 @@ fn bind_query<'q>(
     sql: &'q str,
     params: &'q [SqlParam],
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    // raw-sql: dynamic issue list/retrieve query assembled per-request from list_q builder fragments (WHERE/ORDER/CASE/annotations/pagination/group-values); rebuilding via sea-query here would duplicate pidash_services::space::queries::issue_list and risk drift — simple paths use SeaORM Entities directly
     let mut query = sqlx::query(sql);
     for param in params {
         query = match param {
@@ -473,13 +474,12 @@ async fn load_list_board(pool: &sqlx::PgPool, anchor: &str) -> Result<BoardScope
     let project_id = opt_uuid(row, "entity_identifier")?;
     // Forward-FK liveness (`deploy_board.workspace`, soft-deletion
     // manager): a dead workspace is a 500, not a 404.
-    let live: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1 AND \"workspaces\".\"deleted_at\" IS NULL)",
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    let db_live = pidash_db::pool::sea_orm_connection(pool);
+    let live = workspaces::Entity::find_by_id(workspace_id)
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .one(&db_live)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     if live.is_none() {
         return Err(HandlerError::ServerError);
     }
@@ -502,17 +502,6 @@ async fn load_list_board(pool: &sqlx::PgPool, anchor: &str) -> Result<BoardScope
 /// workspace answers the same 404 envelope (the hop raises
 /// `ObjectDoesNotExist` there too). `project_id` is the board's
 /// `project_id` FK (`:601`), NOT `entity_identifier`.
-fn retrieve_board_sql() -> String {
-    format!(
-        "SELECT {} FROM \"deploy_boards\" INNER JOIN \"workspaces\" ON (\"deploy_boards\".\"workspace_id\" = \"workspaces\".\"id\" AND \"workspaces\".\"deleted_at\" IS NULL) WHERE (\"deploy_boards\".\"deleted_at\" IS NULL AND \"deploy_boards\".\"anchor\" = $1)",
-        BOARD_COLUMNS
-            .iter()
-            .map(|col| format!("\"deploy_boards\".\"{col}\""))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
 struct RetrieveBoard {
     scope: BoardScope,
     slug: String,
@@ -522,20 +511,27 @@ async fn load_retrieve_board(
     pool: &sqlx::PgPool,
     anchor: &str,
 ) -> Result<RetrieveBoard, HandlerError> {
-    let sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM ({}) AS __r",
-        retrieve_board_sql()
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(anchor)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let boards = deploy_boards::Entity::find()
+        .filter(deploy_boards::Column::Anchor.eq(anchor))
+        .filter(deploy_boards::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .join_as(
+            sea_orm::JoinType::InnerJoin,
+            deploy_boards::Entity::belongs_to(workspaces::Entity)
+                .from(deploy_boards::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+            "workspaces",
+        )
+        .all(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
-    if rows.len() > 1 {
+    if boards.len() > 1 {
         // `MultipleObjectsReturned` → the 500 fallback.
         return Err(HandlerError::ServerError);
     }
-    let Some(row) = rows.first() else {
+    let Some(board) = boards.first() else {
         // `.get()` miss → `DoesNotExist` → the dispatch-computed 404
         // envelope ([`AnchorLookup::GetRaises`]); `resolve_anchor` with
         // `board_found = false` returns exactly it.
@@ -543,14 +539,8 @@ async fn load_retrieve_board(
             .expect_err("board miss always denies");
         return Err(HandlerError::NotFound);
     };
-    let text: String = row
-        .try_get("__row")
-        .map_err(|_| HandlerError::ServerError)?;
-    let value: Value = serde_json::from_str(&text).map_err(|_| HandlerError::ServerError)?;
-    let row = obj(&value)?;
-    let workspace_id = opt_uuid(row, "workspace_id")?.ok_or(HandlerError::ServerError)?;
-    // Nullable board FK (`WorkspaceBaseModel.project`, `null=True`).
-    let project_id = opt_uuid(row, "project_id")?;
+    let workspace_id = board.workspace_id;
+    let project_id = board.project_id;
     // `workspace.slug` for the `workspace__slug` filter (`:600`).
     let slug = fetch_workspace_slug(pool, workspace_id).await?;
     Ok(RetrieveBoard {
@@ -568,14 +558,13 @@ async fn fetch_workspace_slug(
 ) -> Result<String, HandlerError> {
     // Dead workspace: Django's `.workspace` hop raises
     // `ObjectDoesNotExist` → the same 404 envelope as a board miss.
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT \"slug\" FROM \"workspaces\" WHERE (\"id\" = $1 AND \"deleted_at\" IS NULL)",
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
-    row.map(|row| row.0).ok_or(HandlerError::NotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let workspace = workspaces::Entity::find_by_id(workspace_id)
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .one(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    workspace.map(|ws| ws.slug).ok_or(HandlerError::NotFound)
 }
 
 // ---------------------------------------------------------------------------
@@ -2550,5 +2539,45 @@ mod tests {
         let items = serde_json::json!([{"vote": 1}]);
         assert_eq!(shape_retrieve_value("vote_items", items.clone()), items);
         assert_eq!(shape_retrieve_value("label_ids", Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn converted_lookup_shapes_pin_filters_and_join() {
+        use sea_orm::{EntityTrait, QueryFilter, QueryTrait};
+        // `request_tz` user lookup: by id alone (`users` has no
+        // `deleted_at` column, so no soft-delete guard is expressible).
+        let user_sql = users::Entity::find_by_id(uuid::Uuid::nil())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(user_sql.contains("users"));
+        assert!(!user_sql.to_lowercase().contains("deleted_at"));
+        // `fetch_workspace_slug` / `load_list_board` liveness: the
+        // forward-FK hop through the soft-deletion manager.
+        let slug_sql = workspaces::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(slug_sql.contains("workspaces"));
+        assert!(slug_sql.to_lowercase().contains("deleted_at"));
+        // `load_retrieve_board`: anchor + both soft-delete guards + the
+        // inner join onto workspaces (the `workspace.slug` hop).
+        let board_sql = deploy_boards::Entity::find()
+            .filter(deploy_boards::Column::Anchor.eq("a"))
+            .filter(deploy_boards::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .join_as(
+                sea_orm::JoinType::InnerJoin,
+                deploy_boards::Entity::belongs_to(workspaces::Entity)
+                    .from(deploy_boards::Column::WorkspaceId)
+                    .to(workspaces::Column::Id)
+                    .into(),
+                "workspaces",
+            )
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(board_sql.contains("deploy_boards"));
+        assert!(board_sql.to_lowercase().contains("join"));
+        assert!(board_sql.to_lowercase().contains("workspaces"));
+        assert!(board_sql.to_lowercase().contains("deleted_at"));
     }
 }

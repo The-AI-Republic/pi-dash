@@ -124,7 +124,7 @@ pub async fn login_session_keys(
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    identity::stamp_last_login(pool, user_id, now).await?;
+    identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), user_id, now).await?;
     // `rotate_token` half (QUIRK-csrf-rotate): a fresh 32-char secret as
     // the cookie value — `_add_new_csrf_cookie` stores the raw secret
     // (the `auth_session/email.rs` and `auth_session/magic.rs` login

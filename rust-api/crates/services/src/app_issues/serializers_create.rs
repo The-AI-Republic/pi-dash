@@ -1552,7 +1552,6 @@ mod tests {
     fn managed_settings(enabled: bool) -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,

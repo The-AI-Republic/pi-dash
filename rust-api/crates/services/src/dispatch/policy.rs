@@ -390,17 +390,20 @@ pub struct ManagedAvailability {
     pub reason_code: String,
 }
 
-/// Availability as explicit API data (`agent_execution.py:83-128`).
+/// Availability as explicit API data (`agent_execution.py:83-134`).
 ///
 /// Rows are always `[cloud_agent, local_runner, managed_runner]`. The cloud row also
 /// reflects the viewer's LLM config when `user` is given; without a user only the
 /// instance switch is reported. `local_runner_available` is the
-/// [`LOCAL_RUNNER_AVAILABLE_EXISTS_SQL`] verdict (online, non-bundled,
-/// unpaused); `local_runner_exists` is the [`LOCAL_RUNNER_EXISTS_SQL`]
-/// verdict (online, non-bundled, paused or not) — consulted only when
-/// the runner is unavailable, exactly as Python's `elif` runs the
-/// second `exists()` only then. `managed` is L4's
+/// [`LOCAL_RUNNER_AVAILABLE_EXISTS_SQL`] verdict (online pod member,
+/// unpaused, engine unpaused); `local_runner_exists` is the
+/// [`LOCAL_RUNNER_EXISTS_SQL`] verdict (online pod member, paused or
+/// not) — consulted only when the runner is unavailable, exactly as
+/// Python's `elif` runs the second `exists()` only then. `managed` is L4's
 /// `managed_runner_availability` verdict, passed through verbatim.
+/// `deprecated` marks the two legacy executors: only `local_runner` is
+/// selectable (design §6); availability is still computed for older
+/// clients (NEWPIDASH-58).
 pub fn agent_executor_options<F>(
     cloud: &CloudAgentSettings,
     user: Option<UserFlags>,
@@ -874,7 +877,6 @@ mod tests {
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,
@@ -1150,6 +1152,8 @@ mod tests {
             text,
             r#"{"kind":"cloud_agent","available":true,"reason_code":"","deprecated":true}"#
         );
+        assert!(!rows[1].deprecated);
+        assert!(rows[2].deprecated);
     }
 
     #[test]
@@ -1271,10 +1275,10 @@ mod tests {
         // revoked_at NULL; the available leg adds paused_at NULL +
         // not engine-paused. Both are SeaORM now (no raw SQL consts).
         let shape = &fixture()["agent_executor_options_shape"];
-        assert!(shape["local_excludes_desktop_bundled"]
+        assert!(shape["local_excludes_pinned_only_and_revoked"]
             .as_str()
             .expect("golden")
-            .contains("DESKTOP_BUNDLED"));
+            .contains("PINNED_ONLY"));
     }
 
     // -- build_tool_plan goldens ---------------------------------------------

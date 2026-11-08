@@ -324,7 +324,6 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("RUNNER_AGENT_OBSERVABILITY_STALE_SECS", V::from(90)),
         // Desktop-bundled managed runner.
         ("MANAGED_RUNNER_ENABLED", V::from("false")),
-        ("MANAGED_RUNNER_MAX_PER_USER_PROJECT", V::from(1)),
         ("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS", V::from(43200)),
         ("MANAGED_RUNNER_GRACEFUL_STOP_SECS", V::from(30)),
         ("MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS", V::from(300)),

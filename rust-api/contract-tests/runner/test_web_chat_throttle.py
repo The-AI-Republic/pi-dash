@@ -18,7 +18,7 @@ import pytest
 import redis
 
 from _harness.auth import login_session
-from _harness.throttle import seed_throttle_window
+from _harness.throttle import reset_throttle_counters, seed_throttle_window
 from _harness.web import web_post
 
 WEB = "/api/runners"
@@ -39,6 +39,11 @@ def test_chat_send_throttled_retry_after_is_ceiled(
     # Plain client: ContractClient retries 429s (sleeping Retry-After),
     # which would swallow the very response this case asserts on.
     owner = daemon_world["owner"]
+    # The suite runs >30 anon hits (CSRF + sign-in per real login) and
+    # would exhaust the 30/min AnonRateThrottle before this test's CSRF
+    # priming. Flush the throttle counters first so the sign-in itself
+    # never 429s; the runner_chat_send window is seeded after sign-in.
+    reset_throttle_counters()
     rdb = redis.Redis.from_url(os.environ["REDIS_URL"], socket_timeout=5)
     with httpx.Client(
         base_url=settings.base_url, timeout=30.0, follow_redirects=True

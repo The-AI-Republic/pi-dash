@@ -912,7 +912,7 @@ async fn save_user_data(
         uuid::Uuid::new_v4().simple()
     );
     let updated = identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &identity::LoginStamps {
             medium: Some("magic-code"),
@@ -952,8 +952,13 @@ async fn get_or_create_profile(
     now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
 ) -> Result<(bool, Option<uuid::Uuid>), sqlx::Error> {
-    let path =
-        identity::get_or_create_profile(pool, *user_id, now, &profile_background_color()).await?;
+    let path = identity::get_or_create_profile(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *user_id,
+        now,
+        &profile_background_color(),
+    )
+    .await?;
     Ok((path.is_onboarded, path.last_workspace_id))
 }
 
@@ -1092,9 +1097,15 @@ async fn process_workspace_project_invitations(
                 created_by: None,
             })
             .collect();
-        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
-            .await
-            .map_err(map_err)?;
+        members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        .map_err(map_err)?;
 
         for invite in &invites {
             // `invalidate_cache_directly(path, url_params=False, user=False,
@@ -1165,9 +1176,15 @@ async fn process_workspace_project_invitations(
                 created_by: invite.created_by_id,
             })
             .collect();
-        members::bulk_add(pool, &rows, &view_props, &issue_props, now)
-            .await
-            .map_err(map_err)?;
+        members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &rows,
+            &view_props,
+            &issue_props,
+            now,
+        )
+        .await
+        .map_err(map_err)?;
 
         // `workspace_project_join.py:76-87` sets `project_id` on every
         // `ProjectMember` row (Django main; PB-1008 retired), so the
@@ -1194,9 +1211,15 @@ async fn process_workspace_project_invitations(
             .collect();
         // The project bulk runs after every workspace row committed above
         // (no transaction).
-        pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
-            .await
-            .map_err(map_err)?;
+        pidash_services::domain::projects::members::bulk_add(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &bulk,
+            &props,
+            &prefs,
+            false,
+        )
+        .await
+        .map_err(map_err)?;
     }
 
     // Both querysets are (soft-)deleted after the joins (`:90-91`): the
@@ -1364,7 +1387,7 @@ async fn login_user(request: LoginRequest<'_>) -> Result<String, Response> {
     }
     // `user_logged_in` → `update_last_login` (`auth/models.py`): the
     // signal save, inside `login()` before the session persists.
-    if identity::stamp_last_login(pool, user.id, now)
+    if identity::stamp_last_login(&pidash_db::pool::sea_orm_connection(pool), user.id, now)
         .await
         .is_err()
     {

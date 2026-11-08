@@ -27,6 +27,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -34,7 +35,6 @@ use uuid::Uuid;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
-use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
@@ -46,9 +46,7 @@ use pidash_services::runner_sessions::drain::{
     AssignmentFacts, DispatchFacts, DrainEffect,
 };
 use pidash_services::runner_sessions::guards::alive_threshold;
-use pidash_services::runner_sessions::pubsub::{
-    send_to_runner, PubsubStore, CLOSE_ACTIVE_SESSIONS_SQL,
-};
+use pidash_services::runner_sessions::pubsub::{send_to_runner, PubsubStore};
 
 use crate::state::AppState;
 use pidash_services::dispatch::admission::RedisAdmissionCache;
@@ -141,6 +139,33 @@ pub(crate) struct MovePubsub<'p> {
     pub(crate) runner: &'p RunnerSettings,
 }
 
+/// The `CLOSE_ACTIVE_SESSIONS_SQL` read (`pubsub.py:95-99`): active
+/// sessions for one runner, newest first — same guards, same order,
+/// full-row projection, no `LIMIT`.
+fn active_sessions_select(
+    runner_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::runner_session::Entity> {
+    use pidash_db::entity::runner_session;
+    runner_session::Entity::find()
+        .filter(runner_session::Column::RunnerId.eq(runner_id))
+        .filter(runner_session::Column::RevokedAt.is_null())
+        .order_by_desc(runner_session::Column::CreatedAt)
+}
+
+fn session_from_model(
+    model: pidash_db::entity::runner_session::Model,
+) -> Result<RunnerSession, OutboxError> {
+    Ok(RunnerSession {
+        id: model.id,
+        runner_id: model.runner_id,
+        protocol_version: model.protocol_version,
+        created_at: model.created_at.with_timezone(&Utc),
+        last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&Utc)),
+        revoked_at: model.revoked_at.map(|at| at.with_timezone(&Utc)),
+        revoked_reason: model.revoked_reason,
+    })
+}
+
 impl PubsubStore for MovePubsub<'_> {
     async fn enqueue_for_runner(
         &self,
@@ -170,14 +195,12 @@ impl PubsubStore for MovePubsub<'_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await?;
-        rows.iter()
-            .map(runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::from)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let rows = active_sessions_select(runner_id)
+            .all(&db)
+            .await
+            .map_err(|error| OutboxError::from(pidash_db::orm_tx::into_sqlx(error)))?;
+        rows.into_iter().map(session_from_model).collect()
     }
 
     async fn revoke_runner_session(

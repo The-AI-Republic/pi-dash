@@ -25,7 +25,7 @@
 //!   [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`] / [`ONLINE_MANAGED_RUNNER_SQL`] +
 //!   [`managed_runner_availability`].
 //! * `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`)
-//!   → [`managed_runner_configuration_check`] (E001/E003/E004 + the data-driven
+//!   → [`managed_runner_configuration_check`] (E001/E004 + the data-driven
 //!   E002 recipe cross-check over [`PhaseTemplate`] rows).
 //! * `IsDesktopSession` (`permissions.py:12-28`) → [`is_desktop_session`] +
 //!   [`DesktopSessionRequiredBody`].
@@ -709,12 +709,6 @@ pub fn managed_runner_configuration_check(
             ),
         });
     }
-    if managed.max_per_user_project < 1 {
-        errors.push(ConfigurationError {
-            id: "managed.E003",
-            message: "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1".to_string(),
-        });
-    }
     if managed.queued_max_age_secs <= 0 {
         errors.push(ConfigurationError {
             id: "managed.E004",
@@ -903,7 +897,6 @@ mod tests {
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,
@@ -1424,22 +1417,10 @@ mod tests {
             recipes,
         );
         assert!(errors.is_empty());
-        // E003/E004: the fixture entries gloss the trigger ("(< 1)", "(<= 0)");
-        // — the messages below are verbatim from `checks.py:30-37`.
-        assert_eq!(
-            golden["E003"],
-            "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1 (< 1)"
-        );
-        let mut managed = django_managed_settings();
-        managed.max_per_user_project = 0;
-        let errors = managed_runner_configuration_check(&managed, "local_runner", &phases, recipes);
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                "managed.E003",
-                "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1",
-            )]
-        );
+        // E004: the fixture entry glosses the trigger ("(<= 0)");
+        // — the message below is verbatim from `checks.py:30-37`.
+        // E003 is gone with the cap (#2910): no check references the removed
+        // setting, so a default-constructed settings value passes clean.
         assert_eq!(
             golden["E004"],
             "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive (<= 0)"
