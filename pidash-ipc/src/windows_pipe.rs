@@ -227,6 +227,43 @@ mod tests {
         out
     }
 
+    /// Render `sddl` the way Windows prints a stored descriptor, so SIDs
+    /// that have SDDL aliases (e.g. the built-in Administrator, `LA`)
+    /// compare equal to the aliased form `pipe_sddl` returns.
+    fn canonical_sddl(sddl: &str) -> String {
+        let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(ok != 0, "parse {sddl}");
+        let mut s: *mut u16 = std::ptr::null_mut();
+        let ok = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                SDDL_REVISION_1,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut s,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(ok != 0, "render {sddl}");
+        let out = unsafe {
+            let len = (0..).take_while(|&i| *s.add(i) != 0).count();
+            String::from_utf16_lossy(std::slice::from_raw_parts(s, len))
+        };
+        unsafe {
+            LocalFree(s.cast());
+            LocalFree(sd);
+        }
+        out
+    }
+
     fn unique_name() -> String {
         format!(r"\\.\pipe\pidash-test-{}", uuid::Uuid::new_v4())
     }
@@ -235,11 +272,10 @@ mod tests {
     async fn daemon_pipe_is_owned_by_and_open_only_to_the_current_user() {
         let me = CurrentUserSid::get().unwrap().to_sddl().unwrap();
         let pipe = create_owner_only_pipe(&unique_name(), true).unwrap();
-        let sddl = pipe_sddl(&pipe);
-        assert!(sddl.starts_with(&format!("O:{me}D:P")), "{sddl}");
-        let dacl = &sddl[sddl.find("D:").unwrap()..];
-        assert_eq!(dacl.matches('(').count(), 1, "exactly one ACE: {sddl}");
-        assert!(dacl.ends_with(&format!(";;;{me})")), "ACE is for the user: {sddl}");
+        // Owner = me; protected DACL with a single full-access ACE for me
+        // (GA is stored as the pipe's mapped FILE_ALL_ACCESS, `FA`).
+        let expected = canonical_sddl(&format!("O:{me}D:P(A;;FA;;;{me})"));
+        assert_eq!(pipe_sddl(&pipe), expected);
         verify_pipe_owner(&pipe, "test").unwrap();
     }
 

@@ -102,6 +102,9 @@ jobs:
       # root workspace that owns pidash-ipc, with the desktop's pinned toolchain.
       - name: Test pidash-ipc (Windows)
         if: runner.os == 'Windows'
+        # bash runs with -e: a pwsh multi-line script would ignore a failing
+        # cargo command and report only the last one's exit code.
+        shell: bash
         run: |
           cargo +1.93 clippy -p pidash-ipc --all-targets --locked -- -D warnings
           cargo +1.93 test -p pidash-ipc --all-targets --locked
