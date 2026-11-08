@@ -399,7 +399,7 @@ pub async fn dispatch_waiting(
         return Ok(0);
     }
     let mut tx = Transaction::begin(pool).await?;
-    lock_workspace(&mut **tx.inner(), workspace_id).await?;
+    lock_workspace(tx.inner(), workspace_id).await?;
     let (capacity, due) = {
         let conn = TxConn::new(tx.inner());
         let running = running_cloud_count_query(workspace_id)
