@@ -36,6 +36,9 @@ if [[ "$*" == *"--filter @pidash/kit build"* ]]; then
     printf '%s' "${VITE_WEB_BASE_URL-<absent>}" > "$DEV_PREP_TEST_LOG/kit-web-base"
     exit 0
 fi
+if [[ "$*" == *"--filter @pidash/api-client build"* ]]; then
+    exit 0
+fi
 if [[ "$*" == *"--filter web_new build:desktop"* ]]; then
     printf '%s' "${VITE_WEB_BASE_URL-<absent>}" > "$DEV_PREP_TEST_LOG/web-base"
     printf '%s' "${VITE_API_BASE_URL-<absent>}" > "$DEV_PREP_TEST_LOG/api-base"
@@ -157,6 +160,10 @@ class DevPrepBakedOriginTests(unittest.TestCase):
         self.assertLess(kit, app)
         install = next(i for i, line in enumerate(calls) if line.startswith("pnpm install"))
         self.assertLess(install, kit)
+        # Both workspace deps (PIDESKAPP-185): the API client feeds the SPA too.
+        api_client = next(i for i, line in enumerate(calls) if "--filter @pidash/api-client build" in line)
+        self.assertLess(api_client, app)
+        self.assertLess(install, api_client)
 
     def test_bake_info_records_the_frontend_and_both_origins(self):
         self.prep(VITE_API_BASE_URL="http://127.0.0.1:8131", VITE_WEB_BASE_URL="https://app.example.com")
