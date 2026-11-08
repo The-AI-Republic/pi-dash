@@ -1,26 +1,26 @@
 {
   "_trace": "live GET /api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (routes pi_dash/urls.py:31-44); securityScheme rendered from utils/openapi/auth.py:15-34 (APIKeyAuthenticationExtension.get_security_definition)",
-  "_method": "httpx GETs to http://127.0.0.1:18734 (scratch DB pidash_n34_dj, ENABLE_DRF_SPECTACULAR=1); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs. Re-recorded by NEWPIDASH-34 (scheduler-writes drift, 730ea8d28/7d64d46ad).",
+  "_method": "httpx GET http://127.0.0.1:8000/api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (pi_dash.settings.test, scratch DB pidash_n60_test); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs. Re-recorded by NEWPIDASH-60 (engine/machine-identity + workspaces runners/ drift, origin/main f92fe3c07).",
   "openapi_version": "3.0.3",
   "default_rendering": {
     "url": "/api/schema/",
     "status": 200,
     "content_type": "application/vnd.oai.openapi; charset=utf-8",
-    "body_bytes": 841530,
-    "body_sha256": "c96aeb5a723cc0126d4448782516ed856d440b8cd11b7d13f648c19caacf8c6a",
+    "body_bytes": 850135,
+    "body_sha256": "b82d43c9936cf84c4a5cd03621c9e35957a4f1b64d8c8a24d959fa0df88f0cac",
     "note": "YAML by default; content-type has NO +json suffix"
   },
   "json_rendering": {
     "url": "/api/schema/?format=json",
     "status": 200,
     "content_type": "application/vnd.oai.openapi+json",
-    "body_bytes": 1417414,
-    "body_sha256": "5c35ac9acb8964c678678d851be8b23f912ea6a5c9f853d8bc8685d02bb5e3dd"
+    "body_bytes": 1429769,
+    "body_sha256": "78df2c17435da22c36ebb8fa0cf4c9d0e525b301cec4fa346c1d5a7e19853cfd"
   },
   "doc_equality_proof": {
     "parsed_equal": true,
-    "yaml_paths": 128,
-    "json_paths": 128
+    "yaml_paths": 135,
+    "json_paths": 135
   },
   "route_map_matches_golden": true,
   "security_schemes": {
@@ -413,6 +413,50 @@
         }
       }
     },
+    "/api/v1/runner/dev-machines/{dev_machine_id}/": {
+      "get": {
+        "operationId": "runner_dev_machines_retrieve",
+        "tags": ["runner"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dev_machine_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No response body"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "runner_dev_machines_partial_update",
+        "tags": ["runner"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dev_machine_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No response body"
+          }
+        }
+      }
+    },
     "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/": {
       "post": {
         "operationId": "runner_dev_machines_commands_result_create",
@@ -431,6 +475,52 @@
           {
             "in": "path",
             "name": "request_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No response body"
+          }
+        }
+      }
+    },
+    "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/": {
+      "post": {
+        "operationId": "runner_dev_machines_merge_into_create",
+        "tags": ["runner"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dev_machine_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No response body"
+          }
+        }
+      }
+    },
+    "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/": {
+      "get": {
+        "operationId": "runner_dev_machines_replace_candidates_retrieve",
+        "tags": ["runner"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dev_machine_id",
             "schema": {
               "type": "string",
               "format": "uuid"
@@ -635,6 +725,27 @@
         ],
         "responses": {
           "204": {
+            "description": "No response body"
+          }
+        }
+      },
+      "post": {
+        "operationId": "runner_runners_create_2",
+        "tags": ["runner"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "runner_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
             "description": "No response body"
           }
         }
@@ -15693,6 +15804,28 @@
           },
           "404": {
             "description": "Work item not found"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/runners/": {
+      "get": {
+        "operationId": "workspaces_runners_retrieve",
+        "tags": ["workspaces"],
+        "summary": null,
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "No response body"
           }
         }
       }

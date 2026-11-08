@@ -130,6 +130,7 @@
   "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/re-tick/": ["post"],
   "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/run-ai/": ["post"],
   "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/": ["post"],
+  "/api/v1/workspaces/{slug}/runners/": ["get"],
   "/api/v1/workspaces/{slug}/schedulers/": ["get", "post"],
   "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/": ["delete", "patch"],
   "/api/v1/workspaces/{slug}/stickies/": ["get", "post"],
