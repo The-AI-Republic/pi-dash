@@ -166,6 +166,22 @@ if [[ "${PIDASH_DESKTOP_WEB:-}" == "web_new" ]]; then
     echo "[dev-prep] pnpm install"
     ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm install --frozen-lockfile )
 
+    # web_new imports "@pidash/kit/kit.css" (apps/web_new/src/styles/app.css)
+    # and the package exports it from ./dist/kit.css, which is gitignored.
+    # `pnpm --filter web_new build:desktop` alone does not build workspace
+    # dependencies, so a clean checkout fails with
+    # "Package path ./kit.css is exported from package .../@pidash/kit,
+    # but no valid target file was found". Build both workspace deps first,
+    # mirroring .github/workflows/web-new.yml (builds kit + api-client
+    # before web_new). The legacy branch below gets the same guarantee
+    # from turbo's build.dependsOn ^build; the explicit pnpm builds here
+    # always rebuild, so a stale dist/ cannot be bundled either.
+    echo "[dev-prep] pnpm --filter @pidash/kit build"
+    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm --filter @pidash/kit build )
+
+    echo "[dev-prep] pnpm --filter @pidash/api-client build"
+    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm --filter @pidash/api-client build )
+
     echo "[dev-prep] pnpm --filter web_new build:desktop"
     ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" PIDASH_TARGET=desktop pnpm --filter web_new build:desktop )
 

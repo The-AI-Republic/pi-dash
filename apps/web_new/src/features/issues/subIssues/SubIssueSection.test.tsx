@@ -21,6 +21,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 
 import { createAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import { platform } from "../../../core/platform/index.js";
 import { ISSUE_TYPE_FILTER_FLAG, TEAM_PROJECT_FILTER_FLAG } from "../edition/flags.js";
 import { registerEditionIssuesProviders, resetEditionIssuesProviders } from "../edition/providers.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
@@ -287,6 +288,7 @@ beforeEach(() => {
 
 afterEach(() => {
   useSubIssuesUiStore.setState({ parents: {} });
+  vi.restoreAllMocks();
   resetEditionIssuesProviders();
   delete edition.flags[TEAM_PROJECT_FILTER_FLAG];
   delete edition.flags[ISSUE_TYPE_FILTER_FLAG];
@@ -715,6 +717,24 @@ describe("SubIssueSection writes", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Copy link" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalled());
     expect(writeText).toHaveBeenCalledWith(`${globalThis.location.origin}/acme/browse/ATL-7`);
+  });
+
+  it("copies the hosted address when the window origin is the desktop bundle", async () => {
+    stubApi();
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(globalThis.navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderSection();
+    await screen.findByText("Child one");
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { origin: "http://tauri.localhost" },
+    });
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
+    await user.click(screen.getByRole("button", { name: "Actions for ATL-7" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Copy link" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalled());
+    expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/browse/ATL-7");
   });
 
   it("reports a refused copy instead of failing silently", async () => {

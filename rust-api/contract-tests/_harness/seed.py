@@ -1192,8 +1192,7 @@ class Seeder:
                        false,true,
                        0,0,'{}','UTC','','main',
                        10800,10,10800,10800,
-                       true,'local_runner',
-                       'fail_to_backlog',
+                       true,'local_runner','fail_to_backlog',
                        now(),now())""",
             (
                 project_id,

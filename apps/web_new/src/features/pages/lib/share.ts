@@ -6,14 +6,14 @@
 // it; the copy text and failure are reported through the app's single
 // notice surface.
 
+import { shareableAddress } from "../../../shared/shell/shareLink.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 
 export const PAGE_LINK_COPIED_TITLE = "Page link copied to clipboard.";
 export const PAGE_LINK_COPY_FAILED_TITLE = "Couldn't copy the page link.";
 
 export function pageLinkUrl(workspaceSlug: string, projectId: string, pageId: string): string {
-  const path = `/${workspaceSlug}/projects/${projectId}/pages/${pageId}`;
-  return new URL(path, window.location.origin).toString();
+  return shareableAddress(`/${workspaceSlug}/projects/${projectId}/pages/${pageId}`);
 }
 
 /** Write the canonical page address; true when the clipboard accepts it. */

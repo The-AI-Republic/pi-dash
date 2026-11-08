@@ -14,10 +14,13 @@ import { Skeleton } from "@pidash/kit";
 import { useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 
+import { platform } from "../../../core/platform/index.js";
 import {
   CALLBACK_FAILED_TITLE,
   CALLBACK_OK_MESSAGE,
   CALLBACK_OK_TITLE,
+  INSTALL_FAILED_FALLBACK,
+  INSTALL_FAILED_TITLE,
   INTEGRATIONS_TAB_HEADING,
   INTEGRATIONS_TAB_INTRO,
   NO_ADMIN_COPY,
@@ -41,6 +44,12 @@ export function IntegrationsSettingsPage(): React.ReactElement {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const [pickedSlug, setPickedSlug] = React.useState<string | null>(null);
   const handledCallback = React.useRef<string | null>(null);
+  // A desktop install handoff opens in the system browser, so the callback
+  // completes there instead of landing on this window. The next window
+  // focus re-reads the status once, so the panel reflects the install
+  // without waiting for a manual refresh. This is a single re-read after a
+  // handoff, not polling.
+  const awaitingInstall = React.useRef(false);
 
   // One notice and one scrub per distinct marker; a re-render never
   // repeats either. The address rewrite happens in place, so the shell's
@@ -61,6 +70,16 @@ export function IntegrationsSettingsPage(): React.ReactElement {
     }
     window.history.replaceState(null, "", scrubbedAddress(pathname, search, window.location.hash));
   }, [search, pathname, status]);
+
+  React.useEffect(() => {
+    const unsubscribe = platform.onFocusChange((focused) => {
+      if (focused && awaitingInstall.current) {
+        awaitingInstall.current = false;
+        void status.refetch();
+      }
+    });
+    return unsubscribe;
+  }, [status]);
 
   const workspace = selectedWorkspace(status.data, pickedSlug);
 
@@ -112,6 +131,17 @@ export function IntegrationsSettingsPage(): React.ReactElement {
             onInstall={() => {
               startInstall.mutate(workspace.slug, {
                 onSuccess: (url) => {
+                  if (platform.kind === "desktop") {
+                    // Never navigate the app window to the host: the webview
+                    // has its own cookie store and no address bar or back
+                    // control. The system browser owns the sign-in, and the
+                    // focus effect above re-reads the status on return.
+                    void platform.openExternal(url).then(
+                      () => (awaitingInstall.current = true),
+                      () => notifyError(INSTALL_FAILED_TITLE, INSTALL_FAILED_FALLBACK)
+                    );
+                    return;
+                  }
                   window.location.assign(url);
                 },
               });

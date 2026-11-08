@@ -362,7 +362,7 @@ describe("CommentCard", () => {
     });
     expect(screen.queryByText("This comment has no text.")).not.toBeInTheDocument();
     expect(
-      view.container.querySelector('img[src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"]')
+      view.container.querySelector('img[src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"]')
     ).not.toBeNull();
   });
 

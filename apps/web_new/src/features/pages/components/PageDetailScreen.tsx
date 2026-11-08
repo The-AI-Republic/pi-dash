@@ -266,7 +266,11 @@ export function PageDetailScreen({
   // typing; before the canvas paints, the stored body stands in (PAGE-046).
   const canvasRef = React.useRef<HTMLDivElement | null>(null);
   const storedHtml = page?.description_html ?? "";
-  const live = useLivePageDocument(canvasRef, storedHtml, { workspaceSlug, projectId });
+  const live = useLivePageDocument(canvasRef, storedHtml, {
+    workspaceSlug,
+    projectId,
+    apiBaseUrl: getAppClient().baseUrl,
+  });
   const paneDocument = live.document;
   const openPane = (): void => {
     onSearchChange(paneSearch(search, "outline"));
@@ -343,7 +347,7 @@ export function PageDetailScreen({
     formattingBarVisible({ editable: capabilities.canEdit, stickyToolbar: preferences.sticky_toolbar });
   const canvasWidth = pageCanvasWidth({ fullWidth: preferences.full_width, paneOpen });
   const resolveAsset = React.useCallback(
-    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId }),
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
     [workspaceSlug, projectId]
   );
 

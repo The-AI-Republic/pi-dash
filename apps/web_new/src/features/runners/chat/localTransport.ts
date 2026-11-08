@@ -284,6 +284,10 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
   const activeTurns = new Map<string, string>();
   const subscribers = new Map<string, (frame: LocalChatFrame) => void>();
   const errorSubscribers = new Map<string, (message: string) => void>();
+  /** Session id to the assistant text streamed for its in-flight turn. */
+  const assistantTextBySession = new Map<string, string>();
+  /** Session id to the in-flight store of its completed reply. */
+  const replyStores = new Map<string, Promise<void>>();
   let listening = false;
 
   const account = (): string => {
@@ -298,8 +302,50 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     listening = true;
     api.subscribe({
       onFrame: (frame) => {
-        if (endsTurn(frame)) activeTurns.delete(frameSession(frame));
-        subscribers.get(frameSession(frame))?.(frame);
+        const sessionId = frameSession(frame);
+        if (frame.result === "chat_message_started") {
+          assistantTextBySession.set(sessionId, "");
+        } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
+          assistantTextBySession.set(
+            sessionId,
+            (assistantTextBySession.get(sessionId) ?? "") + deltaText(frame.data.payload)
+          );
+        }
+        if (frame.result === "chat_message_completed") {
+          // The reply is stored here, not in the page's subscription, so a
+          // turn that finishes after the page left still lands in the store.
+          // It is stored before the page re-reads history on the terminal
+          // frame; otherwise the streamed bubble vanishes.
+          const accumulated = assistantTextBySession.get(sessionId) ?? "";
+          const reply = frame.data.assistant_message?.trim() ? frame.data.assistant_message : accumulated;
+          assistantTextBySession.delete(sessionId);
+          let stored: Promise<void>;
+          try {
+            const owner = account();
+            stored =
+              reply.trim() === ""
+                ? Promise.resolve()
+                : api.appendEvent(owner, sessionId, { role: "assistant", content: reply }).then(
+                    () => undefined,
+                    () => undefined
+                  );
+          } catch {
+            stored = Promise.resolve();
+          }
+          replyStores.set(sessionId, stored);
+          void stored.then(() => {
+            if (replyStores.get(sessionId) === stored) replyStores.delete(sessionId);
+          });
+        }
+        if (frame.result === "chat_started" && frame.data.local_thread_id !== "") {
+          try {
+            void api.setThreadId(account(), sessionId, frame.data.local_thread_id).catch(() => undefined);
+          } catch {
+            // Signed out: the frame is still routed to the page.
+          }
+        }
+        if (endsTurn(frame)) activeTurns.delete(sessionId);
+        subscribers.get(sessionId)?.(frame);
       },
       onError: (event) => {
         activeTurns.delete(event.chat_session_id);
@@ -453,12 +499,16 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
       activeTurns.delete(sessionId);
       subscribers.delete(sessionId);
       errorSubscribers.delete(sessionId);
+      assistantTextBySession.delete(sessionId);
+      replyStores.delete(sessionId);
     },
 
     clearChatHistory: async () => {
       await api.clearHistory(account());
       // Every conversation went with the history, so nothing is in flight.
       activeTurns.clear();
+      assistantTextBySession.clear();
+      replyStores.clear();
     },
 
     chatWorkingDir: async (workspaceId, runnerId) => {
@@ -474,32 +524,17 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     subscribeChatEvents: (sessionId, _after, handlers: ChatSubscriptionHandlers) => {
       listenOnce();
       const folder = createFrameFolder(sessionId);
-      let assistantText = "";
       const receive = (frame: LocalChatFrame): void => {
-        if (frame.result === "chat_message_started") {
-          assistantText = "";
-        } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
-          assistantText += deltaText(frame.data.payload);
-        }
         if (frame.result === "chat_message_completed") {
-          // The reply is stored before the page re-reads history on the
-          // terminal frame; otherwise the streamed bubble vanishes.
-          const reply = frame.data.assistant_message?.trim() ? frame.data.assistant_message : assistantText;
+          // The reply and thread id are stored by the process-wide listener;
+          // the page only displays. Delivery waits for that store so the
+          // history re-read sees the reply.
           const completion = folder(frame);
-          const stored =
-            reply.trim() === ""
-              ? Promise.resolve()
-              : api.appendEvent(account(), sessionId, { role: "assistant", content: reply }).then(
-                  () => undefined,
-                  () => undefined
-                );
+          const stored = replyStores.get(sessionId) ?? Promise.resolve();
           void stored.then(() => {
-            if (completion !== null) handlers.onEvent(completion);
+            if (completion !== null && subscribers.get(sessionId) === receive) handlers.onEvent(completion);
           });
           return;
-        }
-        if (frame.result === "chat_started" && frame.data.local_thread_id !== "") {
-          void api.setThreadId(account(), sessionId, frame.data.local_thread_id).catch(() => undefined);
         }
         const event = folder(frame);
         if (event !== null) handlers.onEvent(event);
