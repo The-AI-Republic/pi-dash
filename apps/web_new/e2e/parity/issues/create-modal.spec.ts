@@ -367,7 +367,11 @@ test(
         display_properties: before.displayProperties,
       });
       try {
-        await driver.openProjectIssuesSettled(seed.workspaceSlug, seed.projectId);
+        // Reload so the board re-renders in kanban. openProjectIssuesSettled
+        // forces list layout on the oracle driver, so it cannot reach the
+        // kanban board.
+        await driver.boardReloadIssues();
+        await driver.kanbanOpenBoard();
         await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
         const column = (await driver.kanbanColumns())[0]?.name ?? "";
         expect(column).not.toBe("");
