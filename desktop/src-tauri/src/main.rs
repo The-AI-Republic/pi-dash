@@ -1124,7 +1124,7 @@ mod tests {
         let script = LINUX_EDIT_FIX;
         assert!(!script.trim().is_empty(), "empty script");
         assert!(
-            script.contains("'keydown'") && script.contains("addEventListener"),
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
             "capture-phase key handler"
         );
         assert!(
@@ -1132,7 +1132,7 @@ mod tests {
             "plain-field targets"
         );
         assert!(
-            script.contains("'undo'") && script.contains("'redo'"),
+            script.contains("\"undo\"") && script.contains("\"redo\""),
             "both directions"
         );
         assert!(

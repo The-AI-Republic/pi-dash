@@ -123,13 +123,13 @@ class LinuxUndoFixStructuralTests(unittest.TestCase):
         self.assertTrue(SCRIPT.is_file(), f"{SCRIPT} is missing")
         script = SCRIPT.read_text()
         for marker in (
-            "'keydown'",
+            '"keydown"',
             "addEventListener",
             "TEXTAREA",
             "INPUT",
             "execCommand",
-            "'undo'",
-            "'redo'",
+            '"undo"',
+            '"redo"',
             "KeyZ",
             "KeyY",
             "preventDefault",
