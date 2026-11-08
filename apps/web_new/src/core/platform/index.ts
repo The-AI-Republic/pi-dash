@@ -7,9 +7,12 @@
 // branch on the target themselves.
 
 export type {
+  AboutApi,
+  AboutInfo,
   AgentEngineProfile,
   AgentHostCheck,
   AgentRuntimeApi,
+  BundledNotice,
   CliInstallProgress,
   CliSetupApi,
   CliStatus,

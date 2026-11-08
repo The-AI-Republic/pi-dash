@@ -11,9 +11,12 @@ import { desktopShareUrl } from "./shareUrl.js";
 import { createPersistentStore } from "./storage.js";
 import { isWebAddress } from "./urls.js";
 import type {
+  AboutApi,
+  AboutInfo,
   AgentEngineProfile,
   AgentHostCheck,
   AgentRuntimeApi,
+  BundledNotice,
   CliSetupApi,
   CliStatus,
   DeepLinkApi,
@@ -698,6 +701,44 @@ const desktopUpdater: UpdaterApi = {
   },
 };
 
+interface NativeNotice {
+  file?: unknown;
+  component?: unknown;
+  license?: unknown;
+  text?: unknown;
+}
+
+function toBundledNotice(raw: unknown): BundledNotice | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const notice = raw as NativeNotice;
+  if (typeof notice.file !== "string" || notice.file.length === 0) return null;
+  return {
+    file: notice.file,
+    // A heading is always shown; the file name stands in for a missing one.
+    component: typeof notice.component === "string" && notice.component.length > 0 ? notice.component : notice.file,
+    license: typeof notice.license === "string" ? notice.license : "",
+    text: typeof notice.text === "string" ? notice.text : null,
+  };
+}
+
+/**
+ * Map the shell's About payload (about.rs). Entries without a file name
+ * are dropped; anything else is kept so a staged-but-unreadable text still
+ * shows up as missing instead of disappearing from the dialog.
+ */
+export function toAboutInfo(raw: unknown): AboutInfo {
+  const payload = typeof raw === "object" && raw !== null ? (raw as { version?: unknown; notices?: unknown }) : {};
+  const notices = Array.isArray(payload.notices) ? payload.notices : [];
+  return {
+    version: typeof payload.version === "string" ? payload.version : "",
+    notices: notices.map(toBundledNotice).filter((notice): notice is BundledNotice => notice !== null),
+  };
+}
+
+const desktopAbout: AboutApi = {
+  load: async () => toAboutInfo(await invokeNative<unknown>("desktop_about")),
+};
+
 /** Event the desktop deep-link plugin emits when the OS hands it a URL. */
 const DEEP_LINK_EVENT = "deep-link://new-url";
 
@@ -915,6 +956,7 @@ export const platform: Platform = {
   agentRuntime: desktopAgentRuntime,
   localChat: desktopLocalChat,
   updates: desktopUpdater,
+  about: desktopAbout,
   cliSetup: desktopCliSetup,
   sessionTeardown: desktopSessionTeardown,
   shellSignIn: desktopShellSignIn,
