@@ -146,7 +146,7 @@ def epics(db_conn, seed):
         # creator rule needs a project that hides others' rows.
         cur.execute(
             "INSERT INTO projects (%s) VALUES (%s)" % (
-                PROJECT_COLUMNS, ",".join(["%s"] * 30)),
+                PROJECT_COLUMNS, ",".join(["%s"] * 31)),
             _project_row(ids["g_project"], "Epic Guest Project", "ISG",
                          ws, False),
         )
