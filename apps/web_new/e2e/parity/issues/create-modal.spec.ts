@@ -14,17 +14,18 @@ import {
   browserCookies,
   createServerCycle,
   createServerModule,
+  createServerState,
   deleteServerCycle,
   deleteServerDraft,
   deleteServerIssue,
   deleteServerModule,
+  deleteServerState,
   serverDraftNames,
   serverDrafts,
   serverIssueDetails,
   serverIssueRecord,
   serverIssueNames,
   serverIssues,
-  serverListStates,
   serverPatchProjectUserProperties,
   serverProjectUserProperties,
   serverProjectViews,
@@ -243,23 +244,27 @@ test(
     const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
     const FIRST = `NF119 prefill first ${suffix}`;
     const SECOND = `NF119 prefill second ${suffix}`;
+    const STATE_NAME = `NF119 Doing ${suffix}`;
+    // The parity seed carries exactly one state, so no non-default column
+    // can exist until this run creates one; it is deleted in cleanup.
+    const setup = await signInFreshUser(seed.email, seed.password);
+    const created = await createServerState(seed.workspaceSlug, seed.projectId, setup.cookie, {
+      name: STATE_NAME,
+      group: "started",
+      color: "#3A3A3A",
+    });
     const board = await openBoardByState(driver, seed, seed.projectId);
     const session = board.user.cookie;
+    const targetState = created;
 
     await test.step("the state columns render", async () => {
       await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
     });
 
     await test.step("the column create opens prefilled with that state", async () => {
-      const states = await serverListStates(seed.workspaceSlug, seed.projectId, session);
-      const defaultState = states.find((row) => row.isDefault) ?? states[0];
-      if (defaultState === undefined) throw new Error("[parity] seed project carries no states.");
       const columns = await driver.kanbanColumns();
-      const target = columns.find((column) => column.name !== "None" && column.name !== defaultState.name);
-      if (target === undefined) throw new Error("[parity] no non-default state column to prefill from.");
-      const targetState = states.find((row) => row.name === target.name);
-      if (targetState === undefined)
-        throw new Error(`[parity] column ${JSON.stringify(target.name)} has no matching state.`);
+      const target = columns.find((column) => column.name === STATE_NAME);
+      if (target === undefined) throw new Error(`[parity] column ${JSON.stringify(STATE_NAME)} did not render.`);
       expect(await driver.kanbanHeaderCreateVisible(target.name)).toBe(true);
       await driver.kanbanHeaderCreate(target.name);
       await expect.poll(() => driver.kanbanCreateModalVisible(), { timeout: 30_000 }).toBe(true);
@@ -294,6 +299,7 @@ test(
         if (mine !== undefined)
           await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine.id, session).catch(() => {});
       }
+      await deleteServerState(seed.workspaceSlug, seed.projectId, created.id, session).catch(() => {});
       await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
         display_filters: board.beforeFilters,
         display_properties: board.beforeProperties,

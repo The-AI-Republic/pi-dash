@@ -965,7 +965,6 @@ export function WorkItemCreateDialog({
         },
         onSuccess: (created) => {
           clearWorkItemDraft(workspaceSlug);
-          onCreated?.(created.id);
           const membership = membershipForForm(named);
           if (hasMembership(membership)) {
             attachMembership.mutate(
@@ -981,6 +980,10 @@ export function WorkItemCreateDialog({
             attachAssets.mutate({ projectId, issueId: created.id, assetIds });
           }
           if (!createMore) {
+            // Fired only when the dialog is actually finishing: the
+            // board/list parents unmount on it, so firing while Create
+            // more is on would drop the reset form below (ISS-119).
+            onCreated?.(created.id);
             finishClose();
             return;
           }
