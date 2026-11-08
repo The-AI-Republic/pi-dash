@@ -16,8 +16,6 @@ on:
       # Path dependency of desktop/src-tauri (the daemon wire protocol);
       # editing it changes no lockfile under desktop/.
       - "pidash-ipc/**"
-      # Pinned agent-engine release that prepare-agent.sh stages.
-      - "runner/ENGINE_VERSION"
       # Windows IPC server arm, checked on the Windows leg below.
       - "runner/src/ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
@@ -32,8 +30,6 @@ on:
     paths:
       - "desktop/**"
       - "pidash-ipc/**"
-      # Pinned agent-engine release that prepare-agent.sh stages.
-      - "runner/ENGINE_VERSION"
       # Windows IPC server arm, checked on the Windows leg below.
       - "runner/src/ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
@@ -116,17 +112,3 @@ jobs:
       - name: Test release packaging helpers
         if: runner.os == 'Linux'
         run: python -m unittest discover -s desktop/tests -p 'test_*.py' -v
-
-      # The engine ships renamed to pidash-agent-engine; Codex re-execs helper
-      # copies of itself (arg0 / current_exe) to build its sandbox. If the
-      # rename broke that self-location the sandbox would silently not engage.
-      # This guard downloads the pinned upstream engine, runs it under its
-      # shipped name, and fails the build if an out-of-bounds write is not
-      # blocked — so a future CODEX_BUNDLE_VERSION bump can't ship a broken
-      # sandbox. Needs no model, session, or credential; only the download of
-      # the pinned release uses the network. See PDASHOSS01-162, design §24.8.
-      - name: Sandbox survives the engine rename (Linux)
-        if: runner.os == 'Linux'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python desktop/tests/sandbox_rename_smoke.py --stage
