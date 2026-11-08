@@ -200,6 +200,36 @@ pub fn allocate_engine_folder(
     Ok(dir)
 }
 
+/// True when `name` names a Windows reserved device (`CON`, `PRN`, `AUX`,
+/// `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), case-insensitively and ignoring
+/// any extension after the first `.`. Win32 path normalisation treats any
+/// trailing path component with that stem as a device, so it can never be
+/// created as a directory.
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("");
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            let bytes = upper.as_bytes();
+            bytes.len() == 4
+                && (bytes.starts_with(b"COM") || bytes.starts_with(b"LPT"))
+                && bytes[3].is_ascii_digit()
+                && bytes[3] != b'0'
+        }
+    }
+}
+
+/// Append `_` to the file stem of a reserved device name (`CON` → `CON_`,
+/// `CON.txt` → `CON_.txt`) so it becomes a creatable directory name while
+/// keeping the original spelling readable.
+fn escape_reserved_name(name: &str) -> String {
+    match name.find('.') {
+        Some(idx) => format!("{}_.{}", &name[..idx], &name[idx + 1..]),
+        None => format!("{name}_"),
+    }
+}
+
 /// A safe single path component from a slug or project identifier.
 fn component(raw: &str, fallback: &str) -> String {
     let out: String = raw
@@ -214,7 +244,7 @@ fn component(raw: &str, fallback: &str) -> String {
         })
         .collect();
     let out = out.trim_matches(|c| c == '.' || c == '-').to_string();
-    if out.is_empty()
+    let candidate = if out.is_empty()
         || Path::new(&out)
             .components()
             .any(|c| c != Component::Normal(out.as_ref()))
@@ -222,6 +252,11 @@ fn component(raw: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         out
+    };
+    if is_windows_reserved_name(&candidate) {
+        escape_reserved_name(&candidate)
+    } else {
+        candidate
     }
 }
 
@@ -392,6 +427,56 @@ mod tests {
         let root = tmp.path().join("root");
         let got = allocate_working_dir(&root, "../..", "a/b", &cfg(vec![])).unwrap();
         assert_eq!(got, root.join("workspace").join("a-b"));
+    }
+
+    #[test]
+    fn reserved_device_names_are_escaped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let c = cfg(vec![]);
+        // Project position
+        for (raw, expected) in [
+            ("CON", "CON_"),
+            ("con", "con_"),
+            ("Aux", "Aux_"),
+            ("NUL", "NUL_"),
+            ("nul", "nul_"),
+            ("COM1", "COM1_"),
+            ("com9", "com9_"),
+            ("LPT1", "LPT1_"),
+            ("lpt9", "lpt9_"),
+            ("PRN", "PRN_"),
+            ("CON.txt", "CON_.txt"),
+            ("con.dat", "con_.dat"),
+            ("CoM3.foo", "CoM3_.foo"),
+        ] {
+            let got = allocate_working_dir(&root, "acme", raw, &c).unwrap();
+            assert_eq!(
+                got,
+                root.join("acme").join(expected),
+                "project {raw:?} should map to {expected:?}"
+            );
+        }
+        // Workspace position
+        for (raw, expected) in [("CON", "CON_"), ("aux", "aux_"), ("nul.txt", "nul_.txt")] {
+            let got = allocate_working_dir(&root, raw, "WEB", &c).unwrap();
+            assert_eq!(
+                got,
+                root.join(expected).join("WEB"),
+                "workspace {raw:?} should map to {expected:?}"
+            );
+        }
+        // Non-reserved names unchanged
+        for raw in [
+            "WEB", "acme", "api-2", "my_proj", "CONX", "COM10", "LPT", "cons",
+        ] {
+            let got = allocate_working_dir(&root, "acme", raw, &c).unwrap();
+            assert_eq!(
+                got,
+                root.join("acme").join(raw),
+                "non-reserved {raw:?} should be unchanged"
+            );
+        }
     }
 
     #[test]
