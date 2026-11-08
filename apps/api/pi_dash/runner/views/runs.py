@@ -384,6 +384,9 @@ class AgentRunListEndpoint(APIView):
                         else None
                     ),
                 )
+                # The executor seam may already supply a pin (Cloud Agent
+                # supplies None). Merge the resolved direct-run target once.
+                execution.update(pinned_runner=pinned_runner, pin_kind=pin_kind)
                 run = AgentRun.objects.create(
                     workspace_id=ctx.workspace_id,
                     created_by=ctx.created_by,
@@ -393,8 +396,6 @@ class AgentRunListEndpoint(APIView):
                     run_config=request.data.get("run_config") or {},
                     required_capabilities=request.data.get("required_capabilities") or [],
                     work_item_id=ctx.work_item_id,
-                    pinned_runner=pinned_runner,
-                    pin_kind=pin_kind,
                     **execution,
                     # Owner stays NULL until assignment (design §5.3).
                 )
