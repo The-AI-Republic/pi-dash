@@ -1147,10 +1147,10 @@ describe("IssuePeek standing", () => {
     expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
   });
 
-  it("hides the menu on synced issues", async () => {
+  it("shows the menu on synced issues", async () => {
     renderPeek({ details: {}, syncedIssue: true });
     expect(await screen.findByRole("button", { name: "Copy work item link" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Work item actions" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Work item actions" })).toBeInTheDocument();
   });
 
   it("renders an epic peek with its own widget title", async () => {
