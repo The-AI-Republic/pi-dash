@@ -172,7 +172,15 @@ impl IpcServer {
             }
             Request::ConfigGet => {
                 let cfg = crate::config::file::load_config(&self.paths)?;
-                Ok(Response::Config(serde_json::to_value(&cfg)?))
+                // Protocol promises "redacted of credentials": never hand
+                // the IPC socket a live mt_/ec_ token. Non-secret fields
+                // stay so the desktop's daemon_runners can still enumerate
+                // runners. See Config::redacted.
+                let mut json = serde_json::to_value(cfg.redacted())?;
+                // Defense in depth: clear any token-like key the typed
+                // redaction might not know about (future per-runner fields).
+                redact_json_for_ipc(&mut json);
+                Ok(Response::Config(json))
             }
             Request::ConfigUpdate { patch, runner } => {
                 // ``runner`` is reserved / informational — the patch is
@@ -183,7 +191,17 @@ impl IpcServer {
                 // opt in without bumping IPC version again.
                 let _ = runner;
                 let mut cfg = crate::config::file::load_config(&self.paths)?;
+                // Never let ConfigUpdate clobber credentials with the
+                // redacted placeholders ConfigGet now returns. Credentials
+                // change only via `pidash auth login/logout`. Stripping
+                // the keys from the patch plus restoring after the merge
+                // keeps the on-disk mt_/ec_ tokens intact through any
+                // ConfigGet->ConfigUpdate round-trip.
+                let original = cfg.clone();
+                let mut patch = patch;
+                strip_secrets_from_patch(&mut patch);
                 merge_json(&mut cfg, patch)?;
+                restore_secrets(&mut cfg, &original);
                 crate::config::file::write_config(&self.paths, &cfg)?;
                 self.primary_state.set_config(cfg.clone()).await;
                 Ok(Response::Ack)
@@ -647,10 +665,131 @@ fn deep_merge(base: &mut serde_json::Value, patch: serde_json::Value) {
     }
 }
 
+/// Remove credential keys from a `ConfigUpdate` patch (recursive).
+/// ConfigGet now returns `cli.token`, `cli.workspaces[].token` and
+/// `cli.engine_credential.token` as absent; if a client round-trips
+/// that value back through ConfigUpdate, the merge would otherwise
+/// clear the on-disk tokens. Stripping the keys here makes the round-
+/// trip a no-op for secrets — they stay on disk and change only via
+/// `pidash auth login/logout`.
+///
+/// Keys are matched exactly (`token`, `api_token`, `connection_secret`)
+/// so non-secret paths like `model_token_file` survive.
+fn strip_secrets_from_patch(patch: &mut serde_json::Value) {
+    const SECRET_KEYS: &[&str] = &["token", "api_token", "connection_secret"];
+    match patch {
+        serde_json::Value::Object(map) => {
+            for key in SECRET_KEYS {
+                map.remove(*key);
+            }
+            for value in map.values_mut() {
+                strip_secrets_from_patch(value);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_secrets_from_patch(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Restore credentials that a `ConfigUpdate` merge might have blanked
+/// via the redacted `ConfigGet` value or a partial `workspaces` array.
+/// If the merged config lost a token that the on-disk config had, and
+/// the patch did not carry an explicit new token, restore the original.
+/// Tokens change only via `pidash auth login/logout`, not IPC.
+fn restore_secrets(
+    merged: &mut crate::config::schema::Config,
+    original: &crate::config::schema::Config,
+) {
+    let Some(merged_cli) = merged.cli.as_mut() else {
+        return;
+    };
+    let Some(orig_cli) = original.cli.as_ref() else {
+        return;
+    };
+    // cli.token: restore when merged is empty.
+    if merged_cli.token.as_deref().is_none_or(str::is_empty)
+        && let Some(t) = orig_cli.token.as_deref().filter(|s| !s.is_empty())
+    {
+        merged_cli.token = Some(t.to_string());
+    }
+    // engine credential.
+    if merged_cli
+        .engine_credential
+        .as_ref()
+        .is_some_and(|ec| ec.token.is_empty())
+        && let Some(ec) = orig_cli
+            .engine_credential
+            .as_ref()
+            .filter(|ec| !ec.token.is_empty())
+    {
+        merged_cli
+            .engine_credential
+            .get_or_insert_with(crate::config::schema::EngineCredential::default)
+            .token = ec.token.clone();
+        if merged_cli
+            .engine_credential
+            .as_ref()
+            .unwrap()
+            .expires_at
+            .is_none()
+        {
+            merged_cli.engine_credential.as_mut().unwrap().expires_at = ec.expires_at;
+        }
+    }
+    // Workspace tokens: match by slug; restore when the merged entry lost it.
+    let orig_by_slug: std::collections::HashMap<&str, &str> = orig_cli
+        .workspaces
+        .iter()
+        .map(|w| (w.slug.as_str(), w.token.as_str()))
+        .collect();
+    for w in &mut merged_cli.workspaces {
+        if w.token.is_empty()
+            && let Some(&orig_token) = orig_by_slug.get(w.slug.as_str())
+            && !orig_token.is_empty()
+        {
+            w.token = orig_token.to_string();
+        }
+    }
+}
+
+/// Defense-in-depth for `ConfigGet`: clear any token-like key that
+/// remains in the serialized JSON after the typed `Config::redacted`
+/// pass. `Config::redacted` already clears the known `mt_`/`ec_` fields;
+/// this walk catches future per-runner secret fields that might be added
+/// to `Config` without updating the typed redaction. Exact-key match
+/// keeps `model_token_file` (a path, not a secret) intact.
+fn redact_json_for_ipc(value: &mut serde_json::Value) {
+    const SECRET_KEYS: &[&str] = &["token", "api_token", "connection_secret"];
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in SECRET_KEYS {
+                if let Some(v) = map.get_mut(*key)
+                    && v.as_str().is_some_and(|s| !s.is_empty())
+                {
+                    *v = serde_json::Value::String(String::new());
+                }
+            }
+            for v in map.values_mut() {
+                redact_json_for_ipc(v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json_for_ipc(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::config::schema::{CliSection, Config, EngineCredential};
+    use crate::config::schema::{CliSection, Config, EngineCredential, WorkspaceCredential};
     use crate::daemon::supervisor::RunnerSpawnCtx;
     use crate::daemon::workspace_tokens::WorkspaceTokens;
     use crate::engine::test_server::{self, Handler};
@@ -1135,5 +1274,251 @@ sleep 1
         let sent = server.requests_to(&crate::engine::api::dev_machine_path(machine_id));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].json()["engine_paused_by_owner"], true);
+    }
+
+    // ---- ConfigGet redaction (PIDESKAPP-220) ---------------------------
+
+    fn config_with_secrets(slug: &str) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig::default(),
+            runners: vec![RunnerConfig {
+                name: "web".into(),
+                runner_id: Uuid::new_v4(),
+                workspace_slug: Some(slug.into()),
+                project_slug: Some("TEST".into()),
+                pod_id: None,
+                workspace: WorkspaceSection {
+                    working_dir: std::path::PathBuf::from("/tmp/wd"),
+                },
+                agent: AgentSection::default(),
+                codex: Default::default(),
+                claude_code: Default::default(),
+                cursor_agent: Default::default(),
+                openclaw: Default::default(),
+                grok: Default::default(),
+                muse_code: Default::default(),
+                approval_policy: Default::default(),
+            }],
+            cli: Some(CliSection {
+                token: Some("mt_default_secret".into()),
+                workspace_slug: Some("acme".into()),
+                workspaces: vec![
+                    WorkspaceCredential {
+                        slug: "beta".into(),
+                        token: "mt_beta_secret".into(),
+                    },
+                    WorkspaceCredential {
+                        slug: "gamma".into(),
+                        token: "mt_gamma_secret".into(),
+                    },
+                ],
+                engine_credential: Some(EngineCredential {
+                    token: "ec_secret_live".into(),
+                    expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
+                }),
+                ..Default::default()
+            }),
+            engine: Default::default(),
+            auth: Default::default(),
+        }
+    }
+
+    #[test]
+    fn redacted_clears_every_workspace_and_engine_token() {
+        let cfg = config_with_secrets("acme");
+        let redacted = cfg.redacted();
+        let json = serde_json::to_value(&redacted).unwrap();
+        let text = json.to_string();
+        assert!(
+            !text.contains("mt_default_secret"),
+            "cli.token leaked: {text}"
+        );
+        assert!(
+            !text.contains("mt_beta_secret"),
+            "beta token leaked: {text}"
+        );
+        assert!(
+            !text.contains("mt_gamma_secret"),
+            "gamma token leaked: {text}"
+        );
+        assert!(
+            !text.contains("ec_secret_live"),
+            "engine credential leaked: {text}"
+        );
+        // Non-secret fields survive for desktop daemon_runners.
+        assert!(text.contains("acme"), "workspace slug lost: {text}");
+        assert!(text.contains("beta"), "workspace slug lost: {text}");
+        assert!(text.contains("web"), "runner lost: {text}");
+        assert!(json["runner"].is_array(), "runner blocks lost: {json}");
+        // Original is untouched.
+        assert_eq!(
+            cfg.cli.as_ref().unwrap().token.as_deref(),
+            Some("mt_default_secret")
+        );
+    }
+
+    #[test]
+    fn strip_secrets_from_patch_removes_tokens_but_keeps_other_keys() {
+        let mut patch = serde_json::json!({
+            "cli": {
+                "token": "mt_evil",
+                "workspace_slug": "hacked",
+                "workspaces": [{"slug": "beta", "token": "mt_beta"}],
+                "engine_credential": {"token": "ec_evil"}
+            },
+            "daemon": {"log_level": "debug"},
+            "runner": [{"name": "web", "model_token_file": "/tmp/file", "token": "runner_token"}]
+        });
+        strip_secrets_from_patch(&mut patch);
+        assert_eq!(patch["daemon"]["log_level"], "debug");
+        assert_eq!(patch["cli"]["workspace_slug"], "hacked");
+        assert!(
+            patch["cli"].get("token").is_none(),
+            "cli.token not stripped"
+        );
+        assert!(patch["cli"]["workspaces"][0].get("token").is_none());
+        assert!(patch["cli"]["engine_credential"].get("token").is_none());
+        // model_token_file is a path, not a secret — must survive.
+        assert_eq!(patch["runner"][0]["model_token_file"], "/tmp/file");
+        // Exact-key match: `token` removed even under runner.
+        assert!(patch["runner"][0].get("token").is_none());
+    }
+
+    #[test]
+    fn redact_json_for_ipc_clears_future_token_fields() {
+        // Simulates a future per-runner token field added to Config without
+        // updating typed redaction: the JSON walk must still clear it.
+        let mut json = serde_json::json!({
+            "runner": [{"name": "web", "api_token": "future_secret"}],
+            "cli": {"token": "mt_leak"}
+        });
+        redact_json_for_ipc(&mut json);
+        assert_eq!(json["runner"][0]["api_token"], "");
+        assert_eq!(json["cli"]["token"], "");
+        // model_token_file untouched
+        let mut json2 = serde_json::json!({"runner": [{"codex": {"model_token_file": "/tmp/p"}}]});
+        redact_json_for_ipc(&mut json2);
+        assert_eq!(json2["runner"][0]["codex"]["model_token_file"], "/tmp/p");
+    }
+
+    #[tokio::test]
+    async fn config_get_over_ipc_never_returns_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::util::paths::Paths {
+            config_dir: tmp.path().join("c"),
+            data_dir: tmp.path().join("d"),
+            runtime_dir: tmp.path().join("r"),
+            machine_context_dir: tmp.path().join("c"),
+        };
+        let cfg = config_with_secrets("acme");
+        crate::config::file::write_config(&paths, &cfg).unwrap();
+
+        let spawn_ctx = RunnerSpawnCtx::for_tests(None, WorkspaceTokens::default(), &paths, &[]);
+        let server = IpcServer {
+            path: paths.ipc_socket_path(),
+            primary_state: crate::daemon::state::StateHandle::new(Config {
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![],
+                cli: None,
+                engine: Default::default(),
+                auth: Default::default(),
+            }),
+            paths: paths.clone(),
+            instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            spawn_ctx,
+        };
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        for _ in 0..200 {
+            if paths.ipc_socket_path().exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut client = crate::ipc::client::Client::connect(paths.ipc_socket_path())
+            .await
+            .unwrap();
+        match client.call(Request::ConfigGet).await.unwrap() {
+            Response::Config(v) => {
+                let s = v.to_string();
+                assert!(
+                    !s.contains("mt_default_secret"),
+                    "cli.token leaked over IPC: {s}"
+                );
+                assert!(
+                    !s.contains("mt_beta_secret"),
+                    "workspace token leaked over IPC: {s}"
+                );
+                assert!(
+                    !s.contains("mt_gamma_secret"),
+                    "workspace token leaked over IPC: {s}"
+                );
+                assert!(
+                    !s.contains("ec_secret_live"),
+                    "engine credential leaked over IPC: {s}"
+                );
+                // Non-secret fields still arrive.
+                assert!(s.contains("acme"), "missing slug: {s}");
+                assert!(s.contains("web"), "missing runner: {s}");
+                // Runner blocks usable by desktop daemon_runners.
+                let blocks = v["runner"].as_array().unwrap();
+                assert_eq!(blocks.len(), 1);
+                assert_eq!(blocks[0]["name"], "web");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // Round-trip: sending the redacted value back via ConfigUpdate must not clear disk tokens.
+        let raw = crate::config::file::load_config(&paths).unwrap();
+        assert_eq!(
+            raw.cli.as_ref().unwrap().token.as_deref(),
+            Some("mt_default_secret")
+        );
+        // Simulate client sending redacted JSON back as patch.
+        let redacted_json = serde_json::to_value(raw.redacted()).unwrap();
+        let mut client2 = crate::ipc::client::Client::connect(paths.ipc_socket_path())
+            .await
+            .unwrap();
+        // Need a patch that would clear tokens if not stripped.
+        let mut patch = redacted_json.clone();
+        // Ensure patch contains explicit null/empty tokens (what a naive client might send).
+        if let Some(cli) = patch.get_mut("cli").and_then(|v| v.as_object_mut()) {
+            cli.insert("token".into(), serde_json::Value::Null);
+        }
+        match client2
+            .call(Request::ConfigUpdate {
+                patch,
+                runner: None,
+            })
+            .await
+            .unwrap()
+        {
+            Response::Ack => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        let after = crate::config::file::load_config(&paths).unwrap();
+        assert_eq!(
+            after.cli.as_ref().unwrap().token.as_deref(),
+            Some("mt_default_secret"),
+            "ConfigUpdate clobbered disk token via redacted round-trip"
+        );
+        assert_eq!(
+            after.cli.as_ref().unwrap().workspaces[0].token,
+            "mt_beta_secret",
+            "ConfigUpdate clobbered workspace token"
+        );
+        assert_eq!(
+            after
+                .cli
+                .as_ref()
+                .unwrap()
+                .engine_credential
+                .as_ref()
+                .unwrap()
+                .token,
+            "ec_secret_live"
+        );
     }
 }
