@@ -31,12 +31,15 @@ export function selectWaitingRun(issue: Pick<Issue, "agent_status">): WaitingRun
 }
 
 /** Wait fields the reason sentence reads. */
-export type WaitingReasonInput = Pick<DispatchWait, "reason" | "runner_last_seen_at" | "runs_ahead">;
+export type WaitingReasonInput = Pick<
+  DispatchWait,
+  "reason" | "runner_last_seen_at" | "runs_ahead" | "pause_reason" | "expires_at" | "pin_kind"
+>;
 
 /**
  * Why the run waits, in one clause: offline names the last heartbeat,
- * busy names the runs ahead, other reasons read plainly. Unknown
- * reasons surface as-is per the contract.
+ * busy names the runs ahead, paused names the pause reason, other
+ * reasons read plainly. Unknown reasons surface as-is per the contract.
  */
 export function waitingReasonText(wait: WaitingReasonInput, nowMs: number = Date.now()): string {
   switch (wait.reason) {
@@ -44,6 +47,16 @@ export function waitingReasonText(wait: WaitingReasonInput, nowMs: number = Date
       const stamp = wait.runner_last_seen_at;
       const ago = stamp === null ? null : formatRunnerSeenAgo(stamp, nowMs);
       return ago === null ? "offline" : `offline, last seen ${ago}`;
+    }
+    case "runner_paused": {
+      const reason = wait.pause_reason ?? null;
+      if (reason === "dispatch_paused" || reason === "owner_paused") return "paused by its owner";
+      if (reason === "wallet_empty") return "paused: the wallet is empty";
+      if (reason === "engine_sign_in_required") return "paused: the engine's sign-in expired";
+      if (reason === "gateway_session_revoked") return "paused: the gateway session was revoked";
+      if (reason === "profile_unavailable") return "paused: the profile is unavailable";
+      if (reason === "engine_disabled") return "paused: the engine is disabled";
+      return reason ? `paused: ${reason}` : "paused";
     }
     case "runner_busy":
       if (wait.runs_ahead <= 0) return "busy";
@@ -59,7 +72,17 @@ export function waitingReasonText(wait: WaitingReasonInput, nowMs: number = Date
 
 /** The banner sentence: which runner, and why it waits. */
 export function waitingBannerText(runnerName: string, wait: WaitingReasonInput, nowMs: number = Date.now()): string {
-  return `Waiting for runner ${runnerName} — ${waitingReasonText(wait, nowMs)}.`;
+  const reason = waitingReasonText(wait, nowMs);
+  const base = `Waiting for runner ${runnerName} — ${reason}.`;
+  // expires_at: dedicated automatic runs fail after 12h while the runner is unavailable
+  if (
+    wait.pin_kind === "dedicated" &&
+    wait.expires_at &&
+    (wait.reason === "runner_offline" || wait.reason === "runner_paused")
+  ) {
+    return `${base} Fails at ${wait.expires_at} if it does not reconnect.`;
+  }
+  return base;
 }
 
 /** Compact waiting marker for the execution-target trigger. */
@@ -67,6 +90,8 @@ export function waitingBadgeLabel(wait: WaitingReasonInput): string {
   switch (wait.reason) {
     case "runner_offline":
       return "Offline";
+    case "runner_paused":
+      return "Paused";
     case "runner_busy":
       return wait.runs_ahead > 0 ? `${wait.runs_ahead} ahead` : "Busy";
     case "runner_not_permitted":

@@ -27,8 +27,6 @@ export const RUNNER_NOT_ASSIGNABLE_REASONS: Readonly<Record<string, string>> = {
   runner_wrong_project: "This runner belongs to another project.",
   runner_pod_mismatch: "This runner is not in this pod.",
   runner_revoked: "This runner was revoked.",
-  runner_desktop_bundled: "Desktop runners can't take dedicated issues.",
-  executor_not_local: "Dedicated runners need the local runner.",
   runner_owner_not_on_issue: "Add the runner's owner as an assignee to choose it.",
   active_run_in_progress: "This issue has a run in progress.",
 };
@@ -147,10 +145,8 @@ export type ExecutionTarget =
 
 /**
  * Ordered picker rows: each pod in server order with its squad row
- * followed by that pod's runners in server order. Built-in engine
- * runners are skipped (design §7, §11): servers list them now that the
- * `include_bundled` filter is gone, but an engine is reached only
- * through its pod. Runners read
+ * followed by that pod's runners in server order. Engines are listed
+ * as "Built-in engine · <machine>" (§23.6). Runners read
  * assignable unless the server says otherwise, so plain list rows
  * without eligibility answers stay pickable.
  */
@@ -163,14 +159,17 @@ export function buildExecutionTargets(
   for (const pod of pods) {
     targets.push({ kind: "pod", podId: pod.id, label: pod.name, isDefault: pod.is_default });
     for (const runner of runners) {
-      if (runner.pod !== pod.id || isEngineRunner(runner)) continue;
+      if (runner.pod !== pod.id) continue;
       const assignable = runner.assignable ?? true;
       const code = assignable ? "" : (runner.not_assignable_code ?? "");
       targets.push({
         kind: "runner",
         runnerId: runner.id,
         podId: pod.id,
-        label: runner.name,
+        label:
+          isEngineRunner(runner) && runnerMachineName(runner)
+            ? `Built-in engine · ${runnerMachineName(runner)}`
+            : runner.name,
         machineName: runnerMachineName(runner) ?? "",
         statusLine: runnerStatusLine(runner),
         ownerName: resolveOwnerName(runner.owner) ?? "",
