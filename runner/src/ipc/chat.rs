@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
@@ -66,6 +66,16 @@ use crate::daemon::runner_instance::RunnerInstance;
 
 /// How long a resolved approval / cancel wait is allowed to hold a turn.
 const APPROVAL_TTL_MINUTES: i64 = 10;
+
+/// Upper bound on live local chat sessions per registry. Each live session
+/// holds a long-lived engine process, so the set is capped: viewing more
+/// sessions than this evicts the least-recently-used ones (their bridges
+/// torn down) and the next warm/send respawns them.
+const MAX_LIVE_CHAT_SESSIONS: usize = 8;
+
+/// How long a local chat session may sit without a warm/turn before its
+/// engine process is shut down and the session dropped.
+const CHAT_IDLE_TTL_MINUTES: i64 = 10;
 
 // ---------------------------------------------------------------------------
 // Sink abstraction — lets the turn driver stream to the live IPC socket in
@@ -123,6 +133,10 @@ struct SessionRuntime {
     /// life of the thread so a mode change mid-session cannot retune a turn
     /// already in flight — it takes effect on the next thread instead.
     approval_mode: ApprovalMode,
+    /// When this session was last warmed or sent a turn. Stamped on
+    /// creation and on every completed warm/turn; read by the registry
+    /// reaper to evict idle sessions.
+    last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Per-`RunnerInstance` registry of live chat sessions, keyed by
@@ -139,15 +153,76 @@ impl ChatRegistry {
     }
 
     async fn get_or_create(&self, id: Uuid) -> Arc<ChatSession> {
+        if let Some(existing) = self.get(id).await {
+            if let Ok(mut rt) = existing.rt.try_lock() {
+                rt.last_used_at = Some(Utc::now());
+            }
+            self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS).await;
+            return existing;
+        }
+        // Leave room for the session about to be inserted.
+        self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS - 1).await;
         let mut map = self.sessions.lock().await;
         map.entry(id)
             .or_insert_with(|| {
                 Arc::new(ChatSession {
-                    rt: Mutex::new(SessionRuntime::default()),
+                    rt: Mutex::new(SessionRuntime {
+                        last_used_at: Some(Utc::now()),
+                        ..SessionRuntime::default()
+                    }),
                     cancel: Notify::new(),
                 })
             })
             .clone()
+    }
+
+    /// Evict idle sessions: those past their idle TTL first, then the
+    /// least-recently-used ones while the registry exceeds `target`. The
+    /// session being requested (`except`) and any session with a turn in
+    /// flight (its runtime is locked) are never touched. Evicted bridges
+    /// are shut down, tearing down their engine processes; the next
+    /// warm/send for a dropped session respawns it.
+    async fn reap_idle(&self, except: Uuid, target: usize) {
+        let now = Utc::now();
+        let idle_limit = chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES);
+        // Snapshot the eviction candidates under the map lock. `try_lock`
+        // only — a locked runtime means a warm/turn is in flight and the
+        // session must survive.
+        let candidates: Vec<Uuid> = {
+            let map = self.sessions.lock().await;
+            let mut candidates = Vec::new();
+            let mut by_age: Vec<(Option<DateTime<Utc>>, Uuid)> = Vec::new();
+            for (id, session) in map.iter() {
+                if *id == except {
+                    continue;
+                }
+                let Ok(rt) = session.rt.try_lock() else {
+                    continue;
+                };
+                if rt.last_used_at.is_none_or(|t| now - t > idle_limit) {
+                    candidates.push(*id);
+                } else {
+                    by_age.push((rt.last_used_at, *id));
+                }
+            }
+            let excess = map.len().saturating_sub(target);
+            if excess > 0 {
+                by_age.sort_by_key(|(at, _)| *at);
+                by_age.truncate(excess);
+                candidates.extend(by_age.into_iter().map(|(_, id)| id));
+            }
+            candidates
+        };
+        for id in candidates {
+            let session = {
+                let mut map = self.sessions.lock().await;
+                map.remove(&id)
+            };
+            let Some(session) = session else {
+                continue;
+            };
+            reap_one(self, id, session).await;
+        }
     }
 
     async fn get(&self, id: Uuid) -> Option<Arc<ChatSession>> {
@@ -161,6 +236,23 @@ impl ChatRegistry {
     /// Whether `id` is a live session of this registry.
     pub(crate) async fn contains(&self, id: Uuid) -> bool {
         self.sessions.lock().await.contains_key(&id)
+    }
+}
+
+/// Shut one reaped session's engine down. A turn may have started since
+/// the reaper's snapshot, so the runtime is re-checked: a busy session is
+/// put back untouched.
+async fn reap_one(registry: &ChatRegistry, id: Uuid, session: Arc<ChatSession>) {
+    let bridge = {
+        let Ok(mut rt) = session.rt.try_lock() else {
+            let mut map = registry.sessions.lock().await;
+            map.insert(id, session);
+            return;
+        };
+        rt.bridge.take()
+    };
+    if let Some(bridge) = bridge {
+        bridge.shutdown(Duration::from_secs(5)).await.ok();
     }
 }
 
@@ -416,6 +508,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         payload: serde_json::json!({ "local_session_id": warmed_thread_id }),
     })
     .await?;
+    rt.last_used_at = Some(Utc::now());
     Ok(Response::Ack)
 }
 
@@ -504,6 +597,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
     };
     rt.bridge_seq = bridge_seq;
     rt.started_sent = started_sent;
+    rt.last_used_at = Some(Utc::now());
 
     // A failed turn tears the bridge down so the next send respawns cleanly.
     let terminal = match outcome {
@@ -1891,5 +1985,67 @@ mod tests {
         // otherwise accept `<workspace>/../escape`, which resolves outside.
         assert!(resolve_chat_workspace(&cfg, Some("../escape")).is_err());
         assert!(resolve_chat_workspace(&cfg, Some("sub/../../escape")).is_err());
+    }
+
+    #[tokio::test]
+    async fn warmed_chat_sessions_are_reaped_once_the_registry_grows() {
+        // PIDESKAPP-75: every local chat the user views calls `chat_warm`,
+        // which spawns a long-lived engine process keyed by `chat_session_id`
+        // and nothing ever reaped the entries. N distinct warms must not
+        // leave N live sessions: the least-recently-used ones are evicted
+        // (their bridges torn down) once the registry passes its cap, and
+        // the next warm/send respawns them.
+        let registry = ChatRegistry::new();
+        let first = Uuid::new_v4();
+        registry.get_or_create(first).await;
+        // View more chats than the live cap allows.
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        assert!(
+            !registry.contains(first).await,
+            "the least-recently-warmed chat session must be evicted once the registry exceeds its cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_a_turn_in_flight_is_never_reaped() {
+        // A warm/turn holds the session's runtime lock; the reaper must
+        // leave that session alone no matter how far past the cap the
+        // registry grows.
+        let registry = ChatRegistry::new();
+        let busy = Uuid::new_v4();
+        let busy_session = registry.get_or_create(busy).await;
+        // Simulate an in-flight warm/turn holding the runtime lock.
+        let _in_flight = busy_session.rt.lock().await;
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        drop(_in_flight);
+        assert!(
+            registry.contains(busy).await,
+            "a session with a turn in flight must never be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_is_reaped_on_the_next_warm() {
+        // A session left untouched past the idle TTL must go on the next
+        // registry access, even before the cap is reached.
+        let registry = ChatRegistry::new();
+        let stale = Uuid::new_v4();
+        let stale_session = registry.get_or_create(stale).await;
+        {
+            let mut rt = stale_session.rt.lock().await;
+            rt.last_used_at =
+                Some(Utc::now() - chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES + 1));
+        }
+        registry.get_or_create(Uuid::new_v4()).await;
+        assert!(
+            !registry.contains(stale).await,
+            "a session idle past its TTL must be reaped"
+        );
     }
 }
