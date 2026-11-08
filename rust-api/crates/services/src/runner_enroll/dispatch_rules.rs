@@ -16,7 +16,8 @@ use pidash_db::entity::{agent_run, runner};
 
 /// `release_locality_pins` (`dispatch_rules.py:125-145`): send QUEUED
 /// `local_runner` runs pinned to `runner_ids` back to their pod (clear
-/// `pinned_runner`, clear the parent's `thread_id`). Legacy
+/// `pinned_runner`, clear the parent's `thread_id`). Locality pins only
+/// (`pin_kind = "locality"`, §12.1): dedicated runs wait (§11.3). Legacy
 /// `managed_runner` runs stay pinned. Must run inside the caller's
 /// transaction. Returns `(released, pod_ids)` for post-commit drains.
 ///
@@ -34,7 +35,8 @@ pub async fn release_locality_pins(
     let filter = Condition::all()
         .add(agent_run::Column::PinnedRunnerId.is_in(runner_ids.to_vec()))
         .add(agent_run::Column::Status.eq("queued"))
-        .add(agent_run::Column::ExecutorKind.eq("local_runner"));
+        .add(agent_run::Column::ExecutorKind.eq("local_runner"))
+        .add(agent_run::Column::PinKind.eq("locality"));
     let affected = agent_run::Entity::find()
         .filter(filter.clone())
         .lock(LockType::Update)

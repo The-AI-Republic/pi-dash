@@ -342,8 +342,10 @@ async fn finalize_merge_cancel(
 }
 
 /// Hand `loser`'s queued runs to `survivor` (`_hand_over_to_survivor`,
-/// revision 4.0). Returns the pods to drain (`{survivor.pod} | loose`)
-/// and the finalized run ids (terminal-effects publication each).
+/// revision 4.0). Dedicated pins are never released here (Django's
+/// `loose` excludes them). Returns the pods to drain
+/// (`{survivor.pod} | loose`) and the finalized run ids
+/// (terminal-effects publication each).
 async fn hand_over_to_survivor(
     db: &impl ConnectionTrait,
     loser: &runner_entity::Model,
@@ -373,7 +375,10 @@ async fn hand_over_to_survivor(
                 .exec(db)
                 .await
                 .map(drop)?;
-        } else if run.executor_kind == "local_runner" {
+        } else if run.executor_kind == "local_runner" && run.pin_kind != "dedicated" {
+            // Django's `loose` excludes dedicated pins (§12, §23.4):
+            // those are the per-issue dedicated assignment's, never a
+            // bulk release to the pod.
             loose_pods.insert(run.pod_id);
             agent_run::Entity::update_many()
                 .col_expr(agent_run::Column::PinnedRunnerId, Expr::value(None::<Uuid>))

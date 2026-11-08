@@ -2048,6 +2048,7 @@ fn paused_runner_pin_ids_select(
         .filter(agent_run::Column::PinnedRunnerId.is_not_null())
         .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
         .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
         .order_by_desc(agent_run::Column::CreatedAt)
         .into_tuple()
 }
@@ -2090,6 +2091,7 @@ fn paused_runner_pin_lock_select(
         .filter(agent_run::Column::Id.eq(run_id))
         .filter(agent_run::Column::PinnedRunnerId.is_not_null())
         .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
         .filter(runner::Column::PausedAt.is_not_null())
         .order_by_desc(agent_run::Column::CreatedAt)
         .limit(1);
@@ -3294,6 +3296,7 @@ mod tests {
         assert!(ids.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
         assert!(ids.contains("\"agent_run\".\"pinned_runner_id\" IS NOT NULL"));
         assert!(ids.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(ids.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
         assert!(ids.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"));
         assert!(!ids.contains("LIMIT"));
         let lock = pg_selector(paused_runner_pin_lock_select(Uuid::nil()));
@@ -3307,6 +3310,7 @@ mod tests {
             "{lock}"
         );
         assert!(lock.contains("\"runner\".\"paused_at\" IS NOT NULL"));
+        assert!(lock.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
         assert!(
             lock.ends_with(
                 "ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""

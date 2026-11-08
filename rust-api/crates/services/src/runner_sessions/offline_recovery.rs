@@ -86,7 +86,9 @@ fn aliased_columns(alias: &str, columns: &[&str]) -> String {
 /// Stuck-pin candidate ids: QUEUED `local_runner` runs with a pin,
 /// created before the cutoff, whose pinned runner is silent past the
 /// cutoff, never heartbeated, or operator-paused (`_pinned_runner_gone_q`,
-/// `09738d222`). Binds: `$1` cutoff (`created_at`),
+/// `09738d222`). Locality pins only (`_releasable_pins`): dedicated
+/// pins are owned by the issue and never released here (§12.1).
+/// Binds: `$1` cutoff (`created_at`),
 /// `$2` `local_runner`, `$3` `queued`, `$4` cutoff (heartbeat).
 pub fn stuck_queued_run_ids_select(
     cutoff: DateTime<Utc>,
@@ -99,6 +101,7 @@ pub fn stuck_queued_run_ids_select(
         .filter(run::Column::ExecutorKind.eq(AgentExecutorKind::LocalRunner.value()))
         .filter(run::Column::PinnedRunnerId.is_not_null())
         .filter(run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(run::Column::PinKind.ne("dedicated"))
         .filter(runner_gone(cutoff))
         .order_by_desc(run::Column::CreatedAt)
         .limit(500)
@@ -132,6 +135,7 @@ pub fn release_pin_lock_select(
         .filter(run::Column::Id.eq(run_id))
         .filter(run::Column::PinnedRunnerId.is_not_null())
         .filter(run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(run::Column::PinKind.ne("dedicated"))
         .filter(runner_gone(cutoff))
         .order_by_desc(run::Column::CreatedAt)
         .limit(1);
@@ -195,13 +199,15 @@ fn runner_gone(cutoff: DateTime<Utc>) -> Condition {
 
 /// Paused-runner candidate ids (`release_pins_for_paused_runner`,
 /// `09738d222`): every QUEUED `local_runner` run pinned to the
-/// just-paused runner, whatever its age. No runner join (the pin
+/// just-paused runner, whatever its age. Locality pins only
+/// (`_releasable_pins`, §12.1). No runner join (the pin
 /// column carries the id) and no `LIMIT`: the pause owns the set.
 /// Binds: `$1` `local_runner`, `$2` `queued`, `$3` runner id.
 pub fn paused_runner_pin_ids_select() -> String {
     "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE \
      (\"agent_run\".\"executor_kind\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
-     \"agent_run\".\"status\" = $2 AND \"agent_run\".\"pinned_runner_id\" = $3) \
+     \"agent_run\".\"status\" = $2 AND \"agent_run\".\"pinned_runner_id\" = $3 AND \
+     \"agent_run\".\"pin_kind\" <> $4) \
      ORDER BY \"agent_run\".\"created_at\" DESC"
         .to_owned()
 }
@@ -210,14 +216,15 @@ pub fn paused_runner_pin_ids_select() -> String {
 /// OF "agent_run"` with the still-paused predicate re-applied (the
 /// runner may have been resumed since the candidate list was read),
 /// plus the parent row via `select_related`. Binds: `$1` run id,
-/// `$2` `queued`.
+/// `$2` `queued`, `$3` `dedicated`.
 pub fn paused_runner_pin_lock_select() -> String {
     format!(
         "SELECT {}, {} FROM \"agent_run\" INNER JOIN \"runner\" ON \
          (\"agent_run\".\"pinned_runner_id\" = \"runner\".\"id\") \
          LEFT OUTER JOIN \"agent_run\" T3 ON (\"agent_run\".\"parent_run_id\" = T3.\"id\") \
          WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
-         \"agent_run\".\"status\" = $2 AND \"runner\".\"paused_at\" IS NOT NULL) \
+         \"agent_run\".\"status\" = $2 AND \"runner\".\"paused_at\" IS NOT NULL AND \
+         \"agent_run\".\"pin_kind\" <> $3) \
          ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\"",
         qualified_columns("agent_run", agent_run::COLUMNS),
         aliased_columns("T3", agent_run::COLUMNS),
@@ -408,11 +415,13 @@ mod tests {
     #[test]
     fn paused_release_list_sql_matches_django() {
         // No runner join, no age gate, no LIMIT: the pause owns the set.
+        // Locality pins only (`_releasable_pins` excludes dedicated, §12.1).
         assert_eq!(
             paused_runner_pin_ids_select(),
             "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE \
              (\"agent_run\".\"executor_kind\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
-             \"agent_run\".\"status\" = $2 AND \"agent_run\".\"pinned_runner_id\" = $3) \
+             \"agent_run\".\"status\" = $2 AND \"agent_run\".\"pinned_runner_id\" = $3 AND \
+             \"agent_run\".\"pin_kind\" <> $4) \
              ORDER BY \"agent_run\".\"created_at\" DESC",
         );
     }
@@ -427,10 +436,12 @@ mod tests {
         );
         assert!(sql.starts_with(&head), "projection drifted");
         // Same lock shape as the sweep, but the re-check is the
-        // still-paused arm alone (no cutoff bind).
+        // still-paused arm alone (no cutoff bind). Locality pins only
+        // (`_release_pins` excludes dedicated in the re-check, §12.1).
         assert!(sql.contains(
             "WHERE (\"agent_run\".\"id\" = $1 AND \"agent_run\".\"pinned_runner_id\" IS NOT NULL AND \
-             \"agent_run\".\"status\" = $2 AND \"runner\".\"paused_at\" IS NOT NULL) \
+             \"agent_run\".\"status\" = $2 AND \"runner\".\"paused_at\" IS NOT NULL AND \
+             \"agent_run\".\"pin_kind\" <> $3) \
              ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""
         ));
         assert!(!sql.contains("\"T3\""));
@@ -470,6 +481,8 @@ mod tests {
             "\"agent_run\".\"executor_kind\" = 'local_runner'",
             "\"agent_run\".\"pinned_runner_id\" IS NOT NULL",
             "\"agent_run\".\"status\" = 'queued'",
+            // §12.1: locality pins only (`_releasable_pins` excludes dedicated).
+            "\"agent_run\".\"pin_kind\" <> 'dedicated'",
             "(\"runner\".\"last_heartbeat_at\" < '2026-01-02 03:04:05.000000 +00:00' OR \
              \"runner\".\"last_heartbeat_at\" IS NULL OR \
              \"runner\".\"paused_at\" IS NOT NULL OR \
@@ -498,6 +511,8 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("\"runner\".\"paused_at\" IS NOT NULL"));
+        // §12.1: the re-check carries the locality filter too.
+        assert!(sql.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
         assert!(
             sql.ends_with(
                 "ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""
