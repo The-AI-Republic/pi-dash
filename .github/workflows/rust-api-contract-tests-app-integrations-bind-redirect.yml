@@ -36,7 +36,7 @@ concurrency:
 jobs:
   bind-redirect-django:
     name: bind-redirect suite vs Django
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -139,7 +139,7 @@ jobs:
 
   bind-redirect-rust:
     name: bind-redirect suite vs Rust serve
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:

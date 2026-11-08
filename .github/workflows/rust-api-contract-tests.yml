@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   web-edge:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -103,7 +103,7 @@ jobs:
         run: python -m pytest web_edge -v
   contract-tests:
     name: worker-plane oracle vs Django
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
