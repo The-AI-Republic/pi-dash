@@ -122,6 +122,8 @@ export {
 export type { WorkspaceStepView } from "./workspace.js";
 
 export {
+  CHAT_HISTORY_DELETE_FAILED_MESSAGE,
+  CHAT_HISTORY_DELETE_FAILED_TITLE,
   CLOUD_SIGN_OUT_LANDING,
   isHostedBackend,
   performSignOut,

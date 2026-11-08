@@ -43,7 +43,7 @@ import type {
   DaemonLocalRunner,
   LocalChatApi,
 } from "../../../core/platform/index.js";
-import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
+import type { RuntimeSignOutChoice, RuntimeSignOutResult } from "../../../core/session/index.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { restoreApprovalModes, stashApprovalModes } from "./approvalModes.js";
 import { requestDaemonSetup, type SetUpReason } from "./setupPrompt.js";
@@ -525,25 +525,43 @@ function defaultSleep(ms: number): Promise<void> {
  * signed in (they are independent of the app) unless the user ticked "Also
  * sign out Pi Dash on this computer". Approval modes are handed to the host
  * before the webview wipe; chat history goes only when the dialog asked for
- * it. Never rejects.
+ * it. Never rejects. Resolves with whether the requested chat-history
+ * deletion finished, so the caller can tell the user when local transcripts
+ * survive sign-out (PIDESKAPP-195).
  */
 export async function disposeRuntimeForSignOut(
   input: { choice: RuntimeSignOutChoice; chat?: Pick<LocalChatApi, "clearHistory"> | undefined } & RuntimeDeps
-): Promise<void> {
+): Promise<RuntimeSignOutResult> {
   const { runtime, choice, chat } = input;
-  if (!runtime) return;
+  if (!runtime) return { chatHistoryDeleted: true };
   const account = getRuntimeAccount();
   try {
     await stashApprovalModes({ account, runtime });
   } catch {
     // Signing out matters more than keeping a preference; wipe regardless.
   }
+  let chatHistoryDeleted = true;
   if (choice.deleteChatHistory && account && chat) {
     try {
       await chat.clearHistory(account);
+      chatHistoryDeleted = true;
     } catch {
-      // Deleting history failed; the sign-out itself still goes ahead.
+      // First attempt failed. Retry once — local files may be busy (open
+      // files on Windows, read-only caches) and a second attempt after a
+      // brief delay gives the host more time to release them. Still never
+      // rejects; the sign-out itself must not be trapped by a delete.
+      try {
+        await chat.clearHistory(account);
+        chatHistoryDeleted = true;
+      } catch {
+        chatHistoryDeleted = false;
+      }
     }
+  } else if (!choice.deleteChatHistory) {
+    chatHistoryDeleted = true;
+  } else {
+    // Delete requested but no account/chat to clear; nothing to delete.
+    chatHistoryDeleted = true;
   }
   if (choice.signOutComputer) {
     try {
@@ -559,4 +577,5 @@ export async function disposeRuntimeForSignOut(
   state.identity = null;
   state.discovery = null;
   state.topUpUrl = "";
+  return { chatHistoryDeleted };
 }

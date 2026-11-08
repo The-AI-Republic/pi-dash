@@ -228,7 +228,7 @@ describe("resume and discovery", () => {
     ).resolves.toBeUndefined();
     await expect(
       disposeRuntimeForSignOut({ client, choice: { deleteChatHistory: true, signOutComputer: false } })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ chatHistoryDeleted: true });
     expect(getProject).not.toHaveBeenCalled();
   });
 
@@ -636,28 +636,35 @@ describe("disposeRuntimeForSignOut", () => {
     const runtime = fakeRuntime();
     const chat = { clearHistory: vi.fn(async () => undefined) };
     resume(runtime);
-    await disposeRuntimeForSignOut({
+    const withoutDelete = await disposeRuntimeForSignOut({
       client,
       runtime,
       chat,
       choice: { deleteChatHistory: false, signOutComputer: false },
     });
     expect(chat.clearHistory).not.toHaveBeenCalled();
+    expect(withoutDelete).toEqual({ chatHistoryDeleted: true });
     resume(runtime);
-    await disposeRuntimeForSignOut({
+    const withDelete = await disposeRuntimeForSignOut({
       client,
       runtime,
       chat,
       choice: { deleteChatHistory: true, signOutComputer: false },
     });
     expect(chat.clearHistory).toHaveBeenCalledWith("u1");
+    expect(withDelete).toEqual({ chatHistoryDeleted: true });
   });
 
   it("leaves the daemon and engine signed in and forgets discovery", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
     await discoverDaemon(runtime);
-    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    const disposal = await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      choice: { deleteChatHistory: false, signOutComputer: false },
+    });
+    expect(disposal).toEqual({ chatHistoryDeleted: true });
     expect(runtime.engineLogin).not.toHaveBeenCalled();
     expect(compatibleHello()).toBeNull();
     await expect(discoverDaemon(runtime)).resolves.toBeNull();
@@ -673,21 +680,64 @@ describe("disposeRuntimeForSignOut", () => {
     resume(runtime);
     await expect(
       disposeRuntimeForSignOut({ client, runtime, chat, choice: { deleteChatHistory: true, signOutComputer: false } })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ chatHistoryDeleted: false });
   });
 
   it("signs out the computer only when ticked, and never rejects when it fails", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
-    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    const noComputer = await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      choice: { deleteChatHistory: false, signOutComputer: false },
+    });
+    expect(noComputer).toEqual({ chatHistoryDeleted: true });
     expect(runtime.signOutComputer).not.toHaveBeenCalled();
     resume(runtime);
-    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } });
+    const withComputer = await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      choice: { deleteChatHistory: false, signOutComputer: true },
+    });
+    expect(withComputer).toEqual({ chatHistoryDeleted: true });
     expect(runtime.signOutComputer).toHaveBeenCalledTimes(1);
     resume(runtime);
     runtime.signOutComputer.mockRejectedValue(new Error("logout failed"));
     await expect(
       disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } })
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ chatHistoryDeleted: true });
+  });
+
+  it("repeats the delete request when the first pass fails and reports deletion unfinished", async () => {
+    const runtime = fakeRuntime();
+    const chat = { clearHistory: vi.fn(async () => Promise.reject(new Error("io"))) };
+    resume(runtime);
+    const disposal = await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      chat,
+      choice: { deleteChatHistory: true, signOutComputer: false },
+    });
+    expect(chat.clearHistory).toHaveBeenCalledTimes(2);
+    expect(chat.clearHistory).toHaveBeenNthCalledWith(1, "u1");
+    expect(chat.clearHistory).toHaveBeenNthCalledWith(2, "u1");
+    expect(disposal).toEqual({ chatHistoryDeleted: false });
+  });
+
+  it("reports chat history deleted when the retried delete succeeds", async () => {
+    const runtime = fakeRuntime();
+    const chat = {
+      clearHistory: vi.fn().mockRejectedValueOnce(new Error("io")).mockResolvedValue(undefined),
+    };
+    resume(runtime);
+    const disposal = await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      chat,
+      choice: { deleteChatHistory: true, signOutComputer: false },
+    });
+    expect(chat.clearHistory).toHaveBeenCalledTimes(2);
+    expect(chat.clearHistory).toHaveBeenNthCalledWith(2, "u1");
+    expect(disposal).toEqual({ chatHistoryDeleted: true });
   });
 });

@@ -41,6 +41,10 @@ export const SIGN_OUT_FAILED_TITLE = "Could not sign out";
 // stays aligned with the old app.
 export const SIGN_OUT_FAILED_MESSAGE = "Failed to sign out. Please try again.";
 
+/** The user asked to delete chat history but the native side could not finish. */
+export const CHAT_HISTORY_DELETE_FAILED_TITLE = "Chat history not deleted";
+export const CHAT_HISTORY_DELETE_FAILED_MESSAGE = "Chat history could not be fully deleted from this computer.";
+
 /** Cloud sign-out landing (CLOUD-016): the login card, reached by a full navigation. */
 export const CLOUD_SIGN_OUT_LANDING = "/login";
 
@@ -118,7 +122,12 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
   // computer sign-in and the runtime identity stay untouched, and the user
   // who stays signed in can carry on chatting without a page reload.
   if (runtime !== null && choice !== null) {
-    await runtime.disposeRuntimeForSignOut(choice);
+    const disposal = await runtime.disposeRuntimeForSignOut(choice);
+    if (choice.deleteChatHistory && disposal?.chatHistoryDeleted === false) {
+      // Credentials are already gone, so sign-out continues; the user still
+      // needs to know transcripts remain on this computer.
+      notifyError(CHAT_HISTORY_DELETE_FAILED_TITLE, CHAT_HISTORY_DELETE_FAILED_MESSAGE);
+    }
   }
   clearSession(queryClient);
   if (teardown !== undefined) {
