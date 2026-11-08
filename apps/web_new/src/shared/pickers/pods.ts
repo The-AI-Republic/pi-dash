@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Execution-target option shaping (parity/specs/issues.md §17/§21,
-// ISS-218; built-in engine design §6, §7, §11). Runner is the only
-// executor, so the picker offers no agent rows: each pod offers an "any
-// runner" row plus its runners, each with the machine it runs on, a
-// status line, an owner name and an assignability answer. Built-in
-// engine runners are never offered: an engine takes issue work only as
-// a pod member, through the pod row (dedicating an issue to one engine
-// belongs to the dedicated-runner design, HA §23). A pod pick pins the
-// pod and clears the runner; a runner pick pins the runner inside its
-// pod. Both keep the local executor.
+// ISS-218; built-in engine design §6, §7, §11; dedicated-runner
+// design §14.4, §23.6). Runner is the only executor, so the picker
+// offers no agent rows: each pod offers an "any runner" row plus its
+// runners, each with the machine it runs on, a status line, an owner
+// name and an assignability answer. Built-in engine runners are listed
+// as "Built-in engine · <machine>" like any other runner, so an issue
+// can be dedicated to one engine. A pod pick pins the pod and clears
+// the runner; a runner pick pins the runner inside its pod. Both keep
+// the local executor.
 import type { ExecutorKind, Pod, PodList, Runner, RunnerList, WorkspaceMemberList } from "@pidash/api-client";
 
 import { isEngineRunner, runnerMachineName } from "../lib/runnerIdentity.js";

@@ -8,6 +8,7 @@
 import type { AgentRunSummary, DispatchWait, Issue } from "@pidash/api-client";
 
 import { formatRunnerSeenAgo } from "../../../../shared/pickers/index.js";
+import { formatCountdown } from "../agent/agentStatus.js";
 
 /** A queued run pinned to a runner, with its computed wait. */
 export interface WaitingRun {
@@ -51,11 +52,11 @@ export function waitingReasonText(wait: WaitingReasonInput, nowMs: number = Date
     case "runner_paused": {
       const reason = wait.pause_reason ?? null;
       if (reason === "dispatch_paused" || reason === "owner_paused") return "paused by its owner";
-      if (reason === "wallet_empty") return "paused: the wallet is empty";
-      if (reason === "engine_sign_in_required") return "paused: the engine's sign-in expired";
-      if (reason === "gateway_session_revoked") return "paused: the gateway session was revoked";
-      if (reason === "profile_unavailable") return "paused: the profile is unavailable";
-      if (reason === "engine_disabled") return "paused: the engine is disabled";
+      if (reason === "wallet_empty") return "the wallet is empty";
+      if (reason === "engine_sign_in_required") return "the engine's sign-in expired";
+      if (reason === "gateway_session_revoked") return "the gateway session was revoked";
+      if (reason === "profile_unavailable") return "the profile is unavailable";
+      if (reason === "engine_disabled") return "the engine is disabled";
       return reason ? `paused: ${reason}` : "paused";
     }
     case "runner_busy":
@@ -74,15 +75,13 @@ export function waitingReasonText(wait: WaitingReasonInput, nowMs: number = Date
 export function waitingBannerText(runnerName: string, wait: WaitingReasonInput, nowMs: number = Date.now()): string {
   const reason = waitingReasonText(wait, nowMs);
   const base = `Waiting for runner ${runnerName} — ${reason}.`;
-  // expires_at: dedicated automatic runs fail after 12h while the runner is unavailable
-  if (
-    wait.pin_kind === "dedicated" &&
-    wait.expires_at &&
-    (wait.reason === "runner_offline" || wait.reason === "runner_paused")
-  ) {
-    return `${base} Fails at ${wait.expires_at} if it does not reconnect.`;
-  }
-  return base;
+  // expires_at: dedicated runs fail after 12h while the runner is unavailable
+  // (§11.3); locality pins carry no bound (null).
+  const countdown = formatCountdown(wait.expires_at, nowMs);
+  if (wait.pin_kind !== "dedicated" || countdown === null) return base;
+  if (wait.reason !== "runner_busy" && wait.reason !== "dispatching")
+    return `${base} Fails at ${countdown} if it does not reconnect.`;
+  return `${base} Fails in ${countdown}.`;
 }
 
 /** Compact waiting marker for the execution-target trigger. */
