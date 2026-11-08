@@ -33,6 +33,7 @@ use crate::ipc::protocol::{
     version_lt,
 };
 use crate::ipc::server::IpcServer;
+use crate::util::fs::create_dir_all_private;
 use crate::util::paths::{Paths, RunnerPaths};
 
 pub struct Supervisor {
@@ -622,7 +623,7 @@ impl RunnerSpawnCtx {
 
         self.stop_runner_locked(runner_id).await;
         if let Some(dir) = &changes.working_dir
-            && let Err(e) = std::fs::create_dir_all(dir)
+            && let Err(e) = create_dir_all_private(dir)
         {
             self.add_runner_locked(inst.config.clone()).await?;
             anyhow::bail!("creating working dir {}: {e}", dir.display());
@@ -3451,7 +3452,7 @@ impl ChatWorker {
         // prompt. This is the PDASHOSS01-83 fix: a warm-runner chat message does
         // no git operation before the agent spawns.
         let workspace_path = self.runner_config.workspace.working_dir.clone();
-        std::fs::create_dir_all(&workspace_path)?;
+        create_dir_all_private(&workspace_path)?;
         if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
             let requested = std::path::PathBuf::from(cwd);
             let requested = if requested.is_absolute() {
@@ -3685,6 +3686,35 @@ fn assemble_failure_detail(
         joined.push('…');
     }
     joined
+}
+
+/// Readable run-failure base for a gateway refusal. Prefers the gateway's own
+/// sentence; falls back to a status-specific line when the engine gave us no
+/// body text, so the Activity row is never an empty or raw string.
+fn gateway_refusal_detail(status: u64, text: String) -> String {
+    if !text.trim().is_empty() {
+        return text;
+    }
+    match status {
+        402 => "Model gateway returned 402: the account has no credit left.".to_string(),
+        401 => {
+            "Model gateway returned 401: the credential is not accepted. Sign in again.".to_string()
+        }
+        _ => format!("Model gateway returned unexpected status {status}."),
+    }
+}
+
+/// Clean a terminal failure base that is the engine's raw
+/// `unexpected status ...` string. A 402/401 becomes its gateway text (or
+/// the status fallback); anything else is returned unchanged.
+fn clean_gateway_failure_detail(raw: &str) -> String {
+    let Some((status, text)) = crate::codex::gateway::gateway_status_text(raw) else {
+        return raw.to_string();
+    };
+    if !crate::codex::gateway::is_gateway_refusal_status(status) {
+        return raw.to_string();
+    }
+    gateway_refusal_detail(status, text)
 }
 
 /// Owns one `Assign`'s lifecycle. Spawned as a task from `RunnerLoop`, so the
@@ -4407,6 +4437,39 @@ impl AssignWorker {
                 params,
                 run_id,
             } => {
+                // The engine files a gateway 402/401 under "stream
+                // disconnected" and is about to re-send the whole request
+                // five times over. Stop it on the first notice instead of
+                // logging it as history and waiting out the retries.
+                if let Some((status, text)) =
+                    crate::codex::gateway::gateway_refusal(&method, &params)
+                {
+                    let base = gateway_refusal_detail(status, text);
+                    bridge.interrupt().await.ok();
+                    let enriched = self.build_failure_detail(&base, bridge).await;
+                    run_events.flush_before_lifecycle(&self.out).await;
+                    let metadata = self.run_metadata().await;
+                    self.send(ClientMsg::RunFailed {
+                        run_id,
+                        reason: FailureReason::Internal,
+                        detail: Some(enriched.clone()),
+                        ended_at: Utc::now(),
+                        tokens: metadata.tokens,
+                        model: metadata.model,
+                    })
+                    .await;
+                    hist.append(&HistoryEntry::Footer {
+                        ts: Utc::now(),
+                        final_status: "failed".into(),
+                        done_payload: None,
+                        error: Some(enriched),
+                    })
+                    .await
+                    .ok();
+                    return Ok(Some(Outcome {
+                        status_label: "failed".into(),
+                    }));
+                }
                 hist.append(&HistoryEntry::CodexEvent {
                     ts: Utc::now(),
                     method: method.clone(),
@@ -4587,9 +4650,10 @@ impl AssignWorker {
                 // use so the user sees command-tool context and a
                 // stderr tail in the issue activity comment, not just
                 // the bridge's classifier text.
-                let base = detail
+                let raw_base = detail
                     .clone()
                     .unwrap_or_else(|| "agent reported failure".to_string());
+                let base = clean_gateway_failure_detail(&raw_base);
                 let enriched = self.build_failure_detail(&base, bridge).await;
                 run_events.flush_before_lifecycle(&self.out).await;
                 let metadata = self.run_metadata().await;
@@ -6075,5 +6139,178 @@ mod tests {
         let delivered = replay_drain_journal_once(&paths, &runners).await;
         assert_eq!(delivered, 0);
         assert!(drain_journal::load(&paths).is_empty());
+    }
+
+    /// Drive one Raw error notice through `handle_bridge_event` and return the
+    /// outcome plus the RunFailed detail (if any). PIDESKAPP-162: the run
+    /// lane must fail on a 402/401 willRetry notice, not log it as history.
+    async fn run_error_notice_through_handler(
+        status: u64,
+        body_inner: &str,
+    ) -> (Option<String>, Option<String>) {
+        use crate::codex::app_server::AppServer;
+        use crate::codex::bridge::Bridge;
+        use tokio::process::Command;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let config = runner_config("main", "WEB", wd.clone());
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut worker = AssignWorker {
+            runner_paths: runner_paths.clone(),
+            daemon_paths: paths.clone(),
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        let run_id = uuid::Uuid::new_v4();
+        let mut hist = HistoryWriter::open(&runner_paths, run_id).await.unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("while read _; do :; done");
+        let server = AppServer::spawn_command(cmd)
+            .await
+            .expect("spawn fake codex");
+        let mut bridge = AgentBridge::Codex(Bridge::from_server(server, None));
+        let mut run_events = RunEventMirror::new(run_id);
+        let mut token_meter = crate::daemon::observability::RunTokenMeter::default();
+
+        let params = serde_json::json!({
+            "willRetry": true,
+            "error": {
+                "message": "Reconnecting... 1/5",
+                "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": status}},
+                "additionalDetails": body_inner,
+            },
+            "threadId": "th_test",
+            "turnId": "turn_1",
+        });
+        let ev = BridgeEvent::Raw {
+            run_id,
+            method: "error".into(),
+            params,
+        };
+        let out = worker
+            .handle_bridge_event(
+                ev,
+                &mut bridge,
+                &mut hist,
+                &wd,
+                &mut run_events,
+                &mut token_meter,
+            )
+            .await
+            .expect("handle event");
+        let status_label = out.as_ref().map(|o| o.status_label.clone());
+        // Drain to RunFailed if one was sent, skipping RunEvents mirror frames.
+        let mut detail: Option<String> = None;
+        let deadline = std::time::Instant::now() + Duration::from_millis(400);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let Ok(Some(msg)) = tokio::time::timeout(remaining, rx.recv()).await else {
+                break;
+            };
+            match msg.body {
+                ClientMsg::RunFailed { detail: d, .. } => {
+                    detail = d;
+                    break;
+                }
+                ClientMsg::RunEvents { .. } => continue,
+                _ => continue,
+            }
+        }
+        bridge.shutdown(Duration::from_secs(1)).await.ok();
+        (status_label, detail)
+    }
+
+    #[tokio::test]
+    async fn run_lane_gateway_402_will_retry_fails_run_with_cleaned_detail() {
+        let (status, detail) = run_error_notice_through_handler(
+            402,
+            "unexpected status 402 Payment Required: Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan., url: https://gateway.test/v1/responses, request id: req_1",
+        )
+        .await;
+        assert_eq!(status.as_deref(), Some("failed"));
+        let detail = detail.expect("RunFailed detail");
+        assert!(
+            detail.contains("Daily free quota used"),
+            "detail should carry gateway text, got: {detail}"
+        );
+        assert!(
+            !detail.contains("url:")
+                && !detail.contains("request id")
+                && !detail.contains("Reconnecting"),
+            "detail must not leak URL/request id/Reconnecting, got: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_lane_gateway_401_will_retry_fails_run_with_cleaned_detail() {
+        let (status, detail) = run_error_notice_through_handler(
+            401,
+            "unexpected status 401 Unauthorized: Invalid JWT, url: https://gateway.test/v1/responses, request id: req_1",
+        )
+        .await;
+        assert_eq!(status.as_deref(), Some("failed"));
+        let detail = detail.expect("RunFailed detail");
+        assert!(
+            detail.contains("Invalid JWT"),
+            "detail should carry gateway text, got: {detail}"
+        );
+        assert!(
+            !detail.contains("url:")
+                && !detail.contains("request id")
+                && !detail.contains("Reconnecting"),
+            "detail must not leak URL/request id/Reconnecting, got: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_lane_transient_503_will_retry_stays_a_raw_event() {
+        let (status, detail) = run_error_notice_through_handler(
+            503,
+            "unexpected status 503 Service Unavailable: try again later, url: https://gateway.test/v1/responses, request id: req_1",
+        )
+        .await;
+        assert!(
+            status.is_none(),
+            "503 is worth retrying and must stay Raw, got status {status:?}"
+        );
+        assert!(
+            detail.is_none(),
+            "no RunFailed may be sent for a retryable 503, got: {detail:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_gateway_402_detail_is_cleaned_not_raw() {
+        let raw = "unexpected status 402 Payment Required: Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan., url: https://gateway.test/v1/responses, request id: req_1";
+        let cleaned = clean_gateway_failure_detail(raw);
+        assert_eq!(
+            cleaned,
+            "Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan."
+        );
+        assert_eq!(
+            clean_gateway_failure_detail(
+                "unexpected status 503 Service Unavailable: boom, url: https://x/v1/responses, request id: r1"
+            ),
+            "unexpected status 503 Service Unavailable: boom, url: https://x/v1/responses, request id: r1"
+        );
     }
 }

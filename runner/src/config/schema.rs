@@ -952,6 +952,30 @@ pub(crate) fn canonical_for_compare(path: &Path) -> PathBuf {
 }
 
 impl Config {
+    /// A clone with every credential blanked — for IPC `ConfigGet`,
+    /// which the protocol documents as "redacted of credentials".
+    ///
+    /// Clears `cli.token`, every `cli.workspaces[].token` and
+    /// `cli.engine_credential.token`. All other fields (runner names,
+    /// working dirs, daemon URL, workspace slugs) are preserved so
+    /// consumers like the desktop's `daemon_runners` keep working.
+    /// `#[serde(skip_serializing_if)]` on the token fields means the
+    /// cleared values disappear from JSON entirely rather than echoing
+    /// a placeholder.
+    pub fn redacted(&self) -> Self {
+        let mut out = self.clone();
+        if let Some(cli) = &mut out.cli {
+            cli.token = None;
+            for w in &mut cli.workspaces {
+                w.token.clear();
+            }
+            if let Some(ec) = &mut cli.engine_credential {
+                ec.token.clear();
+            }
+        }
+        out
+    }
+
     /// First configured runner, or `None` for a freshly enrolled connection
     /// that has no runners yet. Callers that need a panic-on-absent
     /// invariant should validate first via [`Config::validate`] which

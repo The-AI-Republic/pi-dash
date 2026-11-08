@@ -10,3 +10,7 @@ d69200f0bf841b1d1a07f80b80cf742a2e4fc2bab91ae8a44b1042f8e8ca9fa4  codex-x86_64-a
 5cda6182bd94c3a30f2eb63a495489ebf7f691fddb14d70f48c6c1a5071b6cde  codex-aarch64-unknown-linux-musl.tar.gz
 f479424eca092484dc40d87ae28c44f4cc40234a60045d6131e493800d814a30  codex-x86_64-unknown-linux-musl.tar.gz
 e5434e7df009c65c610b03088b34a9f9df338d7e6b83f6dc07520da00542e44b  codex-x86_64-pc-windows-msvc.exe.tar.gz
+2c6ea97dfb0a936b695ece6df058b89d4dfd53774a9ad852b3e4c98e6bbdfd20  bwrap-aarch64-unknown-linux-musl.tar.gz
+e7d65c75e05637e42b93f6abf9222fa0d26b537648a7a34c122b75021d41756d  bwrap-x86_64-unknown-linux-musl.tar.gz
+3d2db3cc3dc96da51508fdc160c566d70c689ef7b228778b3276428467ccefbe  codex-command-runner-x86_64-pc-windows-msvc.exe.tar.gz
+fbd12258013aae9be8acb617e017a36da985b182b2a47fc4f3afe82144edbadf  codex-windows-sandbox-setup-x86_64-pc-windows-msvc.exe.tar.gz

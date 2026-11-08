@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Stage pinned agent release assets for the desktop (no wildcard executable selection)."""
+"""Stage the bundled CLI for the desktop release (no wildcard executable selection).
+
+Only `pidash` is staged. The built-in engine is owned by the CLI release
+(`engine/<version>/` installed by `pidash engine install`) and is never part
+of the desktop bundle.
+"""
 
 import argparse
 import hashlib
-import importlib.util
 import io
 import json
 from pathlib import Path, PurePosixPath
@@ -14,31 +18,6 @@ import subprocess
 import tarfile
 import tempfile
 import zipfile
-
-# The pinned agent-engine release, shared with prepare-agent.sh, the CLI
-# release pipeline (runner/scripts/stage_engine.py) and the runner itself.
-ENGINE_VERSION_FILE = Path(__file__).resolve().parents[2] / "runner/ENGINE_VERSION"
-# SHA-256 of each upstream Codex asset, pinned in the repo next to
-# ENGINE_VERSION. The digest GitHub publishes must match it, so a replaced
-# upstream asset fails the bundle the same way it fails the CLI release.
-ENGINE_SHA256_FILE = ENGINE_VERSION_FILE.with_name("ENGINE_SHA256")
-STAGE_ENGINE = ENGINE_VERSION_FILE.parent / "scripts/stage_engine.py"
-
-
-def _stage_engine():
-    spec = importlib.util.spec_from_file_location("stage_engine", STAGE_ENGINE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def engine_pins(tag, path=ENGINE_SHA256_FILE):
-    """{asset: "sha256:<hex>"} pinned for `tag` (same parser as the CLI release)."""
-    return _stage_engine().read_pins(tag, path)
-
-
-def default_engine_tag(path=ENGINE_VERSION_FILE):
-    return Path(path).read_text().strip()
 
 
 def targets(target):
@@ -50,10 +29,9 @@ def targets(target):
 
 
 def assets(target):
-    """Exact upstream asset and member names, including Windows executable suffixes."""
+    """Exact release asset and member names, including Windows executable suffixes."""
     windows = target.endswith("windows-msvc")
     suffix = ".exe" if windows else ""
-    engine_target = target.replace("linux-gnu", "linux-musl")
     archive_suffix = ".zip" if windows else ".tar.xz"
     return [
         (
@@ -61,12 +39,6 @@ def assets(target):
             f"pidash-{target}{archive_suffix}",
             f"pidash{suffix}",
             f"pidash{suffix}",
-        ),
-        (
-            "openai/codex",
-            f"codex-{engine_target}{suffix}.tar.gz",
-            f"codex-{engine_target}{suffix}",
-            f"pidash-agent-engine{suffix}",
         ),
     ]
 
@@ -131,23 +103,15 @@ def executable_bytes(payload, archive, member):
             return executable.read()
 
 
-def stage(target, runner_tag, engine_tag, output, pins_file=ENGINE_SHA256_FILE):
-    pins = engine_pins(engine_tag, pins_file)
+def stage(target, runner_tag, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pidash-agent-slices-") as directory:
         slices = {}
         for architecture in targets(target):
             for repo, archive, member, destination in assets(architecture):
-                if repo == "openai/codex":
-                    tag = engine_tag
-                    pinned = pins.get(archive)
-                    if pinned is None:
-                        raise ValueError(f"No SHA-256 pinned for {repo}/{archive} in {pins_file}")
-                else:
-                    tag, pinned = runner_tag, None
                 payload = executable_bytes(
-                    download(repo, tag, archive, pinned=pinned), archive, member
+                    download(repo, runner_tag, archive), archive, member
                 )
                 path = Path(directory) / architecture / destination
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,14 +136,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
     parser.add_argument("--runner-tag", required=True)
-    parser.add_argument(
-        "--engine-tag",
-        help="upstream openai/codex tag; defaults to runner/ENGINE_VERSION",
-    )
     parser.add_argument("--output", type=Path, default=Path("bin"))
     args = parser.parse_args()
-    engine_tag = args.engine_tag or default_engine_tag()
-    stage(args.target, args.runner_tag, engine_tag, args.output)
+    stage(args.target, args.runner_tag, args.output)
 
 
 if __name__ == "__main__":
