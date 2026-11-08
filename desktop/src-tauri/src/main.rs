@@ -609,7 +609,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
                 .min_inner_size(800.0, 600.0)
-                .resizable(true);
+                .resizable(true)
+                // PIDESKAPP-87: Tauri's native handler replaces the webview
+                // drop target on Windows, so the shared UI's HTML5 drag and
+                // drop (board cards, reorder, file drops) never reaches the
+                // page. Nothing consumes Tauri's own drag events.
+                .disable_drag_drop_handler();
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             {
                 // PIDESKAPP-51: the numpad-plus accelerator can never fire
@@ -859,6 +864,22 @@ mod tests {
         );
         // Hot-reload and release keep following the server target.
         assert_eq!(api_base_for(None, target, false), target);
+    }
+
+    #[test]
+    fn main_window_disables_tauri_drag_drop_handler() {
+        // PIDESKAPP-87: Tauri's native handler replaces the WebView2 drop
+        // target on Windows, so HTML5 drag and drop never reaches the page.
+        // The window is built only in `setup`, so the builder call is the
+        // fix. The needle is concatenated so this test's own source does
+        // not satisfy the assertion.
+        let needle = concat!(".disable_drag_drop", "_handler()");
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains(needle),
+            "main window builder must call {needle}: the shared web UI drags \
+             board cards and drops files through HTML5 drag and drop"
+        );
     }
 
     #[test]
