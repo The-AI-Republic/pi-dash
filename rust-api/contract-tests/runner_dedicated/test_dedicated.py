@@ -88,6 +88,31 @@ def test_release_pin_refused_for_dedicated(admin_client, world, dedicated_run, o
     assert "dr-pod" in body["error"]
 
 
+def test_merge_moves_dedicated_assignment(admin_client, world, merge_world):
+    resp = admin_client.post(
+        f"/api/v1/runner/dev-machines/{merge_world['source_id']}/merge-into/",
+        json={"target_dev_machine_id": merge_world["target_id"]},
+    )
+    assert resp.status_code == 200, resp.text[:500]
+    assert resp.json()["collisions"] == [
+        {"revoked_runner_id": merge_world["loser_id"],
+         "survivor_runner_id": merge_world["survivor_id"]}
+    ]
+    body = admin_client.get(_issue_url(world, world["issue1"]["id"])).json()
+    assert body["assigned_runner_id"] == merge_world["survivor_id"]
+    assert body["assigned_pod_id"] == merge_world["pod_b_id"]
+
+
+def test_merge_repoints_queued_same_pod(admin_client, world, merge_world, merge_run):
+    resp = admin_client.post(
+        f"/api/v1/runner/dev-machines/{merge_world['source_id']}/merge-into/",
+        json={"target_dev_machine_id": merge_world["target_id"]},
+    )
+    assert resp.status_code == 200, resp.text[:500]
+    body = admin_client.get(f"/api/runners/runs/{merge_run['id']}/").json()
+    assert body["pinned_runner"] == str(merge_world["survivor_id"])
+
+
 def test_cross_project_pod_move_refused(admin_client, world, dedicated_issue, online_runner, project2, seeder):
     seeder.create_pod(world["ws"]["id"], project2["id"], name="dr-pod2")
     pods = admin_client.get(f"/api/runners/pods/?project={project2['id']}")

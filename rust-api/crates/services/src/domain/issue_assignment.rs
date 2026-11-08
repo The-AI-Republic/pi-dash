@@ -2220,6 +2220,77 @@ async fn apply_fall_back(
     Ok(outcome)
 }
 
+/// §23.4 machine-merge assignment move (`_hand_over_to_survivor`):
+/// point `Issue.assigned_runner`/`assigned_pod` at the survivor in the
+/// merge transaction. No validation (D7 domain writer for `issues`).
+pub async fn move_dedicated_assignment(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    runner_id: Uuid,
+    pod_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sea_orm::DbErr> {
+    issues::Entity::update_many()
+        .col_expr(
+            issues::Column::AssignedRunnerId,
+            sea_orm::sea_query::Expr::value(Some(runner_id)),
+        )
+        .col_expr(
+            issues::Column::AssignedPodId,
+            sea_orm::sea_query::Expr::value(Some(pod_id)),
+        )
+        .col_expr(
+            issues::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(issues::Column::Id.eq(issue_id))
+        .exec(db)
+        .await
+        .map(drop)
+}
+
+/// One system `issue_comments` row (D7 domain writer for
+/// `issue_comments`; the shared shape behind `post_fall_back_comment`,
+/// `clear_dedicated_runner` and the §23.4 retired-machine comment).
+pub async fn insert_system_comment(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    actor_id: Option<Uuid>,
+    body: String,
+    now: DateTime<Utc>,
+) -> Result<(), sea_orm::DbErr> {
+    let comment = issue_comments::ActiveModel {
+        id: sea_orm::Set(Uuid::new_v4()),
+        comment_stripped: sea_orm::Set(body.clone()),
+        attachments: sea_orm::Set(Vec::new()),
+        created_by_id: sea_orm::Set(actor_id),
+        issue_id: sea_orm::Set(issue_id),
+        project_id: sea_orm::Set(project_id),
+        updated_by_id: sea_orm::Set(actor_id),
+        workspace_id: sea_orm::Set(workspace_id),
+        actor_id: sea_orm::Set(actor_id),
+        comment_html: sea_orm::Set(body),
+        comment_json: sea_orm::Set(json!({})),
+        access: sea_orm::Set("full".to_owned()),
+        external_id: sea_orm::Set(None),
+        external_source: sea_orm::Set(None),
+        deleted_at: sea_orm::Set(None),
+        edited_at: sea_orm::Set(None),
+        description_id: sea_orm::Set(None),
+        parent_id: sea_orm::Set(None),
+        speaker_type: sea_orm::Set("system".to_owned()),
+        speaker_label: sea_orm::Set(String::new()),
+        speaker_agent_run_id: sea_orm::Set(None),
+        labels: sea_orm::Set(Vec::new()),
+        created_at: sea_orm::Set(now.into()),
+        updated_at: sea_orm::Set(now.into()),
+    };
+    comment.insert(db).await?;
+    Ok(())
+}
+
 /// System comment for `fall_back` naming runner, reason and pod (§13.1).
 async fn post_fall_back_comment(
     db: &impl ConnectionTrait,

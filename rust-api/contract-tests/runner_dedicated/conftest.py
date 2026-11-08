@@ -187,6 +187,76 @@ def dedicated_run(seeder, world, online_runner, dedicated_issue):
 
 
 @pytest.fixture()
+def merge_world(seeder, world):
+    """Two machines (source/target), each with an engine runner for the
+    same project (§23.4): the source's engine in the default pod, the
+    target's engine in a second pod. Issue I1 is dedicated to the
+    source's engine. `runner`/`dev_machine` return ids (strings)."""
+    admin_id = world["admin"]["id"]
+    ws_id = world["ws"]["id"]
+    project_id = world["project"]["id"]
+    source_id = seeder.create_dev_machine(admin_id, host_label=f"dr-src-{seeder.tag}")["id"]
+    target_id = seeder.create_dev_machine(admin_id, host_label=f"dr-tgt-{seeder.tag}")["id"]
+    pod_b = seeder.create_pod(ws_id, project_id, name="dr-pod-b")
+    loser = seeder.enroll_runner(
+        admin_id, ws_id, world["pod"]["id"], "dr-loser-token", name=f"dr-loser-{seeder.tag}"
+    )
+    seeder.db.execute(
+        "UPDATE runner SET provisioning='desktop_bundled', dev_machine_id=%s WHERE id=%s",
+        (source_id, loser["id"]),
+    )
+    loser_id = loser["id"]
+    survivor = seeder.enroll_runner(
+        admin_id, ws_id, pod_b["id"], "dr-survivor-token", name=f"dr-survivor-{seeder.tag}"
+    )
+    seeder.db.execute(
+        "UPDATE runner SET provisioning='desktop_bundled', dev_machine_id=%s WHERE id=%s",
+        (target_id, survivor["id"]),
+    )
+    survivor_id = survivor["id"]
+    seeder.db.execute(
+        "UPDATE issues SET assigned_runner_id=%s, assigned_pod_id=%s WHERE id=%s",
+        (loser_id, world["pod"]["id"], world["issue1"]["id"]),
+    )
+    return {
+        "source_id": source_id,
+        "target_id": target_id,
+        "loser_id": loser_id,
+        "survivor_id": survivor_id,
+        "pod_b_id": pod_b["id"],
+    }
+
+
+@pytest.fixture()
+def merge_run(seeder, world, merge_world):
+    """A QUEUED dedicated run on the merge issue, in the survivor's pod
+    (the §23.4 same-pod re-point case)."""
+    run_id = _uid()
+    seeder.db.execute(
+        """INSERT INTO agent_run
+           (id, status, prompt, run_config, required_capabilities, thread_id,
+            error_details, workspace_id, work_item_id, pod_id, created_by_id,
+            llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason,
+            tool_plan, phase_kind, agent_metadata, usage, pinned_runner_id,
+            pin_kind, created_at)
+           VALUES (%s,'queued','merge prompt','{}','{}','',
+                   '{}',%s,%s,%s,%s,'model','human','local_runner',0,'',
+                   '{}','work','{}','{"input": 0, "output": 0, "total": 0}',
+                   %s,'dedicated',now())""",
+        (
+            run_id,
+            world["ws"]["id"],
+            world["issue1"]["id"],
+            merge_world["pod_b_id"],
+            world["admin"]["id"],
+            merge_world["loser_id"],
+        ),
+    )
+    seeder.track.add("agent_run", run_id)
+    return {"id": run_id}
+
+
+@pytest.fixture()
 def admin_client(settings, world):
     db = LazyDatabase(settings.database_url)
     try:

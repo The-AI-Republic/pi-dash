@@ -9,14 +9,16 @@
 //! [`merge_dev_machine`]: one transaction that moves the source's live
 //! runners to the target with the §13 collision rule: when both have a
 //! live engine runner for one project, the target's survives, the
-//! source's queued work is handed over (re-pinned in the survivor's
-//! pod, released (`local_runner`) or cancelled (`managed_runner`)
-//! elsewhere) and the loser is revoked with `dev_machine_merged`.
-//! Every other runner moves (engine renamed to the target scheme, other
-//! uniquified). The source's tokens/sessions die, the source is
-//! revoked with `merged_into` + stored `merge_result`, and its engine
-//! credential is revoked. No run's `pod` is rewritten. Idempotent: a
-//! retry for the same target returns the stored result.
+//! dedicated assignment moves to the survivor (§23.4, E2/E4-gated)
+//! and the source's queued work is handed over (re-pinned in the
+//! survivor's pod, released (`local_runner`) or cancelled
+//! (`managed_runner`) elsewhere) and the loser is revoked with
+//! `dev_machine_merged`. Every other runner moves (engine renamed to
+//! the target scheme, other uniquified). The source's tokens/sessions
+//! die, the source is revoked with `merged_into` + stored
+//! `merge_result`, and its engine credential is revoked. No run's
+//! `pod` is rewritten. Idempotent: a retry for the same target
+//! returns the stored result.
 
 #![forbid(unsafe_code)]
 
@@ -31,17 +33,20 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    agent_run, agent_run_event, dev_machine, machine_session, pod as pod_entity,
+    agent_run, agent_run_event, dev_machine, issues, machine_session, pod as pod_entity,
     projects as project_entity, runner as runner_entity, workspaces as workspace_entity,
 };
+use pidash_types::runner_runs::AgentRunStatus;
 
 use crate::domain::engine_credential;
+use crate::domain::issue_assignment;
 use crate::domain::tokens;
 use crate::runner_enroll::engine_naming;
 use crate::runner_enroll::queries::enroll_reads;
 use crate::runner_enroll::revoke as revoke_kernels;
 use crate::runner_runs::finalization;
 use crate::runner_runs::SetValue;
+use crate::runner_sessions::guards;
 
 /// Live-session window (`LIVE_SESSION_WINDOW`, 90s).
 pub const LIVE_SESSION_WINDOW_SECS: i64 = 90;
@@ -197,8 +202,11 @@ impl From<DbErr> for MergeError {
 /// The merge outcome: the stored `merge_result` document (the same
 /// object the response answers) plus the post-commit effects in
 /// Django registration order — publishes (per finalized run), handoffs
-/// (per revoke-cancelled run), pod drains, stream cleanup (per
-/// revoked loser). The caller fires them after commit.
+/// (per revoke-cancelled run), pod drains, dedicated bounces and
+/// recreates (§23.4 / §13.1 lost policy and other-pod recreate),
+/// stream cleanup (per revoked loser). The caller fires them after
+/// commit, in the order `publish → handoff → drain → bounce →
+/// recreate → cleanup` (the revoke bundle's firing order).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergeOutcome {
     pub result: Value,
@@ -206,6 +214,33 @@ pub struct MergeOutcome {
     pub publish_run_ids: Vec<Uuid>,
     pub handoff_pairs: Vec<(Uuid, Uuid)>,
     pub cleanup_runner_ids: Vec<Uuid>,
+    /// §13.1/§23.4 lost-policy bounces for E2/E4-failed dedicated
+    /// issues (`LostRunnerOutcome.bounce`).
+    pub bounce_effects: Vec<BounceEffect>,
+    /// §13.1 `fall_back` step-2 recreates and §23.4 QUEUED other-pod
+    /// recreates (`LostRunnerOutcome.recreate_in_pod`).
+    pub recreate_effects: Vec<RecreateEffect>,
+}
+
+/// A §13.1 ticking-issue bounce for one E2/E4-failed dedicated issue
+/// (`RevokeEffect::Bounce` shape).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BounceEffect {
+    pub issue_id: Uuid,
+    pub runner_name: Option<String>,
+    pub reason: String,
+    pub triggered_by: String,
+}
+
+/// A dedicated recreate in a pod (`RevokeEffect::Recreate` shape):
+/// Django `_create_and_dispatch_run(issue, parent=<cancelled run>,
+/// creator=<parent's>, pod=..., trigger=<parent's>, pod_once=False)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecreateEffect {
+    pub issue_id: Uuid,
+    pub pod_id: Uuid,
+    pub trigger: String,
+    pub creator: Option<Uuid>,
 }
 
 /// `finalize_agent_run` (`agent_run_finalization.py:50-96`) for the
@@ -217,24 +252,23 @@ pub struct MergeOutcome {
 /// terminal-effects publication). First-writer-wins: a terminal row
 /// or a failed expected filter is `Ok(false)`.
 ///
-/// `expected_queued`: the handover cancel's `expected_status=QUEUED`
-/// (no `cancel_reason`). `expected_runner`: the revoke cancel's
-/// `expected_runner_id` (`cancel_reason` set).
+/// `expected_status`: the handover cancels' `expected_status` (no
+/// `cancel_reason`). `expected_runner`: the revoke cancel's
+/// `expected_runner_id` (`cancel_reason` set). `error`: the finalize
+/// `error` text — `"runner revoked"` for the bulk/revoke cancels,
+/// `"runner retired on machine merge"` for the §23.4 per-issue
+/// QUEUED/PAUSED cancels (`machine_identity.py`).
 async fn finalize_merge_cancel(
     db: &impl ConnectionTrait,
     run_id: Uuid,
     now: DateTime<Utc>,
-    expected_queued: bool,
+    expected_status: Option<AgentRunStatus>,
     expected_runner: Option<Uuid>,
     cancel_reason: Option<&str>,
+    error: &str,
 ) -> Result<bool, DbErr> {
-    use pidash_types::runner_runs::AgentRunStatus;
-
     let mut extras: Vec<(&'static str, SetValue)> = vec![
-        (
-            "error",
-            SetValue::Text(revoke_kernels::FINALIZE_ERROR.to_owned()),
-        ),
+        ("error", SetValue::Text(error.to_owned())),
         (
             "error_code",
             SetValue::Text(revoke_kernels::FINALIZE_ERROR_CODE.to_owned()),
@@ -257,7 +291,7 @@ async fn finalize_merge_cancel(
         row_status,
         run.runner_id,
         expected_runner,
-        expected_queued.then_some(AgentRunStatus::Queued),
+        expected_status,
     ) {
         return Ok(false);
     }
@@ -270,7 +304,7 @@ async fn finalize_merge_cancel(
     };
     bag.insert(
         ERROR_DETAILS_MESSAGE.to_owned(),
-        Value::String(revoke_kernels::FINALIZE_ERROR.to_owned()),
+        Value::String(error.to_owned()),
     );
     bag.insert(
         ERROR_DETAILS_CODE.to_owned(),
@@ -341,6 +375,193 @@ async fn finalize_merge_cancel(
     Ok(true)
 }
 
+/// The §23.4 dedicated handover (`_hand_over_to_survivor`, the
+/// per-issue part): each issue dedicated to `loser` moves to
+/// `survivor` (lifecycle re-assignment; E7 not re-checked, only E2/E4),
+/// or is handed to the lost-runner policy when E2/E4 fails. QUEUED
+/// same-pod re-points (dedicated pin + parent thread clear); QUEUED
+/// other-pod cancels and recreates in the survivor's pod; PAUSED
+/// other-pod cancels with the retired-machine comment; ASSIGNED/RUNNING
+/// runs end via the revoke that follows. Returns the lost-policy
+/// bounce/recreate effects and the cancelled run ids (publication
+/// each). Runs boxed by the caller before the bulk re-pin below.
+#[allow(clippy::type_complexity)]
+async fn hand_over_dedicated(
+    db: &impl ConnectionTrait,
+    loser: &runner_entity::Model,
+    survivor: &runner_entity::Model,
+    actor_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(Vec<BounceEffect>, Vec<RecreateEffect>, Vec<Uuid>), DbErr> {
+    let survivor_pod = pod_entity::Entity::find_by_id(survivor.pod_id)
+        .one(db)
+        .await?;
+    let survivor_project_id = survivor_pod.as_ref().map(|pod| pod.project_id);
+    let survivor_revoked = survivor.status == "revoked" || survivor.revoked_at.is_some();
+    let dedicated = issues::Entity::find()
+        .filter(issues::Column::AssignedRunnerId.eq(loser.id))
+        .lock_exclusive()
+        .order_by_asc(issues::Column::Id)
+        .all(db)
+        .await?;
+    let mut bounces = Vec::new();
+    let mut recreates = Vec::new();
+    let mut published = Vec::new();
+    for issue in &dedicated {
+        if survivor_revoked || survivor_project_id != Some(issue.project_id) {
+            // E2/E4 failed: the issue is handled as for a lost runner
+            // (§13.1) and the merge goes on (Django `apply_lost_runner_policy`
+            // with `reason="dev_machine_merged"`).
+            let outcome = issue_assignment::apply_lost_runner_policy(
+                db,
+                issue.id,
+                "dev_machine_merged",
+                Some(actor_id),
+            )
+            .await?;
+            if outcome.bounce {
+                bounces.push(BounceEffect {
+                    issue_id: issue.id,
+                    runner_name: outcome.runner_name,
+                    reason: outcome
+                        .bounce_reason
+                        .unwrap_or_else(|| "no-eligible-runner".to_owned()),
+                    triggered_by: outcome
+                        .bounce_triggered_by
+                        .unwrap_or_else(|| "dev_machine_merged".to_owned()),
+                });
+            }
+            if let Some(pod_id) = outcome.recreate_in_pod {
+                recreates.push(RecreateEffect {
+                    issue_id: issue.id,
+                    pod_id,
+                    trigger: outcome
+                        .recreate_trigger
+                        .unwrap_or_else(|| "tick".to_owned()),
+                    creator: outcome.recreate_creator,
+                });
+            }
+            continue;
+        }
+        // E2/E4 hold: the assignment moves (D7 domain writer). No
+        // run's `pod` is rewritten.
+        issue_assignment::move_dedicated_assignment(
+            db,
+            issue.id,
+            survivor.id,
+            survivor.pod_id,
+            now,
+        )
+        .await?;
+        // Per-issue non-terminal runs (§23.4 table), oldest first.
+        let statuses: Vec<&str> = guards::NON_TERMINAL_STATUSES
+            .iter()
+            .map(|status| status.value())
+            .collect();
+        let runs = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(issue.id))
+            .filter(agent_run::Column::Status.is_in(statuses))
+            .lock_exclusive()
+            .order_by_asc(agent_run::Column::CreatedAt)
+            .order_by_asc(agent_run::Column::Id)
+            .all(db)
+            .await?;
+        for run in &runs {
+            match AgentRunStatus::from_value(&run.status) {
+                Some(AgentRunStatus::Queued) => {
+                    if run.pod_id == survivor.pod_id {
+                        // Re-pointed (§13.2) + parent thread clear.
+                        agent_run::Entity::update_many()
+                            .col_expr(
+                                agent_run::Column::PinnedRunnerId,
+                                Expr::value(Some(survivor.id)),
+                            )
+                            .col_expr(
+                                agent_run::Column::PinKind,
+                                Expr::value(issue_assignment::PIN_DEDICATED),
+                            )
+                            .filter(agent_run::Column::Id.eq(run.id))
+                            .filter(agent_run::Column::Status.eq("queued"))
+                            .exec(db)
+                            .await
+                            .map(drop)?;
+                        if let Some(parent_id) = run.parent_run_id {
+                            agent_run::Entity::update_many()
+                                .col_expr(agent_run::Column::ThreadId, Expr::value(String::new()))
+                                .filter(agent_run::Column::Id.eq(parent_id))
+                                .filter(agent_run::Column::ThreadId.ne(""))
+                                .exec(db)
+                                .await
+                                .map(drop)?;
+                        }
+                    } else if finalize_merge_cancel(
+                        db,
+                        run.id,
+                        now,
+                        Some(AgentRunStatus::Queued),
+                        None,
+                        None,
+                        "runner retired on machine merge",
+                    )
+                    .await?
+                    {
+                        // Cancelled; on commit recreated in the survivor's
+                        // pod (`_create_and_dispatch_run`, Django's
+                        // `transaction.on_commit`).
+                        published.push(run.id);
+                        recreates.push(RecreateEffect {
+                            issue_id: issue.id,
+                            pod_id: survivor.pod_id,
+                            trigger: run.trigger.clone(),
+                            creator: Some(run.created_by_id),
+                        });
+                    }
+                }
+                Some(AgentRunStatus::PausedAwaitingInput) => {
+                    if run.pod_id == survivor.pod_id {
+                        // Not touched; the reply runs on the survivor.
+                        continue;
+                    }
+                    if finalize_merge_cancel(
+                        db,
+                        run.id,
+                        now,
+                        Some(AgentRunStatus::PausedAwaitingInput),
+                        None,
+                        None,
+                        "runner retired on machine merge",
+                    )
+                    .await?
+                    {
+                        published.push(run.id);
+                        let body = format!(
+                            "<p>The waiting run was waiting for input on the retired machine. A reply now starts a run on <strong>{}</strong>.</p>",
+                            survivor.name
+                        );
+                        // D7 domain writer for `issue_comments`.
+                        issue_assignment::insert_system_comment(
+                            db,
+                            issue.id,
+                            issue.project_id,
+                            issue.workspace_id,
+                            Some(actor_id),
+                            body,
+                            now,
+                        )
+                        .await?;
+                    }
+                }
+                _ => {
+                    // ASSIGNED / RUNNING / CANCEL_REQUESTED / AWAITING_*:
+                    // the run ends via the revoke that follows; the
+                    // next run is dedicated to the survivor.
+                }
+            }
+        }
+    }
+    Ok((bounces, recreates, published))
+}
+
 /// Hand `loser`'s queued runs to `survivor` (`_hand_over_to_survivor`,
 /// revision 4.0). Dedicated pins are never released here (Django's
 /// `loose` excludes them). Returns the pods to drain
@@ -388,7 +609,16 @@ async fn hand_over_to_survivor(
                 .await
                 .map(drop)?;
         } else if run.executor_kind == "managed_runner"
-            && finalize_merge_cancel(db, run.id, now, true, None, None).await?
+            && finalize_merge_cancel(
+                db,
+                run.id,
+                now,
+                Some(AgentRunStatus::Queued),
+                None,
+                None,
+                revoke_kernels::FINALIZE_ERROR,
+            )
+            .await?
         {
             published.push(run.id);
         }
@@ -429,9 +659,10 @@ async fn revoke_loser(
             db,
             *run_id,
             now,
-            false,
+            None,
             Some(loser_id),
             Some("dev_machine_merged"),
+            revoke_kernels::FINALIZE_ERROR,
         )
         .await?
         {
@@ -469,12 +700,15 @@ async fn revoke_loser(
 /// (`TxConn` over a begun sqlx transaction) and commits on `Ok`.
 /// Locks run `ORDER BY pk` (both machines, then the source's runners
 /// in `created_at, id` order); the stored result is returned verbatim
-/// on a same-target retry.
+/// on a same-target retry. `actor_id` is the agent system user for
+/// the §13.1/§23.4 comments (`get_agent_system_user`), resolved by
+/// the caller on its pool (the revoke-store precedent).
 pub async fn merge_dev_machine(
     db: &impl ConnectionTrait,
     user_id: Uuid,
     source_id: Uuid,
     target_id: Uuid,
+    actor_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<MergeOutcome, MergeError> {
     if source_id == target_id {
@@ -512,6 +746,8 @@ pub async fn merge_dev_machine(
                 publish_run_ids: Vec::new(),
                 handoff_pairs: Vec::new(),
                 cleanup_runner_ids: Vec::new(),
+                bounce_effects: Vec::new(),
+                recreate_effects: Vec::new(),
             });
         }
         return Err(MergeError::AlreadyMerged);
@@ -557,6 +793,8 @@ pub async fn merge_dev_machine(
     let mut publish_run_ids: Vec<Uuid> = Vec::new();
     let mut handoff_pairs: Vec<(Uuid, Uuid)> = Vec::new();
     let mut cleanup_runner_ids: Vec<Uuid> = Vec::new();
+    let mut bounce_effects: Vec<BounceEffect> = Vec::new();
+    let mut recreate_effects: Vec<RecreateEffect> = Vec::new();
     for runner in &runners {
         let pod = pod_entity::Entity::find_by_id(runner.pod_id)
             .one(db)
@@ -566,6 +804,13 @@ pub async fn merge_dev_machine(
         let is_engine = runner.provisioning == "desktop_bundled";
         if let Some(survivor) = survivors.get(&project_id).filter(|_| is_engine) {
             let survivor = survivor.clone();
+            // §23.4 first (Django order): the dedicated assignment move
+            // and its per-issue run handling, then the bulk re-pin.
+            let (bounces, recreates, dedicated_published) =
+                hand_over_dedicated(db, runner, &survivor, actor_id, now).await?;
+            bounce_effects.extend(bounces);
+            recreate_effects.extend(recreates);
+            publish_run_ids.extend(dedicated_published);
             let (drains, published) = hand_over_to_survivor(db, runner, &survivor, now).await?;
             drain_pods.extend(drains);
             publish_run_ids.extend(published);
@@ -687,5 +932,7 @@ pub async fn merge_dev_machine(
         publish_run_ids,
         handoff_pairs,
         cleanup_runner_ids,
+        bounce_effects,
+        recreate_effects,
     })
 }
