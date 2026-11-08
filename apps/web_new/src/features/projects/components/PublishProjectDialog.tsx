@@ -28,6 +28,7 @@ import {
 
 export const PUBLISH_LINK_COPIED_TITLE = "Published page link copied successfully.";
 export const PUBLISH_LINK_COPY_FAILED_TITLE = "Couldn't copy the published link";
+export const PUBLISH_LINK_UNAVAILABLE = "The public link is unavailable without a hosted web address.";
 export const PUBLISH_LAYOUT_REQUIRED = "Keep at least one layout on before publishing.";
 export const PUBLISH_LAYOUT_REMOVE_REFUSED = "A published board needs at least one layout.";
 
@@ -42,16 +43,16 @@ export interface PublishProjectDialogProps {
 type LayoutKey = "list" | "kanban";
 
 /** The public link for a published board, or null when it cannot be built. */
-function publishedBoardLinkOrNull(published: boolean, stored: unknown): string | null {
+function publishedBoardLinkState(published: boolean, stored: unknown): { link: string | null; unavailable: boolean } {
   if (!published || stored === undefined || typeof stored !== "object" || stored === null || !("anchor" in stored)) {
-    return null;
+    return { link: null, unavailable: false };
   }
   const anchor = (stored as { anchor: unknown }).anchor;
-  if (typeof anchor !== "string" || anchor === "") return null;
+  if (typeof anchor !== "string" || anchor === "") return { link: null, unavailable: false };
   try {
-    return publishedBoardLink(anchor);
+    return { link: publishedBoardLink(anchor), unavailable: false };
   } catch {
-    return null;
+    return { link: null, unavailable: true };
   }
 }
 
@@ -157,7 +158,9 @@ export function PublishProjectDialog({
     }
   }
 
-  const link = publishedBoardLinkOrNull(published, stored);
+  // A build with no hosted origin cannot produce a public address: say so
+  // instead of offering a dead link (PIDESKAPP-197).
+  const { link, unavailable: linkUnavailable } = publishedBoardLinkState(published, stored);
   const loading = board.isPending;
   const unpublishing = unpublish.isPending;
   const boardId = published && stored !== undefined && "id" in stored ? stored.id : null;
@@ -252,29 +255,35 @@ export function PublishProjectDialog({
             </div>
           </div>
 
-          {link === null ? null : (
+          {link === null && !linkUnavailable ? null : (
             <div className="flex flex-col gap-(--space-2)" data-testid="publish-live-link-row">
               <span className="text-body flex items-center gap-(--space-2) font-medium text-(--text)">
                 <span aria-hidden="true" className="size-2 rounded-full bg-(--success)" />
                 Live
               </span>
-              <div className="flex items-end gap-(--space-2)">
-                <Input label="Public link" readOnly value={link} data-testid="publish-live-link" className="flex-1" />
-                <a
-                  href={link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label="Open published board"
-                  className="text-body inline-flex h-(--control-height) items-center gap-(--space-1) rounded-(--radius-control) border border-(--border) px-(--space-3) text-(--text) hover:bg-(--subtle)"
-                >
-                  <ExternalLink size={14} aria-hidden="true" />
-                  Open
-                </a>
-                <Button variant="secondary" aria-label="Copy published link" onClick={() => void copyLink(link)}>
-                  <Copy size={14} aria-hidden="true" />
-                  Copy
-                </Button>
-              </div>
+              {link !== null ? (
+                <div className="flex items-end gap-(--space-2)">
+                  <Input label="Public link" readOnly value={link} data-testid="publish-live-link" className="flex-1" />
+                  <a
+                    href={link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="Open published board"
+                    className="text-body inline-flex h-(--control-height) items-center gap-(--space-1) rounded-(--radius-control) border border-(--border) px-(--space-3) text-(--text) hover:bg-(--subtle)"
+                  >
+                    <ExternalLink size={14} aria-hidden="true" />
+                    Open
+                  </a>
+                  <Button variant="secondary" aria-label="Copy published link" onClick={() => void copyLink(link)}>
+                    <Copy size={14} aria-hidden="true" />
+                    Copy
+                  </Button>
+                </div>
+              ) : (
+                <p role="alert" className="text-meta text-(--danger)">
+                  {PUBLISH_LINK_UNAVAILABLE}
+                </p>
+              )}
             </div>
           )}
           <p className="text-meta text-(--text-muted)">Viewers need only the live link.</p>
