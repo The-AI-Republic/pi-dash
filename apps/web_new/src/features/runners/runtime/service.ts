@@ -24,7 +24,14 @@
 // Every entry takes the API client plus the platform capability and is
 // inert without the capability, so web and cloud builds make no call.
 
-import { approveDeviceCode, getIssue, getProject, startDeviceGrant, type ApiClient } from "@pidash/api-client";
+import {
+  approveDeviceCode,
+  getAgentProfile,
+  getIssue,
+  getProject,
+  startDeviceGrant,
+  type ApiClient,
+} from "@pidash/api-client";
 
 import type {
   AgentRuntimeApi,
@@ -100,6 +107,8 @@ interface RuntimeState {
   discovery: DaemonDiscovery | null;
   lastSilentAttempt: number;
   silentInFlight: Promise<boolean> | null;
+  /** Where the user adds model credit, from the last agent profile the server read. */
+  topUpUrl: string;
 }
 
 const state: RuntimeState = {
@@ -108,6 +117,7 @@ const state: RuntimeState = {
   discovery: null,
   lastSilentAttempt: 0,
   silentInFlight: null,
+  topUpUrl: "",
 };
 
 /** Drop all runtime state. Tests only; the app resumes instead. */
@@ -117,6 +127,7 @@ export function resetRuntimeServiceForTests(): void {
   state.discovery = null;
   state.lastSilentAttempt = 0;
   state.silentInFlight = null;
+  state.topUpUrl = "";
 }
 
 /**
@@ -126,6 +137,26 @@ export function resetRuntimeServiceForTests(): void {
  */
 export function getRuntimeAccount(): string {
   return state.account;
+}
+
+/**
+ * Where the user adds model credit, from the last agent profile the
+ * server read. Empty when the server names no place.
+ */
+export function getModelTopUpUrl(): string {
+  return state.topUpUrl;
+}
+
+/** Best-effort read of the top-up page off the agent profile (chat transcript link). */
+async function refreshTopUpUrl(deps: RuntimeDeps): Promise<void> {
+  const { client, runtime } = deps;
+  if (!runtime || !state.identity) return;
+  try {
+    const profile = await getAgentProfile(client);
+    state.topUpUrl = profile.top_up_url ?? "";
+  } catch {
+    // Keep what we had.
+  }
 }
 
 /** The last discovery, or `null` before the first one (or off the desktop). */
@@ -279,6 +310,7 @@ export function resumeRuntime(
   if (current?.userId !== user.id) {
     state.discovery = null;
     state.lastSilentAttempt = 0;
+    state.topUpUrl = "";
   }
   if (state.account !== user.id) {
     state.account = user.id;
@@ -299,6 +331,7 @@ export async function refreshRuntime(deps: RuntimeDeps): Promise<void> {
   if (!runtime || !state.identity) return;
   await rediscover(runtime);
   await renewEngineIfAllowed(deps);
+  await refreshTopUpUrl(deps);
 }
 
 /** What the set-up does, step by step, for its progress screen. */
@@ -411,6 +444,19 @@ export async function ensureChatRuntime(input: { workspaceSlug: string } & Runti
   assertEngineUsable(hello);
 }
 
+/**
+ * The model gateway refused the engine's credential mid-chat. The daemon
+ * owns model tokens now, so the app can only renew the engine sign-in —
+ * silently, when its state allows. Rejects when it cannot; the caller asks
+ * the user to sign in.
+ */
+export async function refreshModelCredential(deps: RuntimeDeps): Promise<void> {
+  const { runtime } = deps;
+  if (!runtime) return;
+  await rediscover(runtime);
+  if (!(await renewEngineIfAllowed(deps))) throw new Error("The built-in engine needs a new sign-in.");
+}
+
 /** The engine runner this computer has for a project, if any. */
 export async function localEngineRunner(
   runtime: AgentRuntimeApi,
@@ -512,4 +558,5 @@ export async function disposeRuntimeForSignOut(
   // answer still in flight is dropped as stale).
   state.identity = null;
   state.discovery = null;
+  state.topUpUrl = "";
 }

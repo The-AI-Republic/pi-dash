@@ -20,6 +20,7 @@ const platformState = vi.hoisted(() => ({
   api: null as unknown,
   account: "u-1",
   ensure: vi.fn(async () => undefined),
+  refresh: vi.fn(async () => undefined),
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -37,6 +38,8 @@ vi.mock("../../../core/platform/index.js", () => ({
 vi.mock("../runtime/service.js", () => ({
   getRuntimeAccount: () => platformState.account,
   ensureChatRuntime: platformState.ensure,
+  refreshModelCredential: platformState.refresh,
+  getModelTopUpUrl: () => "",
 }));
 vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
