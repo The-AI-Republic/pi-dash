@@ -605,7 +605,9 @@ const desktopShellSignIn: ShellSignInApi = {
     }
     // Invoke-only: a failure rejects so the caller surfaces it instead of
     // falling back to an in-window navigation the desktop flow cannot use.
-    return core.invoke("plugin:opener|open_url", { url }).then(() => undefined);
+    // The native command needs no capability entry and refuses non-http(s)
+    // URLs on its own side.
+    return core.invoke("open_in_browser", { url }).then(() => undefined);
   },
 };
 
@@ -867,7 +869,7 @@ export const platform: Platform = {
     if (!core) {
       return Promise.reject(new Error("openExternal needs the native bridge"));
     }
-    return core.invoke("plugin:opener|open_url", { url }).then(
+    return core.invoke("open_in_browser", { url }).then(
       () => undefined,
       () => {
         globalThis.window.open(url, "_blank", "noopener");

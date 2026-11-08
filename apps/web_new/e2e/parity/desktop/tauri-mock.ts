@@ -70,7 +70,7 @@ declare global {
  * Install the mocked desktop bridge. Call before the first navigation:
  * the init script runs on every subsequent page load. The mock records
  * invokes, proxies API traffic through fetch, and serves the lifecycle,
- * chat, history, updater, CLI, opener and deep-link commands from memory.
+ * chat, history, updater, CLI, browser-open and deep-link commands from memory.
  */
 export async function installDesktopMock(page: Page, config: DesktopMockConfig = {}): Promise<void> {
   await page.addInitScript((seed: DesktopMockConfig) => {
@@ -305,7 +305,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           await apiStream(params, channel);
           return null;
         }
-        case "plugin:opener|open_url":
+        case "open_in_browser":
         case "plugin:window|set_title":
         case "desktop_clear_web_data":
           return null;
