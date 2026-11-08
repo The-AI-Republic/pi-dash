@@ -2,10 +2,6 @@
 # Counts only go down: lower an entry (or delete it at 0) in the PR
 # that migrates sites to SeaORM. Never raise one; mark a justified
 # exception with `// raw-sql: <reason>` instead.
-crates/api/src/app_notifications/mod.rs 15
-crates/api/src/auth_session/email.rs 19
-crates/api/src/auth_session/magic.rs 14
-crates/api/src/auth_session/password.rs 5
 
 [dup]
 # SELECTs with two output columns of one name (fix, don't add).
