@@ -35,6 +35,9 @@ echo "pnpm $*" >> "$FAKE_LOG"
 if [[ "${1:-}" == "install" ]]; then
     exit 0
 fi
+if [[ "$*" == *"--filter @pidash/kit build"* ]]; then
+    exit 0
+fi
 if [[ "$*" == *"--filter web_new build:desktop"* ]]; then
     out="apps/web_new/dist/desktop"
     mkdir -p "$out/assets"
@@ -166,6 +169,14 @@ class WebNewDesktopTests(unittest.TestCase):
         self.assertFalse(self.dev_tree.exists())
         # The bundled runner setup still runs on the flagged path.
         self.assertTrue(self.prepare_marker.exists())
+        # The design system builds before the desktop bundle: web_new
+        # imports @pidash/kit/kit.css, which only exists as compiled dist/
+        # (PIDESKAPP-185). Reversing this order breaks clean checkouts.
+        log = self.fake_log.read_text()
+        self.assertLess(
+            log.index("@pidash/kit build"),
+            log.index("build:desktop"),
+        )
 
     def test_default_path_still_merges_the_overlay_tree(self):
         write(self.tmp / "apps/web/package.json", '{"name":"web"}\n')
