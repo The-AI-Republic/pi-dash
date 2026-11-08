@@ -18,6 +18,13 @@ on:
       - "pidash-ipc/**"
       # Pinned agent-engine release that prepare-agent.sh stages.
       - "runner/ENGINE_VERSION"
+      # The desktop shell bundles apps/web_new (PIDASH_DESKTOP_WEB=web_new),
+      # so a frontend-only PR can break the desktop build and must still
+      # trigger the desktop-web-new job below (PIDESKAPP-205).
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/pull-request-test-desktop.yml"
   # Post-merge validation, same reasoning as the runner workflow: PR checks
   # don't re-run when the base moves.
@@ -32,6 +39,11 @@ on:
       - "pidash-ipc/**"
       # Pinned agent-engine release that prepare-agent.sh stages.
       - "runner/ENGINE_VERSION"
+      # Same frontend paths as the pull_request trigger above (PIDESKAPP-205).
+      - "apps/web_new/**"
+      - "packages/kit/**"
+      - "packages/api-client/**"
+      - "pnpm-lock.yaml"
       - ".github/workflows/pull-request-test-desktop.yml"
 
 concurrency:
@@ -110,3 +122,68 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python desktop/tests/sandbox_rename_smoke.py --stage
+
+  desktop-web-new:
+    name: desktop web_new build (PIDASH_DESKTOP_WEB=web_new)
+    # Linux is enough to catch bundle/shell regressions; the native matrix
+    # above covers per-OS Rust arms in debug. Release guards (build.rs)
+    # only run in release, so this job compiles in release.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libsoup-3.0-dev \
+            patchelf \
+            rsync
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        working-directory: desktop/src-tauri
+        run: rustup show
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Enable Corepack and pnpm
+        run: corepack enable pnpm
+
+      # The exact command a developer runs locally for the new frontend:
+      # clean checkout -> dev-prep web_new branch (kit build + desktop
+      # bundle into desktop/src-tauri/dist/). A clean tree has no
+      # packages/kit/dist, so this also pins the PIDESKAPP-185 order.
+      - name: Build desktop bundle from web_new (dev-prep)
+        env:
+          PIDASH_DESKTOP_WEB: "web_new"
+          PI_DASH_URL: "https://pidash.example.com"
+          VITE_API_BASE_URL: "https://pidash.example.com"
+          VITE_WEB_BASE_URL: "https://pidash.example.com"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash desktop/scripts/dev-prep.sh
+
+      # Release profile runs build.rs's bundle guards (size/marker for
+      # web_new, PIDESKAPP-184). `cargo build` skips the tauri CLI's
+      # beforeBuildCommand, so dev-prep is not re-run; dist/ is already
+      # populated by the previous step.
+      - name: Release build of the Tauri shell
+        working-directory: desktop/src-tauri
+        env:
+          PI_DASH_URL: "https://pidash.example.com"
+          VITE_API_BASE_URL: "https://pidash.example.com"
+          VITE_WEB_BASE_URL: "https://pidash.example.com"
+        run: cargo build --release --locked

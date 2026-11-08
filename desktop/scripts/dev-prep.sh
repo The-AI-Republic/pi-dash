@@ -166,6 +166,15 @@ if [[ "${PIDASH_DESKTOP_WEB:-}" == "web_new" ]]; then
     echo "[dev-prep] pnpm install"
     ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm install --frozen-lockfile )
 
+    # web_new imports @pidash/kit/kit.css, which resolves to the package's
+    # compiled dist/kit.css. Vite aliases @pidash/kit's JS to source, so the
+    # desktop build looks fine on a dirty tree with a stale dist/, but on a
+    # clean checkout it fails with "Package path ./kit.css is exported ... but
+    # no valid target file was found" (PIDESKAPP-185). Build the design
+    # system first; web-new.yml already does this.
+    echo "[dev-prep] pnpm --filter @pidash/kit build"
+    ( cd "$OSS_DIR" && pnpm --filter @pidash/kit build )
+
     echo "[dev-prep] pnpm --filter web_new build:desktop"
     ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" PIDASH_TARGET=desktop pnpm --filter web_new build:desktop )
 

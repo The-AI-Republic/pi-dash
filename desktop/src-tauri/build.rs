@@ -4,7 +4,10 @@
 
 mod dist_guard;
 
-use dist_guard::scan_text_assets;
+use dist_guard::{
+    dist_assets_non_empty, dist_index_looks_real, dist_is_web_new, scan_text_assets,
+    web_new_dist_has_desktop_marker, web_new_index_references_assets,
+};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PI_DASH_URL");
@@ -35,7 +38,7 @@ fn main() {
     // when bundled mode is selected against an invalid dist/. That covers
     // the `cargo build` / `cargo run` / IDE-debug-run path that bypasses
     // tauri.conf's beforeDevCommand entirely.
-    let dist_valid = dist_index_looks_real();
+    let dist_valid = dist_index_looks_real(&std::path::PathBuf::from("dist"));
     println!(
         "cargo:rustc-env=PIDASH_DIST_VALID={}",
         if dist_valid { "1" } else { "0" }
@@ -63,44 +66,89 @@ fn main() {
     // don't break on a fresh clone where dist/ is still the placeholder.
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         let dist = std::path::PathBuf::from("dist");
-        let index = dist.join("index.html");
-        let meta = match std::fs::metadata(&index) {
-            Ok(m) => m,
-            Err(e) => panic!(
-                "Release build but desktop/src-tauri/dist/index.html cannot be read: {e}. \
-                Run desktop/scripts/dev-prep.sh to populate dist/ (release pipelines may \
-                pre-populate it and set PIDASH_SKIP_DEV_PREP=1)."
-            ),
-        };
-        if meta.len() < 4096 {
-            panic!(
-                "Release build but desktop/src-tauri/dist/index.html is only {} bytes \
-                (looks like the 118-byte placeholder). Run desktop/scripts/dev-prep.sh \
-                to populate dist/.",
-                meta.len()
-            );
-        }
-        let assets = dist.join("assets");
-        let assets_ok = std::fs::read_dir(&assets)
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false);
-        if !assets_ok {
-            panic!(
-                "Release build but desktop/src-tauri/dist/assets/ is missing or empty. \
-                Run desktop/scripts/dev-prep.sh to populate it (must include hashed JS/CSS chunks)."
-            );
-        }
-        validate_baked_api_base(&dist);
-        validate_baked_web_base(&dist);
-        // Editions whose sign-in hands off to the system browser (an OIDC
-        // provider that must not run inside the webview) opt into checking
-        // that the bundled sign-in screen actually does so.
-        if std::env::var("PIDASH_DESKTOP_EXTERNAL_SIGNIN").as_deref() == Ok("1") {
-            validate_desktop_login_handoff(&dist);
+        if dist_is_web_new(&dist) {
+            validate_web_new_dist(&dist);
+        } else {
+            validate_legacy_dist(&dist);
+            validate_baked_api_base(&dist);
+            validate_baked_web_base(&dist);
+            // Editions whose sign-in hands off to the system browser (an OIDC
+            // provider that must not run inside the webview) opt into checking
+            // that the bundled sign-in screen actually does so.
+            if std::env::var("PIDASH_DESKTOP_EXTERNAL_SIGNIN").as_deref() == Ok("1") {
+                validate_desktop_login_handoff(&dist);
+            }
         }
     }
 
     tauri_build::build()
+}
+
+/// Legacy (overlay-merged apps/web) release guard. web_new's tiny SPA shell
+/// cannot use the byte threshold; see validate_web_new_dist.
+fn validate_legacy_dist(dist: &std::path::Path) {
+    let index = dist.join("index.html");
+    let meta = match std::fs::metadata(&index) {
+        Ok(m) => m,
+        Err(e) => panic!(
+            "Release build but desktop/src-tauri/dist/index.html cannot be read: {e}. \
+            Run desktop/scripts/dev-prep.sh to populate dist/ (release pipelines may \
+            pre-populate it and set PIDASH_SKIP_DEV_PREP=1)."
+        ),
+    };
+    if meta.len() < 4096 {
+        panic!(
+            "Release build but desktop/src-tauri/dist/index.html is only {} bytes \
+            (looks like the 118-byte placeholder). Run desktop/scripts/dev-prep.sh \
+            to populate dist/.",
+            meta.len()
+        );
+    }
+    if !dist_assets_non_empty(dist) {
+        panic!(
+            "Release build but desktop/src-tauri/dist/assets/ is missing or empty. \
+            Run desktop/scripts/dev-prep.sh to populate it (must include hashed JS/CSS chunks)."
+        );
+    }
+}
+
+/// web_new release guard: mirrors dev-prep.sh's web_new validation
+/// (PIDESKAPP-184). web_new ships a tiny SPA shell, so the legacy byte
+/// threshold would panic on a bundle dev-prep just accepted. Instead require
+/// the shell to reference its bundle, a non-empty assets/, and the desktop
+/// platform marker.
+///
+/// The baked API/web-base scans and the legacy open_in_browser hand-off check
+/// do not apply: web_new resolves its API origin at runtime through the
+/// native transport, and its sign-in hand-off is verified by the cloud
+/// edition's own bundle check (PIDESKAPP-204). A dist/ without the web_new
+/// bake-info sidecar falls through to the legacy guard above.
+fn validate_web_new_dist(dist: &std::path::Path) {
+    if std::fs::metadata(dist.join("index.html")).is_err() {
+        panic!(
+            "Release build but desktop/src-tauri/dist/index.html cannot be read. \
+            Run desktop/scripts/dev-prep.sh to populate dist/."
+        );
+    }
+    if !web_new_index_references_assets(dist) {
+        panic!(
+            "Release build but desktop/src-tauri/dist/index.html does not reference \
+            its assets/ bundle (looks like a broken build). Run desktop/scripts/dev-prep.sh."
+        );
+    }
+    if !dist_assets_non_empty(dist) {
+        panic!(
+            "Release build but desktop/src-tauri/dist/assets/ is missing or empty. \
+            Run desktop/scripts/dev-prep.sh to populate it (must include hashed JS/CSS chunks)."
+        );
+    }
+    if !web_new_dist_has_desktop_marker(dist) {
+        panic!(
+            "Release build but desktop/src-tauri/dist has no desktop platform marker. \
+            The bundle was built without PIDASH_TARGET=desktop; rebuild with \
+            PIDASH_DESKTOP_WEB=web_new."
+        );
+    }
 }
 
 fn validate_baked_api_base(dist: &std::path::Path) {
@@ -202,23 +250,4 @@ fn collect_home_signin_chunks(dir: &std::path::Path, chunks: &mut Vec<String>) {
             chunks.push(contents);
         }
     }
-}
-
-/// Shared validity check used by both the release-build guard (panic) and
-/// the debug-build runtime-warning flag (PIDASH_DIST_VALID). Mirrors the
-/// criteria in dev-prep.sh so the three layers agree on what counts as a
-/// "real" SPA bundle.
-fn dist_index_looks_real() -> bool {
-    let dist = std::path::PathBuf::from("dist");
-    let index = dist.join("index.html");
-    let Ok(meta) = std::fs::metadata(&index) else {
-        return false;
-    };
-    if meta.len() < 4096 {
-        return false;
-    }
-    let assets = dist.join("assets");
-    std::fs::read_dir(&assets)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false)
 }
