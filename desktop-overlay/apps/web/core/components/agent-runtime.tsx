@@ -23,8 +23,10 @@ import { registerLocalChatTransport } from "@/services/local-chat-transport";
  * Opening a project no longer enrols anything: the built-in engine is turned
  * on for a project when it is used (design §5). What runs here, per signed-in
  * user: install the per-runner chat routing, find this computer's daemon (on
- * launch, on focus and every minute — renewing the engine silently only when
- * its sign-in is `expiring` or `expired`), and move older builds' private
+ * launch, on focus, on network recovery and every minute — renewing the
+ * engine silently only when its sign-in is `expiring` or `expired`, and
+ * waking the daemon's cloud connections so an outage's backoff ends with the
+ * user's next action — PIDESKAPP-181), and move older builds' private
  * daemon trees to it. The migration is retried on each launch until the
  * daemon is there and signed in as this account.
  *
@@ -71,10 +73,15 @@ export const AgentRuntime = observer(function AgentRuntime() {
     tick();
     const timer = setInterval(tick, 60_000);
     window.addEventListener("focus", tick);
+    // Network recovery: refresh also wakes the daemon's cloud connections —
+    // the browser's `online` event is the only prompt the app gets when
+    // connectivity returns (PIDESKAPP-181).
+    window.addEventListener("online", tick);
     return () => {
       active = false;
       clearInterval(timer);
       window.removeEventListener("focus", tick);
+      window.removeEventListener("online", tick);
     };
   }, [user?.id, user?.email]);
 
