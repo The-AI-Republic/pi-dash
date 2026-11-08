@@ -927,21 +927,15 @@ async function desk025Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     await driver.page.context().addCookies(sessionBrowserCookies(session));
     await driver.openWorkspaceHome(seed.workspaceSlug);
     await expect.poll(() => driver.sidebarLinkTexts(), POLL_60).toContain("Home");
-    // The god-mode route refuses the desktop target and the address is not
-    // one the new app owns, so it leaves the window instead of claiming the
-    // page does not exist. No admin surface renders anywhere.
-    for (const route of ["/god-mode", "/god-mode/"]) {
+    // The console and the public boards are mounted only in the web build
+    // (D13), so their addresses leave the window instead of claiming the
+    // page does not exist. No admin or board surface renders anywhere.
+    for (const route of ["/god-mode", "/god-mode/", "/god-mode/parity-workspace", "/spaces/parity-anchor/"]) {
       await expectHandOff(driver, route);
     }
   });
 
   await test.step("an address the new app owns keeps the in-window not-found", async () => {
-    // The spaces subtree is in the migrated list: it renders in the window,
-    // and an anchor that does not resolve is a real in-app not-found.
-    await driver.visit("/spaces/parity-anchor/");
-    await expect.poll(() => driver.pageText(), POLL_60).toContain("Workspace not found");
-    expect(await driver.pageText()).toContain("Go Home");
-    expect(await driver.pageText()).not.toContain(NEW_HANDOFF_HEADING);
     // A single unknown segment is a workspace address, owned and gated: the
     // workspace-not-found screen, never a browser hand-off.
     await driver.visit("/__parity_no_such_ws__");

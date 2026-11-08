@@ -645,10 +645,16 @@ the old frontend behind the proxy for every route the migrated-route list
 cannot render it (the native shell refuses to load a server-hosted page
 remotely, DESK-024), so the surface that would otherwise show not-found
 becomes the hand-off: under the desktop target, when the address on screen
-is not one the migrated list claims, it opens that same path, query and
-fragment on the hosted web app through the platform external open
-(DESK-015's web-address guard applies) and says the screen moved to the
-browser. A build with no hosted origin baked in cannot open anything and
+is not one the bundle carries, it opens that same path, query and fragment
+on the hosted web app through the platform external open (DESK-015's
+web-address guard applies) and says the screen moved to the browser.
+
+"Carries" means the migrated list minus the web-only subtrees: the console
+(`/god-mode/*`) and the public boards (`/spaces/*`) are in the list because
+the hosted app serves them, but the desktop build mounts neither, so their
+addresses hand off. The exclusion list lives beside the classifier
+(`src/shared/coexistence/webOnlyRoutes.ts`) and must stay a subset of the
+migrated list, which it checks at import time. A build with no hosted origin baked in cannot open anything and
 says so instead. The web target never hands off: it is the hosted app, so
 an address nothing there renders stays the normal not-found page.
 

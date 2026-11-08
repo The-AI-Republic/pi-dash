@@ -29,14 +29,6 @@ pub fn scan_text_assets(dir: &std::path::Path, expected: &str, saw_expected: &mu
     }
 }
 
-/// Whether the document at `index` boots a built bundle: it has to point at
-/// the hashed assets/ directory, which only a real build emits. The committed
-/// placeholder carries no script at all, so this is the one signal that
-/// separates them whatever the frontend's shell size is.
-pub fn index_looks_like_shell(index: &std::path::Path) -> bool {
-    std::fs::read_to_string(index).is_ok_and(|html| html.contains("assets/"))
-}
-
 // Same extensions dev-prep.sh and the release pipeline grep. `txt` is
 // deliberately absent: dist/bake-info.txt is written by the build itself and
 // carries the expected URLs verbatim, so counting it would let the guard pass
@@ -196,34 +188,6 @@ mod tests {
         .unwrap();
 
         assert!(!dist_contains(dist.path(), API_BASE));
-    }
-
-    #[test]
-    fn a_missing_index_does_not_look_like_a_shell() {
-        let dist = tempfile::tempdir().unwrap();
-        assert!(!index_looks_like_shell(&dist.path().join("index.html")));
-    }
-
-    #[test]
-    fn the_committed_placeholder_does_not_look_like_a_shell() {
-        // The placeholder is a small document with no bundle wiring; the real
-        // shell is tiny too, so size cannot tell them apart.
-        let dist = tempfile::tempdir().unwrap();
-        let index = dist.path().join("index.html");
-        std::fs::write(&index, "<!doctype html><html><body></body></html>").unwrap();
-        assert!(!index_looks_like_shell(&index));
-    }
-
-    #[test]
-    fn a_shell_pointing_at_its_assets_looks_real() {
-        let dist = tempfile::tempdir().unwrap();
-        let index = dist.path().join("index.html");
-        std::fs::write(
-            &index,
-            "<!doctype html><html><body><script type=\"module\" src=\"/assets/index-abc123.js\"></script></body></html>",
-        )
-        .unwrap();
-        assert!(index_looks_like_shell(&index));
     }
 
     #[test]

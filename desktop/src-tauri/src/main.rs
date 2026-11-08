@@ -193,10 +193,10 @@ fn bundle_redirect_for(url: &Url, server: &Url, bundle_root: &Url) -> Option<Url
 /// surface, and without a handler wry drops these requests on every
 /// platform, so "Open in new tab" silently did nothing. An in-app path
 /// resolves against the bundle origin, which nothing outside the app can
-/// load — map it to the same path on the hosted web app, as the bundled
-/// frontend does for copied links. Any other http(s) URL opens unchanged.
-/// `None` means refuse: the same http/https restriction as
-/// `open_in_browser`.
+/// load — map it to the same path on the hosted web app, as
+/// `desktop-overlay`'s `desktopWebUrl` does for copied links. Any other
+/// http(s) URL opens unchanged. `None` means refuse: the same http/https
+/// restriction as `open_in_browser`.
 fn browser_url_for_new_window(url: &Url, bundle_root: Option<&Url>, web_base: &Url) -> Option<Url> {
     // Checked first: on Windows the bundle origin is itself an http URL.
     let on_bundle = bundle_root.is_some_and(|root| {

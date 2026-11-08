@@ -18,6 +18,7 @@
 import { parseHostedOrigin } from "../../core/platform/shareUrl.js";
 import { isWebAddress } from "../../core/platform/urls.js";
 import { isMigratedPath } from "./migrated-routes.js";
+import { isWebOnlyDesktopPath } from "./webOnlyRoutes.js";
 
 /** What the desktop shell should do with the address it is showing. */
 export type DesktopRouteVerdict =
@@ -29,15 +30,24 @@ export type DesktopRouteVerdict =
 /**
  * Classify an address the desktop bundle is about to show.
  *
- * Anything the migrated-route list claims stays in the window. Everything
- * else belongs to another frontend and leaves for the browser at the same
- * path, query and fragment. The root address is always in-app: it is the
- * signed-out entry (and the edition's landing), never an old-app screen.
+ * Anything the migrated-route list claims stays in the window — except the
+ * web-only subtrees the desktop bundle does not mount (the instance console
+ * and the public boards, D13). Everything else belongs to another frontend
+ * and leaves for the browser at the same path, query and fragment. The root
+ * address is always in-app: it is the signed-out entry (and the edition's
+ * landing), never an old-app screen.
+ *
+ * An explicit `entries` list is a test/preview seam and describes what the
+ * deployed app claims, not what this bundle carries, so it bypasses the
+ * web-only exclusion the same way the hosted proxy does.
  */
 export function classifyDesktopRoute(path: string, entries?: readonly string[]): DesktopRouteVerdict {
   if (isRootAddress(path)) return { kind: "in-app" };
-  const migrated = entries === undefined ? isMigratedPath(path) : isMigratedPath(path, entries);
-  return migrated ? { kind: "in-app" } : { kind: "hand-off", path };
+  if (entries === undefined) {
+    if (!isMigratedPath(path) || isWebOnlyDesktopPath(path)) return { kind: "hand-off", path };
+    return { kind: "in-app" };
+  }
+  return isMigratedPath(path, entries) ? { kind: "in-app" } : { kind: "hand-off", path };
 }
 
 /** A bare path of slashes, optionally followed by a query or fragment. */

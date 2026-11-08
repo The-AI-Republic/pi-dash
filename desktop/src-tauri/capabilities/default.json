@@ -9,7 +9,6 @@
     "updater:allow-check",
     "updater:allow-download-and-install",
     "dialog:allow-message",
-    "dialog:allow-open",
-    "opener:default"
+    "dialog:allow-open"
   ]
 }
