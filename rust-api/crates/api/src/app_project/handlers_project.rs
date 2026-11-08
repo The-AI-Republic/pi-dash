@@ -5274,11 +5274,25 @@ async fn compact_list_select(
         .order_by(pup_entity::Column::CreatedAt, Order::Desc)
         .to_owned();
     // intake_count: COUNT(ii.id) FILTER (live and status=-2) as a CASE.
+    // Qualified with the table: the outer join also selects from `projects`,
+    // which has its own `deleted_at`/`id`, so bare columns are 42702 ambiguous.
     let intake_count = Expr::case(
-        Expr::col(pidash_db::entity::intake_issues::Column::DeletedAt)
-            .is_null()
-            .and(Expr::col(pidash_db::entity::intake_issues::Column::Status).eq(-2)),
-        Expr::col(pidash_db::entity::intake_issues::Column::Id),
+        Expr::col((
+            pidash_db::entity::intake_issues::Entity,
+            pidash_db::entity::intake_issues::Column::DeletedAt,
+        ))
+        .is_null()
+        .and(
+            Expr::col((
+                pidash_db::entity::intake_issues::Entity,
+                pidash_db::entity::intake_issues::Column::Status,
+            ))
+            .eq(-2),
+        ),
+        Expr::col((
+            pidash_db::entity::intake_issues::Entity,
+            pidash_db::entity::intake_issues::Column::Id,
+        )),
     )
     .finally(Expr::val(Option::<uuid::Uuid>::None));
     let intake_count = sea_orm::sea_query::Expr::expr(intake_count).count();
