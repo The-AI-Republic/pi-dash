@@ -634,22 +634,25 @@ export const UPDATE_AVAILABLE_EVENT = "updater://available";
 interface NativePendingUpdate {
   version?: unknown;
   currentVersion?: unknown;
+  notes?: unknown;
   installing?: unknown;
 }
 
 /**
  * Map the shell's pending-update payload. A malformed announcement is
  * treated as no update, so the control never names a release it cannot
- * install.
+ * install. Release notes ride along only when the shell sent a string.
  */
 export function toPendingUpdate(raw: unknown): PendingUpdate | null {
   if (typeof raw !== "object" || raw === null) return null;
   const payload = raw as NativePendingUpdate;
   if (typeof payload.version !== "string" || payload.version.length === 0) return null;
   if (typeof payload.currentVersion !== "string" || payload.currentVersion.length === 0) return null;
+  const notes = typeof payload.notes === "string" && payload.notes.length > 0 ? payload.notes : undefined;
   return {
     version: payload.version,
     currentVersion: payload.currentVersion,
+    ...(notes === undefined ? {} : { notes }),
     installing: payload.installing === true,
   };
 }
@@ -666,8 +669,16 @@ const desktopUpdater: UpdaterApi = {
     let unlisten: Unsubscribe | undefined;
     events
       .listen<NativePendingUpdate | null>(UPDATE_AVAILABLE_EVENT, (event) => {
+        if (!active) return;
+        // An explicit null is the shell confirming the pending update was
+        // withdrawn — deliver it so the control hides. Anything else is
+        // parsed, and malformed shapes stay dropped.
+        if (event.payload === null) {
+          callback(null);
+          return;
+        }
         const update = toPendingUpdate(event.payload);
-        if (active && update) callback(update);
+        if (update) callback(update);
       })
       .then(
         (stop) => {

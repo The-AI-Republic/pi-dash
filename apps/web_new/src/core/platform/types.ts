@@ -438,6 +438,8 @@ export interface PendingUpdate {
   version: string;
   /** The release the app is running right now. */
   currentVersion: string;
+  /** The release notes from the update manifest, when the release carried any. */
+  notes?: string;
   /** True while the shell downloads and installs this release. */
   installing: boolean;
 }
@@ -491,9 +493,11 @@ export interface UpdaterApi {
   install(): Promise<void>;
   /**
    * Follow announcements of updates found while the app runs, including
-   * the re-announcement after a failed install. Returns the unsubscribe.
+   * the re-announcement after a failed install and a `null` announcement
+   * when the shell confirms the pending update was withdrawn. Returns the
+   * unsubscribe.
    */
-  onAvailable(callback: (update: PendingUpdate) => void): Unsubscribe;
+  onAvailable(callback: (update: PendingUpdate | null) => void): Unsubscribe;
 }
 
 /**
