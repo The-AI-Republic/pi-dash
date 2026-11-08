@@ -1,9 +1,9 @@
+#![forbid(unsafe_code)]
+
 //! Dispatch rules for built-in engine runners (#2903, `dispatch_rules.py`).
 //!
-//! Minimal port for NEWPIDASH-49 (the dispatch core NEWPIDASH-48 owns the
-//! full usage rule/matcher/preflight). This module owns only what the
-//! owner controls call: releasing queued locality pins when an engine
-//! stops taking pod work, and the pause flip effects. Drains run after
+//! Minimal port: releasing queued locality pins when an engine stops
+//! taking pod work, and the pause flip effects. Drains run after
 //! commit; the caller drains the returned pod/runner ids.
 
 use sea_orm::{

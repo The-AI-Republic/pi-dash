@@ -26,10 +26,11 @@
 //! D-26 children swept, none names it), so its field validation and save halves are
 //! translated here — this module is its only consumer.
 //!
-//! Layering: the services builders return `:named`-placeholder fragments; [`positional`]
-//! rewrites them to `$n` (the `handlers_lists` precedent). Endpoint-specific SQL lives
-//! here only where it names this endpoint's projection; merged predicates are spliced
-//! verbatim, never re-ported. DRF field validation (`is_valid()` before `validate()`)
+//! Layering: SeaORM (sea-query) builders project the same predicates the
+//! services `:named`-placeholder fragments name; single-table reads use the
+//! entity API, joins/subqueries the `list_engine::query_built` runner.
+//! Endpoint-specific SQL lives here only where it names this endpoint's
+//! projection; merged predicates are rebuilt verbatim, never re-ported. DRF field validation (`is_valid()` before `validate()`)
 //! is translated here per serializer (verified field-by-field against the pinned
 //! Django 4.2.30 + DRF 3.15.2); the issue-create object leg reuses the merged
 //! [`issue_create_validate`](pidash_services::app_issues::serializers_create::issue_create_validate)
@@ -111,24 +112,29 @@ use uuid::Uuid;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::app_pages::strip::sync_description_stripped;
+use pidash_db::entity::{
+    assistant_user_llm_config, cycle_issues, cycles, draft_issue_assignees, draft_issue_cycles,
+    draft_issue_labels, draft_issue_modules, draft_issues, estimate_points, file_assets,
+    issue_assignees, issue_labels, issue_types, issue_views, issues, labels, module_issues,
+    modules, pages, pod, project_members, project_pages, projects, states, user_favorites, users,
+    workspaces,
+};
+use pidash_db::orm_tx::{is_integrity_violation as sea_is_integrity, TxConn};
 use pidash_jobs::queue::{self, NewJob};
 use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_jobs::TaskMessage;
+use pidash_services::app_issues::serializers_create as create_q;
 use pidash_services::app_issues::serializers_create::{
-    assignee_member_filter_sql, issue_create_to_representation, issue_create_validate,
-    label_filter_null_project_sql, label_filter_sql, m2m_insert_sql, CreateValidateError,
-    ExecutorPolicy, IssueCreateRow, LockedIssueAttrs, PodRef, ResolvedProject, ValidateAttrs,
-    ValidateContext, ValidateProbes, ValidatedAttrs, ESTIMATE_EXISTS_SQL, PARENT_EXISTS_SQL,
-    POD_FETCH_SQL, PROJECT_FETCH_SQL, STATE_EXISTS_SQL,
+    issue_create_to_representation, issue_create_validate, CreateValidateError, ExecutorPolicy,
+    IssueCreateRow, LockedIssueAttrs, PodRef, ResolvedProject, ValidateAttrs, ValidateContext,
+    ValidateProbes, ValidatedAttrs,
 };
 use pidash_services::app_issues::shape::envelope;
-use pidash_services::app_workspace::queries_extras as qx;
 use pidash_services::app_workspace::ser_account_token as fav;
 use pidash_services::app_workspace::tasks as wtask;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
 use pidash_services::dispatch::admission::{
-    LlmProfile, ENROLLED_MANAGED_RUNNERS_EXISTS_SQL, ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL,
-    HEARTBEAT_GRACE_SECS, ONLINE_MANAGED_RUNNER_SQL,
+    self as admission_q, LlmProfile, ManagedRunnerProbe, HEARTBEAT_GRACE_SECS,
 };
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
@@ -141,6 +147,17 @@ use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
+use sea_orm::prelude::DateTimeWithTimeZone;
+use sea_orm::sea_query::extension::postgres::{PgExpr, PgFunc};
+use sea_orm::sea_query::{
+    Alias, BinOper, Condition, Expr, ExprTrait, Func, IntoIden, JoinType, Order, Query,
+    SelectStatement, SimpleExpr, SubQueryStatement,
+};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
+    EntityTrait, FromQueryResult, QueryFilter, QueryOrder, QuerySelect, RelationTrait, RuntimeErr,
+    Set,
+};
 
 use super::gates;
 use crate::app_issues::Denial;
@@ -302,17 +319,60 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// A SeaORM connection over the request pool (no I/O, `list_engine`
+/// precedent).
+fn orm(pool: &sqlx::PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+fn a(name: &'static str) -> Alias {
+    Alias::new(name)
+}
+
+fn col<C: IntoIden + 'static>(alias: &'static str, column: C) -> Expr {
+    Expr::col((a(alias), column))
+}
+
+fn sub(stmt: SelectStatement) -> SimpleExpr {
+    SimpleExpr::SubQuery(None, Box::new(SubQueryStatement::SelectStatement(stmt)))
+}
+
+async fn query_built<T: FromQueryResult>(
+    db: &DatabaseConnection,
+    stmt: &SelectStatement,
+) -> Result<Vec<T>, Denial> {
+    let rows = db
+        .query_all(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    rows.iter()
+        .map(|row| T::from_query_result(row, "").map_err(|_| Denial::ServerError))
+        .collect()
+}
+
+/// `(SELECT id FROM workspaces WHERE slug = $slug)` — the shared
+/// `workspace__slug=:slug` subquery (`queries_membership::
+/// workspace_id_by_slug_sql`). A NULL (unknown slug) matches no row,
+/// exactly as before. No `deleted_at` guard: cross-FK traversal does
+/// not apply the related manager.
+fn workspace_id_sub(slug: &str) -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.column(workspaces::Column::Id)
+        .from(workspaces::Entity)
+        .and_where(workspaces::Column::Slug.eq(slug.to_owned()));
+    sub(stmt)
+}
+
 /// The actor's `user_timezone` (`users.user_timezone`), parsed for DRF
 /// serializer rendering (`TimezoneMixin` activates the actor zone, so every
 /// datetime renders shifted into it). Runs after the membership gate, so
 /// memberless callers 403 before this is reached.
 async fn actor_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    let db = orm(pool);
+    let name = crate::app_issues::access::user_timezone(&db, *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -324,18 +384,9 @@ async fn fetch_workspace_role(
     slug: &str,
     user_id: &Uuid,
 ) -> Result<Option<i16>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    crate::app_issues::access::workspace_role(&orm(pool), slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Membership facts for one decorator gate: the caller passes the route's
@@ -413,16 +464,31 @@ async fn creator_exists(
     pk: &Uuid,
     user_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let sql = format!(
-        "SELECT 1 FROM {table} WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL LIMIT 1"
-    );
-    let row: Option<(i32,)> = sqlx::query_as(&sql)
-        .bind(pk)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let db = orm(pool);
+    let hit: Option<Uuid> = match table {
+        "issues" => issues::Entity::find()
+            .select_only()
+            .column(issues::Column::Id)
+            .filter(issues::Column::Id.eq(*pk))
+            .filter(issues::Column::CreatedById.eq(*user_id))
+            .filter(issues::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?,
+        "draft_issues" => draft_issues::Entity::find()
+            .select_only()
+            .column(draft_issues::Column::Id)
+            .filter(draft_issues::Column::Id.eq(*pk))
+            .filter(draft_issues::Column::CreatedById.eq(*user_id))
+            .filter(draft_issues::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?,
+        _ => unreachable!("creator table {table}"),
+    };
+    Ok(hit.is_some())
 }
 
 #[allow(clippy::result_large_err)]
@@ -445,33 +511,6 @@ fn parse_pk(raw: &str) -> Result<Uuid, Response> {
     }
     Uuid::parse_str(raw)
         .map_err(|_| json_response(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()))
-}
-
-/// Rewrite the services builders' `:named` placeholders to positional
-/// `$n` binds, in `binds` order. Names are matched longest-first so
-/// `:user` never eats the head of a longer placeholder.
-fn positional(fragment: &str, binds: &[&str]) -> String {
-    let mut ordered: Vec<(usize, &str)> = binds
-        .iter()
-        .enumerate()
-        .map(|(index, name)| (index, *name))
-        .collect();
-    ordered.sort_by_key(|(_, name)| std::cmp::Reverse(name.len()));
-    let mut out = fragment.to_owned();
-    for (index, name) in ordered {
-        out = out.replace(&format!(":{name}"), &format!("${}", index + 1));
-    }
-    out
-}
-
-/// Whether a `sqlx` failure is an `IntegrityError` (unique / FK / check /
-/// not-null / exclusion): unique violations, foreign-key violations and
-/// check violations map to the payload 400; everything else is the 500.
-fn is_integrity_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|db| db.code())
-        .is_some_and(|code| code.starts_with("23"))
 }
 
 fn utc_now_micros() -> DateTime<Utc> {
@@ -2337,36 +2376,130 @@ fn valid_branch_name(branch: &str) -> bool {
 }
 
 /// One pk existence probe (`queryset.get` over the field's queryset).
-async fn pk_exists(
-    pool: &sqlx::PgPool,
-    queryset: PkQueryset,
-    id: &Uuid,
-) -> Result<bool, sqlx::Error> {
-    let sql = match queryset {
-        PkQueryset::StatesAll => "SELECT 1 FROM states WHERE id = $1 LIMIT 1",
+async fn pk_exists(pool: &sqlx::PgPool, queryset: PkQueryset, id: &Uuid) -> Result<bool, DbErr> {
+    let db = orm(pool);
+    let hit: Option<Uuid> = match queryset {
+        PkQueryset::StatesAll => {
+            states::Entity::find()
+                .select_only()
+                .column(states::Column::Id)
+                .filter(states::Column::Id.eq(*id))
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
         PkQueryset::States => {
-            "SELECT 1 FROM states WHERE id = $1 AND \"group\" != 'triage' AND deleted_at IS NULL LIMIT 1"
+            states::Entity::find()
+                .select_only()
+                .column(states::Column::Id)
+                .filter(states::Column::Id.eq(*id))
+                .filter(states::Column::Group.ne("triage"))
+                .filter(states::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await?
         }
-        PkQueryset::Issues => "SELECT 1 FROM issues WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
+        PkQueryset::Issues => {
+            issues::Entity::find()
+                .select_only()
+                .column(issues::Column::Id)
+                .filter(issues::Column::Id.eq(*id))
+                .filter(issues::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
         PkQueryset::IssuesVisible => {
-            "SELECT 1 FROM issues i LEFT JOIN states s ON s.id = i.state_id JOIN projects p ON p.id = i.project_id WHERE i.id = $1 AND i.deleted_at IS NULL AND NOT (s.\"group\" = 'triage' AND s.\"group\" IS NOT NULL) AND i.archived_at IS NULL AND p.archived_at IS NULL AND NOT i.is_draft LIMIT 1"
+            issues::Entity::find()
+                .select_only()
+                .column(issues::Column::Id)
+                .join(JoinType::LeftJoin, issues::Relation::States.def())
+                .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+                .filter(issues::Column::Id.eq(*id))
+                .filter(issues::Column::DeletedAt.is_null())
+                .filter(
+                    Condition::all()
+                        .add(states::Column::Group.eq("triage"))
+                        .add(states::Column::Group.is_not_null())
+                        .not(),
+                )
+                .filter(issues::Column::ArchivedAt.is_null())
+                .filter(projects::Column::ArchivedAt.is_null())
+                .filter(issues::Column::IsDraft.eq(false))
+                .into_tuple()
+                .one(&db)
+                .await?
         }
-        PkQueryset::PodsAll => "SELECT 1 FROM pod WHERE id = $1 LIMIT 1",
-        PkQueryset::Labels => "SELECT 1 FROM labels WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
-        PkQueryset::Users => "SELECT 1 FROM users WHERE id = $1 LIMIT 1",
+        PkQueryset::PodsAll => {
+            pod::Entity::find()
+                .select_only()
+                .column(pod::Column::Id)
+                .filter(pod::Column::Id.eq(*id))
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
+        PkQueryset::Labels => {
+            labels::Entity::find()
+                .select_only()
+                .column(labels::Column::Id)
+                .filter(labels::Column::Id.eq(*id))
+                .filter(labels::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
+        PkQueryset::Users => {
+            users::Entity::find()
+                .select_only()
+                .column(users::Column::Id)
+                .filter(users::Column::Id.eq(*id))
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
         PkQueryset::Estimates => {
-            "SELECT 1 FROM estimate_points WHERE id = $1 AND deleted_at IS NULL LIMIT 1"
+            estimate_points::Entity::find()
+                .select_only()
+                .column(estimate_points::Column::Id)
+                .filter(estimate_points::Column::Id.eq(*id))
+                .filter(estimate_points::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await?
         }
         PkQueryset::Types => {
-            "SELECT 1 FROM issue_types WHERE id = $1 AND deleted_at IS NULL LIMIT 1"
+            issue_types::Entity::find()
+                .select_only()
+                .column(issue_types::Column::Id)
+                .filter(issue_types::Column::Id.eq(*id))
+                .filter(issue_types::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await?
         }
-        PkQueryset::Projects => "SELECT 1 FROM projects WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
+        PkQueryset::Projects => {
+            projects::Entity::find()
+                .select_only()
+                .column(projects::Column::Id)
+                .filter(projects::Column::Id.eq(*id))
+                .filter(projects::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await?
+        }
         PkQueryset::Favorites => {
-            "SELECT 1 FROM user_favorites WHERE id = $1 AND deleted_at IS NULL LIMIT 1"
+            user_favorites::Entity::find()
+                .select_only()
+                .column(user_favorites::Column::Id)
+                .filter(user_favorites::Column::Id.eq(*id))
+                .filter(user_favorites::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&db)
+                .await?
         }
     };
-    let row: Option<(i32,)> = sqlx::query_as(sql).bind(id).fetch_optional(pool).await?;
-    Ok(row.is_some())
+    Ok(hit.is_some())
 }
 
 /// Render one serializer-`errors` map (field errors in declaration order;
@@ -2535,13 +2668,15 @@ struct StateRow {
 }
 
 async fn state_row(pool: &sqlx::PgPool, id: &Uuid) -> Result<Option<StateRow>, Denial> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT \"group\" FROM states WHERE id = $1 LIMIT 1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(group,)| StateRow { group }))
+    let row: Option<String> = states::Entity::find()
+        .select_only()
+        .column(states::Column::Group)
+        .filter(states::Column::Id.eq(*id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|group| StateRow { group }))
 }
 
 /// One `projects` row's workspace + default assignee, save-path scope:
@@ -2554,20 +2689,29 @@ struct ProjectRow {
 }
 
 async fn project_row(pool: &sqlx::PgPool, id: &Uuid) -> Result<Option<ProjectRow>, Denial> {
-    let row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
-        "SELECT id, workspace_id, default_assignee_id FROM projects WHERE id = $1 LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(
-        row.map(|(id, workspace_id, default_assignee_id)| ProjectRow {
-            id,
-            workspace_id,
-            default_assignee_id,
-        }),
-    )
+    #[derive(Debug, FromQueryResult)]
+    struct ProjectRowDb {
+        id: Uuid,
+        workspace_id: Uuid,
+        default_assignee_id: Option<Uuid>,
+    }
+    let row: Option<ProjectRowDb> = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::WorkspaceId,
+            projects::Column::DefaultAssigneeId,
+        ])
+        .filter(projects::Column::Id.eq(*id))
+        .into_model()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| ProjectRow {
+        id: row.id,
+        workspace_id: row.workspace_id,
+        default_assignee_id: row.default_assignee_id,
+    }))
 }
 
 /// A JSON float: CPython `repr` for finite values (`1e+16`, `65535.0`),
@@ -2606,34 +2750,108 @@ pub(crate) struct FavoriteRow {
     project_id: Option<String>,
 }
 
-pub(crate) fn favorite_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<FavoriteRow, Denial> {
-    use sqlx::Row;
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let entity_type: String = row
-        .try_get("entity_type")
-        .map_err(|_| Denial::ServerError)?;
-    let entity_identifier: Option<Uuid> = row
-        .try_get("entity_identifier")
-        .map_err(|_| Denial::ServerError)?;
-    let name: Option<String> = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let is_folder: bool = row.try_get("is_folder").map_err(|_| Denial::ServerError)?;
-    let sequence: f64 = row.try_get("sequence").map_err(|_| Denial::ServerError)?;
-    let parent: Option<Uuid> = row.try_get("parent_id").map_err(|_| Denial::ServerError)?;
-    let workspace_id: Uuid = row
-        .try_get("workspace_id")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Option<Uuid> = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    Ok(FavoriteRow {
-        id: id.to_string(),
-        entity_type,
-        entity_identifier: entity_identifier.map(|id| id.to_string()),
-        name,
-        is_folder,
-        sequence,
-        parent: parent.map(|id| id.to_string()),
-        workspace_id: workspace_id.to_string(),
-        project_id: project_id.map(|id| id.to_string()),
-    })
+/// The SeaORM decode of one favorite row (rendered columns only).
+#[derive(Debug, FromQueryResult)]
+struct FavoriteDbRow {
+    id: Uuid,
+    entity_type: String,
+    entity_identifier: Option<Uuid>,
+    name: Option<String>,
+    is_folder: bool,
+    sequence: f64,
+    parent_id: Option<Uuid>,
+    workspace_id: Uuid,
+    project_id: Option<Uuid>,
+}
+
+impl From<FavoriteDbRow> for FavoriteRow {
+    fn from(row: FavoriteDbRow) -> Self {
+        FavoriteRow {
+            id: row.id.to_string(),
+            entity_type: row.entity_type,
+            entity_identifier: row.entity_identifier.map(|id| id.to_string()),
+            name: row.name,
+            is_folder: row.is_folder,
+            sequence: row.sequence,
+            parent: row.parent_id.map(|id| id.to_string()),
+            workspace_id: row.workspace_id.to_string(),
+            project_id: row.project_id.map(|id| id.to_string()),
+        }
+    }
+}
+
+/// The rendered favorite columns over the ported scope (`favorite_list_sql`
+/// without the `*`).
+fn favorites_select(slug: &str, user_id: Uuid, parent: Option<Uuid>, top: bool) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.columns([
+        (a("user_favorites"), user_favorites::Column::Id),
+        (a("user_favorites"), user_favorites::Column::EntityType),
+        (
+            a("user_favorites"),
+            user_favorites::Column::EntityIdentifier,
+        ),
+        (a("user_favorites"), user_favorites::Column::Name),
+        (a("user_favorites"), user_favorites::Column::IsFolder),
+        (a("user_favorites"), user_favorites::Column::Sequence),
+        (a("user_favorites"), user_favorites::Column::ParentId),
+        (a("user_favorites"), user_favorites::Column::WorkspaceId),
+        (a("user_favorites"), user_favorites::Column::ProjectId),
+    ])
+    .from_as(user_favorites::Entity, a("user_favorites"));
+    if top {
+        stmt.and_where(col("user_favorites", user_favorites::Column::UserId).eq(user_id))
+            .and_where(
+                col("user_favorites", user_favorites::Column::WorkspaceId)
+                    .binary(BinOper::Equal, workspace_id_sub(slug)),
+            )
+            .and_where(col("user_favorites", user_favorites::Column::ParentId).is_null())
+            .and_where(col("user_favorites", user_favorites::Column::DeletedAt).is_null());
+    } else {
+        stmt.and_where(col("user_favorites", user_favorites::Column::UserId).eq(user_id))
+            .and_where(
+                col("user_favorites", user_favorites::Column::WorkspaceId)
+                    .binary(BinOper::Equal, workspace_id_sub(slug)),
+            )
+            .and_where(
+                col("user_favorites", user_favorites::Column::ParentId)
+                    .eq(parent.expect("group parent")),
+            )
+            .and_where(col("user_favorites", user_favorites::Column::DeletedAt).is_null());
+    }
+    // Branch: top-level is `(project-null AND NOT page) OR (project-member)`;
+    // the group is `project-null OR (project-member)`.
+    let mut member_probe = Query::select();
+    member_probe
+        .expr(Expr::val(1))
+        .from_as(project_members::Entity, a("pm"))
+        .and_where(
+            col("pm", project_members::Column::ProjectId)
+                .equals((a("user_favorites"), user_favorites::Column::ProjectId)),
+        )
+        .and_where(col("pm", project_members::Column::MemberId).eq(user_id))
+        .and_where(col("pm", project_members::Column::IsActive).eq(true));
+    let member = col("user_favorites", user_favorites::Column::ProjectId)
+        .is_not_null()
+        .and(Expr::exists(member_probe));
+    if top {
+        let escaped = col("user_favorites", user_favorites::Column::EntityType).ne("page");
+        let left = col("user_favorites", user_favorites::Column::ProjectId)
+            .is_null()
+            .and(escaped);
+        stmt.and_where(left.or(member));
+    } else {
+        stmt.and_where(
+            col("user_favorites", user_favorites::Column::ProjectId)
+                .is_null()
+                .or(member),
+        );
+    }
+    stmt.order_by(
+        (a("user_favorites"), user_favorites::Column::CreatedAt),
+        Order::Desc,
+    );
+    stmt
 }
 
 /// Render one favorite row in `USER_FAVORITE_WIRE_FIELDS` order. The
@@ -2677,55 +2895,168 @@ async fn fetch_entity_lite(
     id: &Uuid,
     with_project: bool,
 ) -> Result<Option<EntityLiteRow>, Denial> {
-    use sqlx::Row;
     // Only cycles/modules/views carry a `project_id` column — projects
     // are the top (the lite omits it) and pages link projects M2M (the
     // serializer reads `.first()`).
-    let sql = if with_project {
-        format!(
-            "SELECT id, name, logo_props, project_id FROM {table} WHERE id = $1 AND deleted_at IS NULL LIMIT 1"
-        )
-    } else {
-        format!(
-            "SELECT id, name, logo_props FROM {table} WHERE id = $1 AND deleted_at IS NULL LIMIT 1"
-        )
+    let db = orm(pool);
+    #[derive(Debug, FromQueryResult)]
+    struct LiteNoProject {
+        id: Uuid,
+        name: String,
+        logo_props: Value,
+    }
+    #[derive(Debug, FromQueryResult)]
+    struct LiteWithProject {
+        id: Uuid,
+        name: String,
+        logo_props: Value,
+        project_id: Option<Uuid>,
+    }
+    #[derive(Debug, FromQueryResult)]
+    struct CycleLite {
+        id: Uuid,
+        name: String,
+        logo_props: Value,
+        project_id: Uuid,
+    }
+    let row = match table {
+        "projects" => {
+            let found: Option<LiteNoProject> = projects::Entity::find()
+                .select_only()
+                .columns([
+                    projects::Column::Id,
+                    projects::Column::Name,
+                    projects::Column::LogoProps,
+                ])
+                .filter(projects::Column::Id.eq(*id))
+                .filter(projects::Column::DeletedAt.is_null())
+                .into_model()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            found.map(|row| EntityLiteRow {
+                id: row.id.to_string(),
+                name: row.name,
+                logo_props: row.logo_props,
+                project_id: None,
+            })
+        }
+        "pages" => {
+            let found: Option<LiteNoProject> = pages::Entity::find()
+                .select_only()
+                .columns([
+                    pages::Column::Id,
+                    pages::Column::Name,
+                    pages::Column::LogoProps,
+                ])
+                .filter(pages::Column::Id.eq(*id))
+                .filter(pages::Column::DeletedAt.is_null())
+                .into_model()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            found.map(|row| EntityLiteRow {
+                id: row.id.to_string(),
+                name: row.name,
+                logo_props: row.logo_props,
+                project_id: None,
+            })
+        }
+        "cycles" => {
+            let found: Option<CycleLite> = cycles::Entity::find()
+                .select_only()
+                .columns([
+                    cycles::Column::Id,
+                    cycles::Column::Name,
+                    cycles::Column::LogoProps,
+                    cycles::Column::ProjectId,
+                ])
+                .filter(cycles::Column::Id.eq(*id))
+                .filter(cycles::Column::DeletedAt.is_null())
+                .into_model()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            found.map(|row| EntityLiteRow {
+                id: row.id.to_string(),
+                name: row.name,
+                logo_props: row.logo_props,
+                project_id: Some(row.project_id.to_string()),
+            })
+        }
+        "modules" => {
+            let found: Option<CycleLite> = modules::Entity::find()
+                .select_only()
+                .columns([
+                    modules::Column::Id,
+                    modules::Column::Name,
+                    modules::Column::LogoProps,
+                    modules::Column::ProjectId,
+                ])
+                .filter(modules::Column::Id.eq(*id))
+                .filter(modules::Column::DeletedAt.is_null())
+                .into_model()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            found.map(|row| EntityLiteRow {
+                id: row.id.to_string(),
+                name: row.name,
+                logo_props: row.logo_props,
+                project_id: Some(row.project_id.to_string()),
+            })
+        }
+        "issue_views" => {
+            let found: Option<LiteWithProject> = issue_views::Entity::find()
+                .select_only()
+                .columns([
+                    issue_views::Column::Id,
+                    issue_views::Column::Name,
+                    issue_views::Column::LogoProps,
+                    issue_views::Column::ProjectId,
+                ])
+                .filter(issue_views::Column::Id.eq(*id))
+                .filter(issue_views::Column::DeletedAt.is_null())
+                .into_model()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
+            found.map(|row| EntityLiteRow {
+                id: row.id.to_string(),
+                name: row.name,
+                logo_props: row.logo_props,
+                project_id: row.project_id.map(|id| id.to_string()),
+            })
+        }
+        _ => unreachable!("entity table {table}"),
     };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let name: String = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let logo_props: Value = row.try_get("logo_props").map_err(|_| Denial::ServerError)?;
-    let project_id: Option<Uuid> = if with_project {
-        row.try_get("project_id").map_err(|_| Denial::ServerError)?
-    } else {
-        None
-    };
-    Ok(Some(EntityLiteRow {
-        id: id.to_string(),
-        name,
-        logo_props,
-        project_id: project_id.map(|id| id.to_string()),
-    }))
+    let _ = with_project;
+    Ok(row)
 }
 
 /// `Page.projects.first()`: the page's projects, `-created_at` first, over
 /// the live-`Project` manager (the through rows carry no deletion filter —
 /// the M2M manager only scopes the target model).
 async fn page_first_project(pool: &sqlx::PgPool, page_id: &Uuid) -> Result<Option<String>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT p.id FROM project_pages pp JOIN projects p ON p.id = pp.project_id WHERE pp.page_id = $1 AND p.deleted_at IS NULL ORDER BY p.created_at DESC LIMIT 1",
-    )
-    .bind(page_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(id,)| id.to_string()))
+    #[derive(Debug, FromQueryResult)]
+    struct ProjectIdRow {
+        id: Uuid,
+    }
+    let mut stmt = Query::select();
+    stmt.column((a("p"), projects::Column::Id))
+        .from_as(project_pages::Entity, a("pp"))
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            a("p"),
+            col("p", projects::Column::Id).equals((a("pp"), project_pages::Column::ProjectId)),
+        )
+        .and_where(col("pp", project_pages::Column::PageId).eq(*page_id))
+        .and_where(col("p", projects::Column::DeletedAt).is_null())
+        .order_by((a("p"), projects::Column::CreatedAt), Order::Desc)
+        .limit(1);
+    let rows = query_built::<ProjectIdRow>(&orm(pool), &stmt).await?;
+    Ok(rows.into_iter().next().map(|row| row.id.to_string()))
 }
 
 /// `get_entity_data` (`favorite.py:83-88`): `None` for `issue`/`folder`/
@@ -2841,24 +3172,12 @@ async fn favorite_list(
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, false).await? {
         return Ok(denied);
     }
-    let sql = positional(
-        &format!(
-            "SELECT user_favorites.* FROM user_favorites WHERE {} AND {} ORDER BY {}",
-            qx::favorite_scope_where(),
-            qx::favorite_branch_where(),
-            qx::FAVORITE_LIST_ORDER_SQL,
-        ),
-        &["slug", "user"],
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(&slug)
-        .bind(user_id)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let rows =
+        query_built::<FavoriteDbRow>(&orm(&pool), &favorites_select(&slug, user_id, None, true))
+            .await?;
     let mut rendered = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let favorite = favorite_row_from_pg(row)?;
+    for row in rows {
+        let favorite = FavoriteRow::from(row);
         let entity = fetch_favorite_entity(
             &pool,
             &favorite.entity_type,
@@ -2912,21 +3231,66 @@ const FILTER_DISPATCH_ORDER: &[&str] = &[
     "start_target_date",
 ];
 
-/// One compiled predicate: SQL text, or the failure Django raises while
-/// building it (`true` = `FieldError`/500, `false` = `ValidationError`/400).
+/// One compiled predicate: a SeaORM condition, or the failure Django
+/// raises while building it (`true` = `FieldError`/500, `false` =
+/// `ValidationError`/400).
 enum FilterPredicate {
-    Sql(String),
+    Cond(SimpleExpr),
     Fail(bool),
 }
 
-/// Compile the legacy filters for the draft list: `Ok(sql)` appends to the
-/// window (and count) query; `Err(500)` on the first `FieldError` predicate;
-/// `Err(400)` on the first `ValidationError` predicate.
+fn draft_col(column: draft_issues::Column) -> Expr {
+    col("draft_issues", column)
+}
+
+fn draft_exists_states(groups: &[String]) -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.expr(Expr::val(1))
+        .from_as(states::Entity, a("s"))
+        .and_where(
+            col("s", states::Column::Id).equals((a("draft_issues"), draft_issues::Column::StateId)),
+        )
+        .and_where(col("s", states::Column::Group).is_in(groups.iter().cloned()));
+    Expr::exists(stmt)
+}
+
+fn draft_zoned_date(column: draft_issues::Column, timezone: &Tz) -> SimpleExpr {
+    draft_col(column)
+        .binary(BinOper::Custom("AT TIME ZONE"), Expr::val(timezone.name()))
+        .cast_as(a("date"))
+}
+
+fn draft_date_term(term: &str, timezone: &Tz) -> SimpleExpr {
+    match term {
+        "created_at__date" => draft_zoned_date(draft_issues::Column::CreatedAt, timezone),
+        "completed_at__date" => draft_zoned_date(draft_issues::Column::CompletedAt, timezone),
+        "start_date" => draft_col(draft_issues::Column::StartDate).into(),
+        "target_date" => draft_col(draft_issues::Column::TargetDate).into(),
+        other => unreachable!("date term {other}"),
+    }
+}
+
+fn draft_date_bound(left: SimpleExpr, gte: bool, date: NaiveDate) -> SimpleExpr {
+    let right = Expr::val(date.to_string()).cast_as(a("date"));
+    if gte {
+        left.gte(right)
+    } else {
+        left.lte(right)
+    }
+}
+
+fn draft_like_pattern(text: &str) -> String {
+    format!("%{}%", escape_like(text))
+}
+
+/// Compile the legacy filters for the draft list: `Ok(condition)` appends to
+/// the window (and count) query; `Err(500)` on the first `FieldError`
+/// predicate; `Err(400)` on the first `ValidationError` predicate.
 fn compile_draft_filters(
     pairs: &[(String, String)],
     now: &DateTime<Utc>,
     timezone: &Tz,
-) -> Result<String, StatusCode> {
+) -> Result<Condition, StatusCode> {
     // Ordered map: key → predicate (later assignments overwrite the value,
     // keeping the first position).
     let mut predicates: Vec<(String, FilterPredicate)> = Vec::new();
@@ -2947,23 +3311,18 @@ fn compile_draft_filters(
                 if !ids.is_empty() {
                     insert(
                         "state__in".to_owned(),
-                        FilterPredicate::Sql(in_uuid_list("draft_issues.state_id", &ids)),
+                        FilterPredicate::Cond(draft_col(draft_issues::Column::StateId).is_in(ids)),
                     );
                 }
             }
             "state_group" => {
                 let groups = raw_list(raw);
                 if !groups.is_empty() {
+                    let groups: Vec<String> =
+                        groups.iter().map(|group| (*group).to_owned()).collect();
                     insert(
                         "state__group__in".to_owned(),
-                        FilterPredicate::Sql(format!(
-                            r#"EXISTS(SELECT 1 FROM states s WHERE s.id = draft_issues.state_id AND s."group" IN ({}))"#,
-                            groups
-                                .iter()
-                                .map(|group| push_text(group))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )),
+                        FilterPredicate::Cond(draft_exists_states(&groups)),
                     );
                 }
             }
@@ -2991,10 +3350,9 @@ fn compile_draft_filters(
                     } else {
                         insert(
                             "estimate_point__in".to_owned(),
-                            FilterPredicate::Sql(in_uuid_list(
-                                "draft_issues.estimate_point_id",
-                                &ids,
-                            )),
+                            FilterPredicate::Cond(
+                                draft_col(draft_issues::Column::EstimatePointId).is_in(ids),
+                            ),
                         );
                     }
                 }
@@ -3002,16 +3360,15 @@ fn compile_draft_filters(
             "priority" => {
                 let priorities = raw_list(raw);
                 if !priorities.is_empty() {
+                    let priorities: Vec<String> = priorities
+                        .iter()
+                        .map(|priority| (*priority).to_owned())
+                        .collect();
                     insert(
                         "priority__in".to_owned(),
-                        FilterPredicate::Sql(format!(
-                            "draft_issues.priority IN ({})",
-                            priorities
-                                .iter()
-                                .map(|priority| push_text(priority))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )),
+                        FilterPredicate::Cond(
+                            draft_col(draft_issues::Column::Priority).is_in(priorities),
+                        ),
                     );
                 }
             }
@@ -3020,14 +3377,14 @@ fn compile_draft_filters(
                 if items.contains(&"None") {
                     insert(
                         "parent__isnull".to_owned(),
-                        FilterPredicate::Sql("draft_issues.parent_id IS NULL".to_owned()),
+                        FilterPredicate::Cond(draft_col(draft_issues::Column::ParentId).is_null()),
                     );
                 }
                 let ids = valid_uuid_list(raw);
                 if !ids.is_empty() {
                     insert(
                         "parent__in".to_owned(),
-                        FilterPredicate::Sql(in_uuid_list("draft_issues.parent_id", &ids)),
+                        FilterPredicate::Cond(draft_col(draft_issues::Column::ParentId).is_in(ids)),
                     );
                 }
             }
@@ -3061,14 +3418,18 @@ fn compile_draft_filters(
                 if items.contains(&"None") {
                     insert(
                         "created_by__isnull".to_owned(),
-                        FilterPredicate::Sql("draft_issues.created_by_id IS NULL".to_owned()),
+                        FilterPredicate::Cond(
+                            draft_col(draft_issues::Column::CreatedById).is_null(),
+                        ),
                     );
                 }
                 let ids = valid_uuid_list(raw);
                 if !ids.is_empty() {
                     insert(
                         "created_by__in".to_owned(),
-                        FilterPredicate::Sql(in_uuid_list("draft_issues.created_by_id", &ids)),
+                        FilterPredicate::Cond(
+                            draft_col(draft_issues::Column::CreatedById).is_in(ids),
+                        ),
                     );
                 }
             }
@@ -3085,10 +3446,9 @@ fn compile_draft_filters(
                 if !raw.is_empty() {
                     insert(
                         "name__icontains".to_owned(),
-                        FilterPredicate::Sql(format!(
-                            "draft_issues.name ILIKE {} ESCAPE '\\'",
-                            push_text(&format!("%{}%", escape_like(raw)))
-                        )),
+                        FilterPredicate::Cond(
+                            draft_col(draft_issues::Column::Name).ilike(draft_like_pattern(raw)),
+                        ),
                     );
                 }
             }
@@ -3115,16 +3475,10 @@ fn compile_draft_filters(
                         "cancelled",
                     ],
                 };
+                let groups: Vec<String> = groups.iter().map(|group| (*group).to_owned()).collect();
                 insert(
                     "state__group__in".to_owned(),
-                    FilterPredicate::Sql(format!(
-                        r#"EXISTS(SELECT 1 FROM states s WHERE s.id = draft_issues.state_id AND s."group" IN ({}))"#,
-                        groups
-                            .iter()
-                            .map(|group| push_text(group))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )),
+                    FilterPredicate::Cond(draft_exists_states(&groups)),
                 );
             }
             "project" => {
@@ -3132,7 +3486,9 @@ fn compile_draft_filters(
                 if !ids.is_empty() {
                     insert(
                         "project__in".to_owned(),
-                        FilterPredicate::Sql(in_uuid_list("draft_issues.project_id", &ids)),
+                        FilterPredicate::Cond(
+                            draft_col(draft_issues::Column::ProjectId).is_in(ids),
+                        ),
                     );
                 }
             }
@@ -3172,7 +3528,7 @@ fn compile_draft_filters(
                 if raw == "false" {
                     insert(
                         "parent__isnull".to_owned(),
-                        FilterPredicate::Sql("draft_issues.parent_id IS NULL".to_owned()),
+                        FilterPredicate::Cond(draft_col(draft_issues::Column::ParentId).is_null()),
                     );
                 }
             }
@@ -3186,21 +3542,25 @@ fn compile_draft_filters(
                 if raw == "true" {
                     insert(
                         "target_date__isnull".to_owned(),
-                        FilterPredicate::Sql("draft_issues.target_date IS NOT NULL".to_owned()),
+                        FilterPredicate::Cond(
+                            draft_col(draft_issues::Column::TargetDate).is_not_null(),
+                        ),
                     );
                     insert(
                         "start_date__isnull".to_owned(),
-                        FilterPredicate::Sql("draft_issues.start_date IS NOT NULL".to_owned()),
+                        FilterPredicate::Cond(
+                            draft_col(draft_issues::Column::StartDate).is_not_null(),
+                        ),
                     );
                 }
             }
             _ => unreachable!("dispatcher key {key}"),
         }
     }
-    let mut fragments = Vec::new();
+    let mut condition = Condition::all();
     for (_, predicate) in &predicates {
         match predicate {
-            FilterPredicate::Sql(sql) => fragments.push(sql.clone()),
+            FilterPredicate::Cond(expr) => condition = condition.add(expr.clone()),
             FilterPredicate::Fail(field_error) => {
                 return Err(if *field_error {
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -3210,7 +3570,7 @@ fn compile_draft_filters(
             }
         }
     }
-    Ok(fragments.join(" AND "))
+    Ok(condition)
 }
 
 /// `filter_valid_uuids` over a comma list minus `"null"`: `uuid.UUID(item)`
@@ -3231,16 +3591,6 @@ fn raw_list(raw: &str) -> Vec<&str> {
     } else {
         items
     }
-}
-
-fn in_uuid_list(column: &str, ids: &[Uuid]) -> String {
-    format!(
-        "{column} IN ({})",
-        ids.iter()
-            .map(|id| format!("'{id}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 /// Escape LIKE specials for `__contains`/`__icontains` (backslash escape).
@@ -3277,20 +3627,7 @@ fn compile_date_param(
     if queries.is_empty() || queries.contains(&"") {
         return;
     }
-    // The zone comes from a parsed `Tz`, so it is a valid IANA name; the
-    // quotes are doubled anyway because this SQL is interpolated, not bound.
-    let zone = timezone.name().replace('\'', "''");
-    let column = match term {
-        "created_at__date" => {
-            format!("(draft_issues.created_at AT TIME ZONE '{zone}')::date")
-        }
-        "completed_at__date" => {
-            format!("(draft_issues.completed_at AT TIME ZONE '{zone}')::date")
-        }
-        "start_date" => "draft_issues.start_date".to_owned(),
-        "target_date" => "draft_issues.target_date".to_owned(),
-        _ => unreachable!("date term {term}"),
-    };
+    let column = || draft_date_term(term, timezone);
     for query in queries {
         let parts: Vec<&str> = query.split(';').collect();
         if parts.len() >= 2 {
@@ -3317,10 +3654,7 @@ fn compile_date_param(
                     let key = format!("{term}__{}", if gte { "gte" } else { "lte" });
                     insert(
                         key,
-                        FilterPredicate::Sql(format!(
-                            "{column} {} '{bound}'",
-                            if gte { ">=" } else { "<=" }
-                        )),
+                        FilterPredicate::Cond(draft_date_bound(column(), gte, bound)),
                     );
                 }
                 // A relative head with != 3 parts writes NOTHING.
@@ -3328,7 +3662,7 @@ fn compile_date_param(
                 match parse_drf_date(parts[0]) {
                     Some(date) => insert(
                         format!("{term}__gte"),
-                        FilterPredicate::Sql(format!("{column} >= '{date}'")),
+                        FilterPredicate::Cond(draft_date_bound(column(), true, date)),
                     ),
                     None => insert(format!("{term}__gte"), FilterPredicate::Fail(false)),
                 }
@@ -3336,7 +3670,7 @@ fn compile_date_param(
                 match parse_drf_date(parts[0]) {
                     Some(date) => insert(
                         format!("{term}__lte"),
-                        FilterPredicate::Sql(format!("{column} <= '{date}'")),
+                        FilterPredicate::Cond(draft_date_bound(column(), false, date)),
                     ),
                     None => insert(format!("{term}__lte"), FilterPredicate::Fail(false)),
                 }
@@ -3344,10 +3678,11 @@ fn compile_date_param(
         } else {
             insert(
                 format!("{term}__contains"),
-                FilterPredicate::Sql(format!(
-                    "{column}::text LIKE {} ESCAPE '\\'",
-                    push_text(&format!("%{}%", escape_like(parts[0])))
-                )),
+                FilterPredicate::Cond(
+                    column()
+                        .cast_as(a("text"))
+                        .like(draft_like_pattern(parts[0])),
+                ),
             );
         }
     }
@@ -3383,67 +3718,244 @@ fn uuid_opt_text(value: Option<Uuid>) -> Option<String> {
     value.map(|id| id.to_string())
 }
 
-fn draft_row_from_pg(row: &sqlx::postgres::PgRow) -> Result<DraftRow, Denial> {
-    use sqlx::Row;
-    let id: Uuid = row.try_get("id").map_err(|_| Denial::ServerError)?;
-    let name: Option<String> = row.try_get("name").map_err(|_| Denial::ServerError)?;
-    let state_id: Option<Uuid> = row.try_get("state_id").map_err(|_| Denial::ServerError)?;
-    let sort_order: f64 = row.try_get("sort_order").map_err(|_| Denial::ServerError)?;
-    let completed_at: Option<DateTime<Utc>> = row
-        .try_get("completed_at")
-        .map_err(|_| Denial::ServerError)?;
-    let estimate_point: Option<Uuid> = row
-        .try_get("estimate_point_id")
-        .map_err(|_| Denial::ServerError)?;
-    let priority: String = row.try_get("priority").map_err(|_| Denial::ServerError)?;
-    let start_date: Option<NaiveDate> =
-        row.try_get("start_date").map_err(|_| Denial::ServerError)?;
-    let target_date: Option<NaiveDate> = row
-        .try_get("target_date")
-        .map_err(|_| Denial::ServerError)?;
-    let project_id: Option<Uuid> = row.try_get("project_id").map_err(|_| Denial::ServerError)?;
-    let parent_id: Option<Uuid> = row.try_get("parent_id").map_err(|_| Denial::ServerError)?;
-    let cycle_id: Option<Uuid> = row.try_get("cycle_id").map_err(|_| Denial::ServerError)?;
-    let module_ids: Vec<Uuid> = row.try_get("module_ids").map_err(|_| Denial::ServerError)?;
-    let label_ids: Vec<Uuid> = row.try_get("label_ids").map_err(|_| Denial::ServerError)?;
-    let assignee_ids: Vec<Uuid> = row
-        .try_get("assignee_ids")
-        .map_err(|_| Denial::ServerError)?;
-    let created_at: DateTime<Utc> = row.try_get("created_at").map_err(|_| Denial::ServerError)?;
-    let updated_at: DateTime<Utc> = row.try_get("updated_at").map_err(|_| Denial::ServerError)?;
-    let created_by: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let updated_by: Option<Uuid> = row
-        .try_get("updated_by_id")
-        .map_err(|_| Denial::ServerError)?;
-    let type_id: Option<Uuid> = row.try_get("type_id").map_err(|_| Denial::ServerError)?;
-    let description_html: String = row
-        .try_get("description_html")
-        .map_err(|_| Denial::ServerError)?;
-    Ok(DraftRow {
-        id: id.to_string(),
-        name,
-        state_id: uuid_opt_text(state_id),
-        sort_order,
-        completed_at,
-        estimate_point: uuid_opt_text(estimate_point),
-        priority,
-        start_date,
-        target_date,
-        project_id: uuid_opt_text(project_id),
-        parent_id: uuid_opt_text(parent_id),
-        cycle_id: uuid_opt_text(cycle_id),
-        module_ids: module_ids.iter().map(ToString::to_string).collect(),
-        label_ids: label_ids.iter().map(ToString::to_string).collect(),
-        assignee_ids: assignee_ids.iter().map(ToString::to_string).collect(),
-        created_at,
-        updated_at,
-        created_by: uuid_opt_text(created_by),
-        updated_by: uuid_opt_text(updated_by),
-        type_id: uuid_opt_text(type_id),
-        description_html,
-    })
+/// The SeaORM decode of one draft row (list/detail columns + the four
+/// annotations).
+#[derive(Debug, FromQueryResult)]
+struct DraftDbRow {
+    id: Uuid,
+    name: Option<String>,
+    state_id: Option<Uuid>,
+    sort_order: f64,
+    completed_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    estimate_point_id: Option<Uuid>,
+    priority: String,
+    start_date: Option<NaiveDate>,
+    target_date: Option<NaiveDate>,
+    project_id: Option<Uuid>,
+    parent_id: Option<Uuid>,
+    cycle_id: Option<Uuid>,
+    module_ids: Vec<Uuid>,
+    label_ids: Vec<Uuid>,
+    assignee_ids: Vec<Uuid>,
+    created_at: chrono::DateTime<chrono::FixedOffset>,
+    updated_at: chrono::DateTime<chrono::FixedOffset>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    type_id: Option<Uuid>,
+    description_html: String,
+}
+
+fn draft_from_db(row: DraftDbRow) -> DraftRow {
+    DraftRow {
+        id: row.id.to_string(),
+        name: row.name,
+        state_id: uuid_opt_text(row.state_id),
+        sort_order: row.sort_order,
+        completed_at: row.completed_at.map(|moment| moment.with_timezone(&Utc)),
+        estimate_point: uuid_opt_text(row.estimate_point_id),
+        priority: row.priority,
+        start_date: row.start_date,
+        target_date: row.target_date,
+        project_id: uuid_opt_text(row.project_id),
+        parent_id: uuid_opt_text(row.parent_id),
+        cycle_id: uuid_opt_text(row.cycle_id),
+        module_ids: row.module_ids.iter().map(ToString::to_string).collect(),
+        label_ids: row.label_ids.iter().map(ToString::to_string).collect(),
+        assignee_ids: row.assignee_ids.iter().map(ToString::to_string).collect(),
+        created_at: row.created_at.with_timezone(&Utc),
+        updated_at: row.updated_at.with_timezone(&Utc),
+        created_by: uuid_opt_text(row.created_by_id),
+        updated_by: uuid_opt_text(row.updated_by_id),
+        type_id: uuid_opt_text(row.type_id),
+        description_html: row.description_html,
+    }
+}
+
+/// `COALESCE(ARRAY_AGG(DISTINCT x), '{}'::uuid[])` (`list_engine::id_array`).
+fn draft_id_array(x: Expr) -> SimpleExpr {
+    Func::coalesce([
+        PgFunc::array_agg_distinct(x).into(),
+        Expr::val("{}").cast_as(a("uuid[]")),
+    ])
+    .into()
+}
+
+/// The draft cycle subquery (`draft_cycle_subquery_sql`): alive links for
+/// this draft, `LIMIT 1` with NO `ORDER BY`.
+fn draft_cycle_expr() -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.column((a("dic"), draft_issue_cycles::Column::CycleId))
+        .from_as(draft_issue_cycles::Entity, a("dic"))
+        .and_where(
+            col("dic", draft_issue_cycles::Column::DraftIssueId)
+                .equals((a("draft_issues"), draft_issues::Column::Id)),
+        )
+        .and_where(col("dic", draft_issue_cycles::Column::DeletedAt).is_null())
+        .limit(1);
+    sub(stmt)
+}
+
+/// `label_ids` (`draft_label_ids_annotation_sql`): DISTINCT label ids over
+/// alive links whose label row exists (`labels.id IS NOT NULL`).
+fn draft_label_ids_expr() -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.expr(draft_id_array(col("labels", labels::Column::Id)))
+        .from_as(draft_issue_labels::Entity, a("dil"))
+        .join_as(
+            JoinType::InnerJoin,
+            labels::Entity,
+            a("labels"),
+            col("labels", labels::Column::Id)
+                .equals((a("dil"), draft_issue_labels::Column::LabelId)),
+        )
+        .and_where(
+            col("dil", draft_issue_labels::Column::DraftIssueId)
+                .equals((a("draft_issues"), draft_issues::Column::Id)),
+        )
+        .and_where(col("dil", draft_issue_labels::Column::DeletedAt).is_null());
+    sub(stmt)
+}
+
+/// `assignee_ids` (`draft_assignee_ids_annotation_sql`): DISTINCT assignee
+/// ids over alive links where ANY active membership qualifies (no project
+/// scoping, no `pm.deleted_at` guard).
+fn draft_assignee_ids_expr() -> SimpleExpr {
+    let mut member = Query::select();
+    member
+        .expr(Expr::val(1))
+        .from_as(project_members::Entity, a("pm"))
+        .and_where(
+            col("pm", project_members::Column::MemberId).equals((a("users"), users::Column::Id)),
+        )
+        .and_where(col("pm", project_members::Column::IsActive).eq(true));
+    let mut stmt = Query::select();
+    stmt.expr(draft_id_array(col("users", users::Column::Id)))
+        .from_as(draft_issue_assignees::Entity, a("dia"))
+        .join_as(
+            JoinType::InnerJoin,
+            users::Entity,
+            a("users"),
+            col("users", users::Column::Id)
+                .equals((a("dia"), draft_issue_assignees::Column::AssigneeId)),
+        )
+        .and_where(
+            col("dia", draft_issue_assignees::Column::DraftIssueId)
+                .equals((a("draft_issues"), draft_issues::Column::Id)),
+        )
+        .and_where(col("dia", draft_issue_assignees::Column::DeletedAt).is_null())
+        .and_where(Expr::exists(member));
+    sub(stmt)
+}
+
+/// `module_ids` (`draft_module_ids_annotation_sql`): DISTINCT module ids
+/// over alive links whose module is unarchived (no `modules.deleted_at`
+/// guard).
+fn draft_module_ids_expr() -> SimpleExpr {
+    let mut stmt = Query::select();
+    stmt.expr(draft_id_array(col(
+        "dim",
+        draft_issue_modules::Column::ModuleId,
+    )))
+    .from_as(draft_issue_modules::Entity, a("dim"))
+    .join_as(
+        JoinType::InnerJoin,
+        modules::Entity,
+        a("modules"),
+        col("modules", modules::Column::Id)
+            .equals((a("dim"), draft_issue_modules::Column::ModuleId)),
+    )
+    .and_where(
+        col("dim", draft_issue_modules::Column::DraftIssueId)
+            .equals((a("draft_issues"), draft_issues::Column::Id)),
+    )
+    .and_where(col("dim", draft_issue_modules::Column::DeletedAt).is_null())
+    .and_where(col("modules", modules::Column::ArchivedAt).is_null());
+    sub(stmt)
+}
+
+/// The drafted read select: the 21 local columns plus the four
+/// annotations, over the base scope (`draft_scope_where`). `own` adds the
+/// `created_by` leg (list); `reread` pins one pk (create re-read / retrieve).
+fn draft_rows_select(
+    slug: &str,
+    filters: Condition,
+    own: Option<Uuid>,
+    reread: Option<Uuid>,
+    limit: u64,
+    offset: u64,
+    paged: bool,
+) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.columns([
+        (a("draft_issues"), draft_issues::Column::Id),
+        (a("draft_issues"), draft_issues::Column::Name),
+        (a("draft_issues"), draft_issues::Column::StateId),
+        (a("draft_issues"), draft_issues::Column::SortOrder),
+        (a("draft_issues"), draft_issues::Column::CompletedAt),
+        (a("draft_issues"), draft_issues::Column::EstimatePointId),
+        (a("draft_issues"), draft_issues::Column::Priority),
+        (a("draft_issues"), draft_issues::Column::StartDate),
+        (a("draft_issues"), draft_issues::Column::TargetDate),
+        (a("draft_issues"), draft_issues::Column::ProjectId),
+        (a("draft_issues"), draft_issues::Column::ParentId),
+        (a("draft_issues"), draft_issues::Column::CreatedAt),
+        (a("draft_issues"), draft_issues::Column::UpdatedAt),
+        (a("draft_issues"), draft_issues::Column::CreatedById),
+        (a("draft_issues"), draft_issues::Column::UpdatedById),
+        (a("draft_issues"), draft_issues::Column::TypeId),
+        (a("draft_issues"), draft_issues::Column::DescriptionHtml),
+    ])
+    .expr_as(draft_cycle_expr(), a("cycle_id"))
+    .expr_as(draft_module_ids_expr(), a("module_ids"))
+    .expr_as(draft_label_ids_expr(), a("label_ids"))
+    .expr_as(draft_assignee_ids_expr(), a("assignee_ids"))
+    .from_as(draft_issues::Entity, a("draft_issues"))
+    .and_where(
+        col("draft_issues", draft_issues::Column::WorkspaceId)
+            .binary(BinOper::Equal, workspace_id_sub(slug)),
+    )
+    .and_where(col("draft_issues", draft_issues::Column::DeletedAt).is_null());
+    if let Some(user_id) = own {
+        stmt.and_where(col("draft_issues", draft_issues::Column::CreatedById).eq(user_id));
+    }
+    if let Some(id) = reread {
+        stmt.and_where(col("draft_issues", draft_issues::Column::Id).eq(id));
+    }
+    stmt.cond_where(filters);
+    if paged {
+        stmt.order_by(
+            (a("draft_issues"), draft_issues::Column::CreatedAt),
+            Order::Desc,
+        )
+        .limit(limit)
+        .offset(offset);
+    } else {
+        stmt.limit(limit);
+    }
+    stmt
+}
+
+/// The list count: `COUNT(DISTINCT draft_issues.id)` over the same scope.
+fn draft_count_select(slug: &str, filters: Condition, user_id: Uuid) -> SelectStatement {
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Func::count_distinct(col("draft_issues", draft_issues::Column::Id)),
+        a("n"),
+    )
+    .from_as(draft_issues::Entity, a("draft_issues"))
+    .and_where(
+        col("draft_issues", draft_issues::Column::WorkspaceId)
+            .binary(BinOper::Equal, workspace_id_sub(slug)),
+    )
+    .and_where(col("draft_issues", draft_issues::Column::DeletedAt).is_null())
+    .and_where(col("draft_issues", draft_issues::Column::CreatedById).eq(user_id));
+    stmt.cond_where(filters);
+    stmt
+}
+
+#[derive(Debug, FromQueryResult)]
+struct CountDbRow {
+    n: i64,
 }
 
 /// Render one draft row in `DraftIssueSerializer.Meta.fields` order
@@ -3534,7 +4046,7 @@ async fn draft_list(
     let timezone = actor_timezone(&pool, &user_id).await?;
     // `.filter(**filters)` runs BEFORE `paginate` (`:100-105`).
     let filters = match compile_draft_filters(&pairs, &utc_now_micros(), &timezone) {
-        Ok(sql) => sql,
+        Ok(condition) => condition,
         Err(StatusCode::INTERNAL_SERVER_ERROR) => {
             return Ok(gzip_body(
                 &headers,
@@ -3560,53 +4072,35 @@ async fn draft_list(
     let limit = per_page.min(1000);
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
-    // The window and count share one filter text: scope + own rows + legacy.
-    let where_sql = format!(
-        "{} AND draft_issues.created_by_id = '{}'{}",
-        positional(&qx::draft_scope_where(), &["slug"]),
-        user_id,
-        if filters.is_empty() {
-            String::new()
-        } else {
-            format!(" AND ({filters})")
-        },
-    );
-    let from_where = format!("FROM draft_issues WHERE {where_sql}");
+    // The window and count share one filter set: scope + own rows + legacy.
     // The `select_related` set is not executed (every rendered key is a
-    // local column or a ported annotation); the joins only exist to feed
-    // the `ArrayAgg` annotations.
-    let window_sql = format!(
-        "SELECT DISTINCT draft_issues.*, {}, {}, {}, {} FROM draft_issues {} WHERE {where_sql} GROUP BY draft_issues.id ORDER BY {} LIMIT {} OFFSET {}",
-        qx::draft_cycle_subquery_sql(),
-        qx::draft_label_ids_annotation_sql(),
-        qx::draft_assignee_ids_annotation_sql(),
-        qx::draft_module_ids_annotation_sql(),
-        draft_annotation_joins(),
-        qx::DRAFT_LIST_ORDER_SQL,
-        window.stop - window.offset,
-        window.offset,
+    // local column or a ported annotation); the annotations are correlated
+    // subqueries (no joins, no `GROUP BY`, one statement).
+    let db = orm(&pool);
+    let window_limit =
+        u64::try_from(window.stop - window.offset).map_err(|_| Denial::ServerError)?;
+    let window_offset = u64::try_from(window.offset).map_err(|_| Denial::ServerError)?;
+    let window_stmt = draft_rows_select(
+        &slug,
+        filters.clone(),
+        Some(user_id),
+        None,
+        window_limit,
+        window_offset,
+        true,
     );
-    let window_sql = positional(&window_sql, &["slug"]);
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&window_sql)
-        .bind(&slug)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let rows = query_built::<DraftDbRow>(&db, &window_stmt).await?;
     let has_more = rows.len() as i64 > limit;
-    let mut decoded = Vec::with_capacity(rows.len());
-    for row in &rows {
-        decoded.push(draft_row_from_pg(row)?);
-    }
+    let decoded: Vec<DraftRow> = rows.into_iter().map(draft_from_db).collect();
     let page = apply_offset_window(&decoded, limit).map_err(page_denial)?;
     let total_count = {
-        let sql = format!("SELECT COUNT(DISTINCT draft_issues.id) {from_where}");
-        let sql = positional(&sql, &["slug"]);
-        let row: (i64,) = sqlx::query_as(&sql)
-            .bind(&slug)
-            .fetch_one(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        row.0
+        let count_stmt = draft_count_select(&slug, filters, user_id);
+        let count_rows = query_built::<CountDbRow>(&db, &count_stmt).await?;
+        count_rows
+            .into_iter()
+            .next()
+            .map(|row| row.n)
+            .ok_or(Denial::ServerError)?
     };
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
@@ -3628,13 +4122,6 @@ async fn draft_list(
         &format!("[{}]", shaped.join(",")),
     );
     Ok(gzip_body(&headers, StatusCode::OK, body))
-}
-
-/// The annotation joins behind the draft list's `ArrayAgg`s: alive label /
-/// assignee / module links with their target rows (`pm` aliases the
-/// unscoped `project_members` leg of the assignee guard).
-fn draft_annotation_joins() -> String {
-    "LEFT JOIN draft_issue_labels ON draft_issue_labels.draft_issue_id = draft_issues.id LEFT JOIN labels ON labels.id = draft_issue_labels.label_id LEFT JOIN draft_issue_assignees ON draft_issue_assignees.draft_issue_id = draft_issues.id LEFT JOIN users ON users.id = draft_issue_assignees.assignee_id LEFT JOIN project_members pm ON pm.member_id = users.id LEFT JOIN draft_issue_modules ON draft_issue_modules.draft_issue_id = draft_issues.id LEFT JOIN modules ON modules.id = draft_issue_modules.module_id".to_owned()
 }
 
 /// The relative-date head pattern `\d+_(weeks|months)$`.
@@ -3670,18 +4157,16 @@ async fn favorite_create(
     // `AttributeError` → the generic 500 (both probed live).
     // `Workspace.objects.get(slug=slug)` — the scoped manager 404s on a
     // missing or soft-deleted slug.
-    let workspace: Option<(Uuid,)> = sqlx::query_as(&positional(
-        &format!(
-            "SELECT id FROM workspaces WHERE {}",
-            qx::favorite_workspace_lookup_where()
-        ),
-        &["slug"],
-    ))
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace else {
+    let workspace_id: Option<Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(workspace_id) = workspace_id else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
             OBJECT_NOT_FOUND_BODY.to_owned(),
@@ -3713,20 +4198,34 @@ async fn favorite_create(
             // `IS NULL` arm matches nothing over the non-null column);
             // composites stringify via `str()`.
             let entity_type = input.get("entity_type").map(char_filter_text);
-            let sql = positional(
-                &qx::favorite_dedupe_lookup_sql(),
-                &["ws", "user", "entity_type", "entity_identifier"],
-            );
-            let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-                .bind(workspace_id)
-                .bind(user_id)
-                .bind(entity_type.as_deref())
-                .bind(entity_id)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
-            if let Some(row) = row {
-                let favorite = favorite_row_from_pg(&row)?;
+            let dedupe_found: Option<FavoriteDbRow> = match &entity_type {
+                None => None,
+                Some(text) => user_favorites::Entity::find()
+                    .select_only()
+                    .columns([
+                        user_favorites::Column::Id,
+                        user_favorites::Column::EntityType,
+                        user_favorites::Column::EntityIdentifier,
+                        user_favorites::Column::Name,
+                        user_favorites::Column::IsFolder,
+                        user_favorites::Column::Sequence,
+                        user_favorites::Column::ParentId,
+                        user_favorites::Column::WorkspaceId,
+                        user_favorites::Column::ProjectId,
+                    ])
+                    .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
+                    .filter(user_favorites::Column::UserId.eq(user_id))
+                    .filter(user_favorites::Column::EntityType.eq(text.clone()))
+                    .filter(user_favorites::Column::EntityIdentifier.eq(entity_id))
+                    .filter(user_favorites::Column::DeletedAt.is_null())
+                    .order_by_desc(user_favorites::Column::CreatedAt)
+                    .into_model()
+                    .one(&orm(&pool))
+                    .await
+                    .map_err(|_| Denial::ServerError)?,
+            };
+            if let Some(row) = dedupe_found {
+                let favorite = FavoriteRow::from(row);
                 let entity = fetch_favorite_entity(
                     &pool,
                     &favorite.entity_type,
@@ -3782,39 +4281,48 @@ async fn favorite_create(
     // `sequence` (`db/models/favorite.py:56-68`): the WORKSPACE's largest
     // (project or slug workspace — no project/user scoping) + 10000 when
     // any row exists, else the input (or the 65535 default when absent).
-    let largest: Option<(Option<f64>,)> = sqlx::query_as(
-        "SELECT MAX(sequence) FROM user_favorites WHERE workspace_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(row_workspace_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let sequence = match largest.and_then(|row| row.0) {
+    #[derive(Debug, FromQueryResult)]
+    struct MaxSeqRow {
+        max: Option<f64>,
+    }
+    let mut max_stmt = Query::select();
+    max_stmt
+        .expr_as(
+            Func::max(col("user_favorites", user_favorites::Column::Sequence)),
+            a("max"),
+        )
+        .from_as(user_favorites::Entity, a("user_favorites"))
+        .and_where(col("user_favorites", user_favorites::Column::WorkspaceId).eq(row_workspace_id))
+        .and_where(col("user_favorites", user_favorites::Column::DeletedAt).is_null());
+    let largest = query_built::<MaxSeqRow>(&orm(&pool), &max_stmt).await?;
+    let largest = largest.into_iter().next().map(|row| row.max);
+    let sequence = match largest.flatten() {
         Some(largest) => largest + 10000.0,
         None => sequence_input.unwrap_or(65535.0),
     };
     let now = utc_now_micros();
+    let now_db: DateTimeWithTimeZone = now.into();
     let id = Uuid::new_v4();
-    let insert = sqlx::query(
-        "INSERT INTO user_favorites (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, user_id, entity_type, entity_identifier, name, is_folder, sequence, parent_id) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(row_workspace_id)
-    .bind(project_id)
-    .bind(user_id)
-    .bind(&entity_type)
-    .bind(entity_identifier)
-    .bind(&name)
-    .bind(is_folder)
-    .bind(sequence)
-    .bind(parent)
-    .execute(&pool)
-    .await;
+    let model = user_favorites::ActiveModel {
+        id: Set(id),
+        created_at: Set(now_db),
+        updated_at: Set(now_db),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(row_workspace_id),
+        project_id: Set(project_id),
+        user_id: Set(user_id),
+        entity_type: Set(entity_type.clone()),
+        entity_identifier: Set(entity_identifier),
+        name: Set(name.clone()),
+        is_folder: Set(is_folder),
+        sequence: Set(sequence),
+        parent_id: Set(parent),
+    };
+    let insert = model.insert(&orm(&pool)).await;
     if let Err(error) = insert {
-        if is_integrity_violation(&error) {
+        if sea_is_integrity(&error) {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 FAVORITE_EXISTS_BODY.to_owned(),
@@ -3905,21 +4413,34 @@ async fn favorite_patch(
     // vs `:72`): a missing row 404s even for a malformed body (probed
     // live on the sibling draft route). The serializer still 400s
     // `not_a_dict` for non-dict bodies (no view-level `.get` here).
-    let sql = positional(
-        &format!(
-            "SELECT user_favorites.* FROM user_favorites WHERE {}",
-            qx::favorite_lookup_where()
-        ),
-        &["user", "slug", "pk"],
-    );
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(user_id)
-        .bind(&slug)
-        .bind(favorite_pk)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
+    let mut lookup_stmt = Query::select();
+    lookup_stmt
+        .columns([
+            (a("user_favorites"), user_favorites::Column::Id),
+            (a("user_favorites"), user_favorites::Column::EntityType),
+            (
+                a("user_favorites"),
+                user_favorites::Column::EntityIdentifier,
+            ),
+            (a("user_favorites"), user_favorites::Column::Name),
+            (a("user_favorites"), user_favorites::Column::IsFolder),
+            (a("user_favorites"), user_favorites::Column::Sequence),
+            (a("user_favorites"), user_favorites::Column::ParentId),
+            (a("user_favorites"), user_favorites::Column::WorkspaceId),
+            (a("user_favorites"), user_favorites::Column::ProjectId),
+        ])
+        .from_as(user_favorites::Entity, a("user_favorites"))
+        .and_where(col("user_favorites", user_favorites::Column::UserId).eq(user_id))
+        .and_where(
+            col("user_favorites", user_favorites::Column::WorkspaceId)
+                .binary(BinOper::Equal, workspace_id_sub(&slug)),
+        )
+        .and_where(col("user_favorites", user_favorites::Column::Id).eq(favorite_pk))
+        .and_where(col("user_favorites", user_favorites::Column::DeletedAt).is_null())
+        .limit(1);
+    let lookup_rows = query_built::<FavoriteDbRow>(&orm(&pool), &lookup_stmt).await?;
+    let found = lookup_rows.into_iter().next();
+    let Some(row) = found else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
             OBJECT_NOT_FOUND_BODY.to_owned(),
@@ -3932,7 +4453,7 @@ async fn favorite_patch(
     if let Err(response) = require_dict(&input) {
         return Ok(response);
     }
-    let mut favorite = favorite_row_from_pg(&row)?;
+    let mut favorite = FavoriteRow::from(row);
     let timezone = actor_timezone(&pool, &user_id).await?;
     let values = match validate_shape(&pool, &input, FAV_FIELDS, true, &timezone).await {
         Ok(values) => values,
@@ -3942,52 +4463,68 @@ async fn favorite_patch(
     // Default `ModelSerializer.update`: validated keys only, then `save()`
     // (audit `updated_by`, `auto_now` stamp; the sequence leg is add-only).
     let now = utc_now_micros();
-    let mut sets: Vec<String> = Vec::new();
+    let now_db: DateTimeWithTimeZone = now.into();
     if has_key(&values, "entity_type") {
         favorite.entity_type = opt_text(&values, "entity_type").ok_or(Denial::ServerError)?;
-        sets.push(format!(
-            "entity_type = {}",
-            push_text(&favorite.entity_type)
-        ));
     }
     if has_key(&values, "entity_identifier") {
         favorite.entity_identifier =
             opt_uuid(&values, "entity_identifier").map(|id| id.to_string());
-        sets.push(format!(
-            "entity_identifier = {}",
-            push_uuid_opt(&favorite.entity_identifier)
-        ));
     }
     if has_key(&values, "name") {
         favorite.name = opt_text(&values, "name");
-        sets.push(format!("name = {}", push_text_opt(&favorite.name)));
     }
     if let Some(is_folder) = opt_bool(&values, "is_folder") {
         favorite.is_folder = is_folder;
-        sets.push(format!("is_folder = {is_folder}"));
     }
     if let Some(sequence) = opt_float(&values, "sequence") {
         favorite.sequence = sequence;
-        sets.push(format!("sequence = {}", push_float(sequence)));
     }
     if has_key(&values, "parent") {
         favorite.parent = opt_uuid(&values, "parent").map(|id| id.to_string());
-        sets.push(format!("parent_id = {}", push_uuid_opt(&favorite.parent)));
     }
     // `save()` always stamps (`auto_now` + audit), even for an empty patch.
-    let update = format!(
-        "UPDATE user_favorites SET updated_at = '{}', updated_by_id = '{}'{} WHERE id = '{}'",
-        now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-        user_id,
-        if sets.is_empty() {
-            String::new()
-        } else {
-            format!(", {}", sets.join(", "))
-        },
-        favorite_pk,
+    let mut update = user_favorites::Entity::update_many();
+    update = update.col_expr(user_favorites::Column::UpdatedAt, Expr::value(now_db));
+    update = update.col_expr(
+        user_favorites::Column::UpdatedById,
+        Expr::value(Some(user_id)),
     );
-    if let Err(error) = sqlx::query(&update).execute(&pool).await {
-        if is_integrity_violation(&error) {
+    if has_key(&values, "entity_type") {
+        update = update.col_expr(
+            user_favorites::Column::EntityType,
+            Expr::value(favorite.entity_type.clone()),
+        );
+    }
+    if has_key(&values, "entity_identifier") {
+        let ident: Option<Uuid> = favorite
+            .entity_identifier
+            .as_deref()
+            .map(|text| Uuid::parse_str(text).expect("favorite identifier"));
+        update = update.col_expr(user_favorites::Column::EntityIdentifier, Expr::value(ident));
+    }
+    if has_key(&values, "name") {
+        update = update.col_expr(
+            user_favorites::Column::Name,
+            Expr::value(favorite.name.clone()),
+        );
+    }
+    if let Some(is_folder) = opt_bool(&values, "is_folder") {
+        update = update.col_expr(user_favorites::Column::IsFolder, Expr::value(is_folder));
+    }
+    if let Some(sequence) = opt_float(&values, "sequence") {
+        update = update.col_expr(user_favorites::Column::Sequence, Expr::value(sequence));
+    }
+    if has_key(&values, "parent") {
+        let parent: Option<Uuid> = favorite
+            .parent
+            .as_deref()
+            .map(|text| Uuid::parse_str(text).expect("favorite parent"));
+        update = update.col_expr(user_favorites::Column::ParentId, Expr::value(parent));
+    }
+    update = update.filter(user_favorites::Column::Id.eq(favorite_pk));
+    if let Err(error) = update.exec(&orm(&pool)).await {
+        if sea_is_integrity(&error) {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 INVALID_PAYLOAD_BODY.to_owned(),
@@ -4005,40 +4542,6 @@ async fn favorite_patch(
         StatusCode::OK,
         render_favorite(&favorite, entity.as_ref()),
     ))
-}
-
-/// Inline a validated `&str` as a SQL literal (quote-escaped; validated
-/// text is trusted but quoting is still exact).
-fn push_text(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
-}
-
-fn push_text_opt(value: &Option<String>) -> String {
-    match value {
-        Some(text) => push_text(text),
-        None => "NULL".to_owned(),
-    }
-}
-
-fn push_uuid_opt(value: &Option<String>) -> String {
-    match value {
-        Some(text) => format!("'{text}'"),
-        None => "NULL".to_owned(),
-    }
-}
-
-fn push_float(value: f64) -> String {
-    if value.is_nan() {
-        "'NaN'".to_owned()
-    } else if value.is_infinite() {
-        if value > 0.0 {
-            "'Infinity'".to_owned()
-        } else {
-            "'-Infinity'".to_owned()
-        }
-    } else {
-        py_float_str(value)
-    }
 }
 
 /// W33 DELETE (`favorite.py:78-82`): `.get` (404), HARD delete, 204.
@@ -4059,21 +4562,25 @@ async fn favorite_delete(
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, false).await? {
         return Ok(denied);
     }
-    let lookup = positional(
-        &format!(
-            "SELECT user_favorites.* FROM user_favorites WHERE {}",
-            qx::favorite_lookup_where()
-        ),
-        &["user", "slug", "pk"],
-    );
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&lookup)
-        .bind(user_id)
-        .bind(&slug)
-        .bind(favorite_pk)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if row.is_none() {
+    #[derive(Debug, FromQueryResult)]
+    struct ExistsRow {
+        id: Uuid,
+    }
+    let mut exists_stmt = Query::select();
+    exists_stmt
+        .column((a("user_favorites"), user_favorites::Column::Id))
+        .from_as(user_favorites::Entity, a("user_favorites"))
+        .and_where(col("user_favorites", user_favorites::Column::UserId).eq(user_id))
+        .and_where(
+            col("user_favorites", user_favorites::Column::WorkspaceId)
+                .binary(BinOper::Equal, workspace_id_sub(&slug)),
+        )
+        .and_where(col("user_favorites", user_favorites::Column::Id).eq(favorite_pk))
+        .and_where(col("user_favorites", user_favorites::Column::DeletedAt).is_null())
+        .limit(1);
+    let exists_rows = query_built::<ExistsRow>(&orm(&pool), &exists_stmt).await?;
+    let exists = exists_rows.into_iter().next().map(|row| row.id);
+    if exists.is_none() {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
             OBJECT_NOT_FOUND_BODY.to_owned(),
@@ -4085,6 +4592,7 @@ async fn favorite_delete(
     // atomic block. The self-parent FK is the only edge into
     // `user_favorites`, so one recursive CTE is the full cascade.
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
+    // raw-sql: recursive CASCADE CTE the builder cannot express
     sqlx::query(
         "WITH RECURSIVE subtree(id) AS (
            SELECT id FROM user_favorites WHERE parent_id = $1
@@ -4096,12 +4604,14 @@ async fn favorite_delete(
     .execute(&mut *tx)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let delete = positional(&qx::favorite_hard_delete_sql(), &["pk"]);
-    sqlx::query(&delete)
-        .bind(favorite_pk)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    {
+        let conn = TxConn::new(&mut tx);
+        user_favorites::Entity::delete_many()
+            .filter(user_favorites::Column::Id.eq(favorite_pk))
+            .exec(&conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    }
     tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(empty_response())
 }
@@ -4125,17 +4635,14 @@ async fn favorite_group(
     if let Some(denied) = check_allow_gate(&pool, &gate, &slug, &user_id, false).await? {
         return Ok(denied);
     }
-    let sql = positional(&qx::favorite_group_list_sql(), &["slug", "user", "fid"]);
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(&slug)
-        .bind(user_id)
-        .bind(favorite_pk)
-        .fetch_all(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let rows = query_built::<FavoriteDbRow>(
+        &orm(&pool),
+        &favorites_select(&slug, user_id, Some(favorite_pk), false),
+    )
+    .await?;
     let mut rendered = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let favorite = favorite_row_from_pg(row)?;
+    for row in rows {
+        let favorite = FavoriteRow::from(row);
         let entity = fetch_favorite_entity(
             &pool,
             &favorite.entity_type,
@@ -4356,20 +4863,14 @@ async fn draft_object_leg(
             }
             assignee_ids = match project_id {
                 None => Vec::new(),
-                Some(project) => {
-                    let sql = assignee_member_filter_sql(ids.len());
-                    let mut query = sqlx::query_as::<_, (Uuid,)>(&sql).bind(project);
-                    for id in ids {
-                        query = query.bind(id);
-                    }
-                    let rows: Vec<(Uuid,)> = query.fetch_all(pool).await.map_err(|_| {
+                Some(project) => create_q::filter_assignee_members(&orm(pool), project, ids)
+                    .await
+                    .map_err(|_| {
                         json_response(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             SERVER_ERROR_BODY.to_owned(),
                         )
-                    })?;
-                    rows.into_iter().map(|row| row.0).collect()
-                }
+                    })?,
             };
         }
     }
@@ -4381,24 +4882,14 @@ async fn draft_object_leg(
             if let Some(echo) = &context_garbage {
                 return Err(non_field(&django_uuid_invalid(echo)));
             }
-            let sql = match project_id {
-                Some(_) => label_filter_sql(ids.len()),
-                None => label_filter_null_project_sql(ids.len()),
-            };
-            let mut query = sqlx::query_as::<_, (Uuid,)>(&sql);
-            if let Some(project) = project_id {
-                query = query.bind(project);
-            }
-            for id in ids {
-                query = query.bind(id);
-            }
-            let rows: Vec<(Uuid,)> = query.fetch_all(pool).await.map_err(|_| {
-                json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    SERVER_ERROR_BODY.to_owned(),
-                )
-            })?;
-            label_ids = rows.into_iter().map(|row| row.0).collect();
+            label_ids = create_q::filter_project_labels(&orm(pool), project_id, ids)
+                .await
+                .map_err(|_| {
+                    json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        SERVER_ERROR_BODY.to_owned(),
+                    )
+                })?;
         }
     }
     // State / parent / estimate project-membership (`:112-139`): present
@@ -4408,23 +4899,14 @@ async fn draft_object_leg(
         if let Some(echo) = &context_garbage {
             return Err(non_field(&django_uuid_invalid(echo)));
         }
-        let exists = match project_id {
-            None => false,
-            Some(project) => {
-                let row: Option<(i32,)> = sqlx::query_as(STATE_EXISTS_SQL)
-                    .bind(project)
-                    .bind(state)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| {
-                        json_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            SERVER_ERROR_BODY.to_owned(),
-                        )
-                    })?;
-                row.is_some()
-            }
-        };
+        let exists = create_q::state_exists(&orm(pool), project_id, state)
+            .await
+            .map_err(|_| {
+                json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    SERVER_ERROR_BODY.to_owned(),
+                )
+            })?;
         if !exists {
             return Err(non_field(DRAFT_STATE_INVALID));
         }
@@ -4433,23 +4915,14 @@ async fn draft_object_leg(
         if let Some(echo) = &context_garbage {
             return Err(non_field(&django_uuid_invalid(echo)));
         }
-        let exists = match project_id {
-            None => false,
-            Some(project) => {
-                let row: Option<(i32,)> = sqlx::query_as(PARENT_EXISTS_SQL)
-                    .bind(project)
-                    .bind(parent)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| {
-                        json_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            SERVER_ERROR_BODY.to_owned(),
-                        )
-                    })?;
-                row.is_some()
-            }
-        };
+        let exists = create_q::parent_exists(&orm(pool), project_id, parent)
+            .await
+            .map_err(|_| {
+                json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    SERVER_ERROR_BODY.to_owned(),
+                )
+            })?;
         if !exists {
             return Err(non_field(DRAFT_PARENT_INVALID));
         }
@@ -4458,23 +4931,14 @@ async fn draft_object_leg(
         if let Some(echo) = &context_garbage {
             return Err(non_field(&django_uuid_invalid(echo)));
         }
-        let exists = match project_id {
-            None => false,
-            Some(project) => {
-                let row: Option<(i32,)> = sqlx::query_as(ESTIMATE_EXISTS_SQL)
-                    .bind(project)
-                    .bind(estimate)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|_| {
-                        json_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            SERVER_ERROR_BODY.to_owned(),
-                        )
-                    })?;
-                row.is_some()
-            }
-        };
+        let exists = create_q::estimate_exists(&orm(pool), project_id, estimate)
+            .await
+            .map_err(|_| {
+                json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    SERVER_ERROR_BODY.to_owned(),
+                )
+            })?;
         if !exists {
             return Err(non_field(DRAFT_ESTIMATE_INVALID));
         }
@@ -4560,17 +5024,25 @@ async fn default_draft_state(
     pool: &sqlx::PgPool,
     project_id: &Uuid,
 ) -> Result<Option<Uuid>, Denial> {
+    let db = orm(pool);
     for default_only in [true, false] {
-        let sql = format!(
-            "SELECT id FROM states WHERE project_id = $1 AND deleted_at IS NULL AND \"group\" != 'triage' AND is_triage IS DISTINCT FROM TRUE{} ORDER BY sequence ASC LIMIT 1",
-            if default_only { " AND \"default\" = TRUE" } else { "" },
-        );
-        let row: Option<(Uuid,)> = sqlx::query_as(&sql)
-            .bind(project_id)
-            .fetch_optional(pool)
+        let mut query = states::Entity::find()
+            .select_only()
+            .column(states::Column::Id)
+            .filter(states::Column::ProjectId.eq(*project_id))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsTriage.eq(false))
+            .order_by_asc(states::Column::Sequence);
+        if default_only {
+            query = query.filter(states::Column::Default.eq(true));
+        }
+        let row: Option<Uuid> = query
+            .into_tuple()
+            .one(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
-        if let Some((id,)) = row {
+        if let Some(id) = row {
             return Ok(Some(id));
         }
     }
@@ -4584,15 +5056,39 @@ async fn draft_sort_order(
     project_id: Option<Uuid>,
     state_id: Option<Uuid>,
 ) -> Result<Option<f64>, Denial> {
-    let row: Option<(Option<f64>,)> = sqlx::query_as(
-        "SELECT MAX(sort_order) FROM draft_issues WHERE project_id IS NOT DISTINCT FROM $1 AND state_id IS NOT DISTINCT FROM $2 AND deleted_at IS NULL",
+    #[derive(Debug, FromQueryResult)]
+    struct MaxSortRow {
+        max: Option<f64>,
+    }
+    let mut stmt = Query::select();
+    stmt.expr_as(
+        Func::max(col("draft_issues", draft_issues::Column::SortOrder)),
+        a("max"),
     )
-    .bind(project_id)
-    .bind(state_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0).map(|max| max + 10000.0))
+    .from_as(draft_issues::Entity, a("draft_issues"))
+    .and_where(col("draft_issues", draft_issues::Column::DeletedAt).is_null());
+    match project_id {
+        Some(id) => {
+            stmt.and_where(col("draft_issues", draft_issues::Column::ProjectId).eq(id));
+        }
+        None => {
+            stmt.and_where(col("draft_issues", draft_issues::Column::ProjectId).is_null());
+        }
+    };
+    match state_id {
+        Some(id) => {
+            stmt.and_where(col("draft_issues", draft_issues::Column::StateId).eq(id));
+        }
+        None => {
+            stmt.and_where(col("draft_issues", draft_issues::Column::StateId).is_null());
+        }
+    };
+    let rows = query_built::<MaxSortRow>(&orm(pool), &stmt).await?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|row| row.max)
+        .map(|max| max + 10000.0))
 }
 
 /// W35 POST (`draft.py:113-157`): ADMIN+MEMBER gate, workspace get (404),
@@ -4617,19 +5113,17 @@ async fn draft_create(
     // (`draft.py:113` vs `:115-121`): a missing slug 404s even for a
     // malformed body, and the `.get("project_id")` on a non-dict body
     // raises `AttributeError` → the generic 500 (both probed live).
-    let workspace: Option<(Uuid,)> = sqlx::query_as(&positional(
-        &format!(
-            // Both views share the lookup (`Workspace.objects.get(slug)`).
-            "SELECT id FROM workspaces WHERE {}",
-            qx::favorite_workspace_lookup_where()
-        ),
-        &["slug"],
-    ))
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace else {
+    // Both views share the lookup (`Workspace.objects.get(slug)`).
+    let workspace_id: Option<Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug.clone()))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(workspace_id) = workspace_id else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
             OBJECT_NOT_FOUND_BODY.to_owned(),
@@ -4712,35 +5206,38 @@ async fn draft_create(
     let target_date = opt_date(&values, "target_date");
     let external_source = opt_text(&values, "external_source");
     let external_id = opt_text(&values, "external_id");
-    let insert = sqlx::query(
-        "INSERT INTO draft_issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, parent_id, state_id, estimate_point_id, name, description_json, description_html, description_stripped, description_binary, priority, start_date, target_date, sort_order, completed_at, external_source, external_id, type_id) VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, $15, $16, $17, $18, $19, $20, $21, $22)",
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(deleted_at)
-    .bind(row_workspace)
-    .bind(row_project)
-    .bind(parent_id)
-    .bind(state_id)
-    .bind(estimate_point_id)
-    .bind(&name)
-    .bind(&description_json)
-    .bind(&description_html)
-    .bind(&description_stripped)
-    .bind(&priority)
-    .bind(start_date)
-    .bind(target_date)
-    .bind(sort_order)
-    .bind(completed_at)
-    .bind(&external_source)
-    .bind(&external_id)
-    .bind(type_id)
-    .execute(&pool)
-    .await;
+    let now_db: DateTimeWithTimeZone = now.into();
+    let deleted_db: Option<DateTimeWithTimeZone> = deleted_at.map(Into::into);
+    let completed_db: Option<DateTimeWithTimeZone> = completed_at.map(Into::into);
+    let model = draft_issues::ActiveModel {
+        id: Set(id),
+        created_at: Set(now_db),
+        updated_at: Set(now_db),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(deleted_db),
+        workspace_id: Set(row_workspace),
+        project_id: Set(row_project),
+        parent_id: Set(parent_id),
+        state_id: Set(state_id),
+        estimate_point_id: Set(estimate_point_id),
+        name: Set(name.clone()),
+        description_json: Set(description_json.clone()),
+        description_html: Set(description_html.clone()),
+        description_stripped: Set(description_stripped.clone()),
+        description_binary: Set(None),
+        priority: Set(priority.clone()),
+        start_date: Set(start_date),
+        target_date: Set(target_date),
+        sort_order: Set(sort_order),
+        completed_at: Set(completed_db),
+        external_source: Set(external_source.clone()),
+        external_id: Set(external_id.clone()),
+        type_id: Set(type_id),
+    };
+    let insert = model.insert(&orm(&pool)).await;
     if let Err(error) = insert {
-        if is_integrity_violation(&error) {
+        if sea_is_integrity(&error) {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 INVALID_PAYLOAD_BODY.to_owned(),
@@ -4781,22 +5278,25 @@ async fn draft_create(
                 }
             };
             let link = Uuid::new_v4();
-            if let Err(error) = sqlx::query(
-                "INSERT INTO draft_issue_cycles (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, cycle_id) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8)",
-            )
-            .bind(link)
-            .bind(now)
-            .bind(now)
-            .bind(user_id)
-            .bind(row_workspace)
-            .bind(row_project)
-            .bind(id)
-            .bind(cycle_id)
-            .execute(&pool)
-            .await
-            {
-                if is_integrity_violation(&error) {
-                    return Ok(json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY.to_owned()));
+            let cycle_now: DateTimeWithTimeZone = now.into();
+            let cycle_model = draft_issue_cycles::ActiveModel {
+                id: Set(link),
+                created_at: Set(cycle_now),
+                updated_at: Set(cycle_now),
+                created_by_id: Set(Some(user_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                workspace_id: Set(row_workspace),
+                project_id: Set(row_project),
+                draft_issue_id: Set(id),
+                cycle_id: Set(cycle_id),
+            };
+            if let Err(error) = cycle_model.insert(&orm(&pool)).await {
+                if sea_is_integrity(&error) {
+                    return Ok(json_response(
+                        StatusCode::BAD_REQUEST,
+                        INVALID_PAYLOAD_BODY.to_owned(),
+                    ));
                 }
                 return Err(Denial::ServerError);
             }
@@ -4844,7 +5344,7 @@ async fn draft_create(
                 )
                 .await
                 {
-                    if is_integrity_violation(&error) {
+                    if sea_is_integrity(&error) {
                         return Ok(json_response(
                             StatusCode::BAD_REQUEST,
                             INVALID_PAYLOAD_BODY.to_owned(),
@@ -4919,30 +5419,30 @@ async fn insert_draft_links(
     };
     let mut tx = pool.begin().await.map_err(|_| tx_error())?;
     for chunk in assignee_ids.chunks(10) {
-        let mut query = "INSERT INTO draft_issue_assignees (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, assignee_id) VALUES ".to_owned();
-        let now = utc_now_micros();
-        let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-        let updated_text = match updated_by {
-            Some(id) => format!("'{id}'"),
-            None => "NULL".to_owned(),
-        };
-        let project_text = match project_id {
-            Some(id) => format!("'{id}'"),
-            None => "NULL".to_owned(),
-        };
-        let tuples: Vec<String> = chunk
+        let now: DateTimeWithTimeZone = utc_now_micros().into();
+        let rows = chunk
             .iter()
-            .map(|assignee| {
-                let link = Uuid::new_v4();
-                format!(
-                    "('{link}', '{now_text}', '{now_text}', '{created_by}', {updated_text}, NULL, '{workspace_id}', {project_text}, '{draft_id}', '{assignee}')"
-                )
-            })
-            .collect();
-        query.push_str(&tuples.join(", "));
-        if let Err(error) = sqlx::query(&query).execute(&mut *tx).await {
+            .map(|assignee| draft_issue_assignees::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                created_by_id: Set(Some(*created_by)),
+                updated_by_id: Set(*updated_by),
+                deleted_at: Set(None),
+                workspace_id: Set(*workspace_id),
+                project_id: Set(*project_id),
+                draft_issue_id: Set(*draft_id),
+                assignee_id: Set(*assignee),
+            });
+        let result = {
+            let conn = TxConn::new(&mut tx);
+            draft_issue_assignees::Entity::insert_many(rows)
+                .exec(&conn)
+                .await
+        };
+        if let Err(error) = result {
             // Drop without commit: the leg rolls back as one unit.
-            if is_integrity_violation(&error) {
+            if sea_is_integrity(&error) {
                 return Err(json_response(
                     StatusCode::BAD_REQUEST,
                     INVALID_PAYLOAD_BODY.to_owned(),
@@ -4957,30 +5457,28 @@ async fn insert_draft_links(
     tx.commit().await.map_err(|_| tx_error())?;
     let mut tx = pool.begin().await.map_err(|_| tx_error())?;
     for chunk in label_ids.chunks(10) {
-        let mut query = "INSERT INTO draft_issue_labels (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, label_id) VALUES ".to_owned();
-        let now = utc_now_micros();
-        let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-        let updated_text = match updated_by {
-            Some(id) => format!("'{id}'"),
-            None => "NULL".to_owned(),
+        let now: DateTimeWithTimeZone = utc_now_micros().into();
+        let rows = chunk.iter().map(|label| draft_issue_labels::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            created_by_id: Set(Some(*created_by)),
+            updated_by_id: Set(*updated_by),
+            deleted_at: Set(None),
+            workspace_id: Set(*workspace_id),
+            project_id: Set(*project_id),
+            draft_issue_id: Set(*draft_id),
+            label_id: Set(*label),
+        });
+        let result = {
+            let conn = TxConn::new(&mut tx);
+            draft_issue_labels::Entity::insert_many(rows)
+                .exec(&conn)
+                .await
         };
-        let project_text = match project_id {
-            Some(id) => format!("'{id}'"),
-            None => "NULL".to_owned(),
-        };
-        let tuples: Vec<String> = chunk
-            .iter()
-            .map(|label| {
-                let link = Uuid::new_v4();
-                format!(
-                    "('{link}', '{now_text}', '{now_text}', '{created_by}', {updated_text}, NULL, '{workspace_id}', {project_text}, '{draft_id}', '{label}')"
-                )
-            })
-            .collect();
-        query.push_str(&tuples.join(", "));
-        if let Err(error) = sqlx::query(&query).execute(&mut *tx).await {
+        if let Err(error) = result {
             // Drop without commit: the leg rolls back as one unit.
-            if is_integrity_violation(&error) {
+            if sea_is_integrity(&error) {
                 return Err(json_response(
                     StatusCode::BAD_REQUEST,
                     INVALID_PAYLOAD_BODY.to_owned(),
@@ -5006,37 +5504,56 @@ async fn insert_draft_modules(
     created_by: &Uuid,
     updated_by: &Option<Uuid>,
     module_ids: &[Option<Uuid>],
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+) -> Result<(), DbErr> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| DbErr::Exec(sea_orm::RuntimeErr::SqlxError(error)))?;
     for chunk in module_ids.chunks(10) {
-        let mut query = "INSERT INTO draft_issue_modules (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, module_id) VALUES ".to_owned();
-        let now = utc_now_micros();
-        let now_text = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-        let updated_text = match updated_by {
-            Some(id) => format!("'{id}'"),
-            None => "NULL".to_owned(),
+        let now: DateTimeWithTimeZone = utc_now_micros().into();
+        // `module_id` is non-nullable: a `None` entry NULL-inserts through
+        // the builder to raise the `IntegrityError` exactly as before.
+        let mut insert = Query::insert();
+        insert.into_table(draft_issue_modules::Entity);
+        insert.columns([
+            draft_issue_modules::Column::Id,
+            draft_issue_modules::Column::CreatedAt,
+            draft_issue_modules::Column::UpdatedAt,
+            draft_issue_modules::Column::CreatedById,
+            draft_issue_modules::Column::UpdatedById,
+            draft_issue_modules::Column::DeletedAt,
+            draft_issue_modules::Column::WorkspaceId,
+            draft_issue_modules::Column::ProjectId,
+            draft_issue_modules::Column::DraftIssueId,
+            draft_issue_modules::Column::ModuleId,
+        ]);
+        for module in chunk {
+            let link = Uuid::new_v4();
+            insert
+                .values([
+                    link.into(),
+                    now.into(),
+                    now.into(),
+                    Some(*created_by).into(),
+                    (*updated_by).into(),
+                    None::<Uuid>.into(),
+                    (*workspace_id).into(),
+                    (*project_id).into(),
+                    (*draft_id).into(),
+                    (*module).into(),
+                ])
+                .map_err(|e| DbErr::Exec(RuntimeErr::Internal(e.to_string())))?;
+        }
+        let stmt = insert;
+        let result = {
+            let conn = TxConn::new(&mut tx);
+            conn.execute(DbBackend::Postgres.build(&stmt)).await
         };
-        let project_text = match project_id {
-            Some(id) => format!("'{id}'"),
-            None => "NULL".to_owned(),
-        };
-        let tuples: Vec<String> = chunk
-            .iter()
-            .map(|module| {
-                let link = Uuid::new_v4();
-                let module_text = match module {
-                    Some(id) => format!("'{id}'"),
-                    None => "NULL".to_owned(),
-                };
-                format!(
-                    "('{link}', '{now_text}', '{now_text}', '{created_by}', {updated_text}, NULL, '{workspace_id}', {project_text}, '{draft_id}', {module_text})"
-                )
-            })
-            .collect();
-        query.push_str(&tuples.join(", "));
-        sqlx::query(&query).execute(&mut *tx).await?;
+        result?;
     }
-    tx.commit().await?;
+    tx.commit()
+        .await
+        .map_err(|error| DbErr::Exec(sea_orm::RuntimeErr::SqlxError(error)))?;
     Ok(())
 }
 
@@ -5047,23 +5564,10 @@ async fn reread_draft(
     slug: &str,
     id: &Uuid,
 ) -> Result<Option<DraftRow>, Denial> {
-    let sql = format!(
-        "SELECT DISTINCT draft_issues.*, {}, {}, {}, {} FROM draft_issues {} WHERE {} AND draft_issues.id = '{}' GROUP BY draft_issues.id LIMIT 1",
-        qx::draft_cycle_subquery_sql(),
-        qx::draft_label_ids_annotation_sql(),
-        qx::draft_assignee_ids_annotation_sql(),
-        qx::draft_module_ids_annotation_sql(),
-        draft_annotation_joins(),
-        positional(&qx::draft_scope_where(), &["slug"]),
-        id,
-    );
-    let sql = positional(&sql, &["slug"]);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|row| draft_row_from_pg(&row)).transpose()
+    let empty = Condition::all();
+    let stmt = draft_rows_select(slug, empty, None, Some(*id), 1, 0, false);
+    let rows = query_built::<DraftDbRow>(&orm(pool), &stmt).await?;
+    Ok(rows.into_iter().next().map(draft_from_db))
 }
 
 /// Render the create re-read (the same 21 keys as the list shape, but NOT
@@ -5138,43 +5642,46 @@ async fn draft_full_row(
     pk: &Uuid,
     own_only: Option<&Uuid>,
 ) -> Result<Option<DraftFullRow>, Denial> {
-    use sqlx::Row;
-    let mut sql = format!(
-        "SELECT draft_issues.* FROM draft_issues WHERE {} AND draft_issues.id = '{}'",
-        positional(&qx::draft_scope_where(), &["slug"]),
-        pk,
-    );
-    if let Some(user) = own_only {
-        sql.push_str(&format!(" AND draft_issues.created_by_id = '{user}'"));
+    #[derive(Debug, FromQueryResult)]
+    struct FullDbRow {
+        workspace_id: Uuid,
+        project_id: Option<Uuid>,
+        state_id: Option<Uuid>,
+        created_by_id: Option<Uuid>,
+        updated_by_id: Option<Uuid>,
+        description_html: String,
+        completed_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     }
-    sql.push_str(" LIMIT 1");
-    let sql = positional(&sql, &["slug"]);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    Ok(Some(DraftFullRow {
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(|_| Denial::ServerError)?,
-        project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-        state_id: row.try_get("state_id").map_err(|_| Denial::ServerError)?,
-        created_by: row
-            .try_get("created_by_id")
-            .map_err(|_| Denial::ServerError)?,
-        updated_by: row
-            .try_get("updated_by_id")
-            .map_err(|_| Denial::ServerError)?,
-        description_html: row
-            .try_get("description_html")
-            .map_err(|_| Denial::ServerError)?,
-        completed_at: row
-            .try_get("completed_at")
-            .map_err(|_| Denial::ServerError)?,
+    let mut stmt = Query::select();
+    stmt.columns([
+        (a("draft_issues"), draft_issues::Column::WorkspaceId),
+        (a("draft_issues"), draft_issues::Column::ProjectId),
+        (a("draft_issues"), draft_issues::Column::StateId),
+        (a("draft_issues"), draft_issues::Column::CreatedById),
+        (a("draft_issues"), draft_issues::Column::UpdatedById),
+        (a("draft_issues"), draft_issues::Column::DescriptionHtml),
+        (a("draft_issues"), draft_issues::Column::CompletedAt),
+    ])
+    .from_as(draft_issues::Entity, a("draft_issues"))
+    .and_where(
+        col("draft_issues", draft_issues::Column::WorkspaceId)
+            .binary(BinOper::Equal, workspace_id_sub(slug)),
+    )
+    .and_where(col("draft_issues", draft_issues::Column::DeletedAt).is_null())
+    .and_where(col("draft_issues", draft_issues::Column::Id).eq(*pk))
+    .limit(1);
+    if let Some(user) = own_only {
+        stmt.and_where(col("draft_issues", draft_issues::Column::CreatedById).eq(*user));
+    }
+    let rows = query_built::<FullDbRow>(&orm(pool), &stmt).await?;
+    Ok(rows.into_iter().next().map(|row| DraftFullRow {
+        workspace_id: row.workspace_id,
+        project_id: row.project_id,
+        state_id: row.state_id,
+        created_by: row.created_by_id.expect("draft created_by non-null"),
+        updated_by: row.updated_by_id,
+        description_html: row.description_html,
+        completed_at: row.completed_at.map(|moment| moment.with_timezone(&Utc)),
     }))
 }
 
@@ -5309,22 +5816,25 @@ async fn draft_patch(
             // (`db/models/base.py:36-39`, probed live) — the instance ids
             // `update()` passes (`draft.py:269-276`) never reach the row.
             let link = Uuid::new_v4();
-            if let Err(error) = sqlx::query(
-                "INSERT INTO draft_issue_cycles (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, draft_issue_id, cycle_id) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8)",
-            )
-            .bind(link)
-            .bind(now)
-            .bind(now)
-            .bind(user_id)
-            .bind(issue.workspace_id)
-            .bind(issue.project_id)
-            .bind(draft_pk)
-            .bind(cycle_id)
-            .execute(&pool)
-            .await
-            {
-                if is_integrity_violation(&error) {
-                    return Ok(json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY.to_owned()));
+            let patch_now: DateTimeWithTimeZone = now.into();
+            let cycle_model = draft_issue_cycles::ActiveModel {
+                id: Set(link),
+                created_at: Set(patch_now),
+                updated_at: Set(patch_now),
+                created_by_id: Set(Some(user_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                workspace_id: Set(issue.workspace_id),
+                project_id: Set(issue.project_id),
+                draft_issue_id: Set(draft_pk),
+                cycle_id: Set(cycle_id),
+            };
+            if let Err(error) = cycle_model.insert(&orm(&pool)).await {
+                if sea_is_integrity(&error) {
+                    return Ok(json_response(
+                        StatusCode::BAD_REQUEST,
+                        INVALID_PAYLOAD_BODY.to_owned(),
+                    ));
                 }
                 return Err(Denial::ServerError);
             }
@@ -5376,7 +5886,7 @@ async fn draft_patch(
             )
             .await
             {
-                if is_integrity_violation(&error) {
+                if sea_is_integrity(&error) {
                     return Ok(json_response(
                         StatusCode::BAD_REQUEST,
                         INVALID_PAYLOAD_BODY.to_owned(),
@@ -5430,119 +5940,110 @@ async fn draft_patch(
         .unwrap_or(issue.description_html.clone());
     let stripped = sync_description_stripped(Some(&post_html));
     // Assemble the UPDATE: validated keys + save halves + audit stamp.
-    let mut sets: Vec<String> = Vec::new();
+    let now_db: DateTimeWithTimeZone = now.into();
+    let mut update = draft_issues::Entity::update_many();
+    update = update.col_expr(draft_issues::Column::UpdatedAt, Expr::value(now_db));
+    update = update.col_expr(
+        draft_issues::Column::UpdatedById,
+        Expr::value(Some(user_id)),
+    );
     if has_key(&values, "deleted_at") {
-        sets.push(format!(
-            "deleted_at = {}",
-            push_moment(&opt_datetime(&values, "deleted_at"))
-        ));
+        let deleted: Option<DateTimeWithTimeZone> =
+            opt_datetime(&values, "deleted_at").map(Into::into);
+        update = update.col_expr(draft_issues::Column::DeletedAt, Expr::value(deleted));
     }
     if has_key(&values, "name") {
-        sets.push(format!(
-            "name = {}",
-            push_text_opt(&opt_text(&values, "name"))
-        ));
+        update = update.col_expr(
+            draft_issues::Column::Name,
+            Expr::value(opt_text(&values, "name")),
+        );
     }
     if has_key(&values, "description_json") {
-        sets.push(format!(
-            "description_json = {}",
-            push_text(
-                &opt_json(&values, "description_json")
-                    .unwrap_or(Value::Null)
-                    .to_string()
-            )
-        ));
+        let doc = opt_json(&values, "description_json").unwrap_or(Value::Null);
+        update = update.col_expr(draft_issues::Column::DescriptionJson, Expr::value(doc));
     }
     if has_key(&values, "description_html") {
         // `save()` recomputes `stripped` from the new html; when the html
         // is untouched the recompute is value-identical (write skipped).
-        sets.push(format!("description_html = {}", push_text(&post_html)));
-        sets.push(format!(
-            "description_stripped = {}",
-            push_text_opt(&stripped)
-        ));
+        update = update.col_expr(
+            draft_issues::Column::DescriptionHtml,
+            Expr::value(post_html.clone()),
+        );
+        update = update.col_expr(
+            draft_issues::Column::DescriptionStripped,
+            Expr::value(stripped.clone()),
+        );
     }
     if has_key(&values, "priority") {
-        sets.push(format!(
-            "priority = {}",
-            push_text(&opt_text(&values, "priority").unwrap_or_else(|| "none".to_owned()))
-        ));
+        let priority = opt_text(&values, "priority").unwrap_or_else(|| "none".to_owned());
+        update = update.col_expr(draft_issues::Column::Priority, Expr::value(priority));
     }
     if has_key(&values, "start_date") {
-        sets.push(format!(
-            "start_date = {}",
-            push_date(&nullable_date(&values, "start_date").flatten())
-        ));
+        update = update.col_expr(
+            draft_issues::Column::StartDate,
+            Expr::value(nullable_date(&values, "start_date").flatten()),
+        );
     }
     if has_key(&values, "target_date") {
-        sets.push(format!(
-            "target_date = {}",
-            push_date(&nullable_date(&values, "target_date").flatten())
-        ));
+        update = update.col_expr(
+            draft_issues::Column::TargetDate,
+            Expr::value(nullable_date(&values, "target_date").flatten()),
+        );
     }
     if has_key(&values, "sort_order") {
         if let Some(sort) = opt_float(&values, "sort_order") {
-            sets.push(format!("sort_order = {}", push_float(sort)));
+            update = update.col_expr(draft_issues::Column::SortOrder, Expr::value(sort));
         }
     }
     if has_key(&values, "completed_at") || post_state.is_some() {
         // Recomputed whenever the post-setattr state is non-null (even for
         // name-only patches); an explicit input only survives a null state.
-        sets.push(format!("completed_at = {}", push_moment(&completed_at)));
+        let completed: Option<DateTimeWithTimeZone> = completed_at.map(Into::into);
+        update = update.col_expr(draft_issues::Column::CompletedAt, Expr::value(completed));
     }
     if has_key(&values, "external_source") {
-        sets.push(format!(
-            "external_source = {}",
-            push_text_opt(&opt_text(&values, "external_source"))
-        ));
+        update = update.col_expr(
+            draft_issues::Column::ExternalSource,
+            Expr::value(opt_text(&values, "external_source")),
+        );
     }
     if has_key(&values, "external_id") {
-        sets.push(format!(
-            "external_id = {}",
-            push_text_opt(&opt_text(&values, "external_id"))
-        ));
+        update = update.col_expr(
+            draft_issues::Column::ExternalId,
+            Expr::value(opt_text(&values, "external_id")),
+        );
     }
     if has_key(&values, "project") {
-        sets.push(format!(
-            "project_id = {}, workspace_id = '{}'",
-            push_uuid_ref(&post_project),
-            post_workspace
-        ));
+        update = update.col_expr(draft_issues::Column::ProjectId, Expr::value(post_project));
+        update = update.col_expr(
+            draft_issues::Column::WorkspaceId,
+            Expr::value(post_workspace),
+        );
     }
     if dual_uuid(&values, "parent_id", "parent").is_some() {
-        sets.push(format!(
-            "parent_id = {}",
-            push_uuid_ref(&dual_uuid(&values, "parent_id", "parent").flatten())
-        ));
+        update = update.col_expr(
+            draft_issues::Column::ParentId,
+            Expr::value(dual_uuid(&values, "parent_id", "parent").flatten()),
+        );
     }
     if dual_uuid(&values, "state_id", "state").is_some() || state_id != issue.state_id {
-        sets.push(format!("state_id = {}", push_uuid_ref(&state_id)));
+        update = update.col_expr(draft_issues::Column::StateId, Expr::value(state_id));
     }
     if has_key(&values, "estimate_point") {
-        sets.push(format!(
-            "estimate_point_id = {}",
-            push_uuid_ref(&opt_uuid(&values, "estimate_point"))
-        ));
+        update = update.col_expr(
+            draft_issues::Column::EstimatePointId,
+            Expr::value(opt_uuid(&values, "estimate_point")),
+        );
     }
     if has_key(&values, "type") {
-        sets.push(format!(
-            "type_id = {}",
-            push_uuid_ref(&opt_uuid(&values, "type"))
-        ));
+        update = update.col_expr(
+            draft_issues::Column::TypeId,
+            Expr::value(opt_uuid(&values, "type")),
+        );
     }
-    let update = format!(
-        "UPDATE draft_issues SET updated_at = '{}', updated_by_id = '{}'{} WHERE id = '{}'",
-        now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-        user_id,
-        if sets.is_empty() {
-            String::new()
-        } else {
-            format!(", {}", sets.join(", "))
-        },
-        draft_pk,
-    );
-    if let Err(error) = sqlx::query(&update).execute(&pool).await {
-        if is_integrity_violation(&error) {
+    update = update.filter(draft_issues::Column::Id.eq(draft_pk));
+    if let Err(error) = update.exec(&orm(&pool)).await {
+        if sea_is_integrity(&error) {
             return Ok(json_response(
                 StatusCode::BAD_REQUEST,
                 INVALID_PAYLOAD_BODY.to_owned(),
@@ -5560,37 +6061,48 @@ async fn soft_delete_draft_links(
     table: &str,
     draft_id: &Uuid,
     now: &DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    let sql = format!(
-        "UPDATE {table} SET deleted_at = '{}' WHERE draft_issue_id = '{draft_id}' AND deleted_at IS NULL",
-        now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-    );
-    sqlx::query(&sql).execute(pool).await?;
+) -> Result<(), DbErr> {
+    let db = orm(pool);
+    let now_db: DateTimeWithTimeZone = (*now).into();
+    match table {
+        "draft_issue_assignees" => {
+            draft_issue_assignees::Entity::update_many()
+                .col_expr(
+                    draft_issue_assignees::Column::DeletedAt,
+                    Expr::value(now_db),
+                )
+                .filter(draft_issue_assignees::Column::DraftIssueId.eq(*draft_id))
+                .filter(draft_issue_assignees::Column::DeletedAt.is_null())
+                .exec(&db)
+                .await?;
+        }
+        "draft_issue_labels" => {
+            draft_issue_labels::Entity::update_many()
+                .col_expr(draft_issue_labels::Column::DeletedAt, Expr::value(now_db))
+                .filter(draft_issue_labels::Column::DraftIssueId.eq(*draft_id))
+                .filter(draft_issue_labels::Column::DeletedAt.is_null())
+                .exec(&db)
+                .await?;
+        }
+        "draft_issue_cycles" => {
+            draft_issue_cycles::Entity::update_many()
+                .col_expr(draft_issue_cycles::Column::DeletedAt, Expr::value(now_db))
+                .filter(draft_issue_cycles::Column::DraftIssueId.eq(*draft_id))
+                .filter(draft_issue_cycles::Column::DeletedAt.is_null())
+                .exec(&db)
+                .await?;
+        }
+        "draft_issue_modules" => {
+            draft_issue_modules::Entity::update_many()
+                .col_expr(draft_issue_modules::Column::DeletedAt, Expr::value(now_db))
+                .filter(draft_issue_modules::Column::DraftIssueId.eq(*draft_id))
+                .filter(draft_issue_modules::Column::DeletedAt.is_null())
+                .exec(&db)
+                .await?;
+        }
+        other => unreachable!("draft link table {other}"),
+    }
     Ok(())
-}
-
-fn push_moment(value: &Option<DateTime<Utc>>) -> String {
-    match value {
-        Some(moment) => format!(
-            "'{}'",
-            moment.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
-        ),
-        None => "NULL".to_owned(),
-    }
-}
-
-fn push_date(value: &Option<NaiveDate>) -> String {
-    match value {
-        Some(date) => format!("'{date}'"),
-        None => "NULL".to_owned(),
-    }
-}
-
-fn push_uuid_ref(value: &Option<Uuid>) -> String {
-    match value {
-        Some(id) => format!("'{id}'"),
-        None => "NULL".to_owned(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5709,28 +6221,28 @@ async fn soft_delete_draft(
     // `completed_at` is whatever the row holds, not `None`. A null-state
     // draft keeps its stored `completed_at` through the delete.
     let keep_completed = state_id.is_none();
+    let now_db: DateTimeWithTimeZone = now.into();
     if keep_completed {
-        sqlx::query(
-            "UPDATE draft_issues SET deleted_at = $1, updated_at = $1, updated_by_id = $2, state_id = $3 WHERE id = $4",
-        )
-        .bind(now)
-        .bind(actor)
-        .bind(resolved_state)
-        .bind(draft_id)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        draft_issues::Entity::update_many()
+            .col_expr(draft_issues::Column::DeletedAt, Expr::value(now_db))
+            .col_expr(draft_issues::Column::UpdatedAt, Expr::value(now_db))
+            .col_expr(draft_issues::Column::UpdatedById, Expr::value(Some(*actor)))
+            .col_expr(draft_issues::Column::StateId, Expr::value(resolved_state))
+            .filter(draft_issues::Column::Id.eq(*draft_id))
+            .exec(&orm(pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
     } else {
-        sqlx::query(
-            "UPDATE draft_issues SET deleted_at = $1, updated_at = $1, updated_by_id = $2, completed_at = $3 WHERE id = $4",
-        )
-        .bind(now)
-        .bind(actor)
-        .bind(completed_at)
-        .bind(draft_id)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let completed_db: Option<DateTimeWithTimeZone> = completed_at.map(Into::into);
+        draft_issues::Entity::update_many()
+            .col_expr(draft_issues::Column::DeletedAt, Expr::value(now_db))
+            .col_expr(draft_issues::Column::UpdatedAt, Expr::value(now_db))
+            .col_expr(draft_issues::Column::UpdatedById, Expr::value(Some(*actor)))
+            .col_expr(draft_issues::Column::CompletedAt, Expr::value(completed_db))
+            .filter(draft_issues::Column::Id.eq(*draft_id))
+            .exec(&orm(pool))
+            .await
+            .map_err(|_| Denial::ServerError)?;
     }
     enqueue_soft_delete(pool, "draftissue", draft_id).await;
     Ok(())
@@ -5758,12 +6270,15 @@ async fn default_draft_state_opt(
 /// rows resolve): a missing row raises `RelatedObjectDoesNotExist` → the
 /// required-object 404.
 async fn touch_save_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<(), Denial> {
-    let row: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM projects WHERE id = $1 LIMIT 1")
-        .bind(project_id)
-        .fetch_optional(pool)
+    let hit: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.map(|_| ()).ok_or(Denial::NotFound)
+    hit.map(|_| ()).ok_or(Denial::NotFound)
 }
 
 /// Destroy (`draft.py:199-203`): ADMIN + creator(`model=DraftIssue`) gate,
@@ -5790,15 +6305,34 @@ async fn draft_destroy(
     }
     // `.get()` over the default (live) manager: miss → `DoesNotExist` →
     // the 404 branch.
-    let row: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT d.project_id, d.state_id FROM draft_issues d JOIN workspaces w ON w.id = d.workspace_id WHERE w.slug = $1 AND d.id = $2 AND d.deleted_at IS NULL LIMIT 1",
-    )
-    .bind(&slug)
-    .bind(draft_pk)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((project_id, state_id)) = row else {
+    #[derive(Debug, FromQueryResult)]
+    struct DestroyRow {
+        project_id: Option<Uuid>,
+        state_id: Option<Uuid>,
+    }
+    let mut destroy_stmt = Query::select();
+    destroy_stmt
+        .columns([
+            (a("d"), draft_issues::Column::ProjectId),
+            (a("d"), draft_issues::Column::StateId),
+        ])
+        .from_as(draft_issues::Entity, a("d"))
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            a("w"),
+            col("w", workspaces::Column::Id).equals((a("d"), draft_issues::Column::WorkspaceId)),
+        )
+        .and_where(col("w", workspaces::Column::Slug).eq(slug.clone()))
+        .and_where(col("d", draft_issues::Column::Id).eq(draft_pk))
+        .and_where(col("d", draft_issues::Column::DeletedAt).is_null())
+        .limit(1);
+    let destroy_rows = query_built::<DestroyRow>(&orm(&pool), &destroy_stmt).await?;
+    let destroy_row = destroy_rows
+        .into_iter()
+        .next()
+        .map(|row| (row.project_id, row.state_id));
+    let Some((project_id, state_id)) = destroy_row else {
         return Ok(json_response(
             StatusCode::NOT_FOUND,
             OBJECT_NOT_FOUND_BODY.to_owned(),
@@ -5826,17 +6360,10 @@ fn opt_ids(values: &[(String, FieldValue)], name: &str) -> Option<Vec<Uuid>> {
 /// "pod has been deleted". Field validation already proved existence; a
 /// race miss 500s.
 async fn fetch_pod_ref(pool: &sqlx::PgPool, id: &Uuid) -> Result<PodRef, Denial> {
-    let row: Option<(Uuid, Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(POD_FETCH_SQL)
-        .bind(id)
-        .fetch_optional(pool)
+    create_q::fetch_pod_ref(&orm(pool), *id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (id, project_id, deleted_at) = row.ok_or(Denial::ServerError)?;
-    Ok(PodRef {
-        id,
-        project_id,
-        deleted: deleted_at.is_some(),
-    })
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 /// `ProjectMember` assignee filter (`issue.py:338-344`): the silent drop,
@@ -5846,16 +6373,9 @@ async fn filter_assignee_ids(
     project_id: &Uuid,
     ids: &[Uuid],
 ) -> Result<Vec<Uuid>, Denial> {
-    let sql = assignee_member_filter_sql(ids.len());
-    let mut query = sqlx::query_as::<_, (Uuid,)>(&sql).bind(project_id);
-    for id in ids {
-        query = query.bind(id);
-    }
-    let rows: Vec<(Uuid,)> = query
-        .fetch_all(pool)
+    create_q::filter_assignee_members(&orm(pool), *project_id, ids)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(rows.into_iter().map(|row| row.0).collect())
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `Label` filter (`issue.py:347-354`): the silent drop, `-created_at`
@@ -5866,16 +6386,9 @@ async fn filter_label_ids(
     project_id: &Uuid,
     ids: &[Uuid],
 ) -> Result<Vec<Uuid>, Denial> {
-    let sql = label_filter_sql(ids.len());
-    let mut query = sqlx::query_as::<_, (Uuid,)>(&sql).bind(project_id);
-    for id in ids {
-        query = query.bind(id);
-    }
-    let rows: Vec<(Uuid,)> = query
-        .fetch_all(pool)
+    create_q::filter_project_labels(&orm(pool), Some(*project_id), ids)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(rows.into_iter().map(|row| row.0).collect())
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `Project.objects.filter(pk).first()` for the managed arm
@@ -5884,28 +6397,23 @@ async fn fetch_issue_project(
     pool: &sqlx::PgPool,
     id: &Uuid,
 ) -> Result<Option<ResolvedProject>, Denial> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(PROJECT_FETCH_SQL)
-        .bind(id)
-        .fetch_optional(pool)
+    create_q::fetch_resolved_project(&orm(pool), *id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(project_id, workspace_id)| ResolvedProject {
-        project_id,
-        workspace_id,
-    }))
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `managed_llm_profile` seam (`model_provider.py:67-68,85-91`): the
 /// verdict is `bool(api_key_encrypted)`.
 async fn assistant_has_api_key(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
-        "SELECT api_key_encrypted FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0).is_some_and(|key| !key.is_empty()))
+    let key: Option<Option<Vec<u8>>> = assistant_user_llm_config::Entity::find()
+        .select_only()
+        .column(assistant_user_llm_config::Column::ApiKeyEncrypted)
+        .filter(assistant_user_llm_config::Column::UserId.eq(*user_id))
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(key.flatten().is_some_and(|key| !key.is_empty()))
 }
 
 async fn enrolled_runner(
@@ -5914,14 +6422,16 @@ async fn enrolled_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let hit = admission_q::managed_runner_probe(
+        &orm(pool),
+        ManagedRunnerProbe::Enrolled,
+        *user_id,
+        *project_id,
+        *workspace_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 async fn online_runner(
@@ -5931,15 +6441,16 @@ async fn online_runner(
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
     let bound = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-    let row: Option<(Uuid,)> = sqlx::query_as(ONLINE_MANAGED_RUNNER_SQL)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(bound)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let hit = admission_q::managed_runner_probe(
+        &orm(pool),
+        ManagedRunnerProbe::Online(bound),
+        *user_id,
+        *project_id,
+        *workspace_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// The paused tiebreaker (`policy.py:88-91`, `09738d222`).
@@ -5949,27 +6460,39 @@ async fn paused_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let hit = admission_q::managed_runner_probe(
+        &orm(pool),
+        ManagedRunnerProbe::Paused,
+        *user_id,
+        *project_id,
+        *workspace_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// `request.user` flags for the executor arm (in-memory on Django; one
 /// read here, issued only past a managed pin + resolved project).
 async fn viewer_user_flags(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<UserFlags, Denial> {
-    let row: Option<(bool, bool)> =
-        sqlx::query_as("SELECT is_active, is_bot FROM users WHERE id = $1 LIMIT 1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let (is_active, is_bot) = row.ok_or(Denial::ServerError)?;
-    Ok(UserFlags { is_active, is_bot })
+    #[derive(Debug, FromQueryResult)]
+    struct FlagsRow {
+        is_active: bool,
+        is_bot: bool,
+    }
+    let row: Option<FlagsRow> = users::Entity::find()
+        .select_only()
+        .columns([users::Column::IsActive, users::Column::IsBot])
+        .filter(users::Column::Id.eq(*user_id))
+        .into_model()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let row = row.ok_or(Denial::ServerError)?;
+    Ok(UserFlags {
+        is_active: row.is_active,
+        is_bot: row.is_bot,
+    })
 }
 
 /// Map a `validate()` failure to its wire response. `ContextMissing` is
@@ -6168,39 +6691,27 @@ async fn run_issue_create_validate(
     };
     // Steps 9-11: touched + non-null only — a null clears without a probe.
     let state_ok = match state_value {
-        Some(id) => {
-            let row: Option<(i32,)> = sqlx::query_as(STATE_EXISTS_SQL)
-                .bind(project_id)
-                .bind(id)
-                .fetch_optional(pool)
+        Some(id) => Some(
+            create_q::state_exists(&orm(pool), Some(*project_id), id)
                 .await
-                .map_err(|_| db_error())?;
-            Some(row.is_some())
-        }
+                .map_err(|_| db_error())?,
+        ),
         None => None,
     };
     let parent_ok = match parent_value {
-        Some(id) => {
-            let row: Option<(i32,)> = sqlx::query_as(PARENT_EXISTS_SQL)
-                .bind(project_id)
-                .bind(id)
-                .fetch_optional(pool)
+        Some(id) => Some(
+            create_q::parent_exists(&orm(pool), Some(*project_id), id)
                 .await
-                .map_err(|_| db_error())?;
-            Some(row.is_some())
-        }
+                .map_err(|_| db_error())?,
+        ),
         None => None,
     };
     let estimate_ok = match attrs.estimate_point {
-        Some(id) => {
-            let row: Option<(i32,)> = sqlx::query_as(ESTIMATE_EXISTS_SQL)
-                .bind(project_id)
-                .bind(id)
-                .fetch_optional(pool)
+        Some(id) => Some(
+            create_q::estimate_exists(&orm(pool), Some(*project_id), id)
                 .await
-                .map_err(|_| db_error())?;
-            Some(row.is_some())
-        }
+                .map_err(|_| db_error())?,
+        ),
         None => None,
     };
     let policy = ExecutorPolicy {
@@ -6464,23 +6975,41 @@ async fn fetch_issue_m2m(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
 ) -> Result<(Vec<Uuid>, Vec<Uuid>), Denial> {
-    let assignees: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT u.id FROM users AS u JOIN issue_assignees AS ia ON ia.assignee_id = u.id WHERE ia.issue_id = $1 ORDER BY u.created_at DESC",
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let labels: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT l.id FROM labels AS l JOIN issue_labels AS il ON il.label_id = l.id WHERE il.issue_id = $1 AND l.deleted_at IS NULL ORDER BY l.created_at DESC",
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    #[derive(Debug, FromQueryResult)]
+    struct IdRow {
+        id: Uuid,
+    }
+    let db = orm(pool);
+    let mut assignee_stmt = Query::select();
+    assignee_stmt
+        .column((a("u"), users::Column::Id))
+        .from_as(users::Entity, a("u"))
+        .join_as(
+            JoinType::InnerJoin,
+            issue_assignees::Entity,
+            a("ia"),
+            col("ia", issue_assignees::Column::AssigneeId).equals((a("u"), users::Column::Id)),
+        )
+        .and_where(col("ia", issue_assignees::Column::IssueId).eq(*issue_id))
+        .order_by((a("u"), users::Column::CreatedAt), Order::Desc);
+    let assignee_rows = query_built::<IdRow>(&db, &assignee_stmt).await?;
+    let mut label_stmt = Query::select();
+    label_stmt
+        .column((a("l"), labels::Column::Id))
+        .from_as(labels::Entity, a("l"))
+        .join_as(
+            JoinType::InnerJoin,
+            issue_labels::Entity,
+            a("il"),
+            col("il", issue_labels::Column::LabelId).equals((a("l"), labels::Column::Id)),
+        )
+        .and_where(col("il", issue_labels::Column::IssueId).eq(*issue_id))
+        .and_where(col("l", labels::Column::DeletedAt).is_null())
+        .order_by((a("l"), labels::Column::CreatedAt), Order::Desc);
+    let label_rows = query_built::<IdRow>(&db, &label_stmt).await?;
     Ok((
-        assignees.into_iter().map(|row| row.0).collect(),
-        labels.into_iter().map(|row| row.0).collect(),
+        assignee_rows.into_iter().map(|row| row.id).collect(),
+        label_rows.into_iter().map(|row| row.id).collect(),
     ))
 }
 
@@ -6596,15 +7125,44 @@ async fn draft_to_issue(
     // `.filter(pk=draft_id).first()` — NO `created_by` scoping (any
     // member's draft converts); a miss leaves `None`, and
     // `None.project_id` raises `AttributeError` → the generic 500.
-    type DraftConvertRow = (Option<Uuid>, Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>);
-    let draft: Option<DraftConvertRow> = sqlx::query_as(
-        "SELECT d.project_id, d.workspace_id, d.created_by_id, d.updated_by_id, d.state_id FROM draft_issues d JOIN workspaces w ON w.id = d.workspace_id WHERE w.slug = $1 AND d.id = $2 AND d.deleted_at IS NULL LIMIT 1",
-    )
-    .bind(&slug)
-    .bind(draft_pk)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    #[derive(Debug, FromQueryResult)]
+    struct DraftConvertRow {
+        project_id: Option<Uuid>,
+        workspace_id: Uuid,
+        created_by_id: Option<Uuid>,
+        updated_by_id: Option<Uuid>,
+        state_id: Option<Uuid>,
+    }
+    let mut convert_stmt = Query::select();
+    convert_stmt
+        .columns([
+            (a("d"), draft_issues::Column::ProjectId),
+            (a("d"), draft_issues::Column::WorkspaceId),
+            (a("d"), draft_issues::Column::CreatedById),
+            (a("d"), draft_issues::Column::UpdatedById),
+            (a("d"), draft_issues::Column::StateId),
+        ])
+        .from_as(draft_issues::Entity, a("d"))
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            a("w"),
+            col("w", workspaces::Column::Id).equals((a("d"), draft_issues::Column::WorkspaceId)),
+        )
+        .and_where(col("w", workspaces::Column::Slug).eq(slug.clone()))
+        .and_where(col("d", draft_issues::Column::Id).eq(draft_pk))
+        .and_where(col("d", draft_issues::Column::DeletedAt).is_null())
+        .limit(1);
+    let convert_rows = query_built::<DraftConvertRow>(&orm(&pool), &convert_stmt).await?;
+    let draft = convert_rows.into_iter().next().map(|row| {
+        (
+            row.project_id,
+            row.workspace_id,
+            row.created_by_id,
+            row.updated_by_id,
+            row.state_id,
+        )
+    });
     let Some((draft_project_opt, draft_workspace, draft_created_by, draft_updated_by, draft_state)) =
         draft
     else {
@@ -6701,7 +7259,7 @@ async fn draft_to_issue(
     // activity — in handler order. Django's `post_save` fires inside
     // `Issue.objects.create`, before the assignee/label `bulk_create`s,
     // so the entry prompt sees empty m2m.
-    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let tx_orm = state.orm().ok_or(Denial::ServerError)?;
     let ctx = WriteCtx::new(WriteActor {
         user_id,
         timezone: Some(timezone.name().to_owned()),
@@ -6712,7 +7270,7 @@ async fn draft_to_issue(
     });
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
-    let outcome = domain::run(&ctx, orm, |txn| {
+    let outcome = domain::run(&ctx, tx_orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
         let pool = pool.clone();
@@ -6780,22 +7338,26 @@ async fn draft_to_issue(
         let link = Uuid::new_v4();
         let link_created = utc_now_micros();
         let link_updated = utc_now_micros();
-        if let Err(error) = sqlx::query(
-            "INSERT INTO cycle_issues (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, cycle_id, issue_id) VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8)",
-        )
-        .bind(link)
-        .bind(link_created)
-        .bind(link_updated)
-        .bind(user_id)
-        .bind(draft_workspace)
-        .bind(draft_project)
-        .bind(cycle_id)
-        .bind(row.id)
-        .execute(&pool)
-        .await
-        {
-            if is_integrity_violation(&error) {
-                return Ok(json_response(StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY.to_owned()));
+        let link_created_db: DateTimeWithTimeZone = link_created.into();
+        let link_updated_db: DateTimeWithTimeZone = link_updated.into();
+        let cycle_model = cycle_issues::ActiveModel {
+            id: Set(link),
+            created_at: Set(link_created_db),
+            updated_at: Set(link_updated_db),
+            created_by_id: Set(Some(user_id)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            workspace_id: Set(draft_workspace),
+            project_id: Set(draft_project),
+            cycle_id: Set(cycle_id),
+            issue_id: Set(row.id),
+        };
+        if let Err(error) = cycle_model.insert(&orm(&pool)).await {
+            if sea_is_integrity(&error) {
+                return Ok(json_response(
+                    StatusCode::BAD_REQUEST,
+                    INVALID_PAYLOAD_BODY.to_owned(),
+                ));
             }
             return Err(Denial::ServerError);
         }
@@ -6859,25 +7421,48 @@ async fn draft_to_issue(
         // itself committed pages ago and persists).
         let mut leg_tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
         for chunk in module_ids.chunks(10) {
-            let sql = m2m_insert_sql("module_issues", "module_id", chunk.len(), false);
-            let mut query = sqlx::query(&sql);
+            // `module_id` is non-nullable: a `None` entry NULL-inserts
+            // through the builder to raise the `IntegrityError`.
+            let mut insert = Query::insert();
+            insert.into_table(module_issues::Entity);
+            insert.columns([
+                module_issues::Column::Id,
+                module_issues::Column::CreatedAt,
+                module_issues::Column::UpdatedAt,
+                module_issues::Column::CreatedById,
+                module_issues::Column::UpdatedById,
+                module_issues::Column::DeletedAt,
+                module_issues::Column::ProjectId,
+                module_issues::Column::WorkspaceId,
+                module_issues::Column::IssueId,
+                module_issues::Column::ModuleId,
+            ]);
             for member_id in chunk {
-                let created = utc_now_micros();
-                let updated = utc_now_micros();
-                query = query
-                    .bind(Uuid::new_v4())
-                    .bind(created)
-                    .bind(updated)
-                    .bind(draft_created_by)
-                    .bind(draft_updated_by)
-                    .bind(draft_project)
-                    .bind(draft_workspace)
-                    .bind(row.id)
-                    .bind(member_id);
+                let created: DateTimeWithTimeZone = utc_now_micros().into();
+                let updated: DateTimeWithTimeZone = utc_now_micros().into();
+                insert
+                    .values([
+                        Uuid::new_v4().into(),
+                        created.into(),
+                        updated.into(),
+                        draft_created_by.into(),
+                        draft_updated_by.into(),
+                        None::<Uuid>.into(),
+                        draft_project.into(),
+                        draft_workspace.into(),
+                        row.id.into(),
+                        (*member_id).into(),
+                    ])
+                    .map_err(|_| Denial::ServerError)?;
             }
-            if let Err(error) = query.execute(&mut *leg_tx).await {
+            let stmt = insert;
+            let result = {
+                let conn = TxConn::new(&mut leg_tx);
+                conn.execute(DbBackend::Postgres.build(&stmt)).await
+            };
+            if let Err(error) = result {
                 // Drop without commit: the leg rolls back as one unit.
-                if is_integrity_violation(&error) {
+                if sea_is_integrity(&error) {
                     return Ok(json_response(
                         StatusCode::BAD_REQUEST,
                         INVALID_PAYLOAD_BODY.to_owned(),
@@ -6907,14 +7492,17 @@ async fn draft_to_issue(
     }
     // The `FileAsset` re-point (`:300-306`): a queryset `update()` — no
     // `save()`, so `updated_at` stays.
-    sqlx::query(
-        "UPDATE file_assets SET issue_id = $1, entity_type = 'ISSUE_DESCRIPTION', draft_issue_id = NULL WHERE draft_issue_id = $2",
-    )
-    .bind(row.id)
-    .bind(draft_pk)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IssueId, Expr::value(Some(row.id)))
+        .col_expr(
+            file_assets::Column::EntityType,
+            Expr::value(Some("ISSUE_DESCRIPTION".to_owned())),
+        )
+        .col_expr(file_assets::Column::DraftIssueId, Expr::value(None::<Uuid>))
+        .filter(file_assets::Column::DraftIssueId.eq(draft_pk))
+        .exec(&orm(&pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // The draft delete (`:308`) — after all three publishes.
     soft_delete_draft(&pool, &draft_pk, Some(draft_project), draft_state, &user_id).await?;
     Ok(json_response(
@@ -7370,5 +7958,89 @@ mod tests {
         shared_body::project_list_scalars(map, BODY_SPEC.list_fields);
         assert_eq!(projected["assignee_ids"], serde_json::json!("b"));
         assert_eq!(projected["label_ids"], serde_json::json!("x"));
+    }
+
+    #[tokio::test]
+    async fn live_favorites_drafts_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "users",
+            "user_favorites",
+            "project_members",
+            "draft_issues",
+            "draft_issue_labels",
+            "labels",
+            "draft_issue_assignees",
+            "draft_issue_modules",
+            "modules",
+            "draft_issue_cycles",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, user, fav, draft, label, assignee) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!(
+                "INSERT INTO user_favorites (id, name, is_folder, sequence, workspace_id, user_id, entity_type, deleted_at) VALUES ('{fav}', 'F', false, 1.0, '{ws}', '{user}', 'project', NULL)"
+            ),
+            format!(
+                "INSERT INTO draft_issues (id, created_at, updated_at, name, priority, sort_order, workspace_id, created_by_id, description_html, deleted_at) VALUES ('{draft}', now(), now(), 'D', 'none', 65535.0, '{ws}', '{user}', '<p></p>', NULL)"
+            ),
+            format!(
+                "INSERT INTO labels (id, name, deleted_at) VALUES ('{label}', 'L', NULL)"
+            ),
+            format!(
+                "INSERT INTO users (id, username, first_name, last_name, avatar, date_joined, created_at, updated_at, last_location, created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff, is_email_verified, is_password_autoset, token, user_timezone, last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, is_bot, display_name, is_email_valid, is_password_reset_required) VALUES ('{assignee}', 'u', 'A', 'B', '', now(), now(), now(), '', '', false, false, false, true, false, false, false, '', 'UTC', '', '', '', '', false, 'A B', false, false)"
+            ),
+            format!(
+                "INSERT INTO draft_issue_labels (id, workspace_id, draft_issue_id, label_id, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{draft}', '{label}', NULL)"
+            ),
+            format!(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', gen_random_uuid(), '{assignee}', true, NULL)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let fav_stmt = favorites_select("acme", user, None, true);
+        let fav_rows = query_built::<FavoriteDbRow>(&db, &fav_stmt)
+            .await
+            .expect("favorites select");
+        assert_eq!(fav_rows.len(), 1);
+        assert_eq!(fav_rows[0].id, fav);
+        let draft_stmt = draft_rows_select("acme", Condition::all(), Some(user), None, 10, 0, true);
+        let draft_rows = query_built::<DraftDbRow>(&db, &draft_stmt)
+            .await
+            .expect("drafts select");
+        assert_eq!(draft_rows.len(), 1);
+        assert_eq!(draft_rows[0].id, draft);
+        assert_eq!(draft_rows[0].label_ids, vec![label]);
+        let count_stmt = draft_count_select("acme", Condition::all(), user);
+        let count_rows = query_built::<CountDbRow>(&db, &count_stmt)
+            .await
+            .expect("count select");
+        assert_eq!(count_rows.len(), 1);
+        assert_eq!(count_rows[0].n, 1);
     }
 }

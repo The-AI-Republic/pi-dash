@@ -977,7 +977,7 @@ async fn write_password(
 ) -> Result<(), sqlx::Error> {
     let token = crate::auth_session::email::fresh_user_token();
     identity::write_password_with_save_effects(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         &identity::PasswordSave {
             encoded,
@@ -1076,9 +1076,13 @@ async fn change_password(
     if !is_autoset && old_present && new_present && old_matches {
         if let Field::Text(candidate) = &old {
             if let Some(new_hash) = pidash_auth::password::rehash_if_outdated(candidate, &stored) {
-                if identity::rehash_password(&pool, actor.id, &new_hash)
-                    .await
-                    .is_err()
+                if identity::rehash_password(
+                    &pidash_db::pool::sea_orm_connection(&pool),
+                    actor.id,
+                    &new_hash,
+                )
+                .await
+                .is_err()
                 {
                     return server_error();
                 }

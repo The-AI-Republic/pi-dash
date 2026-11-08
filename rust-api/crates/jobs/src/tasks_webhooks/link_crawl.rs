@@ -23,9 +23,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::redirect::Policy;
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Select, UpdateMany};
 use serde_json::Value;
 use uuid::Uuid;
 
+use pidash_db::entity::issue_links;
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::Pools;
 use pidash_services::tasks_webhooks::link_crawl::{
     self, CrawlReport, DnsFailure, HttpRequest, HttpResponse, ValidateError, CRAWL_TASK_NAME,
@@ -43,13 +47,29 @@ pub const TASK_NAMES: [&str; 1] = [CRAWL_TASK_NAME];
 /// (`db_table = "issue_links"`, `issue.py:480`; UUID pk, `base.py:18`).
 /// The default manager is the `SoftDeletionManager` (`mixins.py:56-66`),
 /// so soft-deleted rows are invisible to the lookup.
-pub const FIND_LINK_SQL: &str =
-    r#"SELECT id, metadata FROM issue_links WHERE id = $1 AND deleted_at IS NULL"#;
+fn find_link_query(id: Uuid) -> Select<issue_links::Entity> {
+    issue_links::Entity::find()
+        .select_only()
+        .column(issue_links::Column::Id)
+        .filter(issue_links::Column::Id.eq(id))
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// Full-row save delta: `metadata`, the `auto_now` `updated_at` touch, and
 /// the worker-context audit blanking (`base.py:21-31` — no crum user, so
 /// the full save persists both NULLs; same semantics as PB-2008/PB-2009).
-pub const SAVE_LINK_METADATA_SQL: &str = r#"UPDATE issue_links SET metadata = $1, updated_at = NOW(), created_by_id = NULL, updated_by_id = NULL WHERE id = $2"#;
+fn save_link_metadata_update(id: Uuid, metadata: Value) -> UpdateMany<issue_links::Entity> {
+    issue_links::Entity::update_many()
+        .col_expr(issue_links::Column::Metadata, Expr::value(metadata))
+        .col_expr(
+            issue_links::Column::UpdatedAt,
+            Expr::current_timestamp().into(),
+        )
+        .col_expr(issue_links::Column::CreatedById, Expr::value(None::<Uuid>))
+        .col_expr(issue_links::Column::UpdatedById, Expr::value(None::<Uuid>))
+        .filter(issue_links::Column::Id.eq(id))
+}
 
 /// `(id, url)` out of a Celery payload. The Python signature is
 /// `crawl_work_item_link_title(id, url)`, so `.delay(id, url)` arrives as
@@ -246,21 +266,20 @@ pub fn register_link_crawl_handler(registry: &mut Registry, pools: Pools) {
 
             let id = Uuid::parse_str(&link_id)
                 .map_err(|_| format!("{CRAWL_TASK_NAME}: invalid IssueLink id {link_id:?}"))?;
-            let exists: Option<Uuid> = sqlx::query_scalar(FIND_LINK_SQL)
-                .bind(id)
-                .fetch_optional(pools.primary())
+            let db = pidash_db::pool::sea_orm_connection(pools.primary());
+            let exists: Option<Uuid> = find_link_query(id)
+                .into_tuple::<Uuid>()
+                .one(&db)
                 .await
-                .map_err(|err| format!("{CRAWL_TASK_NAME}: lookup failed: {err}"))?;
+                .map_err(|err| format!("{CRAWL_TASK_NAME}: lookup failed: {}", into_sqlx(err)))?;
             if exists.is_none() {
                 tracing::warn!("IssueLink not found for the id {link_id} and the url {url}");
                 return Ok(Verdict::Ack);
             }
-            sqlx::query(SAVE_LINK_METADATA_SQL)
-                .bind(sqlx::types::Json(&metadata))
-                .bind(id)
-                .execute(pools.primary())
+            save_link_metadata_update(id, metadata)
+                .exec(&db)
                 .await
-                .map_err(|err| format!("{CRAWL_TASK_NAME}: save failed: {err}"))?;
+                .map_err(|err| format!("{CRAWL_TASK_NAME}: save failed: {}", into_sqlx(err)))?;
             Ok(Verdict::Ack)
         })
     });
@@ -328,19 +347,25 @@ mod tests {
     }
 
     #[test]
-    fn sql_targets_issue_links_metadata() {
-        assert!(FIND_LINK_SQL.contains("issue_links"));
-        assert!(FIND_LINK_SQL.contains("WHERE id = $1"));
+    fn statements_target_issue_links_metadata() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::parse_str("3fa85f64-5717-4562-b3fc-2c963f66afa6").expect("valid uuid");
+        let find_sql = find_link_query(id).build(DbBackend::Postgres).to_string();
+        assert!(find_sql.contains("\"issue_links\""), "{find_sql}");
+        assert!(find_sql.contains("\"id\" ="), "{find_sql}");
         // SoftDeletionManager parity: stamped rows are invisible (PIDASHCONV-1281).
-        assert!(FIND_LINK_SQL.contains("deleted_at IS NULL"));
-        assert!(SAVE_LINK_METADATA_SQL.contains("issue_links"));
-        assert!(SAVE_LINK_METADATA_SQL.contains("metadata = $1"));
+        assert!(find_sql.contains("\"deleted_at\" IS NULL"), "{find_sql}");
+        let save_sql = save_link_metadata_update(id, json!({"title": "t"}))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(save_sql.contains("\"issue_links\""), "{save_sql}");
+        assert!(save_sql.contains("\"metadata\""), "{save_sql}");
         // Full save(): no update_fields narrowing — updated_at touched, and
         // the worker-context audit blanking persists both NULLs (PB-2008/2009 semantics).
-        assert!(SAVE_LINK_METADATA_SQL.contains("updated_at"));
-        assert!(SAVE_LINK_METADATA_SQL.contains("created_by_id = NULL"));
-        assert!(SAVE_LINK_METADATA_SQL.contains("updated_by_id = NULL"));
-        assert!(SAVE_LINK_METADATA_SQL.contains("WHERE id = $2"));
+        assert!(save_sql.contains("\"updated_at\""), "{save_sql}");
+        assert!(save_sql.contains("\"created_by_id\""), "{save_sql}");
+        assert!(save_sql.contains("\"updated_by_id\""), "{save_sql}");
+        assert!(save_sql.contains("\"id\" ="), "{save_sql}");
     }
 
     /// One request through the real adapter: real client constructor,

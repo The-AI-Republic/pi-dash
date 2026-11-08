@@ -76,8 +76,11 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use pidash_db::config::{Settings, StorageSettings};
+use pidash_db::entity::exporters;
+use pidash_db::orm_tx::into_sqlx;
 use pidash_services::tasks_cleanup::exports as logic;
 use pidash_types::tasks_cleanup::exports_dto::DELETE_OLD_S3_LINK_TASK_NAME;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::worker::{Handler, Registry, Verdict};
 
@@ -103,9 +106,36 @@ pub const CLEAR_EXPIRED_URL_SQL: &str =
 /// %H:%M:%S[.ffffff]+00:00`), never caller input, so interpolation is
 /// safe. The unit test below pins the composed statement to the
 /// fixture shape (cutoff quoted for execution).
+///
+/// TASK-CLEANUP-1: kept as the Django-spec pin. Production execution
+/// runs [`expired_exporters_stmt`] over the `exporters` entity.
 pub fn scan_sql_for(now: DateTime<Utc>) -> String {
     let cutoff = super::format_expiry_cutoff(now);
     logic::delete_old_s3_link_sql(&format!("'{cutoff}'"))
+}
+
+/// SeaORM form of the expiry scan (`exporter_expired_task.py:25-27`):
+/// live rows with a non-null `url` whose `created_at` is at or before the
+/// 8-day cutoff, newest first — exactly
+/// [`logic::delete_old_s3_link_sql`]'s predicate and
+/// `ORDER BY "exporters"."created_at" DESC` (no tiebreaker, as Django
+/// emits none). Projects `(key, id)` in scan order.
+pub fn expired_exporters_stmt(now: DateTime<Utc>) -> sea_orm::Select<exporters::Entity> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let cutoff = super::format_expiry_cutoff(now);
+    // `format_expiry_cutoff` returns the Django-literal `...+00:00` text;
+    // parse it back so the bound binds as a typed timestamp, never as
+    // interpolated text.
+    let parsed = DateTime::parse_from_rfc3339(&cutoff)
+        .expect("expiry cutoff renders RFC 3339")
+        .with_timezone(&chrono::FixedOffset::east_opt(0).expect("UTC offset"));
+    exporters::Entity::find()
+        .filter(exporters::Column::DeletedAt.is_null())
+        .filter(exporters::Column::Url.is_not_null())
+        .filter(exporters::Column::CreatedAt.lte(parsed))
+        .order_by_desc(exporters::Column::CreatedAt)
+        .select_only()
+        .columns([exporters::Column::Key, exporters::Column::Id])
 }
 
 /// The database surface the task needs, mirroring the Django calls.
@@ -402,19 +432,30 @@ impl ExpiryStore for PgExpiryStore {
         &self,
         now: DateTime<Utc>,
     ) -> Result<Vec<(Option<String>, Uuid)>, String> {
-        sqlx::query_as::<_, (Option<String>, Uuid)>(&scan_sql_for(now))
-            .fetch_all(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        // Keep the original `(Option<String>, Uuid)` decode shape: the
+        // `key` column is non-null in the schema, but the old reader
+        // tolerated NULL and the plan's truthiness rule consumes it.
+        expired_exporters_stmt(now)
+            .into_tuple::<(Option<String>, Uuid)>()
+            .all(&conn)
             .await
-            .map_err(|error| db_error("expired_exporters", error))
+            .map_err(|e| db_error("expired_exporters", into_sqlx(e)))
     }
 
     async fn clear_url(&self, id: Uuid) -> Result<(), String> {
-        sqlx::query(CLEAR_EXPIRED_URL_SQL)
-            .bind(id)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        exporters::Entity::update_many()
+            .col_expr(
+                exporters::Column::Url,
+                sea_orm::sea_query::Expr::value(None::<String>),
+            )
+            .filter(exporters::Column::Id.eq(id))
+            .filter(exporters::Column::DeletedAt.is_null())
+            .exec(&conn)
             .await
             .map(|_| ())
-            .map_err(|error| db_error("clear_url", error))
+            .map_err(|e| db_error("clear_url", into_sqlx(e)))
     }
 }
 
@@ -491,6 +532,67 @@ mod tests {
             CLEAR_EXPIRED_URL_SQL,
             "UPDATE \"exporters\" SET \"url\" = NULL WHERE \"id\" = $1 AND \"deleted_at\" IS NULL"
         );
+    }
+
+    #[test]
+    fn expired_exporters_stmt_matches_scan_shape() {
+        // TASK-CLEANUP-1: SeaORM form of the scan. Pins the live scope,
+        // the non-null url guard, the created_at bound, the DESC order
+        // (no tiebreaker — Django emits none) and the (key, id)
+        // projection — the same statement `scan_sql_for` spells out.
+        use sea_orm::{DbBackend, QueryTrait};
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 28, 6, 0, 0).unwrap();
+        let sql = expired_exporters_stmt(now)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("\"exporters\""), "scan reads exporters: {sql}");
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL") && sql.contains("\"url\" IS NOT NULL"),
+            "scan keeps the live scope and url guard: {sql}"
+        );
+        assert!(
+            sql.contains("\"created_at\" <="),
+            "scan keeps the created_at bound: {sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY \"exporters\".\"created_at\" DESC"),
+            "scan keeps DESC order with no tiebreaker: {sql}"
+        );
+        assert!(
+            sql.contains("\"key\"") && sql.contains("\"id\""),
+            "scan projects key and id: {sql}"
+        );
+        // The cutoff binds as a typed value (a query parameter), not
+        // interpolated text: the built statement carries a placeholder.
+        let stmt = expired_exporters_stmt(now).build(DbBackend::Postgres);
+        assert!(
+            stmt.sql.contains("$1"),
+            "cutoff binds as one value: {}",
+            stmt.sql
+        );
+    }
+
+    #[test]
+    fn clear_url_orm_shape_matches_clear_sql() {
+        // TASK-CLEANUP-1: the `update_many` in `PgExpiryStore::clear_url`
+        // keeps the `filter(id).update(url=None)` shape: url NULLed by
+        // id with the `deleted_at IS NULL` guard, no `updated_at` bump.
+        use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+        let id = Uuid::now_v7();
+        let stmt = exporters::Entity::update_many()
+            .col_expr(
+                exporters::Column::Url,
+                sea_orm::sea_query::Expr::value(None::<String>),
+            )
+            .filter(exporters::Column::Id.eq(id))
+            .filter(exporters::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres);
+        let sql = stmt.to_string();
+        assert!(sql.starts_with("UPDATE \"exporters\" SET"), "{sql}");
+        assert!(sql.contains("\"url\" = NULL"), "{sql}");
+        assert!(sql.contains("\"id\" ="), "{sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(!sql.contains("\"updated_at\""), "{sql}");
     }
 
     #[test]

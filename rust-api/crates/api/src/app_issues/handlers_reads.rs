@@ -800,7 +800,7 @@ async fn fetch_or_create_property(
     let rich = Value::Object(Map::new());
     let preferences = default_preferences();
     pidash_services::domain::projects::members::get_or_create_property(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &pidash_services::domain::projects::members::NewMemberProperty {
             workspace_id,
             project_id: gate.project_id,

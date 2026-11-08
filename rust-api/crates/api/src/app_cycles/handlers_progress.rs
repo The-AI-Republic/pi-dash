@@ -211,6 +211,12 @@ fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
+/// The shared SeaORM connection over an sqlx pool (no I/O — it wraps the
+/// pool).
+fn sea_conn(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
 /// callers only (anonymous already 401'd); UUIDs pass through unchecked;
 /// other identifiers resolve `UPPER(identifier)` in the workspace, else
@@ -224,16 +230,21 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    use pidash_db::entity::projects as proj_entity;
+    use pidash_db::entity::workspaces as ws_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let row: Option<uuid::Uuid> = proj_entity::Entity::find()
+        .join(JoinType::InnerJoin, proj_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(proj_entity::Column::Identifier.eq(upper))
+        .filter(proj_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(proj_entity::Column::Id)
+        .into_tuple()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
 }
 
 /// Membership facts for the GUEST progress gate, resolved with the same
@@ -245,37 +256,68 @@ async fn membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<(Option<i32>, Option<i32>), Denial> {
-    let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let project_role: Option<(Option<i16>,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id AND w.deleted_at IS NULL
-           WHERE w.slug = $1 AND pm.project_id = $2 AND pm.member_id = $3
-             AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok((
-        workspace_role.and_then(|row| row.0).map(i32::from),
-        project_role.and_then(|row| row.0).map(i32::from),
-    ))
+    use pidash_db::entity::project_members as pm_entity;
+    use pidash_db::entity::workspace_members as wm_entity;
+    use pidash_db::entity::workspaces as ws_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    // `w.deleted_at IS NULL` in the raw join `ON` clause is the same
+    // predicate on an inner join as a `WHERE` filter on the joined
+    // table, so it stays a filter here.
+    let workspace_role: Option<i16> = wm_entity::Entity::find()
+        .join(JoinType::InnerJoin, wm_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(ws_entity::Column::DeletedAt.is_null())
+        .filter(wm_entity::Column::MemberId.eq(*user_id))
+        .filter(wm_entity::Column::IsActive.eq(true))
+        .filter(wm_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(wm_entity::Column::Role)
+        .into_tuple()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let project_role: Option<i16> = pm_entity::Entity::find()
+        .join(JoinType::InnerJoin, pm_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug))
+        .filter(ws_entity::Column::DeletedAt.is_null())
+        .filter(pm_entity::Column::ProjectId.eq(*project_id))
+        .filter(pm_entity::Column::MemberId.eq(Some(*user_id)))
+        .filter(pm_entity::Column::IsActive.eq(true))
+        .filter(pm_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(pm_entity::Column::Role)
+        .into_tuple()
+        .one(&sea_conn(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok((workspace_role.map(i32::from), project_role.map(i32::from)))
 }
 
 // ---------------------------------------------------------------------------
-// SQL: estimate aggregates + live counts
+// Estimates + live counts (sea-query builders)
 // ---------------------------------------------------------------------------
+
+/// One estimate-aggregate row: five per-group sums plus the total.
+#[derive(Debug, Clone, Copy, sea_orm::FromQueryResult)]
+struct EstimateAgg {
+    backlog: Option<f64>,
+    unstarted: Option<f64>,
+    started: Option<f64>,
+    cancelled: Option<f64>,
+    completed: Option<f64>,
+    total: Option<f64>,
+}
+
+/// One live-count row: five per-group counts plus the total.
+#[derive(Debug, Clone, Copy, sea_orm::FromQueryResult)]
+struct LiveCounts {
+    backlog: i64,
+    unstarted: i64,
+    started: i64,
+    cancelled: i64,
+    completed: i64,
+    total: i64,
+}
 
 /// Shared issue scope for every progress query (`base.py:664-671` plus
 /// the `IssueManager` base excludes): live bridge row, workspace slug
@@ -284,60 +326,167 @@ async fn membership(
 ///
 /// The triage exclusion is `NOT (group = 'triage')` over the join —
 /// three-valued, so `NULL`-state rows drop with it (the app_issues
-/// precedent). Joined tables carry no `deleted_at` predicate: Django
-/// applies the soft-delete manager to the base table only.
-const ISSUE_SCOPE_SQL: &str = "FROM issues i \
-     JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $3 AND ci.deleted_at IS NULL \
-     JOIN workspaces w ON w.id = i.workspace_id AND w.slug = $1 \
-     JOIN projects p ON p.id = i.project_id AND p.id = $2 AND p.archived_at IS NULL \
-     LEFT JOIN states s ON s.id = i.state_id \
-     JOIN estimate_points ep ON ep.id = i.estimate_point_id \
-     JOIN estimates e ON e.id = ep.estimate_id AND e.type = 'points' \
-     WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE \
-     AND NOT (s.group = 'triage')";
+/// precedent: `<>` is `NOT (=)` under the same NULL rule). Joined
+/// tables carry no `deleted_at` predicate: Django applies the
+/// soft-delete manager to the base table only.
+fn progress_scope_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{cycle_issues, issues, projects, states, workspaces};
+    use sea_orm::sea_query::{Alias, Condition, Expr, JoinType, Query};
+    let a = Alias::new;
+    let mut stmt = Query::select();
+    stmt.from_as(issues::Entity, a("i"))
+        .join_as(
+            JoinType::InnerJoin,
+            cycle_issues::Entity,
+            a("ci"),
+            Condition::all()
+                .add(
+                    Expr::col((a("ci"), cycle_issues::Column::IssueId))
+                        .equals((a("i"), issues::Column::Id)),
+                )
+                .add(Expr::col((a("ci"), cycle_issues::Column::CycleId)).eq(cycle_id))
+                .add(Expr::col((a("ci"), cycle_issues::Column::DeletedAt)).is_null()),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            a("w"),
+            Condition::all()
+                .add(
+                    Expr::col((a("w"), workspaces::Column::Id))
+                        .equals((a("i"), issues::Column::WorkspaceId)),
+                )
+                .add(Expr::col((a("w"), workspaces::Column::Slug)).eq(slug.to_owned())),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            a("p"),
+            Condition::all()
+                .add(
+                    Expr::col((a("p"), projects::Column::Id))
+                        .equals((a("i"), issues::Column::ProjectId)),
+                )
+                .add(Expr::col((a("p"), projects::Column::Id)).eq(project_id))
+                .add(Expr::col((a("p"), projects::Column::ArchivedAt)).is_null()),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            states::Entity,
+            a("s"),
+            Expr::col((a("s"), states::Column::Id)).equals((a("i"), issues::Column::StateId)),
+        )
+        .and_where(Expr::col((a("i"), issues::Column::DeletedAt)).is_null())
+        .and_where(Expr::col((a("i"), issues::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((a("i"), issues::Column::IsDraft)).eq(false))
+        .and_where(Expr::col((a("s"), states::Column::Group)).ne("triage"));
+    stmt
+}
 
 /// One-row estimate aggregate (`base.py:664-711`): five per-group
 /// `Case`/`Sum`s (NULL on empty — the caller applies `or 0`) plus the
 /// `total` `Sum(default=0)` (never NULL — the caller renders it raw).
-fn estimates_sql() -> String {
-    let group = |name: &str| {
-        format!(
-            "SUM(CASE WHEN s.group = '{name}' THEN CAST(ep.value AS DOUBLE PRECISION) ELSE 0 END) AS {name}"
-        )
-    };
-    format!(
-        "SELECT {} {}",
-        [
-            group("backlog"),
-            group("unstarted"),
-            group("started"),
-            group("cancelled"),
-            group("completed"),
-            "COALESCE(SUM(CAST(ep.value AS DOUBLE PRECISION)), 0.0) AS total".to_owned(),
-        ]
-        .join(", "),
-        ISSUE_SCOPE_SQL
+fn estimates_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::{estimate_points, estimates, issues, states};
+    use sea_orm::sea_query::{Alias, CaseStatement, Condition, Expr, Func, JoinType, SimpleExpr};
+    let a = Alias::new;
+    let mut stmt = progress_scope_stmt(slug, project_id, cycle_id);
+    stmt.join_as(
+        JoinType::InnerJoin,
+        estimate_points::Entity,
+        a("ep"),
+        Expr::col((a("ep"), estimate_points::Column::Id))
+            .equals((a("i"), issues::Column::EstimatePointId)),
     )
+    .join_as(
+        JoinType::InnerJoin,
+        estimates::Entity,
+        a("e"),
+        Condition::all()
+            .add(
+                Expr::col((a("e"), estimates::Column::Id))
+                    .equals((a("ep"), estimate_points::Column::EstimateId)),
+            )
+            .add(Expr::col((a("e"), estimates::Column::Type)).eq("points")),
+    );
+    let value = Expr::col((a("ep"), estimate_points::Column::Value)).cast_as(a("double precision"));
+    let sum_for = |group: &'static str| {
+        Func::sum(SimpleExpr::Case(Box::new(
+            CaseStatement::new()
+                .case(
+                    Expr::col((a("s"), states::Column::Group)).eq(group),
+                    value.clone(),
+                )
+                .finally(Expr::val(0.0)),
+        )))
+    };
+    stmt.expr_as(sum_for("backlog"), "backlog")
+        .expr_as(sum_for("unstarted"), "unstarted")
+        .expr_as(sum_for("started"), "started")
+        .expr_as(sum_for("cancelled"), "cancelled")
+        .expr_as(sum_for("completed"), "completed")
+        .expr_as(
+            Func::coalesce([Func::sum(value).into(), Expr::val(0.0).into()]),
+            "total",
+        );
+    stmt
 }
 
 /// Six live counts plus the total in one round trip (`base.py:719-765`):
 /// same bridge + slug + project + manager scope as the aggregate, one
 /// `FILTER` count per state group. Result-identical to the six separate
 /// `COUNT` queries; only the result rows cross into the envelope.
-const LIVE_COUNTS_SQL: &str = "SELECT \
-     COUNT(*) FILTER (WHERE s.group = 'backlog') AS backlog, \
-     COUNT(*) FILTER (WHERE s.group = 'unstarted') AS unstarted, \
-     COUNT(*) FILTER (WHERE s.group = 'started') AS started, \
-     COUNT(*) FILTER (WHERE s.group = 'cancelled') AS cancelled, \
-     COUNT(*) FILTER (WHERE s.group = 'completed') AS completed, \
-     COUNT(*) AS total \
-     FROM issues i \
-     JOIN cycle_issues ci ON ci.issue_id = i.id AND ci.cycle_id = $3 AND ci.deleted_at IS NULL \
-     JOIN workspaces w ON w.id = i.workspace_id AND w.slug = $1 \
-     JOIN projects p ON p.id = i.project_id AND p.id = $2 AND p.archived_at IS NULL \
-     LEFT JOIN states s ON s.id = i.state_id \
-     WHERE i.deleted_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE \
-     AND NOT (s.group = 'triage')";
+/// The `FILTER` counts compile to `COUNT(CASE WHEN ...)`: rows where the
+/// condition is NULL count in neither (three-valued as in the raw SQL).
+fn live_counts_stmt(
+    slug: &str,
+    project_id: uuid::Uuid,
+    cycle_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    use pidash_db::entity::states;
+    use sea_orm::sea_query::{Alias, Asterisk, CaseStatement, Expr, Func, SimpleExpr};
+    let a = Alias::new;
+    let mut stmt = progress_scope_stmt(slug, project_id, cycle_id);
+    let count_for = |group: &'static str| {
+        Func::count(SimpleExpr::Case(Box::new(CaseStatement::new().case(
+            Expr::col((a("s"), states::Column::Group)).eq(group),
+            Expr::val(1),
+        ))))
+    };
+    stmt.expr_as(count_for("backlog"), "backlog")
+        .expr_as(count_for("unstarted"), "unstarted")
+        .expr_as(count_for("started"), "started")
+        .expr_as(count_for("cancelled"), "cancelled")
+        .expr_as(count_for("completed"), "completed")
+        .expr_as(Func::count(Expr::col(Asterisk)), "total");
+    stmt
+}
+
+/// Run a built statement into one typed row, decoded by name.
+async fn query_one_built<T>(
+    db: &sea_orm::DatabaseConnection,
+    stmt: &sea_orm::sea_query::SelectStatement,
+) -> Result<Option<T>, Denial>
+where
+    T: sea_orm::FromQueryResult,
+{
+    use sea_orm::ConnectionTrait;
+    let rows = db
+        .query_all(sea_orm::DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    rows.first()
+        .map(|row| T::from_query_result(row, "").map_err(|_| Denial::ServerError))
+        .transpose()
+}
 
 // ---------------------------------------------------------------------------
 // Envelope: the `or 0` rule + Python key order
@@ -445,40 +594,56 @@ async fn progress_get(
     // a soft-deleted cycle reads as missing: `.first()` returns None and the
     // view answers 404 (`base.py:661-663`). `NULL` snapshot decodes as `None`
     // and reads falsy, like Python.
-    let cycle: Option<(uuid::Uuid, Option<Value>)> = sqlx::query_as(
-        r#"SELECT c.id, c.progress_snapshot FROM cycles c
-           JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
-           WHERE c.project_id = $2 AND c.id = $3
-             AND c.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(cycle_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((_id, snapshot)) = cycle else {
-        return Err(Denial::NotFound);
-    };
-    let snapshot = snapshot.unwrap_or(Value::Null);
-
-    /// One estimate-aggregate row: five per-group sums plus the total.
-    type EstimateAgg = (
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-    );
-    let agg: Option<EstimateAgg> = sqlx::query_as(&estimates_sql())
-        .bind(&slug)
-        .bind(project_id)
-        .bind(cycle_id)
-        .fetch_optional(&pool)
+    use pidash_db::entity::cycles as c_entity;
+    use pidash_db::entity::workspaces as ws_entity;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    #[derive(Debug, Clone, sea_orm::FromQueryResult)]
+    #[allow(dead_code)]
+    struct CycleRow {
+        id: uuid::Uuid,
+        progress_snapshot: Option<Value>,
+    }
+    let cycle: Option<CycleRow> = c_entity::Entity::find()
+        .join(JoinType::InnerJoin, c_entity::Relation::Workspaces.def())
+        .filter(ws_entity::Column::Slug.eq(slug.as_str()))
+        .filter(c_entity::Column::ProjectId.eq(project_id))
+        .filter(c_entity::Column::Id.eq(cycle_id))
+        .filter(c_entity::Column::DeletedAt.is_null())
+        .select_only()
+        .column(c_entity::Column::Id)
+        .column(c_entity::Column::ProgressSnapshot)
+        .into_model::<CycleRow>()
+        .one(&sea_conn(&pool))
         .await
         .map_err(|_| Denial::ServerError)?;
-    let (backlog, unstarted, started, cancelled, completed, total) = agg.unwrap_or_default();
+    let Some(CycleRow {
+        progress_snapshot, ..
+    }) = cycle
+    else {
+        return Err(Denial::NotFound);
+    };
+    let snapshot = progress_snapshot.unwrap_or(Value::Null);
+
+    let agg: Option<EstimateAgg> = query_one_built(
+        &sea_conn(&pool),
+        &estimates_stmt(&slug, project_id, cycle_id),
+    )
+    .await?;
+    let EstimateAgg {
+        backlog,
+        unstarted,
+        started,
+        cancelled,
+        completed,
+        total,
+    } = agg.unwrap_or(EstimateAgg {
+        backlog: None,
+        unstarted: None,
+        started: None,
+        cancelled: None,
+        completed: None,
+        total: None,
+    });
 
     // `if cycle.progress_snapshot:` — truthiness of the stored dict.
     let counts: [i64; 6] = match &snapshot {
@@ -491,14 +656,26 @@ async fn progress_get(
             snapshot_count(map, "unstarted_issues"),
         ],
         _ => {
-            let row: Option<(i64, i64, i64, i64, i64, i64)> = sqlx::query_as(LIVE_COUNTS_SQL)
-                .bind(&slug)
-                .bind(project_id)
-                .bind(cycle_id)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
-            let (b, u, s, c, d, t) = row.unwrap_or_default();
+            let row: Option<LiveCounts> = query_one_built(
+                &sea_conn(&pool),
+                &live_counts_stmt(&slug, project_id, cycle_id),
+            )
+            .await?;
+            let LiveCounts {
+                backlog: b,
+                unstarted: u,
+                started: s,
+                cancelled: c,
+                completed: d,
+                total: t,
+            } = row.unwrap_or(LiveCounts {
+                backlog: 0,
+                unstarted: 0,
+                started: 0,
+                cancelled: 0,
+                completed: 0,
+                total: 0,
+            });
             // Envelope order is backlog, total, completed, cancelled,
             // started, unstarted (`base.py:775-781`).
             [b, t, d, c, s, u]
@@ -672,29 +849,40 @@ mod tests {
         );
     }
 
+    fn render(stmt: &sea_orm::sea_query::SelectStatement) -> String {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        stmt.to_string(PostgresQueryBuilder)
+    }
+
+    fn fixture_ids() -> (uuid::Uuid, uuid::Uuid) {
+        (
+            uuid::Uuid::parse_str("12345678-1234-1234-1234-123456789abc").expect("id"),
+            uuid::Uuid::parse_str("22345678-2234-2234-2234-223456789abc").expect("id"),
+        )
+    }
+
     #[test]
     fn sql_carries_bridge_scope_and_manager_excludes() {
-        let sql = estimates_sql();
+        let (project_id, cycle_id) = fixture_ids();
+        let sql = render(&estimates_stmt("acme", project_id, cycle_id));
         for fragment in [
-            "ci.cycle_id = $3",
-            "ci.deleted_at IS NULL",
-            "w.slug = $1",
-            "p.id = $2",
-            "p.archived_at IS NULL",
-            "e.type = 'points'",
-            "i.deleted_at IS NULL",
-            "i.archived_at IS NULL",
-            "i.is_draft = FALSE",
-            "NOT (s.group = 'triage')",
-            "CAST(ep.value AS DOUBLE PRECISION)",
-            "COALESCE(SUM(CAST(ep.value AS DOUBLE PRECISION)), 0.0) AS total",
+            "cycle_id",
+            "\"deleted_at\" IS NULL",
+            "\"slug\"",
+            "\"archived_at\" IS NULL",
+            "\"type\" = 'points'",
+            "\"is_draft\" = FALSE",
+            "\"group\" <> 'triage'",
+            "double precision",
+            "COALESCE",
         ] {
             assert!(
                 sql.contains(fragment),
-                "estimates SQL must carry {fragment}"
+                "estimates SQL must carry {fragment}: {sql}"
             );
         }
-        assert!(LIVE_COUNTS_SQL.contains("FILTER (WHERE s.group = 'backlog')"));
-        assert!(LIVE_COUNTS_SQL.contains("COUNT(*) AS total"));
+        let counts = render(&live_counts_stmt("acme", project_id, cycle_id));
+        assert!(counts.contains("COUNT"));
+        assert!(counts.contains("\"group\" = 'backlog'"));
     }
 }

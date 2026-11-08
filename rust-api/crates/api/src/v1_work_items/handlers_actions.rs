@@ -83,15 +83,24 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use sea_orm::sea_query::{Expr, Query};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait,
+};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::entity::{
+    agent_run, assistant_user_llm_config, issue_assignees, issues, projects, states, users,
+    workspaces,
+};
+use pidash_db::pool::sea_orm_connection;
 use pidash_db::redis::client_from_settings;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
-use pidash_types::runner_runs::AgentRunStatus;
 
 use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
@@ -296,24 +305,6 @@ pub fn owned_action(
 // Authentication
 // ---------------------------------------------------------------------------
 
-/// Decoded `api_tokens` row for [`resolve_api_token`].
-type ApiTokenLookup = (
-    String,
-    bool,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-);
-
-/// Decoded `machine_token` row for [`resolve_machine_token`].
-type MachineTokenLookup = (
-    String,
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<bool>,
-);
-
 /// The authenticated actor: user id plus the RAW stored time-zone name.
 /// The zone is NOT parsed here — `TimezoneMixin.initial`
 /// (`api/views/base.py:43-48`) calls `super().initial()`
@@ -369,14 +360,17 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "api-token-lookup"))?;
-    let Some((token, is_active, expired_at, user_id)) = row else {
+    let row =
+        super::auth_reads::live_api_token(&pidash_db::pool::sea_orm_connection(pool), presented)
+            .await
+            .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let Some(super::auth_reads::ApiTokenLookup {
+        token,
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now_unix = chrono::Utc::now().timestamp();
@@ -403,17 +397,20 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
+    let row = super::auth_reads::machine_token_with_device(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
     )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
     .await
     .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
+    let Some(super::auth_reads::MachineTokenLookup {
+        token_hash,
+        user_id,
+        workspace_id,
+        revoked_at,
+        dev_revoked,
+        ..
+    }) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -428,15 +425,13 @@ async fn resolve_machine_token(
         .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
-    let member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
+    let member = super::auth_reads::is_active_workspace_member(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
-    .map_err(|error| db_error(error, "machine-token-member"))?
-    .unwrap_or(false);
+    .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
@@ -459,13 +454,9 @@ async fn resolve_machine_token(
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let name: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "request-timezone"))?;
-    Ok(name.unwrap_or(None))
+    super::auth_reads::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -515,13 +506,10 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
+    let workspace_id =
+        super::auth_reads::workspace_id_by_slug(&pidash_db::pool::sea_orm_connection(&pool), slug)
             .await
-            .map_err(|error| db_error(error, "preamble-workspace"))?
-            .flatten();
+            .map_err(|error| db_error(error, "preamble-workspace"))?;
     Ok(Preamble {
         pool,
         actor,
@@ -549,10 +537,12 @@ pub async fn rewrite_project_id(
     };
     match classify_lookup(raw) {
         ProjectLookup::Pk(id) => Ok(id),
-        ProjectLookup::Identifier(_) => q::fetch_project_id(pool, &scope, raw)
-            .await
-            .map_err(|error| db_error(error, "rewrite-project"))?
-            .ok_or(Denial::ProjectNotFound),
+        ProjectLookup::Identifier(_) => {
+            q::fetch_project_id(&pidash_db::pool::sea_orm_connection(pool), &scope, raw)
+                .await
+                .map_err(|error| db_error(error, "rewrite-project"))?
+                .ok_or(Denial::ProjectNotFound)
+        }
     }
 }
 
@@ -571,13 +561,12 @@ async fn entity_facts(
     // `role` is `smallint`: sqlx does not widen `INT2` into `i32` on
     // decode, so read `i16` and compare as integers. `deleted_at IS NULL`
     // is the `SoftDeletionManager` scope (`db/mixins.py:56-58`).
-    let roles: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
+    let roles = super::auth_reads::project_member_roles(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *workspace_id,
+        *user_id,
+        *project_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
     .await
     .map_err(|error| db_error(error, "entity-roles"))?;
     Ok(project::ProjectFacts {
@@ -627,6 +616,7 @@ async fn require_gate(
 /// `:1225-1229`). `Issue.objects` is the plain `SoftDeletionManager`
 /// (`deleted_at IS NULL` only — the triage/archived/draft exclusions live
 /// on `issue_objects`, which these views do not use).
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct IssueRow {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
@@ -638,97 +628,50 @@ pub struct IssueRow {
     pub state_group: Option<String>,
 }
 
+/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
+/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
+fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::ProjectId,
+            issues::Column::WorkspaceId,
+            issues::Column::CreatedById,
+            issues::Column::AgentExecutor,
+            issues::Column::StateId,
+        ])
+        .column_as(states::Column::Name, "state_name")
+        .column_as(states::Column::Group, "state_group")
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::Id.eq(*pk))
+        .filter(issues::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
 pub async fn fetch_issue(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     pk: &Uuid,
 ) -> Result<Option<IssueRow>, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT i."id", i."project_id", i."workspace_id", i."created_by_id", i."agent_executor",
-                  i."state_id", s."name" AS "state_name", s."group" AS "state_group"
-           FROM "issues" i JOIN "workspaces" w ON w."id" = i."workspace_id"
-           LEFT JOIN "states" s ON s."id" = i."state_id"
-           WHERE w."slug" = $1 AND i."project_id" = $2 AND i."id" = $3
-             AND i."deleted_at" IS NULL LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "fetch-issue"))?;
-    row.map(|row| {
-        Ok(IssueRow {
-            id: row.try_get("id").map_err(|e| db_error(e, "fetch-issue"))?,
-            project_id: row
-                .try_get("project_id")
-                .map_err(|e| db_error(e, "fetch-issue"))?,
-            workspace_id: row
-                .try_get("workspace_id")
-                .map_err(|e| db_error(e, "fetch-issue"))?,
-            created_by_id: row
-                .try_get("created_by_id")
-                .map_err(|e| db_error(e, "fetch-issue"))?,
-            agent_executor: row
-                .try_get("agent_executor")
-                .map_err(|e| db_error(e, "fetch-issue"))?,
-            state_id: row
-                .try_get("state_id")
-                .map_err(|e| db_error(e, "fetch-issue"))?,
-            state_name: row
-                .try_get("state_name")
-                .map_err(|e| db_error(e, "fetch-issue"))?,
-            state_group: row
-                .try_get("state_group")
-                .map_err(|e| db_error(e, "fetch-issue"))?,
-        })
-    })
-    .transpose()
+    issue_row_select(slug, project_id, pk)
+        .into_model::<IssueRow>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-issue"))
 }
-
-/// Map one agent-run row (with the `runner` join Python's
-/// `select_related("runner")` takes) onto [`RunFacts`]. An unknown stored
-/// status maps to a non-active member, as the guards document.
-fn map_run_facts(row: &sqlx::postgres::PgRow) -> Result<RunFacts, Denial> {
-    let status: String = row.try_get("status").map_err(|e| db_error(e, "map-run"))?;
-    Ok(RunFacts {
-        id: row.try_get("id").map_err(|e| db_error(e, "map-run"))?,
-        created_by_id: row
-            .try_get("created_by_id")
-            .map_err(|e| db_error(e, "map-run"))?,
-        owner_id: row
-            .try_get("owner_id")
-            .map_err(|e| db_error(e, "map-run"))?,
-        runner_id: row
-            .try_get("runner_id")
-            .map_err(|e| db_error(e, "map-run"))?,
-        runner_owner_id: row
-            .try_get("runner_owner_id")
-            .map_err(|e| db_error(e, "map-run"))?,
-        work_item_id: row
-            .try_get("work_item_id")
-            .map_err(|e| db_error(e, "map-run"))?,
-        status: AgentRunStatus::from_value(&status).unwrap_or(AgentRunStatus::Cancelled),
-    })
-}
-
-const RUN_FACTS_COLS: &str = r#"r."id", r."created_by_id", r."owner_id", r."runner_id",
-       ru."owner_id" AS "runner_owner_id", r."work_item_id", r."status""#;
 
 /// `AgentRun.objects.select_related("runner").filter(pk=run_id).first()`
 /// (`:1113`, `:1127`, `:1153`): the header paths' row.
 async fn fetch_run_by_id(pool: &PgPool, run_id: &Uuid) -> Result<Option<RunFacts>, Denial> {
-    let sql = format!(
-        r#"SELECT {RUN_FACTS_COLS} FROM "agent_run" r
-           LEFT JOIN "runner" ru ON ru."id" = r."runner_id" WHERE r."id" = $1 LIMIT 1"#
-    );
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(run_id)
-        .fetch_optional(pool)
+    super::auth_reads::run_facts_by_id(&sea_orm_connection(pool), *run_id)
         .await
-        .map_err(|error| db_error(error, "fetch-run"))?;
-    row.map(|row| map_run_facts(&row)).transpose()
+        .map(|row| row.map(super::auth_reads::RunFactsRow::into_facts))
+        .map_err(|error| db_error(error, "fetch-run"))
 }
 
 /// `AgentRun.objects.select_related("runner").filter(work_item_id=issue.pk)
@@ -737,17 +680,14 @@ async fn fetch_newest_runs_on_issue(
     pool: &PgPool,
     issue_id: &Uuid,
 ) -> Result<Vec<RunFacts>, Denial> {
-    let sql = format!(
-        r#"SELECT {RUN_FACTS_COLS} FROM "agent_run" r
-           LEFT JOIN "runner" ru ON ru."id" = r."runner_id"
-           WHERE r."work_item_id" = $1 ORDER BY r."created_at" DESC LIMIT 5"#
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(issue_id)
-        .fetch_all(pool)
+    super::auth_reads::newest_run_facts_on_issue(&sea_orm_connection(pool), *issue_id)
         .await
-        .map_err(|error| db_error(error, "fetch-runs"))?;
-    rows.iter().map(map_run_facts).collect()
+        .map(|rows| {
+            rows.into_iter()
+                .map(super::auth_reads::RunFactsRow::into_facts)
+                .collect()
+        })
+        .map_err(|error| db_error(error, "fetch-runs"))
 }
 
 /// One yield run row:
@@ -764,32 +704,14 @@ async fn fetch_yield_run(
     slug: &str,
     run_id: &Uuid,
 ) -> Result<Option<YieldRun>, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT r."id", r."created_by_id", r."owner_id", r."runner_id",
-                  ru."owner_id" AS "runner_owner_id", r."work_item_id", r."status",
-                  r."workspace_id", r."done_payload"
-           FROM "agent_run" r JOIN "workspaces" w ON w."id" = r."workspace_id"
-           LEFT JOIN "runner" ru ON ru."id" = r."runner_id"
-           WHERE r."id" = $1 AND w."slug" = $2 LIMIT 1"#,
-    )
-    .bind(run_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "fetch-yield-run"))?;
-    row.map(|row| {
-        let facts = map_run_facts(&row)?;
-        Ok(YieldRun {
-            facts,
-            workspace_id: row
-                .try_get("workspace_id")
-                .map_err(|e| db_error(e, "fetch-yield-run"))?,
-            done_payload: row
-                .try_get("done_payload")
-                .map_err(|e| db_error(e, "fetch-yield-run"))?,
-        })
-    })
-    .transpose()
+    let row = super::auth_reads::yield_run_by_id(&sea_orm_connection(pool), slug, *run_id)
+        .await
+        .map_err(|error| db_error(error, "fetch-yield-run"))?;
+    Ok(row.map(|row| YieldRun {
+        facts: row.facts(),
+        workspace_id: row.workspace_id,
+        done_payload: row.done_payload,
+    }))
 }
 
 /// `is_workspace_member` (`core/permissions.py:28-34`): any active
@@ -799,12 +721,11 @@ async fn is_workspace_member(
     user_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
+    super::auth_reads::is_active_workspace_member(
+        &sea_orm_connection(pool),
+        *workspace_id,
+        *user_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_one(pool)
     .await
     .map_err(|error| db_error(error, "is-workspace-member"))
 }
@@ -823,55 +744,59 @@ pub struct ProjectRow {
     pub default_assignee_id: Option<Uuid>,
 }
 
+/// The `projects` columns [`fetch_project`] reads, decoded by name.
+#[derive(Debug, Clone, FromQueryResult)]
+struct ProjectLookup {
+    agent_ticking_enabled: Option<bool>,
+    agent_default_max_ticks: Option<i32>,
+    agent_default_interval_seconds: Option<i32>,
+    agent_review_default_interval_seconds: Option<i32>,
+    agent_test_default_interval_seconds: Option<i32>,
+    default_agent_executor: String,
+    project_lead_id: Option<Uuid>,
+    default_assignee_id: Option<Uuid>,
+}
+
 pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<ProjectRow>, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "agent_ticking_enabled", "agent_default_max_ticks",
-                  "agent_default_interval_seconds", "agent_review_default_interval_seconds",
-                  "agent_test_default_interval_seconds", "default_agent_executor",
-                  "project_lead_id", "default_assignee_id"
-           FROM "projects" WHERE "id" = $1 LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "fetch-project"))?;
-    row.map(|row| {
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::DefaultAgentExecutor,
+            projects::Column::ProjectLeadId,
+            projects::Column::DefaultAssigneeId,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .limit(1)
+        .into_model::<ProjectLookup>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-project"))?;
+    Ok(row.map(|row| {
         // The cadence columns are INT4; the policy widens them to i64
         // (the jobs `map_policy` precedent).
-        let interval_impl: Option<i32> = row
-            .try_get("agent_default_interval_seconds")
-            .map_err(|e| db_error(e, "fetch-project"))?;
-        let interval_review: Option<i32> = row
-            .try_get("agent_review_default_interval_seconds")
-            .map_err(|e| db_error(e, "fetch-project"))?;
-        let interval_test: Option<i32> = row
-            .try_get("agent_test_default_interval_seconds")
-            .map_err(|e| db_error(e, "fetch-project"))?;
         let policy = pidash_services::orchestration::clock::ProjectClockPolicy {
-            agent_ticking_enabled: row
-                .try_get("agent_ticking_enabled")
-                .map_err(|e| db_error(e, "fetch-project"))?,
-            agent_default_max_ticks: row
-                .try_get("agent_default_max_ticks")
-                .map_err(|e| db_error(e, "fetch-project"))?,
-            agent_default_interval_seconds: interval_impl.map(i64::from),
-            agent_review_default_interval_seconds: interval_review.map(i64::from),
-            agent_test_default_interval_seconds: interval_test.map(i64::from),
+            agent_ticking_enabled: row.agent_ticking_enabled,
+            agent_default_max_ticks: row.agent_default_max_ticks,
+            agent_default_interval_seconds: row.agent_default_interval_seconds.map(i64::from),
+            agent_review_default_interval_seconds: row
+                .agent_review_default_interval_seconds
+                .map(i64::from),
+            agent_test_default_interval_seconds: row
+                .agent_test_default_interval_seconds
+                .map(i64::from),
         };
-        Ok(ProjectRow {
+        ProjectRow {
             policy,
-            default_agent_executor: row
-                .try_get("default_agent_executor")
-                .map_err(|e| db_error(e, "fetch-project"))?,
-            project_lead_id: row
-                .try_get("project_lead_id")
-                .map_err(|e| db_error(e, "fetch-project"))?,
-            default_assignee_id: row
-                .try_get("default_assignee_id")
-                .map_err(|e| db_error(e, "fetch-project"))?,
-        })
-    })
-    .transpose()
+            default_agent_executor: row.default_agent_executor,
+            project_lead_id: row.project_lead_id,
+            default_assignee_id: row.default_assignee_id,
+        }
+    }))
 }
 
 /// LLM-key presence for the D-11 closures: the actor plus every
@@ -886,12 +811,17 @@ async fn fetch_llm_presence(
     if user_ids.is_empty() {
         return Ok(presence);
     }
-    let rows: Vec<(Uuid, Option<Vec<u8>>)> =
-        sqlx::query_as(r#"SELECT "user_id", "api_key_encrypted" FROM "assistant_user_llm_config" WHERE "user_id" = ANY($1)"#)
-            .bind(user_ids)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "fetch-llm-presence"))?;
+    let rows: Vec<(Uuid, Option<Vec<u8>>)> = assistant_user_llm_config::Entity::find()
+        .select_only()
+        .columns([
+            assistant_user_llm_config::Column::UserId,
+            assistant_user_llm_config::Column::ApiKeyEncrypted,
+        ])
+        .filter(assistant_user_llm_config::Column::UserId.is_in(user_ids.iter().copied()))
+        .into_tuple()
+        .all(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-llm-presence"))?;
     for id in user_ids {
         presence.insert(*id, false);
     }
@@ -923,18 +853,45 @@ async fn creator_universe(
             ids.push(id);
         }
     }
-    let assignees: Vec<(Uuid, bool, bool)> =
-        sqlx::query_as(pidash_services::orchestration::dispatch::LIVE_ASSIGNEE_CANDIDATES_SQL)
-            .bind(issue.id)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "fetch-assignees"))?;
-    for (id, _, _) in assignees {
+    let assignees = live_assignee_candidate_ids(&sea_orm_connection(pool), issue.id)
+        .await
+        .map_err(|error| db_error(error, "fetch-assignees"))?;
+    for id in assignees {
         if !ids.contains(&id) {
             ids.push(id);
         }
     }
     Ok(ids)
+}
+
+/// The live-assignee candidate ids, the SeaORM form of
+/// `pidash_services::orchestration::dispatch::LIVE_ASSIGNEE_CANDIDATES_SQL`
+/// (`users` whose id is a live `issue_assignees.assignee_id` of the issue,
+/// `ORDER BY users.id`). The callers consume only the ids, so the
+/// `is_active` / `is_bot` columns the constant also selects are not read.
+async fn live_assignee_candidate_ids<C: ConnectionTrait>(
+    db: &C,
+    issue_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.in_subquery(live_assignee_ids_subquery(issue_id)))
+        .order_by_asc(users::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// `SELECT assignee_id FROM issue_assignees WHERE issue_id = ? AND
+/// deleted_at IS NULL`: the `IssueAssignee.objects` through-table scope.
+fn live_assignee_ids_subquery(issue_id: Uuid) -> sea_orm::sea_query::SelectStatement {
+    Query::select()
+        .column(issue_assignees::Column::AssigneeId)
+        .from(issue_assignees::Entity)
+        .and_where(issue_assignees::Column::IssueId.eq(issue_id))
+        .and_where(issue_assignees::Column::DeletedAt.is_null())
+        .to_owned()
 }
 
 /// Live `PodRunnerMatcher`: the single SeaORM implementation shared
@@ -1119,12 +1076,15 @@ async fn creator_universe_for_ids(
     issue_id: Uuid,
 ) -> Result<Vec<Uuid>, Denial> {
     let mut ids: Vec<Uuid> = vec![actor_id];
-    let issue: Option<(Option<Uuid>, Option<Uuid>)> =
-        sqlx::query_as(r#"SELECT "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "fetch-issue-creator"))?;
+    let db = sea_orm_connection(pool);
+    let issue: Option<(Option<Uuid>, Option<Uuid>)> = issues::Entity::find()
+        .select_only()
+        .columns([issues::Column::CreatedById, issues::Column::ProjectId])
+        .filter(issues::Column::Id.eq(issue_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "fetch-issue-creator"))?;
     let (created_by_id, project_id) = issue.unwrap_or((None, None));
     if let Some(id) = created_by_id {
         if !ids.contains(&id) {
@@ -1132,13 +1092,17 @@ async fn creator_universe_for_ids(
         }
     }
     if let Some(project_id) = project_id {
-        let project: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-            r#"SELECT "project_lead_id", "default_assignee_id" FROM "projects" WHERE "id" = $1"#,
-        )
-        .bind(project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "fetch-project-creators"))?;
+        let project: Option<(Option<Uuid>, Option<Uuid>)> = projects::Entity::find()
+            .select_only()
+            .columns([
+                projects::Column::ProjectLeadId,
+                projects::Column::DefaultAssigneeId,
+            ])
+            .filter(projects::Column::Id.eq(project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|error| db_error(error, "fetch-project-creators"))?;
         if let Some((lead, assignee)) = project {
             for id in [lead, assignee].into_iter().flatten() {
                 if !ids.contains(&id) {
@@ -1147,13 +1111,10 @@ async fn creator_universe_for_ids(
             }
         }
     }
-    let assignees: Vec<(Uuid, bool, bool)> =
-        sqlx::query_as(pidash_services::orchestration::dispatch::LIVE_ASSIGNEE_CANDIDATES_SQL)
-            .bind(issue_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "fetch-assignees"))?;
-    for (id, _, _) in assignees {
+    let assignees = live_assignee_candidate_ids(&sea_orm_connection(pool), issue_id)
+        .await
+        .map_err(|error| db_error(error, "fetch-assignees"))?;
+    for id in assignees {
         if !ids.contains(&id) {
             ids.push(id);
         }
@@ -1680,13 +1641,18 @@ async fn run_ai_inner(
         let (status, body) = run_ai_refusal(outcome.reason.as_deref());
         return Ok(json_response(status, body));
     };
-    let row: Option<(Uuid, String, String)> = sqlx::query_as(
-        r#"SELECT "id", "status", "executor_kind" FROM "agent_run" WHERE "id" = $1"#,
-    )
-    .bind(run_id)
-    .fetch_optional(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "run-ai-readback"))?;
+    let row: Option<(Uuid, String, String)> = agent_run::Entity::find()
+        .select_only()
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::Status,
+            agent_run::Column::ExecutorKind,
+        ])
+        .filter(agent_run::Column::Id.eq(run_id))
+        .into_tuple()
+        .one(&sea_orm_connection(&pre.pool))
+        .await
+        .map_err(|error| db_error(error, "run-ai-readback"))?;
     let Some((id, status_text, executor)) = row else {
         return Err(Denial::ServerError);
     };
@@ -1696,6 +1662,22 @@ async fn run_ai_inner(
     // row is assigned before the response returns (PIDASHCONV-1494).
     drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "run-ai-drain").await?;
     Ok(json_response(status, body))
+}
+
+/// `run.done_payload = payload; run.save(update_fields=["done_payload"])`
+/// (`:1300-1308`): one column, no other stamp. `agent_run` is not a
+/// design §4 table, so the entity write runs here.
+async fn write_done_payload<C: ConnectionTrait>(
+    db: &C,
+    run_id: Uuid,
+    payload: Value,
+) -> Result<(), DbErr> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::DonePayload, Expr::value(payload))
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(db)
+        .await
+        .map(|_| ())
 }
 
 /// `POST .../agent-runs/<run_id>/yield/` (`views/issue.py:1255-1327`, `3869a226`).
@@ -1802,12 +1784,13 @@ async fn yield_inner(
     if let Some(stop_ticking) = stop_ticking {
         payload.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
     }
-    sqlx::query(r#"UPDATE "agent_run" SET "done_payload" = $1 WHERE "id" = $2"#)
-        .bind(Value::Object(payload))
-        .bind(run.facts.id)
-        .execute(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "yield-write"))?;
+    write_done_payload(
+        &sea_orm_connection(&pre.pool),
+        run.facts.id,
+        Value::Object(payload),
+    )
+    .await
+    .map_err(|error| db_error(error, "yield-write"))?;
     let work_item_id = run.facts.work_item_id.expect("checked above");
     let (status, body) = yield_response(
         run.facts.id,
@@ -2158,5 +2141,268 @@ mod tests {
         assert!(gate(keyed));
         assert!(!gate(keyless));
         assert!(!gate(Uuid::new_v4()));
+    }
+
+    // ---- SeaORM statement shapes (no database) -------------------------------
+
+    use sea_orm::{DbBackend, QueryTrait};
+
+    #[test]
+    fn issue_row_statement_joins_workspace_inner_and_state_left() {
+        let sql = issue_row_select("acme", &Uuid::nil(), &Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""states"."name" AS "state_name""#), "{sql}");
+        assert!(
+            sql.contains(r#""states"."group" AS "state_group""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.ends_with("LIMIT 1"), "{sql}");
+    }
+
+    #[test]
+    fn live_assignee_subquery_scopes_on_issue_and_liveness() {
+        let sql = live_assignee_ids_subquery(Uuid::nil())
+            .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(sql.contains(r#"FROM "issue_assignees""#), "{sql}");
+        assert!(sql.contains(r#""issue_id" = "#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
+    }
+
+    /// Every new read/write against constraint-free temp copies on one
+    /// connection (skips without `DATABASE_URL`).
+    #[tokio::test]
+    async fn live_action_reads_and_yield_write() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issues",
+            "workspaces",
+            "states",
+            "projects",
+            "assistant_user_llm_config",
+            "users",
+            "issue_assignees",
+            "runner",
+            "agent_run",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, project, state, pod) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (issue, stateless_issue, dead_issue) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (creator, lead, assignee_a, assignee_b, stale_assignee) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (run, other_run) = (Uuid::new_v4(), Uuid::new_v4());
+        let user_rows: Vec<String> = [creator, lead, assignee_a, assignee_b, stale_assignee]
+            .iter()
+            .map(|id| format!("('{id}', true, false)"))
+            .collect();
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!("INSERT INTO states (id, name, \"group\") VALUES ('{state}', 'Doing', 'started')"),
+            format!(
+                "INSERT INTO projects (id, agent_ticking_enabled, agent_default_max_ticks, \
+                 agent_default_interval_seconds, agent_review_default_interval_seconds, \
+                 agent_test_default_interval_seconds, default_agent_executor, project_lead_id, \
+                 default_assignee_id) VALUES ('{project}', false, 7, 60, 120, 180, 'codex', '{lead}', NULL)"
+            ),
+            format!(
+                "INSERT INTO issues (id, project_id, workspace_id, created_by_id, agent_executor, state_id, deleted_at) VALUES \
+                 ('{issue}', '{project}', '{ws}', '{creator}', 'claude', '{state}', NULL), \
+                 ('{stateless_issue}', '{project}', '{ws}', NULL, NULL, NULL, NULL), \
+                 ('{dead_issue}', '{project}', '{ws}', '{creator}', NULL, '{state}', now())"
+            ),
+            format!("INSERT INTO users (id, is_active, is_bot) VALUES {}", user_rows.join(", ")),
+            format!(
+                "INSERT INTO issue_assignees (id, issue_id, assignee_id, created_at, deleted_at) VALUES \
+                 (gen_random_uuid(), '{issue}', '{assignee_a}', '2024-01-01T00:00:00Z', NULL), \
+                 (gen_random_uuid(), '{issue}', '{assignee_b}', '2024-01-02T00:00:00Z', NULL), \
+                 (gen_random_uuid(), '{issue}', '{stale_assignee}', '2024-01-03T00:00:00Z', now())"
+            ),
+            format!(
+                "INSERT INTO assistant_user_llm_config (id, user_id, api_key_encrypted) VALUES \
+                 (1, '{creator}', '\\x6b6579'::bytea), (2, '{lead}', NULL), (3, '{assignee_a}', ''::bytea)"
+            ),
+            format!(
+                "INSERT INTO runner (id, owner_id, pod_id, provisioning, status) VALUES \
+                 (gen_random_uuid(), '{creator}', '{pod}', 'desktop_bundled', 'online'), \
+                 (gen_random_uuid(), '{assignee_a}', '{pod}', 'desktop_bundled', 'revoked'), \
+                 (gen_random_uuid(), '{assignee_b}', '{pod}', 'cloud', 'offline'), \
+                 (gen_random_uuid(), '{lead}', '{pod}', 'cloud', 'revoked')"
+            ),
+            format!(
+                "INSERT INTO agent_run (id, status, executor_kind, done_payload) VALUES \
+                 ('{run}', 'running', 'claude', NULL), ('{other_run}', 'done', 'codex', '{{\"status\":\"ok\"}}')"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect(&sql);
+        }
+        let db = sea_orm_connection(&pool);
+
+        // fetch_issue: slug + project + pk, live rows only, LEFT state.
+        let found = fetch_issue(&pool, "acme", &project, &issue)
+            .await
+            .expect("issue")
+            .expect("found");
+        assert_eq!(found.project_id, Some(project));
+        assert_eq!(found.workspace_id, ws);
+        assert_eq!(found.created_by_id, Some(creator));
+        assert_eq!(found.agent_executor.as_deref(), Some("claude"));
+        assert_eq!(found.state_id, Some(state));
+        assert_eq!(found.state_name.as_deref(), Some("Doing"));
+        assert_eq!(found.state_group.as_deref(), Some("started"));
+        let stateless = fetch_issue(&pool, "acme", &project, &stateless_issue)
+            .await
+            .expect("issue")
+            .expect("found");
+        assert_eq!((stateless.state_id, stateless.state_name), (None, None));
+        assert!(fetch_issue(&pool, "acme", &project, &dead_issue)
+            .await
+            .expect("issue")
+            .is_none());
+        assert!(fetch_issue(&pool, "other", &project, &issue)
+            .await
+            .expect("issue")
+            .is_none());
+
+        // fetch_project: policy widening plus the creator candidates.
+        let proj = fetch_project(&pool, &project)
+            .await
+            .expect("project")
+            .expect("found");
+        assert_eq!(proj.policy.agent_ticking_enabled, Some(false));
+        assert_eq!(proj.policy.agent_default_max_ticks, Some(7));
+        assert_eq!(proj.policy.agent_default_interval_seconds, Some(60));
+        assert_eq!(proj.policy.agent_review_default_interval_seconds, Some(120));
+        assert_eq!(proj.policy.agent_test_default_interval_seconds, Some(180));
+        assert_eq!(proj.default_agent_executor, "codex");
+        assert_eq!(proj.project_lead_id, Some(lead));
+        assert_eq!(proj.default_assignee_id, None);
+        assert!(fetch_project(&pool, &Uuid::new_v4())
+            .await
+            .expect("project")
+            .is_none());
+
+        // fetch_llm_presence: a non-empty key is present, NULL/empty is not,
+        // an unknown user defaults to false.
+        let presence = fetch_llm_presence(&pool, &[creator, lead, assignee_a, assignee_b])
+            .await
+            .expect("presence");
+        assert_eq!(presence.get(&creator), Some(&true));
+        assert_eq!(presence.get(&lead), Some(&false));
+        assert_eq!(presence.get(&assignee_a), Some(&false));
+        assert_eq!(presence.get(&assignee_b), Some(&false));
+        assert!(fetch_llm_presence(&pool, &[])
+            .await
+            .expect("presence")
+            .is_empty());
+
+        // live assignee candidates: live through rows only, by user id.
+        let mut expected = vec![assignee_a, assignee_b];
+        expected.sort();
+        assert_eq!(
+            live_assignee_candidate_ids(&db, issue)
+                .await
+                .expect("cands"),
+            expected
+        );
+        // creator universes: actor, creator, lead, (no default assignee), assignees.
+        let actor = Uuid::new_v4();
+        let universe = creator_universe(&pool, actor, &found, &proj)
+            .await
+            .expect("universe");
+        assert_eq!(&universe[..3], &[actor, creator, lead]);
+        let mut tail = universe[3..].to_vec();
+        tail.sort();
+        assert_eq!(tail, expected);
+        assert_eq!(
+            creator_universe_for_ids(&pool, actor, issue)
+                .await
+                .expect("universe"),
+            universe
+        );
+        // Duplicates collapse (actor == creator).
+        let dup = creator_universe_for_ids(&pool, creator, issue)
+            .await
+            .expect("universe");
+        assert_eq!(dup.iter().filter(|id| **id == creator).count(), 1);
+
+        // The run-ai readback tuple.
+        let readback: Option<(Uuid, String, String)> = agent_run::Entity::find()
+            .select_only()
+            .columns([
+                agent_run::Column::Id,
+                agent_run::Column::Status,
+                agent_run::Column::ExecutorKind,
+            ])
+            .filter(agent_run::Column::Id.eq(run))
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("readback");
+        assert_eq!(readback, Some((run, "running".into(), "claude".into())));
+
+        // The yield write touches only the addressed row's done_payload.
+        let mut payload = serde_json::Map::new();
+        payload.insert("status".to_owned(), Value::String("done".into()));
+        payload.insert("stop_ticking".to_owned(), Value::Bool(true));
+        write_done_payload(&db, run, Value::Object(payload.clone()))
+            .await
+            .expect("write");
+        let (written, untouched): (Option<Value>, Option<Value>) = (
+            agent_run::Entity::find()
+                .select_only()
+                .column(agent_run::Column::DonePayload)
+                .filter(agent_run::Column::Id.eq(run))
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("read")
+                .expect("row"),
+            agent_run::Entity::find()
+                .select_only()
+                .column(agent_run::Column::DonePayload)
+                .filter(agent_run::Column::Id.eq(other_run))
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("read")
+                .expect("row"),
+        );
+        assert_eq!(written, Some(Value::Object(payload)));
+        assert_eq!(untouched, Some(serde_json::json!({"status": "ok"})));
     }
 }

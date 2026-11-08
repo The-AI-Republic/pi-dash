@@ -110,7 +110,7 @@ pub(crate) async fn soft_delete_avatar_asset(
     if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
         tracing::warn!(%error, task = message.task.as_str(), "avatar soft-delete enqueue failed; response stands");
     }
-    let _ = identity::clear_avatar(pool, user_id).await;
+    let _ = identity::clear_avatar(&pidash_db::pool::sea_orm_connection(pool), user_id).await;
 }
 
 /// Shared `download_and_upload_avatar` (`adapter/base.py:139-218`,

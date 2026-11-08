@@ -1468,7 +1468,7 @@ impl SeedStore for PgSeedStore {
         // normalization; every other column at its model default.
         use pidash_services::domain::identity::{create_bot_user, NewBotUser};
         create_bot_user(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &NewBotUser {
                 id: None,
                 username,
@@ -1498,7 +1498,7 @@ impl SeedStore for PgSeedStore {
         let view_props = ws_default_props();
         let issue_props = ws_issue_props();
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedMember {
                 workspace_id,
                 member_id,
@@ -1566,7 +1566,7 @@ impl SeedStore for PgSeedStore {
         let view_props = project_default_props();
         let preferences = default_preferences();
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedProjectMember {
                 project_id,
                 workspace_id,
@@ -1628,7 +1628,7 @@ impl SeedStore for PgSeedStore {
         use pidash_services::domain::projects::states::{add_seed, SeedState};
         let actor = ctx_actor(ctx)?;
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedState {
                 workspace_id,
                 project_id,

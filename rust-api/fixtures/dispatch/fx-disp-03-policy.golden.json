@@ -61,7 +61,7 @@
       "no_llm_config": "llm_config_missing"
     },
     "local_reason": "no_local_runner",
-    "local_excludes_desktop_bundled": "Runner exclude(provisioning=DESKTOP_BUNDLED); bundled-only project reports available=False (test_policy.py:139-156)",
+    "local_excludes_pinned_only_and_revoked": "Runner exclude(pod_dispatch=PINNED_ONLY) + exclude(revoked); paused engine excluded via engine_paused_q (agent_execution.py:121-132, NEWPIDASH-58)",
     "managed_reason_passthrough": "managed_runner_availability(project, user) reason verbatim",
     "cloud_user_gate": "cloud_available and user is not None and not user_has_llm_config(user) -> False/llm_config_missing"
   },
