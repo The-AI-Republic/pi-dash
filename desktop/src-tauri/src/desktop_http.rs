@@ -96,6 +96,20 @@ impl DesktopHttp {
             pre.insert(id.to_owned(), (cancel, now));
         }
     }
+
+    /// Abort every in-flight request and stream. The page that asked for
+    /// them is gone (reload, redirect, crash) and can no longer cancel
+    /// them itself: without this, each reload orphans one Rust task per
+    /// open stream until sign-out bumps the session generation.
+    pub(crate) fn cancel_all(&self) {
+        let pending: Vec<Arc<Notify>> = {
+            let mut inflight = self.inflight.lock().unwrap();
+            std::mem::take(&mut *inflight).into_values().collect()
+        };
+        for cancel in pending {
+            cancel.notify_one();
+        }
+    }
 }
 
 struct Inflight<'a> {
@@ -619,6 +633,36 @@ mod tests {
             "stale tombstone must not cancel a later request"
         );
         drop(inflight);
+    }
+
+    // A page reload destroys the JS world without running its cleanup, so
+    // the page never sends desktop_api_cancel. cancel_all is the Rust-side
+    // safety net the page-load hook calls: every tracked entry must be
+    // aborted, while entries tracked afterwards (the new page's requests)
+    // must be untouched.
+    #[tokio::test]
+    async fn cancel_all_aborts_every_inflight_entry_but_not_later_ones() {
+        let http = DesktopHttp::new(api()).unwrap();
+        let first = http.track("r1");
+        let second = http.track("r2");
+        http.cancel_all();
+        tokio::time::timeout(Duration::from_secs(1), first.cancel.notified())
+            .await
+            .expect("cancel_all missed r1");
+        tokio::time::timeout(Duration::from_secs(1), second.cancel.notified())
+            .await
+            .expect("cancel_all missed r2");
+        drop(first);
+        drop(second);
+        assert!(http.inflight.lock().unwrap().is_empty());
+        let later = http.track("r3");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), later.cancel.notified())
+                .await
+                .is_err(),
+            "cancel_all must not poison entries tracked after it"
+        );
+        drop(later);
     }
 
     #[test]

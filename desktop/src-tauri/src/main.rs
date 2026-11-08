@@ -578,6 +578,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // does get through (e.g. a redirect the policy hook didn't see),
         // bounce as soon as it finishes loading.
         .on_page_load(move |webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                // A new page is loading (reload, 401 bounce, theme-switch
+                // reload, sign-in exchange, …): the page that asked for
+                // the in-flight native requests is going away and cannot
+                // receive their responses, and its JS never gets to run
+                // its cleanup (e.g. NativeEventSource::close). Cancel
+                // them all here, so a reloaded stream is not orphaned
+                // until sign-out. SPA route changes load no new page and
+                // never reach this branch.
+                if webview.label() == "main" {
+                    webview.state::<desktop_http::DesktopHttp>().cancel_all();
+                }
+                return;
+            }
             if payload.event() != tauri::webview::PageLoadEvent::Finished {
                 return;
             }
