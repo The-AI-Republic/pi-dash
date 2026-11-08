@@ -1402,6 +1402,9 @@ pub const TASKS: &[TaskRow] = &[
         name: "runner.expire_stale_approvals",
     },
     TaskRow {
+        name: "runner.fail_dedicated_runs",
+    },
+    TaskRow {
         name: "runner.fail_runs_on_offline_runners",
     },
     TaskRow {
@@ -1436,6 +1439,9 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "runner.sweep_stale_runners",
+    },
+    TaskRow {
+        name: "runner.sweep_stranded_dedicated_runs",
     },
 ];
 
@@ -2150,7 +2156,7 @@ mod tests {
         );
         assert_eq!(
             pidash_jobs::runner_runs::TASK_NAMES.len(),
-            14,
+            16,
             "runner_runs group drifted"
         );
         assert_eq!(
@@ -2163,7 +2169,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 78, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 80, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
@@ -2190,7 +2196,7 @@ mod tests {
             .get("schedule")
             .and_then(|v| v.as_array())
             .expect("schedule");
-        assert_eq!(schedule.len(), 29);
+        assert_eq!(schedule.len(), 31);
         let find = |name: &str| {
             schedule
                 .iter()

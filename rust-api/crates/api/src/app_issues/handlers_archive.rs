@@ -524,6 +524,21 @@ fn json_drf(row: &Map<String, Value>, key: &str) -> Result<String, Denial> {
     json_drf_opt(row, key)?.ok_or(Denial::ServerError)
 }
 
+/// `assigned_runner_detail` by serialized runner id (design §14.1).
+async fn fetch_archived_runner_detail(
+    pool: &sqlx::PgPool,
+    runner_id: Option<String>,
+) -> Result<Option<serde_json::Value>, Denial> {
+    let Some(raw) = runner_id else {
+        return Ok(None);
+    };
+    let id = raw.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    super::access::fetch_assigned_runner_detail(&orm, Some(id))
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 /// Everything the 30-key render borrows: the base scalars plus the
 /// ticker/policy/state/run/blocker inputs, all owned.
 struct DetailOwned {
@@ -543,6 +558,8 @@ struct DetailOwned {
     type_id: Option<String>,
     is_epic: bool,
     assigned_pod_id: Option<String>,
+    assigned_runner_id: Option<String>,
+    assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
     created_at: String,
     updated_at: String,
@@ -611,6 +628,12 @@ impl DetailOwned {
             type_id: json_str_opt(row, "type_id"),
             is_epic: fetch_is_epic(pool, json_str_opt(row, "type_id")).await?,
             assigned_pod_id: json_str_opt(row, "assigned_pod_id"),
+            assigned_runner_id: json_str_opt(row, "assigned_runner_id"),
+            assigned_runner_detail: fetch_archived_runner_detail(
+                pool,
+                json_str_opt(row, "assigned_runner_id"),
+            )
+            .await?,
             agent_executor: json_str_opt(row, "agent_executor"),
             created_at: json_drf(row, "created_at")?,
             updated_at: json_drf(row, "updated_at")?,
@@ -654,6 +677,7 @@ impl DetailOwned {
             type_id: self.type_id.as_deref(),
             is_epic: self.is_epic,
             assigned_pod_id: self.assigned_pod_id.as_deref(),
+            assigned_runner_id: self.assigned_runner_id.as_deref(),
             agent_executor: self.agent_executor.as_deref(),
             module_ids: None,
             label_ids: None,
@@ -687,6 +711,7 @@ impl DetailOwned {
             active_run: self.active_run.as_ref().map(RenderedAgentRun::detail_row),
             run_count: self.run_count,
             blockers: &self.blockers,
+            assigned_runner_detail: self.assigned_runner_detail.clone(),
         }
     }
 }
@@ -830,6 +855,7 @@ struct WriteRow {
     parent_id: Option<String>,
     type_id: Option<String>,
     assigned_pod_id: Option<String>,
+    assigned_runner_id: Option<String>,
     agent_executor: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
@@ -1094,6 +1120,7 @@ fn write_row((issue, state): (issues::Model, Option<states::Model>)) -> WriteRow
         parent_id: id_text(issue.parent_id),
         type_id: id_text(issue.type_id),
         assigned_pod_id: id_text(issue.assigned_pod_id),
+        assigned_runner_id: id_text(issue.assigned_runner_id),
         agent_executor: issue.agent_executor,
         created_at: at(issue.created_at),
         updated_at: at(issue.updated_at),
@@ -1135,6 +1162,7 @@ async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<St
         type_id: row.type_id.as_deref(),
         is_epic,
         assigned_pod_id: row.assigned_pod_id.as_deref(),
+        assigned_runner_id: row.assigned_runner_id.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
         module_ids: None,
         label_ids: None,
@@ -1532,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn current_instance_is_24_keys_in_meta_order() {
+    fn current_instance_is_25_keys_in_meta_order() {
         let base = IssueDetailBaseRow {
             id: "id",
             name: "name",
@@ -1551,6 +1579,7 @@ mod tests {
             type_id: None,
             is_epic: false,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             module_ids: None,
             label_ids: None,
@@ -1582,7 +1611,7 @@ mod tests {
         ] {
             expected.retain(|kept| *kept != key);
         }
-        assert_eq!(parsed.len(), 24);
+        assert_eq!(parsed.len(), 25);
         let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
         assert_eq!(keys, expected);
         assert!(rendered.contains("\"sort_order\": 10000.0"));
@@ -1616,6 +1645,7 @@ mod tests {
             type_id: None,
             is_epic: false,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             module_ids: None,
             label_ids: None,
@@ -1641,6 +1671,7 @@ mod tests {
             active_run: None,
             run_count: 0,
             blockers: &blockers,
+            assigned_runner_detail: None,
         };
         let view = issue_detail_to_representation(&row);
         let rendered = serde_json::to_string(&view).expect("json");

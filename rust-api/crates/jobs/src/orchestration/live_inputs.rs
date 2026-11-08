@@ -80,9 +80,10 @@ impl PodRunnerMatcher for JobsMatcher {
         issue_id: Uuid,
         creator_id: Option<Uuid>,
         human: bool,
+        pod_once: bool,
     ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
         self.inner
-            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human)
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human, pod_once)
     }
 }
 

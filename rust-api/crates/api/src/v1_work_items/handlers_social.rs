@@ -1545,6 +1545,13 @@ async fn expand_issue(
     let state = row.state_id.map(|id| id.to_string());
     let estimate_point = row.estimate_point_id.map(|id| id.to_string());
     let assigned_pod = row.assigned_pod_id.map(|id| id.to_string());
+    let assigned_runner = row.assigned_runner_id.map(|id| id.to_string());
+    let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.assigned_runner_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     let type_id = row.type_id.map(|id| id.to_string());
     // `get_url` (`serializers/issue.py:423-434`): present and absolute, or
     // the key is omitted — never null, never relative.
@@ -1604,6 +1611,8 @@ async fn expand_issue(
         state: state.as_deref(),
         estimate_point: estimate_point.as_deref(),
         assigned_pod: assigned_pod.as_deref(),
+        assigned_runner: assigned_runner.as_deref(),
+        assigned_runner_detail: assigned_runner_detail.as_ref(),
     };
     let assignee_ids = fetch_assignee_ids(pool, issue_id).await?;
     let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();

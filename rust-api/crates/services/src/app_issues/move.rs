@@ -275,7 +275,7 @@ impl MoveOptions {
 
 /// `issues` columns in `_meta` order (the `SourceIssueRow` projection,
 /// shared by the three issue SELECTs).
-pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\"";
+pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\"";
 
 /// `agent_run` columns in `_meta` order (the `HandoffRunRow` projection).
 pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
@@ -284,7 +284,7 @@ pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"works
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
 /// (a bare `FOR UPDATE` would ask Postgres to lock the nullable side of
 /// the `states` outer join and 500).
-pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
+pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
 
 /// Target-membership probe (`:146-152`): active `role >= MEMBER`
 /// membership. `$1` slug, `$2` target project id, `$3` actor id.
@@ -352,7 +352,7 @@ pub mod orm {
 
     /// The `SourceIssueRow` columns (the full row minus the JSON,
     /// stripped-text and workpad columns nothing reads).
-    pub const SOURCE_ROW_COLUMNS: [issues::Column; 31] = [
+    pub const SOURCE_ROW_COLUMNS: [issues::Column; 32] = [
         issues::Column::Id,
         issues::Column::CreatedAt,
         issues::Column::UpdatedAt,
@@ -383,6 +383,7 @@ pub mod orm {
         issues::Column::GitWorkBranch,
         issues::Column::CreatedVia,
         issues::Column::AssignedPodId,
+        issues::Column::AssignedRunnerId,
         issues::Column::AgentExecutor,
     ];
 
@@ -738,6 +739,7 @@ pub struct SourceIssueRow {
     pub parent_id: Option<Uuid>,
     pub estimate_point_id: Option<Uuid>,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub type_id: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -914,6 +916,13 @@ pub trait MoveStore {
 
     /// Uncapped open-blocker flag (`blockers::has_open_blockers_sql`).
     async fn representation_has_open_blockers(&self, issue_id: Uuid) -> Result<bool, StoreError>;
+
+    /// `assigned_runner_detail` for the `current_instance` render
+    /// (design §14.1): `None` when pod-assigned or the runner is gone.
+    async fn representation_assigned_runner_detail(
+        &self,
+        runner_id: Option<Uuid>,
+    ) -> Result<Option<serde_json::Value>, StoreError>;
 
     /// Default non-triage state (`dispatch::tools::CREATE_SAVE_DEFAULT_STATE_SQL`).
     async fn target_default_state(
@@ -1573,6 +1582,10 @@ async fn render_current_instance<S: MoveStore>(
     let state_s = issue.state_id.map(|id| id.to_string());
     let estimate_s = issue.estimate_point_id.map(|id| id.to_string());
     let pod_s = issue.assigned_pod_id.map(|id| id.to_string());
+    let runner_s = issue.assigned_runner_id.map(|id| id.to_string());
+    let runner_detail = store
+        .representation_assigned_runner_detail(issue.assigned_runner_id)
+        .await?;
     let created_by_s = issue.created_by_id.map(|id| id.to_string());
     let updated_by_s = issue.updated_by_id.map(|id| id.to_string());
     let created_at_s = serialize_drf_datetime(issue.created_at);
@@ -1649,6 +1662,8 @@ async fn render_current_instance<S: MoveStore>(
         state: state_s.as_deref(),
         estimate_point: estimate_s.as_deref(),
         assigned_pod: pod_s.as_deref(),
+        assigned_runner: runner_s.as_deref(),
+        assigned_runner_detail: runner_detail.as_ref(),
     };
     let input = RepresentationInput {
         row: &row,
@@ -1985,6 +2000,7 @@ mod tests {
             parent_id: Some(uuid(0x31)),
             estimate_point_id: Some(uuid(0x32)),
             assigned_pod_id: Some(uuid(0x33)),
+            assigned_runner_id: None,
             type_id: Some("bug".to_owned()),
             created_at: now(),
             updated_at: now(),
@@ -2206,6 +2222,14 @@ mod tests {
         ) -> Result<bool, StoreError> {
             self.log("representation_has_open_blockers");
             Ok(self.open_blockers)
+        }
+
+        async fn representation_assigned_runner_detail(
+            &self,
+            _runner_id: Option<Uuid>,
+        ) -> Result<Option<serde_json::Value>, StoreError> {
+            self.log("representation_assigned_runner_detail");
+            Ok(None)
         }
 
         async fn target_default_state(
@@ -2655,7 +2679,7 @@ mod tests {
             MoveResult::AlreadyThere(_) => panic!("expected a move"),
         };
         let calls = store.calls.borrow();
-        let head = &calls[..13];
+        let head = &calls[..14];
         assert_eq!(
             head,
             [
@@ -2669,13 +2693,14 @@ mod tests {
                 "representation_blocked_by",
                 "representation_blocking",
                 "representation_has_open_blockers",
+                "representation_assigned_runner_detail",
                 "target_default_state",
                 "lock_source_issue",
                 "advisory_lock_project",
             ]
         );
         assert_eq!(
-            &calls[13..26],
+            &calls[14..27],
             [
                 "lock_handoff_runs",
                 "max_target_sequence",
@@ -2693,12 +2718,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            &calls[26..28],
+            &calls[27..29],
             ["moved_comment_ids", "moved_description_ids"]
         );
-        assert_eq!(calls[28..40], ["repoint_related"; 12]);
-        assert_eq!(&calls[40..], ["moved_issue"]);
-        assert_eq!(calls.len(), 41);
+        assert_eq!(calls[29..41], ["repoint_related"; 12]);
+        assert_eq!(&calls[41..], ["moved_issue"]);
+        assert_eq!(calls.len(), 42);
 
         // Repoint order is Python's call order.
         assert_eq!(*store.repoints.borrow(), REPOINT_ORDER);

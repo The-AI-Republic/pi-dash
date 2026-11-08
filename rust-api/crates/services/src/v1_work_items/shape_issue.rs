@@ -289,6 +289,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "type_id",
     "url",
     "description_markdown",
+    "assigned_runner_detail",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -319,6 +320,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Write-only fields (`issue.py:118-151`): accepted on write, absent from the
@@ -352,6 +354,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "id",
     "type_id",
     "url",
+    "assigned_runner_detail",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -382,6 +385,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Read-only blocker keys `to_representation` appends for single-item
@@ -446,6 +450,21 @@ pub const POD_WRONG_PROJECT_BODY: &str = r#"{"assigned_pod":["pod is in a differ
 /// `validate()` pod-reassign guard (`:211-216`).
 pub const POD_REASSIGN_ACTIVE_RUN_BODY: &str =
     r#"{"assigned_pod":["cannot reassign pod while the issue has an active run"]}"#;
+/// The dedicated-runner E-checks (`validate_execution_target`, design
+/// §7.1): one variant per code, each Django's `ErrorDetail` — every
+/// one keyed on `assigned_runner` (both serializers carry the runner
+/// in attrs under that key, even though the app surface posts
+/// `assigned_runner_id`).
+pub const RUNNER_NOT_FOUND_BODY: &str = r#"{"assigned_runner":["runner not found"]}"#;
+pub const RUNNER_WRONG_PROJECT_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different project"]}"#;
+pub const RUNNER_POD_MISMATCH_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different pod"]}"#;
+pub const RUNNER_REVOKED_BODY: &str = r#"{"assigned_runner":["runner has been revoked"]}"#;
+pub const RUNNER_OWNER_NOT_ON_ISSUE_BODY: &str =
+    r#"{"assigned_runner":["the runner's owner is not on this issue"]}"#;
+pub const ACTIVE_RUN_IN_PROGRESS_BODY: &str =
+    r#"{"assigned_runner":["the issue has an active run; changes take effect on the next run"]}"#;
 /// `normalize_issue_executor` unknown value
 /// (`runner/services/issue_assignment.py:37-38`).
 pub const EXECUTOR_UNKNOWN_BODY: &str = r#"{"agent_executor":["unknown agent executor"]}"#;
@@ -591,6 +610,19 @@ pub enum ValidateError {
     ParentWrongProject,
     /// `estimate_point` is not one of this workspace+project (`:278-286`).
     EstimatePointWrongProject,
+    /// The dedicated-runner E-checks (`validate_execution_target`):
+    /// E1 `runner_not_found`.
+    RunnerNotFound,
+    /// E2 `runner_wrong_project`.
+    RunnerWrongProject,
+    /// E3 `runner_pod_mismatch`.
+    RunnerPodMismatch,
+    /// E4 `runner_revoked`.
+    RunnerRevoked,
+    /// E7 `runner_owner_not_on_issue`.
+    RunnerOwnerNotOnIssue,
+    /// E8 `active_run_in_progress`.
+    ActiveRunInProgress,
 }
 
 impl ValidateError {
@@ -613,6 +645,27 @@ impl ValidateError {
             ValidateError::ExecutorMidFlight => EXECUTOR_MID_FLIGHT_BODY,
             ValidateError::ParentWrongProject => PARENT_WRONG_PROJECT_BODY,
             ValidateError::EstimatePointWrongProject => ESTIMATE_POINT_WRONG_PROJECT_BODY,
+            ValidateError::RunnerNotFound => RUNNER_NOT_FOUND_BODY,
+            ValidateError::RunnerWrongProject => RUNNER_WRONG_PROJECT_BODY,
+            ValidateError::RunnerPodMismatch => RUNNER_POD_MISMATCH_BODY,
+            ValidateError::RunnerRevoked => RUNNER_REVOKED_BODY,
+            ValidateError::RunnerOwnerNotOnIssue => RUNNER_OWNER_NOT_ON_ISSUE_BODY,
+            ValidateError::ActiveRunInProgress => ACTIVE_RUN_IN_PROGRESS_BODY,
+        }
+    }
+
+    /// Map a domain E-check code (design §7.1, `validate_execution_target`)
+    /// to its variant. The fallthrough is E8 — the only code left after
+    /// E1-E4/E7 (`""` = assignable never reaches this helper, and the
+    /// domain's other failures carry a DB error instead).
+    pub fn from_runner_code(code: &str) -> Self {
+        match code {
+            "runner_not_found" => ValidateError::RunnerNotFound,
+            "runner_wrong_project" => ValidateError::RunnerWrongProject,
+            "runner_pod_mismatch" => ValidateError::RunnerPodMismatch,
+            "runner_revoked" => ValidateError::RunnerRevoked,
+            "runner_owner_not_on_issue" => ValidateError::RunnerOwnerNotOnIssue,
+            _ => ValidateError::ActiveRunInProgress,
         }
     }
 }
@@ -1213,6 +1266,12 @@ pub struct IssueRow<'a> {
     pub state: Option<&'a str>,
     pub estimate_point: Option<&'a str>,
     pub assigned_pod: Option<&'a str>,
+    /// Bare `assigned_runner` FK (model field, renders the PK or null —
+    /// same convention as `assigned_pod`).
+    pub assigned_runner: Option<&'a str>,
+    /// The `assigned_runner_detail` object (design §14.1), `None` when
+    /// the issue is pod-assigned or the runner is gone — renders `null`.
+    pub assigned_runner_detail: Option<&'a Value>,
 }
 
 /// Failure modes of [`render_issue`]: caller-contract violations and the two
@@ -1407,6 +1466,11 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             "state" => opt_str(row.state),
             "estimate_point" => opt_str(row.estimate_point),
             "assigned_pod" => opt_str(row.assigned_pod),
+            "assigned_runner" => opt_str(row.assigned_runner),
+            "assigned_runner_detail" => match row.assigned_runner_detail {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
             // `filter_fields` only ever yields `FIELDS_IN_ORDER` names, and
             // every non-write-only one is matched above.
             _ => unreachable!("render_issue matched every kept readable field"),
@@ -1647,7 +1711,7 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 36);
+        assert_eq!(FIELDS_IN_ORDER.len(), 38);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
@@ -1661,7 +1725,7 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 33);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 35);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
         assert_eq!(
             WRITE_ONLY_FIELDS,
@@ -2565,6 +2629,8 @@ mod tests {
             state: Some("97b22834-b823-4109-a527-b39aa310ceae"),
             estimate_point: None,
             assigned_pod: None,
+            assigned_runner: None,
+            assigned_runner_detail: None,
         }
     }
 
@@ -2632,7 +2698,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 37);
+        assert_eq!(keys.len(), 39);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(
