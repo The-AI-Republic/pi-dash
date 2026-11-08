@@ -411,41 +411,38 @@ async fn sub_total_pairs(
     Ok(out)
 }
 
-/// `ORDER BY` for the unpaginated flat endpoint: the rewritten branches
-/// carry complete SQL; the default branch resolves the raw param without
-/// the paginator's `NULLS LAST` or forced tiebreak.
-fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<(String, String), Denial> {
+/// `ORDER BY` for the unpaginated flat endpoint, as an expression:
+/// `(expr, descending, created_at tiebreak, order joins)`. Mirrors
+/// [`super::list_engine::flat_order_key`]: the flat list selects the
+/// expr as `__order_key` and orders by the alias so the statement is
+/// valid under `DISTINCT` (Django `issues/list/` ends with
+/// `.distinct()`).
+fn flat_order_key_sql(
+    order_spec: &OrderSpec,
+    orig_param: &str,
+) -> Result<(String, bool, bool, String), Denial> {
     let out = order_spec.out_param.as_str();
-    if out == "priority_order"
-        || out == "-priority_order"
-        || out == "state_order"
-        || out == "-state_order"
-    {
-        return Ok((order_spec.order_by_sql.clone(), String::new()));
+    if out == "priority_order" || out == "-priority_order" {
+        let expr = pidash_services::app_issues::priority_case_sql();
+        return Ok((expr, false, true, String::new()));
+    }
+    if out == "state_order" || out == "-state_order" {
+        let expr = pidash_services::app_issues::state_case_sql(r#"state."group""#);
+        return Ok((expr, false, true, String::new()));
     }
     if out == "min_values" || out == "-min_values" {
-        let descending = out.starts_with('-');
         let sub = min_order_subquery(orig_param.trim_start_matches('-'))?;
-        return Ok((
-            format!(
-                "{sub} {}, created_at DESC",
-                if descending { "DESC" } else { "ASC" }
-            ),
-            String::new(),
-        ));
+        return Ok((sub, out.starts_with('-'), true, String::new()));
     }
     // The flat `FROM` always carries the unfiltered `issue_cycle`
     // bridge join, which the cycle-name traversal reuses like Django.
     let key = order_key(out, orig_param, Some("issue_cycle"), false)?;
-    let mut sql = format!(
-        "{expr} {}",
-        if key.descending { "DESC" } else { "ASC" },
-        expr = key.expr,
-    );
-    if !orig_param.contains("created_at") {
-        sql.push_str(", created_at DESC");
-    }
-    Ok((sql, key.joins))
+    Ok((
+        key.expr.clone(),
+        key.descending,
+        !orig_param.contains("created_at"),
+        key.joins.clone(),
+    ))
 }
 
 /// The `IssueDetailEndpoint.get` permission subquery: the issue survives
@@ -684,12 +681,17 @@ pub(crate) fn flat_list_sql(
     order_spec: &OrderSpec,
     orig_param: &str,
 ) -> Result<String, Denial> {
-    let (order_clause, order_joins) = flat_order_sql(order_spec, orig_param)?;
+    let (expr, descending, tiebreak, order_joins) = flat_order_key_sql(order_spec, orig_param)?;
     let selects = annotation_selects(true, None, false, true, true);
     let row_where = with_order_joins(&filtered.from_where, &order_joins);
-    Ok(format!(
-        "SELECT {selects} {row_where} ORDER BY {order_clause}"
-    ))
+    let mut sql = format!(
+        "SELECT DISTINCT {selects}, ({expr}) AS __order_key {row_where} ORDER BY __order_key {}",
+        if descending { "DESC" } else { "ASC" },
+    );
+    if tiebreak {
+        sql.push_str(", created_at DESC");
+    }
+    Ok(sql)
 }
 
 pub(crate) fn serializer_sql(filtered: &FilteredSet) -> String {

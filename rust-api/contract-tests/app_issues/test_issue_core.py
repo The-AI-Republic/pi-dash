@@ -585,6 +585,54 @@ def test_grouped_fanout_deduplicated(clients, seed, db_conn):
         assert len(all_ids) == 4, f"sub-grouped fan-out {all_ids}"
         assert len(set(all_ids)) == 4
         assert fanout_id in all_ids
+
+        # Review defect 1: `issues/list/` with an order that the flat
+        # builder orders by a raw expression 500'd under `SELECT DISTINCT`
+        # ("ORDER BY expressions must appear in select list"). All of
+        # these must return 200 with the single fanout row.
+        for order_by in (
+            "priority",
+            "-priority",
+            "state__group",
+            "labels__name",
+            "issue_cycle__cycle__name",
+        ):
+            resp = admin.get(
+                f"{_base(ws, pid)}/issues/list/?issues={fanout_id}&order_by={order_by}"
+            )
+            assert resp.status_code == 200, (order_by, resp.text)
+            body = resp.json()
+            assert isinstance(body, list)
+            assert len(body) == 1, (
+                f"issues/list order_by={order_by} fan-out: got {len(body)} rows: {body}"
+            )
+            assert body[0]["id"] == fanout_id
+
+        # Review defect 2: `order_by=issue_cycle__cycle__name` on the
+        # paginated list 500'd with "missing FROM-clause entry for table
+        # issue_cycle" (conditional joins skipped the bridge). The CASE
+        # orders (defect 1) must also work on this endpoint. Each must
+        # return 200 with total_count 4 and no duplicate ids.
+        for order_by in (
+            "priority",
+            "state__group",
+            "labels__name",
+            "issue_cycle__cycle__name",
+        ):
+            resp = admin.get(f"{_base(ws, pid)}/issues/?order_by={order_by}")
+            assert resp.status_code == 200, (order_by, resp.text)
+            data = resp.json()
+            assert data["total_count"] == 4, (
+                f"order_by={order_by} total_count {data['total_count']} vs 4"
+            )
+            flat_ids = [row["id"] for row in data["results"]]
+            assert len(flat_ids) == 4, (
+                f"order_by={order_by} fan-out rows {flat_ids}"
+            )
+            assert len(set(flat_ids)) == 4, (
+                f"order_by={order_by} duplicate ids {flat_ids}"
+            )
+            assert fanout_id in flat_ids
     finally:
         with db_conn.cursor() as cur:
             cur.execute("DELETE FROM issue_assignees WHERE issue_id = %s", (fanout_id,))
