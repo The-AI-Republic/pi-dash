@@ -57,17 +57,30 @@ function event(id: string, sessionId = "s-1") {
   };
 }
 
+const CREDIT_DETAIL = "Insufficient credit. Add funds to continue.";
+
+function refused(code: string, detail?: string): LocalChatFrame {
+  return {
+    result: "chat_failed",
+    data: { chat_session_id: "s-1", code, ...(detail === undefined ? {} : { detail }) },
+  };
+}
+
 interface Harness {
   api: LocalChatApi;
   fire: (frame: LocalChatFrame) => void;
   fail: (event: { chat_session_id: string; message: string }) => void;
   ensureRuntime: Mock<() => Promise<void>>;
+  refreshModelCredential: Mock<() => Promise<void>>;
+  topUpUrl: Mock<() => string>;
 }
 
 function harness(overrides: Partial<LocalChatApi> = {}): Harness {
   let onFrame: (frame: LocalChatFrame) => void = () => undefined;
   let onError: (event: { chat_session_id: string; message: string }) => void = () => undefined;
   const ensureRuntime = vi.fn(async () => undefined);
+  const refreshModelCredential = vi.fn(async () => undefined);
+  const topUpUrl = vi.fn(() => "");
   const api: LocalChatApi = {
     listSessions: vi.fn(async () => [record()]),
     createSession: vi.fn(async (_account, input) =>
@@ -100,6 +113,8 @@ function harness(overrides: Partial<LocalChatApi> = {}): Harness {
   return {
     api,
     ensureRuntime,
+    refreshModelCredential,
+    topUpUrl,
     fire: (frame) => onFrame(frame),
     fail: (payload) => onError(payload),
   };
@@ -111,6 +126,8 @@ function transportFor(h: Harness, account = "u-1", stored: (runnerId: string) =>
     account: () => account,
     workspaceSlug: () => "acme",
     ensureRuntime: h.ensureRuntime,
+    refreshModelCredential: h.refreshModelCredential,
+    topUpUrl: h.topUpUrl,
     storedMode: stored,
   });
 }
@@ -829,5 +846,176 @@ describe("local transport", () => {
     const subscribe = vi.spyOn(h.api, "subscribe");
     await complete(transportFor(h)).listChatSessions("ws-id", "r-1");
     expect(subscribe).not.toHaveBeenCalled();
+  });
+});
+
+describe("gateway refusals", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** System notes this account's transcript gained, in order. */
+  function notes(h: Harness): string[] {
+    return vi
+      .mocked(h.api.appendEvent)
+      .mock.calls.filter(([, , input]) => input.role === "system")
+      .map(([, , input]) => input.content);
+  }
+
+  it("writes the gateway's credit message to the transcript before the page hears the failure", async () => {
+    const h = harness();
+    h.topUpUrl.mockReturnValue("https://hub.example.com/account/credits");
+    const transport = transportFor(h);
+    const next = handlers();
+    const order: string[] = [];
+    vi.mocked(h.api.appendEvent).mockImplementation(async (_a, sessionId, input) => {
+      order.push(`store:${input.content}`);
+      return { ...event("e-3", sessionId), role: input.role, content: input.content };
+    });
+    next.onEvent.mockImplementation((e: { kind: string }) => order.push(`event:${e.kind}`));
+    transport.subscribeChatEvents("s-1", 0, next);
+    await transport.sendChatMessage("s-1", "hello");
+
+    h.fire(refused("model_credit_exhausted", CREDIT_DETAIL));
+    // The page refetches history when it hears chat_failed; the note has to be there by then.
+    expect(next.onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" }));
+    await vi.waitFor(() => expect(next.onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" })));
+    expect(notes(h)).toEqual([`${CREDIT_DETAIL}\nAdd credit: https://hub.example.com/account/credits`]);
+    expect(order.at(-2)).toBe(`store:${CREDIT_DETAIL}\nAdd credit: https://hub.example.com/account/credits`);
+    expect(order.at(-1)).toBe("event:chat_failed");
+
+    // No retry, no new credential, and the composer is released.
+    expect(h.api.send).toHaveBeenCalledTimes(1);
+    expect(h.refreshModelCredential).not.toHaveBeenCalled();
+    await expect(transport.sendChatMessage("s-1", "hello")).resolves.toBeDefined();
+  });
+
+  it("shows the credit message without a link when the server names no top-up page", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    await transport.sendChatMessage("s-1", "hello");
+    h.fire(refused("model_credit_exhausted", CREDIT_DETAIL));
+    await vi.waitFor(() => expect(notes(h)).toEqual([CREDIT_DETAIL]));
+    h.fire(refused("model_credit_exhausted"));
+    await vi.waitFor(() => expect(notes(h)).toEqual([CREDIT_DETAIL, "Your model credit has run out."]));
+  });
+
+  it("mints a new credential and resubmits a refused turn once, silently", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    await transport.sendChatMessage("s-1", "hello");
+    const first = vi.mocked(h.api.send).mock.calls[0]![0];
+
+    h.fire(refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(h.api.send).toHaveBeenCalledTimes(2));
+    expect(h.refreshModelCredential).toHaveBeenCalledTimes(1);
+    const second = vi.mocked(h.api.send).mock.calls[1]![0];
+    expect(second.content).toBe("hello");
+    expect(second.messageId).not.toBe(first.messageId);
+    // The user's message is not written twice, and the page saw no failure: the session is still busy.
+    expect(notes(h)).toEqual([]);
+    expect(next.onEvent).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" }));
+    await expect(transport.sendChatMessage("s-1", "again")).rejects.toThrow(TURN_BUSY_MESSAGE);
+
+    // The retry succeeds: an ordinary completed turn.
+    h.fire({
+      result: "chat_message_completed",
+      data: { chat_session_id: "s-1", message_id: second.messageId, status: "completed", assistant_message: "hi" },
+    });
+    await vi.waitFor(() =>
+      expect(next.onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "turn_completed" }))
+    );
+    expect(notes(h)).toEqual([]);
+  });
+
+  it("asks the user to sign in when the new credential is refused too, and stops there", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    await transport.sendChatMessage("s-1", "hello");
+    h.fire(refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(h.api.send).toHaveBeenCalledTimes(2));
+
+    h.fire(refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(next.onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" })));
+    expect(notes(h)).toHaveLength(1);
+    expect(notes(h)[0]).toMatch(/sign in again/i);
+    expect(h.api.send).toHaveBeenCalledTimes(2);
+    expect(h.refreshModelCredential).toHaveBeenCalledTimes(1);
+    // Released: the user can send again after signing in.
+    await expect(transport.sendChatMessage("s-1", "hello")).resolves.toBeDefined();
+  });
+
+  it("asks the user to sign in without resubmitting when no new credential can be had", async () => {
+    const h = harness();
+    h.refreshModelCredential.mockRejectedValueOnce(new Error("Could not connect Pi Dash Agent."));
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    await transport.sendChatMessage("s-1", "hello");
+    h.fire(refused("model_auth_failed", "Invalid JWT"));
+    await vi.waitFor(() => expect(next.onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" })));
+    expect(notes(h)).toHaveLength(1);
+    expect(notes(h)[0]).toMatch(/^Could not connect Pi Dash Agent\.\n/);
+    expect(notes(h)[0]).toMatch(/sign in again/i);
+    expect(h.api.send).toHaveBeenCalledTimes(1);
+    await expect(transport.sendChatMessage("s-1", "hello")).resolves.toBeDefined();
+  });
+
+  it("retries a refused turn even when its chat is not on screen", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "hello");
+    h.fire(refused("model_auth_failed"));
+    await vi.waitFor(() => expect(h.api.send).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not resubmit a turn that was closed while the credential was minted", async () => {
+    const h = harness();
+    let minted!: () => void;
+    h.refreshModelCredential.mockImplementationOnce(() => new Promise<void>((resolve) => (minted = resolve)));
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "hello");
+    h.fire(refused("model_auth_failed"));
+    await transport.closeChat("s-1");
+    minted();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.api.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resubmit a turn the user stopped while the credential was minted", async () => {
+    const h = harness();
+    let minted!: () => void;
+    h.refreshModelCredential.mockImplementationOnce(() => new Promise<void>((resolve) => (minted = resolve)));
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    await transport.sendChatMessage("s-1", "hello");
+    h.fire(refused("model_auth_failed"));
+    await transport.cancelChat("s-1", "stop");
+    minted();
+    await vi.waitFor(() => expect(next.onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" })));
+    expect(h.api.send).toHaveBeenCalledTimes(1);
+    expect(notes(h)).toEqual([]);
+    // Released, and the next turn gets its own refresh.
+    await expect(transport.sendChatMessage("s-1", "hello")).resolves.toBeDefined();
+  });
+
+  it("delivers any other failure untouched, with no note", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    await transport.sendChatMessage("s-1", "hello");
+    h.fire(refused("engine_crashed", "boom"));
+    await vi.waitFor(() => expect(next.onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" })));
+    expect(notes(h)).toEqual([]);
+    expect(h.refreshModelCredential).not.toHaveBeenCalled();
+    expect(h.api.send).toHaveBeenCalledTimes(1);
   });
 });
