@@ -80,6 +80,7 @@ import {
   normalizeTitle,
   resetForCreateMore,
   resolveProjectId,
+  seedForForm,
   selectCreatableProjects,
   targetProjectId,
   toCreateProjectOption,
@@ -88,7 +89,7 @@ import {
   withDefaultExecution,
   type CreateFormInitialValues,
   type CreateFormState,
-  type CreateMembership,
+  type CreateSeed,
 } from "../create/createForm.js";
 import {
   baselineFor,
@@ -540,9 +541,10 @@ export function WorkItemCreateDialog({
   // The description panel keeps its own upload state out of `busy`, so it
   // reports whether a close may proceed (ISS-125).
   const [descriptionReady, setDescriptionReady] = React.useState(true);
-  // The memberships the route seeded for this visit: the discard guard
-  // treats them as context, not as something the user entered (ISS-124).
-  const routeMembership = React.useRef<CreateMembership>({ cycleId: null, moduleIds: [] });
+  // The form the opener seeded for this visit: the discard guard treats
+  // every seeded value as context, not as something the user entered
+  // (ISS-124, NEWPIDASH-143).
+  const routeSeed = React.useRef<CreateSeed>({ cycleId: null, moduleIds: [] });
   // The description the edit opened with, so a late detail read can tell
   // an untouched editor from one the user already typed into.
   const openedDescription = React.useRef<string | null>(null);
@@ -626,7 +628,7 @@ export function WorkItemCreateDialog({
       seededCopyForm ??
       contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
-    routeMembership.current = membershipForForm(next);
+    routeSeed.current = seedForForm(next);
     openedDescription.current = starting?.descriptionHtml ?? null;
     openedBranch.current = starting?.gitWorkBranch ?? "";
     adoptedBranch.current = starting?.gitWorkBranch ?? "";
@@ -860,7 +862,7 @@ export function WorkItemCreateDialog({
       return;
     }
     // An edit never prompts: there is a stored row to fall back on.
-    if (editing || !hasDraftWorthKeeping(form, routeMembership.current, seededExecution)) {
+    if (editing || !hasDraftWorthKeeping(form, routeSeed.current, seededExecution)) {
       finishClose();
       return;
     }
