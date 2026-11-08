@@ -89,6 +89,87 @@ def test_list_assignable_for_adds_fields(api, seed, tenant_a, db):
     assert row["queue_depth"] == 0
 
 
+def test_list_engine_sign_in_state_derived(api, seed, tenant_a):
+    """NEWPIDASH-146 F1: dev_machine_detail derives engine_sign_in_state.
+
+    Stored "active" + past expiry renders "expired" (never the raw stored
+    value). Against Django this is the serializer's derivation; against
+    Rust it is the engine_credential kernel.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    token = seed.api_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"])
+    project = seed.project(tenant_a["workspace"]["id"])
+    pod = seed.pod(tenant_a["workspace"]["id"], project)
+    machine = seed.dev_machine(
+        tenant_a["user"]["id"],
+        engine_sign_in_state="active",
+        engine_credential_expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    runner = seed.runner(
+        tenant_a["user"]["id"],
+        tenant_a["workspace"]["id"],
+        pod,
+        dev_machine_id=machine,
+    )
+    resp = _get(api, tenant_a["workspace"]["slug"], token)
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json() if str(r["id"]) == str(runner))
+    detail = row["dev_machine_detail"]
+    assert detail is not None
+    assert detail["engine_sign_in_state"] == "expired"
+
+
+def test_list_machine_display_name_this_computer(api, seed, tenant_a):
+    """NEWPIDASH-146 F2: a bound machine with empty label+host renders
+    "This computer", not the runner's own name."""
+    token = seed.api_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"])
+    project = seed.project(tenant_a["workspace"]["id"])
+    pod = seed.pod(tenant_a["workspace"]["id"], project)
+    machine = seed.dev_machine(tenant_a["user"]["id"], host_label="")
+    runner = seed.runner(
+        tenant_a["user"]["id"],
+        tenant_a["workspace"]["id"],
+        pod,
+        dev_machine_id=machine,
+    )
+    resp = _get(api, tenant_a["workspace"]["slug"], token)
+    assert resp.status_code == 200, resp.text
+    row = next(r for r in resp.json() if str(r["id"]) == str(runner))
+    assert row["dev_machine_detail"] is not None
+    assert row["machine_display_name"] == "This computer"
+
+
+def test_list_live_state_snapshot(api, seed, tenant_a, db):
+    """NEWPIDASH-146 F3: live_state is the RunnerLiveState snapshot when a
+    row exists, null when it does not."""
+    token = seed.api_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"])
+    project = seed.project(tenant_a["workspace"]["id"])
+    pod = seed.pod(tenant_a["workspace"]["id"], project)
+    runner = seed.runner(tenant_a["user"]["id"], tenant_a["workspace"]["id"], pod)
+    bare = seed.runner(tenant_a["user"]["id"], tenant_a["workspace"]["id"], pod)
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO runner_live_state "
+            "(runner_id, observed_run_id, last_event_at, last_event_kind, "
+            "last_event_summary, agent_pid, agent_subprocess_alive, "
+            "approvals_pending, usage, llm_model, turn_count, "
+            "agent_health, agent_last_activity_at, updated_at) "
+            "VALUES (%s, NULL, NULL, 'tool', 'ran ls', "
+            "4242, true, 0, '{}', 'm', 3, NULL, NULL, now())",
+            (str(runner),),
+        )
+    resp = _get(api, tenant_a["workspace"]["slug"], token)
+    assert resp.status_code == 200, resp.text
+    rows = {str(r["id"]): r for r in resp.json()}
+    live = rows[str(runner)]["live_state"]
+    assert live is not None
+    assert live["agent_pid"] == 4242
+    assert live["llm_model"] == "m"
+    assert live["turn_count"] == 3
+    assert rows[str(bare)]["live_state"] is None
+
+
 def test_list_unknown_workspace_404s(api, seed, tenant_a):
     token = seed.api_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"])
     resp = _get(api, "no-such-slug-xyz", token)

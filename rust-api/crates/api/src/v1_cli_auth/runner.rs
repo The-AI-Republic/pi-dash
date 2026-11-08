@@ -76,7 +76,10 @@ use pidash_db::entity::{
 use pidash_db::redis::client_from_settings;
 use pidash_db::v1_cli_auth::queries::runner_lookup;
 use pidash_jobs::runner_enroll::{fire_revoke_bundle, revoke, RevokeCtx, RevokeScope};
+use pidash_services::domain::engine_credential;
 use pidash_services::runner_enroll::purge;
+use pidash_services::runner_enroll::queries::manage_reads;
+use pidash_services::runner_enroll::serializers::shapes;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_types::{UserId, WorkspaceId};
 
@@ -577,14 +580,14 @@ pub async fn list_runners(
         return forbidden();
     }
     // ?project= narrows to the project's pods. Empty/missing means no
-    // filter; a non-UUID value narrows to nothing (Django filters by raw
-    // string, matching no UUID rows).
+    // filter; a non-UUID value returns [] (Django 500s on the
+    // ValidationError — tier 3: no client sends a non-UUID project).
     let project_filter: Option<Uuid> = match query_last(&query, "project") {
         Some(raw) if !raw.is_empty() => match raw.parse::<Uuid>() {
             Ok(id) => Some(id),
             _ => {
-                // Bogus project: return empty list (matches the contract
-                // test's 00000000-... narrowing to nothing).
+                // Bogus project: return empty list (no client sends it —
+                // tier 3; Django 500s on the ValidationError).
                 return json_response(StatusCode::OK, "[]".to_owned());
             }
         },
@@ -646,9 +649,9 @@ pub async fn list_runners(
         None => None,
     };
 
-    // Render each runner via the shapes kernel (full 31-field wire shape).
-    // Live state is not prefetched (N+1 per row) — render null like Django
-    // does when the row is missing.
+    // Render each runner (full 31-field wire shape). Live state is
+    // fetched per row like the web list (`fetch_live_state` in
+    // `runner_enroll::manage`); null when the row is missing.
     let mut bodies: Vec<String> = Vec::with_capacity(rows.len());
     for row in &rows {
         // Pre-render datetime strings for the shapes layer (already ISO-8601).
@@ -688,20 +691,22 @@ pub async fn list_runners(
             false
         };
         let dispatch_paused = row.paused_at.is_some();
-        let machine_display_name: String = if let Some(label) = row
-            .dm_label
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_string())
-        {
-            label
-        } else if let Some(host) = row
-            .dm_host_label
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_string())
-        {
-            host
+        // `Runner.machine_display_name` (`models.py:740-755` plus the
+        // dev-machine `display_name`): when a dev machine is bound, its
+        // label or host_label, falling back to "This computer" — even when
+        // both labels are blank (`blank=True, default=""`). Only rows with
+        // no bound machine fall back to the runner's own labels (mirroring
+        // `runner_render` in `runner_enroll::manage`).
+        let machine_display_name: String = if row.dm_id.is_some() {
+            let label = row.dm_label.as_deref().unwrap_or("");
+            let host = row.dm_host_label.as_deref().unwrap_or("");
+            if !label.is_empty() {
+                label.to_owned()
+            } else if !host.is_empty() {
+                host.to_owned()
+            } else {
+                "This computer".to_owned()
+            }
         } else if !row.host_label.is_empty() {
             row.host_label.clone()
         } else {
@@ -723,6 +728,15 @@ pub async fn list_runners(
                     .dm_engine_credential_expires_at
                     .as_ref()
                     .map(crate::serializer::render_datetime);
+                // `DevMachineMiniSerializer.to_representation`
+                // (`serializers.py:186-189`): the stored state is derived
+                // through `current_engine_sign_in_state`, never emitted raw
+                // (the `runner_enroll::manage` precedent).
+                let engine_sign_in_state = engine_credential::current_engine_sign_in_state(
+                    row.dm_engine_sign_in_state.as_deref().unwrap_or(""),
+                    row.dm_engine_credential_expires_at,
+                    Utc::now(),
+                );
                 serde_json::json!({
                     "id": dm_id.to_string(),
                     "host_label": row.dm_host_label.clone().unwrap_or_default(),
@@ -730,9 +744,53 @@ pub async fn list_runners(
                     "engine_paused_by_owner": row.dm_engine_paused_by_owner.unwrap_or(false),
                     "engine_auto_pause_reason": row.dm_engine_auto_pause_reason.clone().unwrap_or_default(),
                     "engine_team_runs": row.dm_engine_team_runs.unwrap_or(false),
-                    "engine_sign_in_state": row.dm_engine_sign_in_state.clone().unwrap_or_else(|| "never".to_owned()),
+                    "engine_sign_in_state": engine_sign_in_state,
                     "engine_credential_expires_at": dm_expires,
                 })
+            }
+            None => serde_json::Value::Null,
+        };
+
+        // The `RunnerLiveState` snapshot (`serializers.py:199` via
+        // `RunnerSerializer.live_state`): the row when present, null when
+        // missing. Fetched per row like the web list; rendered through the
+        // shapes kernel so the sub-shape matches byte for byte.
+        let live_row = match manage_reads::runner_live_state(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            row.id,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(_) => return server_error(),
+        };
+        let live_state_value = match live_row {
+            Some(live) => {
+                let render_at = |at: &sea_orm::prelude::DateTimeWithTimeZone| {
+                    crate::serializer::render_datetime(&at.with_timezone(&Utc))
+                };
+                let observed_run_id = live.observed_run_id.map(|id| id.to_string());
+                let last_event_at = live.last_event_at.as_ref().map(render_at);
+                let agent_last_activity_at = live.agent_last_activity_at.as_ref().map(render_at);
+                let live_updated_at = render_at(&live.updated_at);
+                serde_json::to_value(shapes::live_state_to_representation(
+                    &shapes::LiveStateRow {
+                        observed_run_id: observed_run_id.as_deref(),
+                        last_event_at: last_event_at.as_deref(),
+                        last_event_kind: live.last_event_kind.as_deref(),
+                        last_event_summary: live.last_event_summary.as_deref(),
+                        agent_pid: live.agent_pid.map(i64::from),
+                        agent_subprocess_alive: live.agent_subprocess_alive,
+                        approvals_pending: live.approvals_pending.map(i64::from),
+                        usage: &live.usage,
+                        llm_model: live.llm_model.as_deref(),
+                        turn_count: live.turn_count.map(i64::from),
+                        agent_health: live.agent_health.as_deref(),
+                        agent_last_activity_at: agent_last_activity_at.as_deref(),
+                        updated_at: &live_updated_at,
+                    },
+                ))
+                .expect("live-state shape serializes")
             }
             None => serde_json::Value::Null,
         };
@@ -761,7 +819,7 @@ pub async fn list_runners(
             "visibility": i64::from(row.visibility),
             "pod": pod_str,
             "pod_detail": pod_detail,
-            "live_state": serde_json::Value::Null,
+            "live_state": live_state_value,
             "enrolled_at": enrolled_str,
             "revoked_at": revoked_str,
             "revoked_reason": row.revoked_reason,
