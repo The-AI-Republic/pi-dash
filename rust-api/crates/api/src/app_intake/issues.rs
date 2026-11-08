@@ -2166,6 +2166,14 @@ async fn validate_executor(
         return Ok(None);
     };
     let Some(value) = value else {
+        // Explicit clear: `str(None)` vs the stored value.
+        if issue.agent_executor.is_some() && has_active_run(pool, &issue.id).await? {
+            push_error(
+                errors,
+                "agent_executor",
+                "cannot change the execution target while the issue has an active run".to_owned(),
+            );
+        }
         return Ok(Some(ExecutorTranslation { stored: None }));
     };
     // Field level (`AGENT_EXECUTORS`) already rejected unknown values
@@ -2183,7 +2191,11 @@ async fn validate_executor(
         .expect("known value parses")
         .value()
         .to_owned();
-    if normalized != value && has_active_run(pool, &issue.id).await? {
+    // Django `normalize_issue_executor`: the normalized write is compared
+    // against the STORED value, not against the input.
+    if issue.agent_executor.as_deref() != Some(normalized.as_str())
+        && has_active_run(pool, &issue.id).await?
+    {
         push_error(
             errors,
             "agent_executor",
