@@ -721,6 +721,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     handle_deep_link(&handle, url.as_str());
                 }
             });
+            // On Linux/Windows a first-launch URL arrives on argv and is
+            // stored by the deep-link plugin during plugin init, before the
+            // `on_open_url` listener above is registered, so the emitted
+            // event is missed. Read the stored launch URL here; the main
+            // window exists by this point. macOS delivers via
+            // `RunEvent::Opened` after setup, so skip there to avoid
+            // handling the same link twice.
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            match app.deep_link().get_current() {
+                Ok(Some(urls)) => {
+                    let launch_handle = app.handle().clone();
+                    for url in urls {
+                        handle_deep_link(&launch_handle, url.as_str());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("deep-link: get_current failed: {e}"),
+            }
 
             // Background updater checks. Spawned (not awaited) so launch isn't
             // blocked by network — if a new version is available the dialog
@@ -985,5 +1003,44 @@ mod tests {
                 "{p}"
             );
         }
+    }
+
+    #[test]
+    fn launch_deep_link_is_read_via_get_current_on_setup() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("read main.rs");
+        let production = src.split("\nmod tests {").next().unwrap_or(&src);
+        assert!(
+            production.contains("get_current"),
+            "setup never reads the launch URL via get_current"
+        );
+        let on_open = production
+            .find("on_open_url")
+            .expect("on_open_url registration missing");
+        let get_cur = production
+            .find("get_current")
+            .expect("get_current read missing");
+        assert!(
+            get_cur > on_open,
+            "launch URL must be read after on_open_url is registered"
+        );
+        let build = production
+            .find("window.build()")
+            .expect("main window build missing");
+        assert!(
+            build < get_cur,
+            "launch URL must be handled after the main window exists"
+        );
+        let window = get_cur.saturating_sub(600);
+        let gate = &production[window..get_cur];
+        assert!(
+            gate.contains("target_os") && gate.contains("linux") && gate.contains("windows"),
+            "launch URL read must be gated to Linux/Windows, got: {gate:?}"
+        );
+        let tail = &production[get_cur..(get_cur + 800).min(production.len())];
+        assert!(
+            tail.contains("handle_deep_link"),
+            "launch URLs must be passed to handle_deep_link"
+        );
     }
 }
