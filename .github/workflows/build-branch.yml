@@ -40,6 +40,8 @@ on:
       # (cargo-dist parses that prefix as the `pidash` Cargo package).
       # `platform-` is intentionally distinct so the two release pipelines
       # never fire on the same tag.
+      # Rust API + new frontend releases use `rust-platform-v*.*.*` in
+      # release-rust-platform.yml, with separate Docker image repositories.
       - 'platform-v*.*.*'
 
 concurrency:
