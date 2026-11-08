@@ -1333,6 +1333,30 @@ def test_process_logs_time_paths_blank_stamps_but_keep_null():
     ]
 
 
+def test_runner_web_patch_deleted_runner_pins_404():
+    """PATCH on a deleted runner pins 404 (lookup precedes validation).
+
+    NEWPIDASH-58 (run 42446993323 req56): the owner-engine-controls
+    request PATCHes rdel_id with an invalid pod_dispatch and expected
+    400, but Django looks the runner up first and answers 404
+    {"error":"not found"} because the runner was deleted earlier in
+    the session (the DELETE request above). Rust does the same
+    (manage.rs runner_patch calls get_runner before reading the
+    body), so 404 is the only correct expectation.
+    """
+    by_name = {sess.name: sess for sess in ALL_SESSIONS}
+    sess = by_name["runner_web_lifecycle"]
+    matches = [
+        r
+        for r in sess.requests
+        if r.method == "PATCH"
+        and "rdel_id" in r.path
+        and r.json == {"pod_dispatch": "sometimes"}
+    ]
+    assert matches, "no pod_dispatch probe on rdel_id found"
+    assert all(r.expect_status == 404 for r in matches)
+
+
 def test_reasons_shape():
     seen = set()
     for bucket in ("MISSING_FIX", "EXCLUDED", "OWNED_UNCOVERED"):
