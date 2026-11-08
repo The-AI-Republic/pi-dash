@@ -299,6 +299,8 @@ describe("gate loaders", () => {
         if (value instanceof Error) throw value;
         return value;
       }),
+      // Nothing cached: every gate read goes through ensureQueryData.
+      getQueryState: vi.fn(() => undefined),
     } as unknown as QueryClient;
   }
 
