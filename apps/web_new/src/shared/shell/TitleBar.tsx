@@ -3,10 +3,10 @@
 // See the LICENSE file for details.
 // Title bar area (Architecture > shared/shell). Brand and workspace crumb
 // on the left, the palette search box in the middle, the signed-in user on
-// the right. On desktop (platform.window present) the header is also the
-// window drag region, indented for the macOS traffic lights, and it mirrors
+// the right. On desktop the shell keeps a standard native title bar (which
+// provides dragging and the macOS traffic lights), and the header mirrors
 // the location in the native window title. The web build renders plain
-// chrome: no drag region, no inset, no title sync.
+// chrome with no title sync.
 
 import { Avatar } from "@pidash/kit";
 import * as React from "react";
@@ -41,10 +41,9 @@ export function TitleBar({
 
   return (
     <header
-      {...(desktop ? { "data-tauri-drag-region": true } : {})}
       className={`flex h-12 shrink-0 items-center gap-(--space-4) border-b border-(--border) bg-(--bg) px-(--space-4)${
-        desktop ? " select-none" : ""
-      }${desktop?.trafficLightInset ? " pl-20" : ""}`}
+        desktop?.trafficLightInset ? " pl-20" : ""
+      }`}
     >
       <div className="flex min-w-0 items-center gap-(--space-2)" aria-label="Location">
         <span className="text-emphasis text-(--text)">Pi Dash</span>
