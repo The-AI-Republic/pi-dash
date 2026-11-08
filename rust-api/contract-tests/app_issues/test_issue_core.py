@@ -545,13 +545,14 @@ def test_grouped_fanout_deduplicated(clients, seed, db_conn):
                 f"group_by={group} total_results {data['total_results']} vs 4"
             )
             assert data["total_count"] == 4
-            # results is a dict bucket -> list; flatten and check no dup ids
+            # results is a dict bucket -> {results: [...], total_results: n}
+            # (query_grouper / query_multi_grouper). Flatten and check no dup ids.
             results = data["results"]
             assert isinstance(results, dict), f"expected dict results for group_by={group}: {results}"
             all_ids = []
-            for bucket, rows in results.items():
-                assert isinstance(rows, list), (group, bucket, rows)
-                for row in rows:
+            for bucket, entry in results.items():
+                assert isinstance(entry, dict) and "results" in entry, (group, bucket, entry)
+                for row in entry["results"]:
                     all_ids.append(row["id"])
             assert len(all_ids) == 4, (
                 f"group_by={group} fan-out rows {all_ids}"
@@ -572,10 +573,14 @@ def test_grouped_fanout_deduplicated(clients, seed, db_conn):
         results = data["results"]
         assert isinstance(results, dict)
         all_ids = []
-        for bucket, subdict in results.items():
+        # sub-grouped: bucket -> {results: {subbucket -> {results: [...], total_results: n}}, total_results: n}
+        for bucket, entry in results.items():
+            assert isinstance(entry, dict) and "results" in entry, (bucket, entry)
+            subdict = entry["results"]
             assert isinstance(subdict, dict), (bucket, subdict)
-            for subbucket, rows in subdict.items():
-                for row in rows:
+            for subbucket, subentry in subdict.items():
+                assert isinstance(subentry, dict) and "results" in subentry, (subbucket, subentry)
+                for row in subentry["results"]:
                     all_ids.append(row["id"])
         assert len(all_ids) == 4, f"sub-grouped fan-out {all_ids}"
         assert len(set(all_ids)) == 4
