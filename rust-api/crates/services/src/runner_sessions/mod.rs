@@ -65,11 +65,9 @@ pub mod session_service;
 pub mod usage;
 
 pub use drain::{
-    drain_for_runner_log, drain_pod_log, is_desktop_provisioning, next_for_runner_sql,
-    plan_assignment, AssignmentFacts, AssignmentPlan, DrainEffect, ASSIGN_RUN_UPDATE_SQL,
-    DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL, DRAIN_FOR_RUNNER_LOCK_SQL, DRAIN_POD_BY_ID_LOOKUP_SQL,
-    DRAIN_POD_IDLE_RUNNERS_SQL, NEXT_FOR_RUNNER_RANK_POSITION, NEXT_QUEUED_RUN_FOR_POD_SQL,
-    POD_COLUMNS, SELECT_RUNNER_IN_POD_SQL,
+    drain_for_runner_lock_stmt, drain_for_runner_log, drain_pod_idle_list_stmt, drain_pod_log,
+    next_for_runner_stmt, plan_assignment, select_runner_in_pod_stmt, AssignmentFacts,
+    AssignmentPlan, DispatchFacts, DrainEffect, NEXT_QUEUED_RUN_FOR_POD_SQL, POD_COLUMNS,
 };
 pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
 pub use offline_recovery::{
