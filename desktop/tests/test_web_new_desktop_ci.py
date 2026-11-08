@@ -115,6 +115,20 @@ class WebNewDesktopCiTests(unittest.TestCase):
         self.assertIn("parity-env.sh", self.text)
         self.assertIn("VITE_WEB_BASE_URL=\"$PARITY_ORACLE_URL\"", self.text)
 
+    def test_release_build_derives_the_origin_like_dev_prep(self):
+        # The release compile must use the same namespaced oracle URL
+        # dev-prep baked in; a hardcoded port would drift from PARITY_NS.
+        self.assertNotIn("localhost:13005", self.text)
+        self.assertIn("PARITY_ORACLE_URL", self.text)
+
+    def test_failure_artifacts_are_uploaded(self):
+        # A red DESK leg must leave diagnosable evidence: Playwright
+        # error-context/traces and the serve logs upload on failure.
+        self.assertIn("upload-artifact", self.text)
+        self.assertIn("if: failure()", self.text)
+        self.assertIn("test-results/", self.text)
+        self.assertIn("parity-serve-desktop.log", self.text)
+
     def test_stale_parity_legs_are_excluded_explicitly(self):
         # DESK-002/DESK-025/RUN-044 are stale against current web_new
         # behavior (NEWFRONT-1056). They are excluded by code, not silently
