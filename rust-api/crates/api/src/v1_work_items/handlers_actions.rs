@@ -95,7 +95,7 @@ use uuid::Uuid;
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
 use pidash_db::entity::{
-    agent_run, assistant_user_llm_config, issue_assignees, issues, projects, runner, states, users,
+    agent_run, assistant_user_llm_config, issue_assignees, issues, projects, states, users,
     workspaces,
 };
 use pidash_db::pool::sea_orm_connection;
@@ -894,63 +894,19 @@ fn live_assignee_ids_subquery(issue_id: Uuid) -> sea_orm::sea_query::SelectState
         .to_owned()
 }
 
-/// `ISSUE_ASSIGNEE_IDS_SQL` (`runner_sessions::guards`) on SeaORM: the live
-/// through-table assignee ids of the issue, `-created_at`
-/// (`IssueAssignee.Meta.ordering`).
-async fn issue_assignee_ids<C: ConnectionTrait>(
-    db: &C,
-    issue_id: Uuid,
-) -> Result<Vec<Uuid>, DbErr> {
-    issue_assignees::Entity::find()
-        .select_only()
-        .column(issue_assignees::Column::AssigneeId)
-        .filter(issue_assignees::Column::DeletedAt.is_null())
-        .filter(issue_assignees::Column::IssueId.eq(issue_id))
-        .order_by_desc(issue_assignees::Column::CreatedAt)
-        .into_tuple()
-        .all(db)
-        .await
-}
-
-/// `POD_HAS_RUNNER_MANAGED_SQL` (`runner_sessions::guards`) on SeaORM: a
-/// desktop-bundled runner owned by the run creator, in this pod, not
-/// revoked (transient status ignored), `LIMIT 1`.
-fn pod_has_runner_managed_select(creator: Uuid, pod_id: Uuid) -> sea_orm::Select<runner::Entity> {
-    runner::Entity::find()
-        .select_only()
-        .column(runner::Column::Id)
-        .filter(runner::Column::OwnerId.eq(creator))
-        .filter(runner::Column::PodId.eq(pod_id))
-        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
-        .filter(runner::Column::Status.ne("revoked"))
-        .limit(1)
-}
-
-/// `pod_has_runner_general_sql` (`runner_sessions::guards`) on SeaORM: a
-/// non-revoked, non-desktop runner in this pod owned by anyone in the
-/// eligible owner set, `LIMIT 1`. The caller short-circuits an empty set
-/// (no query), as Python does.
-fn pod_has_runner_general_select(owners: &[Uuid], pod_id: Uuid) -> sea_orm::Select<runner::Entity> {
-    runner::Entity::find()
-        .select_only()
-        .column(runner::Column::Id)
-        .filter(runner::Column::OwnerId.is_in(owners.iter().copied()))
-        .filter(runner::Column::PodId.eq(pod_id))
-        .filter(runner::Column::Status.ne("revoked"))
-        .filter(runner::Column::Provisioning.ne("desktop_bundled"))
-        .limit(1)
-}
-
-/// Live `PodRunnerMatcher` over the merged D-14 guards helpers
-/// (`runner/services/matcher.py:375-412`): the managed narrow branch or
-/// the general owner-set branch, with the same no-query short-circuits.
+/// Live `PodRunnerMatcher`: the single SeaORM implementation shared
+/// with jobs (alias kept for the v1 actions call sites).
 pub struct LiveMatcher {
-    pool: PgPool,
+    inner: pidash_services::runner_sessions::SeaOrmPodMatcher,
 }
 
 impl LiveMatcher {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            inner: pidash_services::runner_sessions::SeaOrmPodMatcher::new(
+                pidash_db::pool::sea_orm_connection(&pool),
+            ),
+        }
     }
 }
 
@@ -960,6 +916,7 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
         pod_id: Uuid,
         issue_id: Uuid,
         creator_id: Option<Uuid>,
+        human: bool,
     ) -> Pin<
         Box<
             dyn Future<
@@ -968,68 +925,8 @@ impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher 
                 + '_,
         >,
     > {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            use pidash_services::orchestration::dispatch::DispatchError;
-            use pidash_services::runner_sessions::guards as g;
-            let db = |e: DbErr| DispatchError::Db(e.to_string());
-            let conn = sea_orm_connection(&pool);
-            let issue: Option<(Option<String>, Option<Uuid>, Option<Uuid>)> =
-                issues::Entity::find()
-                    .select_only()
-                    .columns([
-                        issues::Column::AgentExecutor,
-                        issues::Column::CreatedById,
-                        issues::Column::ProjectId,
-                    ])
-                    .filter(issues::Column::Id.eq(issue_id))
-                    .into_tuple()
-                    .one(&conn)
-                    .await
-                    .map_err(db)?;
-            let Some((agent_executor, created_by_id, project_id)) = issue else {
-                return Ok(false);
-            };
-            let project_id = project_id.ok_or_else(|| {
-                DispatchError::Store(
-                    pidash_services::orchestration::creation::CreationError::MissingRow(
-                        "issue has no project".to_owned(),
-                    ),
-                )
-            })?;
-            let default_executor: Option<String> = projects::Entity::find()
-                .select_only()
-                .column(projects::Column::DefaultAgentExecutor)
-                .filter(projects::Column::Id.eq(project_id))
-                .into_tuple()
-                .one(&conn)
-                .await
-                .map_err(db)?;
-            let default_executor = default_executor.unwrap_or_default();
-            if g::is_managed_runner_issue(agent_executor.as_deref(), &default_executor) {
-                let Some(creator) = creator_id else {
-                    return Ok(false);
-                };
-                let hit: Option<Uuid> = pod_has_runner_managed_select(creator, pod_id)
-                    .into_tuple()
-                    .one(&conn)
-                    .await
-                    .map_err(db)?;
-                return Ok(hit.is_some());
-            }
-            let assignees = issue_assignee_ids(&conn, issue_id).await.map_err(db)?;
-            let owners = g::eligible_owner_ids(creator_id, created_by_id, &assignees);
-            if owners.is_empty() {
-                // `:438-439`: an empty owner set answers `false`, no query.
-                return Ok(false);
-            }
-            let hit: Option<Uuid> = pod_has_runner_general_select(&owners, pod_id)
-                .into_tuple()
-                .one(&conn)
-                .await
-                .map_err(db)?;
-            Ok(hit.is_some())
-        })
+        self.inner
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human)
     }
 }
 
@@ -2283,35 +2180,6 @@ mod tests {
         assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
     }
 
-    #[test]
-    fn pod_runner_statements_mirror_the_guards_constants() {
-        let managed = pod_has_runner_managed_select(Uuid::nil(), Uuid::nil())
-            .build(DbBackend::Postgres)
-            .to_string();
-        assert!(
-            managed.contains(r#""runner"."provisioning" = 'desktop_bundled'"#),
-            "{managed}"
-        );
-        assert!(
-            managed.contains(r#""runner"."status" <> 'revoked'"#),
-            "{managed}"
-        );
-        assert!(managed.ends_with("LIMIT 1"), "{managed}");
-        let general = pod_has_runner_general_select(&[Uuid::nil(), Uuid::new_v4()], Uuid::nil())
-            .build(DbBackend::Postgres)
-            .to_string();
-        assert!(general.contains(r#""runner"."owner_id" IN ("#), "{general}");
-        assert!(
-            general.contains(r#""runner"."provisioning" <> 'desktop_bundled'"#),
-            "{general}"
-        );
-        assert!(
-            general.contains(r#""runner"."status" <> 'revoked'"#),
-            "{general}"
-        );
-        assert!(general.ends_with("LIMIT 1"), "{general}");
-    }
-
     /// Every new read/write against constraint-free temp copies on one
     /// connection (skips without `DATABASE_URL`).
     #[tokio::test]
@@ -2471,12 +2339,6 @@ mod tests {
                 .expect("cands"),
             expected
         );
-        // ISSUE_ASSIGNEE_IDS_SQL twin: newest first.
-        assert_eq!(
-            issue_assignee_ids(&db, issue).await.expect("ids"),
-            vec![assignee_b, assignee_a]
-        );
-
         // creator universes: actor, creator, lead, (no default assignee), assignees.
         let actor = Uuid::new_v4();
         let universe = creator_universe(&pool, actor, &found, &proj)
@@ -2497,32 +2359,6 @@ mod tests {
             .await
             .expect("universe");
         assert_eq!(dup.iter().filter(|id| **id == creator).count(), 1);
-
-        // Pod runner probes.
-        let managed: Option<Uuid> = pod_has_runner_managed_select(creator, pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("managed");
-        assert!(managed.is_some());
-        let revoked_desktop: Option<Uuid> = pod_has_runner_managed_select(assignee_a, pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("managed");
-        assert!(revoked_desktop.is_none());
-        let general: Option<Uuid> = pod_has_runner_general_select(&[assignee_a, assignee_b], pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("general");
-        assert!(general.is_some(), "assignee_b's cloud runner qualifies");
-        let none: Option<Uuid> = pod_has_runner_general_select(&[creator, lead], pod)
-            .into_tuple()
-            .one(&db)
-            .await
-            .expect("general");
-        assert!(none.is_none(), "desktop and revoked runners do not");
 
         // The run-ai readback tuple.
         let readback: Option<(Uuid, String, String)> = agent_run::Entity::find()

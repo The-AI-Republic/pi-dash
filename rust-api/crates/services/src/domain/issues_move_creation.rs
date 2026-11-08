@@ -190,16 +190,35 @@ impl CreationSeam for SeaHandoffStore<'_> {
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
         let row = query_one(&self.conn, &orm::runner_select(runner_id)).await?;
-        row.map(|row| {
-            Ok(RunnerView {
-                id: get(&row, "id")?,
-                pod_id: get(&row, "pod_id")?,
-                status: get(&row, "status")?,
-                last_heartbeat_at: get(&row, "last_heartbeat_at")?,
-                paused_at: get(&row, "paused_at")?,
-            })
-        })
-        .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let machine_id: Option<Uuid> = get(&row, "dev_machine_id")?;
+        let engine_paused = match machine_id {
+            Some(machine_id) => {
+                let mrow = query_one(&self.conn, &orm::dev_machine_select(machine_id)).await?;
+                match mrow {
+                    Some(mrow) => {
+                        let engine_paused_by_owner: bool = get(&mrow, "engine_paused_by_owner")?;
+                        let engine_auto_pause_reason: String =
+                            get(&mrow, "engine_auto_pause_reason")?;
+                        engine_paused_by_owner || !engine_auto_pause_reason.is_empty()
+                    }
+                    None => false,
+                }
+            }
+            None => false,
+        };
+        Ok(Some(RunnerView {
+            id: get(&row, "id")?,
+            pod_id: get(&row, "pod_id")?,
+            status: get(&row, "status")?,
+            last_heartbeat_at: get(&row, "last_heartbeat_at")?,
+            paused_at: get(&row, "paused_at")?,
+            provisioning: get(&row, "provisioning")?,
+            pod_dispatch: get(&row, "pod_dispatch")?,
+            engine_paused,
+        }))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {

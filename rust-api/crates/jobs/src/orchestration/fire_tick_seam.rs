@@ -61,7 +61,6 @@ use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::admission::{managed_runner_probe, ManagedRunnerProbe};
 use pidash_services::dispatch::{
     consume_admission_token, AdmissionCache, DeferredConsume, LlmProfile,
 };
@@ -741,25 +740,6 @@ where
             is_project_member,
             is_workspace_admin,
         })
-    }
-
-    async fn enrolled_managed_exists(
-        &mut self,
-        project_id: Uuid,
-        user_id: Uuid,
-        workspace_id: Uuid,
-    ) -> Result<bool, DispatchError> {
-        let conn = TxConn::new(self.dispatch_tx().inner());
-        managed_runner_probe(
-            &conn,
-            ManagedRunnerProbe::Enrolled,
-            user_id,
-            project_id,
-            workspace_id,
-        )
-        .await
-        .map(|probe| probe.is_some())
-        .map_err(|error| db(into_sqlx(error)))
     }
 
     fn managed_runner_enabled(&self) -> bool {
@@ -1642,6 +1622,7 @@ mod tests {
             _pod_id: Uuid,
             _issue_id: Uuid,
             _creator_id: Option<Uuid>,
+            _human: bool,
         ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
             let answer = self.answer;
             Box::pin(async move { Ok(answer) })

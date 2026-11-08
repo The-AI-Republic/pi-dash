@@ -51,23 +51,25 @@ use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::dispatch::{
     DispatchError, PodRunnerMatcher, LIVE_ASSIGNEE_CANDIDATES_SQL,
 };
-use pidash_services::runner_sessions::guards as g;
+use pidash_services::runner_sessions;
 
 // ---------------------------------------------------------------------------
 // Jobs matcher
 // ---------------------------------------------------------------------------
 
-/// Live [`PodRunnerMatcher`] over the merged D-14 guards helpers
-/// (`runner/services/matcher.py:375-412`): the managed narrow branch or
-/// the general owner-set branch, with the same no-query short-circuits.
-/// Mirrors the api crate's `LiveMatcher` (jobs cannot name it).
+/// Live [`PodRunnerMatcher`] (D-12 fire-tick driver): delegates to the
+/// single SeaORM implementation shared with api.
 pub(crate) struct JobsMatcher {
-    pool: PgPool,
+    inner: runner_sessions::SeaOrmPodMatcher,
 }
 
 impl JobsMatcher {
     pub(crate) fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            inner: runner_sessions::SeaOrmPodMatcher::new(pidash_db::pool::sea_orm_connection(
+                &pool,
+            )),
+        }
     }
 }
 
@@ -77,66 +79,10 @@ impl PodRunnerMatcher for JobsMatcher {
         pod_id: Uuid,
         issue_id: Uuid,
         creator_id: Option<Uuid>,
+        human: bool,
     ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
-        let pool = self.pool.clone();
-        Box::pin(async move {
-            let db = |error: sqlx::Error| DispatchError::Db(error.to_string());
-            let conn = sea_orm_connection(&pool);
-            let issue: Option<(Option<String>, Option<Uuid>, Uuid)> =
-                issues::Entity::find_by_id(issue_id)
-                    .select_only()
-                    .columns([
-                        issues::Column::AgentExecutor,
-                        issues::Column::CreatedById,
-                        issues::Column::ProjectId,
-                    ])
-                    .into_tuple()
-                    .one(&conn)
-                    .await
-                    .map_err(|e| db(into_sqlx(e)))?;
-            let Some((agent_executor, created_by_id, project_id)) = issue else {
-                return Ok(false);
-            };
-            let default_executor: Option<String> = projects::Entity::find_by_id(project_id)
-                .select_only()
-                .column(projects::Column::DefaultAgentExecutor)
-                .into_tuple()
-                .one(&conn)
-                .await
-                .map_err(|e| db(into_sqlx(e)))?;
-            let default_executor = default_executor.unwrap_or_default();
-            if g::is_managed_runner_issue(agent_executor.as_deref(), &default_executor) {
-                let Some(creator) = creator_id else {
-                    return Ok(false);
-                };
-                // raw-sql: awaits runner kernel (POD_HAS_RUNNER managed probe owned by runner sessions guards).
-                let hit: Option<(i32,)> = sqlx::query_as(g::POD_HAS_RUNNER_MANAGED_SQL)
-                    .bind(creator)
-                    .bind(pod_id)
-                    .fetch_optional(&pool)
-                    .await
-                    .map_err(db)?;
-                return Ok(hit.is_some());
-            }
-            // raw-sql: awaits runner kernel (issue assignee ids probe owned by runner sessions guards).
-            let assignees: Vec<Uuid> = sqlx::query_scalar(g::ISSUE_ASSIGNEE_IDS_SQL)
-                .bind(issue_id)
-                .fetch_all(&pool)
-                .await
-                .map_err(db)?;
-            let owners = g::eligible_owner_ids(creator_id, created_by_id, &assignees);
-            let Some(sql) = g::pod_has_runner_general_sql(owners.len()) else {
-                return Ok(false);
-            };
-            // raw-sql: awaits runner kernel (pod_has_runner general probe with dynamic owner binds owned by runner sessions guards).
-            let mut query = sqlx::query_as::<_, (i32,)>(&sql);
-            for owner in &owners {
-                query = query.bind(owner);
-            }
-            query = query.bind(pod_id);
-            let hit: Option<(i32,)> = query.fetch_optional(&pool).await.map_err(db)?;
-            Ok(hit.is_some())
-        })
+        self.inner
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human)
     }
 }
 
@@ -316,15 +262,6 @@ pub(crate) fn profile_fn(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Parse one statement with the Postgres dialect (the scan-suite
-    /// precedent): new SQL must at least parse offline.
-    fn parse(sql: &str) -> sqlparser::ast::Statement {
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
-            .expect("SQL parses")
-            .pop()
-            .expect("one statement")
-    }
 
     #[test]
     fn universe_orders_actor_first_deduped() {
@@ -511,22 +448,6 @@ mod tests {
         );
         assert!(presence_sql.contains("\"user_id\""), "{presence_sql}");
         assert!(presence_sql.contains("IN"), "{presence_sql}");
-    }
-
-    #[test]
-    fn kernel_sql_still_parses() {
-        // The awaits-kernel probes still run as raw SQL; keep the
-        // parse guard for those constants.
-        for sql in [
-            g::POD_HAS_RUNNER_MANAGED_SQL,
-            g::ISSUE_ASSIGNEE_IDS_SQL,
-            LIVE_ASSIGNEE_CANDIDATES_SQL,
-        ] {
-            assert!(
-                matches!(parse(sql), sqlparser::ast::Statement::Query(_)),
-                "{sql}"
-            );
-        }
     }
 
     #[tokio::test]

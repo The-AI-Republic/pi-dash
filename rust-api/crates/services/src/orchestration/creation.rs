@@ -265,18 +265,24 @@ pub fn run_select_sql() -> String {
 }
 
 /// The parent's runner for pinning (`service.py:538-540`:
-/// `parent.runner`). `$1` is the runner id.
-pub const RUNNER_SELECT_SQL: &str =
-    "SELECT id, pod_id, status, last_heartbeat_at, paused_at FROM runner WHERE id = $1";
+/// `parent.runner`). `$1` is the runner id. The last three fields are
+/// the #2903 engine facts: provisioning, pod_dispatch, and engine_paused
+/// (`dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> ''`)
+/// — the locality-pin gate (`locality_pin_allowed`).
+pub const RUNNER_SELECT_SQL: &str = "SELECT runner.id, runner.pod_id, runner.status, runner.last_heartbeat_at, runner.paused_at, runner.provisioning, runner.pod_dispatch, (dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> '') AS engine_paused FROM runner LEFT JOIN dev_machine dm ON dm.id = runner.dev_machine_id WHERE runner.id = $1";
 
-/// The decoded [`RUNNER_SELECT_SQL`] row
-/// (`id, pod_id, status, last_heartbeat_at, paused_at`).
+/// The decoded [`RUNNER_SELECT_SQL`] row (`id, pod_id, status,
+/// last_heartbeat_at, paused_at, provisioning, pod_dispatch,
+/// engine_paused`).
 pub type RunnerSelectRow = (
     Uuid,
     Uuid,
     String,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
+    String,
+    String,
+    bool,
 );
 
 /// The assigned pod (`service.py:329`): the default `Pod.objects`
@@ -570,7 +576,7 @@ pub fn run_insert_returning_sql() -> String {
 pub mod orm {
     use chrono::{DateTime, Utc};
     use pidash_db::entity::{
-        agent_run as run, agent_run_event as event, git_code_review_links as reviews,
+        agent_run as run, agent_run_event as event, dev_machine, git_code_review_links as reviews,
         git_repositories as repos, git_repository_bindings as bindings,
         issue_agent_ticker as ticker, issue_assignees, issue_comments as comments, issue_labels,
         issue_relations as relations, issues, labels, pod, projects,
@@ -795,13 +801,34 @@ pub mod orm {
             .to_owned()
     }
 
-    /// [`super::RUNNER_SELECT_SQL`]: the parent's runner.
+    /// [`super::RUNNER_SELECT_SQL`]: the parent's runner, with the
+    /// #2903 engine columns (`provisioning`, `pod_dispatch`,
+    /// `dev_machine_id`) so seam twins can populate `RunnerView`.
     pub fn runner_select(runner_id: Uuid) -> SelectStatement {
         use runner::Column as C;
         Query::select()
-            .columns([C::Id, C::PodId, C::Status, C::LastHeartbeatAt, C::PausedAt])
+            .columns([
+                C::Id,
+                C::PodId,
+                C::Status,
+                C::LastHeartbeatAt,
+                C::PausedAt,
+                C::Provisioning,
+                C::PodDispatch,
+                C::DevMachineId,
+            ])
             .from(runner::Entity)
             .and_where(Expr::col(C::Id).eq(runner_id))
+            .to_owned()
+    }
+
+    /// The engine-pause columns of one dev machine (`#2903` pause state).
+    pub fn dev_machine_select(machine_id: Uuid) -> SelectStatement {
+        use pidash_db::entity::dev_machine::Column as C;
+        Query::select()
+            .columns([C::EnginePausedByOwner, C::EngineAutoPauseReason])
+            .from(dev_machine::Entity)
+            .and_where(Expr::col(C::Id).eq(machine_id))
             .to_owned()
     }
 
@@ -1522,6 +1549,13 @@ pub struct RunnerView {
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     /// `09738d222`: the pin check skips operator-paused runners.
     pub paused_at: Option<DateTime<Utc>>,
+    /// `runner.provisioning` — engine iff `desktop_bundled`.
+    pub provisioning: String,
+    /// `runner.pod_dispatch` (`pod_member` / `pinned_only`).
+    pub pod_dispatch: String,
+    /// The runner's dev machine's pause state (`false` when the runner
+    /// has no machine): owner pause or a non-empty auto-pause reason.
+    pub engine_paused: bool,
 }
 
 /// The consumed `pod` projection (live rows only, per `PodManager`).
@@ -1803,13 +1837,27 @@ pub fn run_config_for_issue(
 /// every later run on the issue. A BUSY runner is alive and stays
 /// eligible; the pinned run waits for it. `09738d222`: an
 /// operator-paused runner is not eligible either — its pins would only
-/// wait out the pause.
+/// wait out the pause. #2903: a pin is also refused unless
+/// `locality_pin_allowed` — engines pin only while they take pod work
+/// (pod_member and unpaused); own-agent runners always pin.
 pub fn pinned_runner_for(
     runner: Option<&RunnerView>,
     target_pod_id: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Option<Uuid> {
     let runner = runner?;
+    let is_engine = runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let pod_member = runner.pod_dispatch
+        == pidash_db::runner_enroll::columns::enums::RUNNER_POD_DISPATCH_POD_MEMBER;
+    if !pidash_auth::permissions::runner::locality_pin_allowed(
+        true,
+        is_engine,
+        pod_member,
+        runner.engine_paused,
+    ) {
+        return None;
+    }
     if runner.status == RUNNER_STATUS_REVOKED || runner.status == RUNNER_STATUS_OFFLINE {
         return None;
     }
@@ -3777,6 +3825,9 @@ mod tests {
             status: "online".to_owned(),
             last_heartbeat_at: Some(clock),
             paused_at: None,
+            provisioning: "personal".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
+            engine_paused: false,
         };
         // M1: no runner.
         assert_eq!(pinned_runner_for(None, Some(uid(0x50)), clock), None);
@@ -3868,6 +3919,33 @@ mod tests {
         };
         assert_eq!(
             pinned_runner_for(Some(&paused), Some(uid(0x50)), clock),
+            None
+        );
+        // #2903 locality gate: engines pin only while they take pod
+        // work. An unpaused pod-member engine pins; a paused one or a
+        // pinned-only one does not; own-agent runners pin regardless.
+        let engine = RunnerView {
+            provisioning: "desktop_bundled".to_owned(),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine), Some(uid(0x50)), clock),
+            Some(uid(0x60))
+        );
+        let engine_paused = RunnerView {
+            engine_paused: true,
+            ..engine.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine_paused), Some(uid(0x50)), clock),
+            None
+        );
+        let engine_pinned_only = RunnerView {
+            pod_dispatch: "pinned_only".to_owned(),
+            ..engine.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine_pinned_only), Some(uid(0x50)), clock),
             None
         );
     }
@@ -4214,6 +4292,9 @@ mod tests {
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(Some(parent)))
@@ -4242,6 +4323,9 @@ mod tests {
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let mut req = dispatch_req(Some(parent));
@@ -4364,6 +4448,9 @@ mod tests {
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = create_continuation_run(&mut seam, &continuation_req(parent))
@@ -4502,6 +4589,9 @@ mod tests {
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
@@ -4530,6 +4620,9 @@ mod tests {
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
