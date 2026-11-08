@@ -1461,20 +1461,42 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         .join(
             JoinType::InnerJoin,
             pidash_db::entity::workspaces::Entity,
-            Expr::col(pidash_db::entity::workspaces::Column::Id).eq(Expr::col((
+            Expr::col((
+                pidash_db::entity::workspaces::Entity,
+                pidash_db::entity::workspaces::Column::Id,
+            ))
+            .eq(Expr::col((
                 pidash_db::entity::deploy_boards::Entity,
                 pidash_db::entity::deploy_boards::Column::WorkspaceId,
             ))),
         )
         .and_where(
-            Expr::col(pidash_db::entity::deploy_boards::Column::DeletedAt)
-                .is_null()
-                .and(Expr::col(pidash_db::entity::deploy_boards::Column::EntityName).eq("project"))
-                .and(
-                    Expr::col(pidash_db::entity::deploy_boards::Column::EntityIdentifier)
-                        .eq(Expr::col((proj_entity::Entity, proj_entity::Column::Id))),
-                )
-                .and(Expr::col(pidash_db::entity::workspaces::Column::Slug).eq(slug)),
+            Expr::col((
+                pidash_db::entity::deploy_boards::Entity,
+                pidash_db::entity::deploy_boards::Column::DeletedAt,
+            ))
+            .is_null()
+            .and(
+                Expr::col((
+                    pidash_db::entity::deploy_boards::Entity,
+                    pidash_db::entity::deploy_boards::Column::EntityName,
+                ))
+                .eq("project"),
+            )
+            .and(
+                Expr::col((
+                    pidash_db::entity::deploy_boards::Entity,
+                    pidash_db::entity::deploy_boards::Column::EntityIdentifier,
+                ))
+                .eq(Expr::col((proj_entity::Entity, proj_entity::Column::Id))),
+            )
+            .and(
+                Expr::col((
+                    pidash_db::entity::workspaces::Entity,
+                    pidash_db::entity::workspaces::Column::Slug,
+                ))
+                .eq(slug),
+            ),
         )
         .to_owned();
     select = select.column_as(
