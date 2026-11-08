@@ -125,6 +125,13 @@ export const PROJECT_SETTINGS: Record<TProjectSettingsTabs, TProjectSettingsItem
     access: [EUserProjectRoles.ADMIN],
     highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/schedulers/`,
   },
+  ai_workers: {
+    key: "ai_workers",
+    i18n_label: "AI Workers",
+    href: `/ai-workers`,
+    access: [EUserProjectRoles.ADMIN],
+    highlight: (pathname: string, baseUrl: string) => pathname === `${baseUrl}/ai-workers/`,
+  },
 };
 
 export const PROJECT_SETTINGS_FLAT_MAP: TProjectSettingsItem[] = Object.values(PROJECT_SETTINGS);
@@ -147,5 +154,6 @@ export const GROUPED_PROJECT_SETTINGS: Record<PROJECT_SETTINGS_CATEGORY, TProjec
     PROJECT_SETTINGS["automations"],
     PROJECT_SETTINGS["github"],
     PROJECT_SETTINGS["schedulers"],
+    PROJECT_SETTINGS["ai_workers"],
   ],
 };

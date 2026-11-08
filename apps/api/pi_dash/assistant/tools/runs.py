@@ -17,18 +17,25 @@ from pi_dash.assistant.tools import _results, _scoping
 
 @assistant.tool
 def get_run_status(ctx: RunContext[AssistantDeps], issue_id: str) -> dict:
-    """Get the status of coding agent runs for an issue."""
+    """Get the status of coding agent runs for an issue, including the
+    dedicated-runner pin and waiting state of each run."""
     issue = _scoping.get_issue(ctx.deps, issue_id)
     from pi_dash.runner.models import AgentRun
+    from pi_dash.runner.services.issue_assignment import build_dispatch_wait
 
     runs = AgentRun.objects.filter(work_item_id=issue.id).order_by("-created_at")[:5]
     out = []
     for r in runs:
+        pinned_name = r.pinned_runner.name if r.pinned_runner_id else None
         out.append(
             {
                 "id": str(r.id),
                 "status": r.status,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                "pinned_runner": str(r.pinned_runner_id) if r.pinned_runner_id else None,
+                "pinned_runner_name": pinned_name,
+                "pin_kind": getattr(r, "pin_kind", "locality"),
+                "dispatch_wait": build_dispatch_wait(r, viewer=_scoping.user_for(ctx.deps)),
             }
         )
     return {"issue_id": str(issue.id), "runs": out}
@@ -39,12 +46,21 @@ def dispatch_coding_run(
     ctx: RunContext[AssistantDeps],
     issue_id: str,
     target_state_id: Optional[str] = None,
+    pin: Optional[str] = None,
 ) -> dict:
     """Start a coding agent run on an issue by moving it into a delegated state.
-    Requires write access. Identical to dragging the issue into that state in the UI."""
+    Requires write access. Identical to dragging the issue into that state in the UI.
+    Pin "pod_once" runs on any runner in the issue's pod for this run only
+    instead of the issue's dedicated runner (design §23.3; the issue stays
+    dedicated). Dedicated-runner refusal reasons (assigned_runner_offline,
+    assigned_runner_paused, assigned_runner_not_owner) and pod_once
+    refusals (pod_once_not_allowed, pod_once_not_applicable,
+    no_eligible_runner_in_pod) are returned in "reason" unchanged."""
     deps = ctx.deps
     issue = _scoping.get_issue(deps, issue_id)
     _scoping.require_project_write(deps, str(issue.project_id))
+    if pin not in (None, "pod_once"):
+        raise ModelRetry('pin must be "pod_once" when given')
 
     from pi_dash.orchestration import service as orchestration
     from pi_dash.orchestration.agent_phases import PHASES, is_ticking_state
@@ -79,7 +95,12 @@ def dispatch_coding_run(
         }
 
     outcome = orchestration.handle_issue_state_transition(
-        issue, from_state, target, actor=_scoping.user_for(deps), dispatch_immediate=True
+        issue,
+        from_state,
+        target,
+        actor=_scoping.user_for(deps),
+        dispatch_immediate=True,
+        pod_once=pin == "pod_once",
     )
     run_id = str(outcome.created_run.id) if outcome.created_run is not None else None
     _results.record_write(

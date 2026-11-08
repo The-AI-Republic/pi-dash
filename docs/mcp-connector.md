@@ -237,3 +237,45 @@ each call's body and response (for an update, the new values and
   list is also scoped to projects the caller is a member of — a comment
   the run left on an issue in a project the caller cannot access is
   omitted, matching normal issue visibility.
+
+## Dedicated runners
+
+An issue routes to a **pod** — any free runner in that squad takes the run —
+or to **one dedicated runner**, chosen because of the machine, tools or access
+that runner has. A dedicated runner is a bottleneck by design: every run of
+the issue goes to it and to no other. Leave an issue on its pod unless the
+work needs something only one runner has.
+
+Tools take the assignment as `assigned_runner` / `assigned_pod` inputs
+(UUIDs or names, resolved within the issue's project):
+
+- **Create / update** (`pidash_create_issue`, `pidash_update_issue`,
+  `pidash_create_project_issue`) — `assigned_runner` dedicates the issue to
+  one runner; passing null on update clears it back to "any runner in the
+  pod". `assigned_pod` sets the pod; on update a pod change with no runner
+  in the same call also clears the dedicated runner. Eligibility follows
+  the API's E-code rules and any E-code is returned to the model unchanged.
+- **Read** (`pidash_get_issue`, `pidash_get_current_issue`,
+  `pidash_get_project_issue`) — every issue carries `assigned_pod_id` /
+  `assigned_runner_id`; detail reads also carry `assigned_runner_detail`
+  and `dispatch_wait` (the waiting object while a run waits for its
+  runner, else null).
+- **Runners** (`pidash_list_project_runners`) — with `assignable_for` (an
+  issue id or `new`), each row carries `assignable`,
+  `not_assignable_code`, `is_busy` and `queue_depth`. Check it before
+  choosing; do not choose a runner that is not assignable.
+- **Runs** — `dispatch_coding_run` accepts `pin: "pod_once"` and does not
+  release a dedicated run (there is no release on any surface). Dedicated
+  refusal reasons (`assigned_runner_offline`, `assigned_runner_paused`,
+  `assigned_runner_not_owner`) and `pod_once` refusals
+  (`pod_once_not_allowed`, `pod_once_not_applicable`,
+  `no_eligible_runner_in_pod`) are returned in `reason` unchanged, with
+  the state change already applied. A run refused for an unavailable
+  dedicated runner is not an error to retry in a loop: use
+  `pin: "pod_once"` only when the work does not need the dedicated runner's
+  machine; otherwise report that the runner is unavailable and stop.
+- **Sub-issues** do not inherit their parent's runner. A child gets the
+  project default pod like any new issue; set a dedicated runner on a child
+  only if the child itself needs it.
+- A run reporting `dispatch_wait` is **waiting, not broken**. Do not create
+  another run or another issue for it.
