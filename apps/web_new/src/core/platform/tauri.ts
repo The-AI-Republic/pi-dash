@@ -572,6 +572,7 @@ const desktopAgentRuntime: AgentRuntimeApi = {
   ensureEngine: () => invokeNative("daemon_ensure_engine"),
   engineLogin: (deviceCode: string) => invokeNative("pidash_cli_engine_login", { deviceCode }),
   reloadCredentials: () => invokeNative("daemon_credentials_reload"),
+  requestReconnect: () => invokeNative("daemon_reconnect"),
   saveApprovalModes: (account: string, modes: Record<string, string>) =>
     invokeNative("chat_approval_modes_save", { account, modes }),
   loadApprovalModes: async (account: string) => {

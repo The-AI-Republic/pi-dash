@@ -119,6 +119,13 @@ describe("desktop agent runtime", () => {
     await expect(platform.agentRuntime?.loadApprovalModes("u1")).resolves.toEqual({});
   });
 
+  it("asks the daemon to reconnect its cloud connections", async () => {
+    const invoke = vi.fn(async () => undefined);
+    installBridge(invoke);
+    await platform.agentRuntime?.requestReconnect();
+    expect(invoke).toHaveBeenCalledWith("daemon_reconnect", undefined);
+  });
+
   it("runs the migration and notices commands", async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === "legacy_scan") return [];
@@ -157,6 +164,7 @@ describe("desktop agent runtime", () => {
     await expect(platform.agentRuntime?.engineLogin("d")).rejects.toThrow(
       "pidash_cli_engine_login needs the native bridge"
     );
+    await expect(platform.agentRuntime?.requestReconnect()).rejects.toThrow("daemon_reconnect needs the native bridge");
     await expect(platform.agentRuntime?.signOutComputer()).rejects.toThrow("pidash_cli_logout needs the native bridge");
   });
 });

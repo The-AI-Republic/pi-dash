@@ -402,6 +402,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           return null;
         case "daemon_ensure_engine":
         case "daemon_credentials_reload":
+        case "daemon_reconnect":
         case "pidash_cli_engine_login":
           return null;
         case "chat_approval_modes_save": {

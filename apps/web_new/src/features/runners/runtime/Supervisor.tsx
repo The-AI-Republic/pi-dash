@@ -7,7 +7,9 @@
 // workspace layout. On desktop it resumes the runtime for the signed
 // account (discovery of this computer's Pi Dash daemon is evaluated for
 // it), registers the local chat transport, re-checks the daemon and the
-// engine sign-in on a minute cadence plus window focus, moves older
+// engine sign-in on a minute cadence plus window focus and network recovery
+// (the re-check also wakes the daemon's cloud connections — PIDESKAPP-181),
+// moves older
 // builds' private daemon trees to it (PIDESKAPP-223, design §13), asks
 // once per machine whether it replaces an offline one (§4.10), and hosts
 // the "Set up Pi Dash on this computer" consent dialog.
@@ -127,10 +129,15 @@ export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactEle
     const unsubscribe = platform.onFocusChange((focused) => {
       if (focused) tick();
     });
+    // Network recovery: the refresh also wakes the daemon's cloud
+    // connections — the browser's `online` event is the only prompt the
+    // app gets when connectivity returns (PIDESKAPP-181).
+    globalThis.window.addEventListener("online", tick);
     return () => {
       active = false;
       clearInterval(timer);
       unsubscribe();
+      globalThis.window.removeEventListener("online", tick);
     };
   }, [runtime, userId, email, cloudUrl, client, registerChatTransport]);
 

@@ -223,6 +223,14 @@ export interface AgentRuntimeApi {
   engineLogin(deviceCode: string): Promise<void>;
   /** Have the daemon re-read its workspace tokens after a CLI sign-in. */
   reloadCredentials(): Promise<void>;
+  /**
+   * Ask the daemon to retry its cloud connections now (PIDESKAPP-181): cuts
+   * every runner's backoff wait short, so the built-in agent comes back
+   * within seconds after an outage instead of waiting out a retry backoff
+   * that can be hours long. Callers treat failures as best-effort (a missing
+   * or too-old daemon is just a missed wake).
+   */
+  requestReconnect(): Promise<void>;
   /** Hand approval modes to the host so they survive the webview wipe. */
   saveApprovalModes(account: string, modes: Record<string, string>): Promise<void>;
   /** Read back the modes stashed for an account (empty when there are none). */
