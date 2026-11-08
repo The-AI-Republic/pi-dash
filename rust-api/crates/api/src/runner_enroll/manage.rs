@@ -1359,7 +1359,7 @@ async fn render_runner_row(pool: &PgPool, row: &RunnerJoinRow) -> Result<String,
 /// `#assignable_for` context, when the list was asked for it (design
 /// §7.4): the viewer and the resolved issue (outer `None` = not
 /// requested, inner `None` = "new" / garbage).
-async fn render_runner_row_ctx(
+pub(crate) async fn render_runner_row_ctx(
     pool: &PgPool,
     row: &RunnerJoinRow,
     viewer_id: Option<Uuid>,

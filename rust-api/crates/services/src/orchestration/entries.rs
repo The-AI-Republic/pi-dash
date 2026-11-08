@@ -537,6 +537,18 @@ pub trait PreflightSeam {
         pod_id: Uuid,
         triggered_by: &str,
     ) -> Result<bool, CreationError>;
+
+    /// The `pod_once` preflight (PDASHOSS01-350, design §23.3): the
+    /// authorization (`pod_once_not_allowed` / `pod_once_not_applicable`)
+    /// and the pod-branch availability (`no_eligible_runner_in_pod`).
+    /// `None` means proceed; `Some(code)` is the refusal reason and
+    /// nothing is created (and nothing bounces).
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, CreationError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,6 +608,10 @@ pub struct TransitionRequest {
     pub jitter_secs: f64,
     /// The crum user for the ticker create-shape, or `None` on system paths.
     pub created_by: Option<Uuid>,
+    /// One-shot pod run (PDASHOSS01-350, design §23.3): the run goes to
+    /// the pod, unpinned, for this run only; the issue stays dedicated.
+    /// `false` everywhere except the assistant-tool dispatch surface.
+    pub pod_once: bool,
 }
 
 /// One `handle_issue_comment` call (`service.py:349-440`).
@@ -777,7 +793,7 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
                 fresh_session: false,
                 creator_id: Some(creator),
                 trigger: AgentRunTrigger::StateTransition.value(),
-                pod_once: false,
+                pod_once: req.pod_once,
                 actor_id: creator,
                 now: req.now,
             },
@@ -880,18 +896,30 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         });
     };
 
-    if !preflight
-        .preflight_eligibility_or_bounce(
-            req.issue_id,
-            creator,
-            pod,
-            AgentRunTrigger::StateTransition.value(),
-        )
+    if !req.pod_once {
+        if !preflight
+            .preflight_eligibility_or_bounce(
+                req.issue_id,
+                creator,
+                pod,
+                AgentRunTrigger::StateTransition.value(),
+            )
+            .await?
+        {
+            return Ok(TransitionOutcome {
+                created_run: None,
+                reason: REASON_NO_ELIGIBLE_RUNNER.to_owned(),
+            });
+        }
+    } else if let Some(code) = preflight
+        .pod_once_preflight(req.issue_id, creator, pod)
         .await?
     {
+        // §23.3: refused with the code, nothing queued, nothing bounced;
+        // the move itself already stands.
         return Ok(TransitionOutcome {
             created_run: None,
-            reason: REASON_NO_ELIGIBLE_RUNNER.to_owned(),
+            reason: code,
         });
     }
 
@@ -902,13 +930,19 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
             parent,
             creator_id: creator,
             pod_id: pod,
-            pod_once: false,
+            pod_once: req.pod_once,
             fresh_session,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: req.now,
         },
     )
     .await?;
+    if req.pod_once && outcome.created_run.is_some() {
+        let comment =
+            CreationSeam::pod_once_started_comment(seam, req.issue_id, pod, creator, req.now)
+                .await?;
+        CreationSeam::insert_system_comment(seam, &comment).await?;
+    }
     Ok(outcome)
 }
 
@@ -1402,6 +1436,7 @@ pub fn fire_transition_request(
         now: req.now,
         jitter_secs: req.jitter_secs,
         created_by: req.created_by,
+        pod_once: false,
     }
 }
 
@@ -2348,8 +2383,19 @@ mod tests {
         ) -> Result<bool, CreationError> {
             self.calls
                 .push((issue_id, creator_id, pod_id, triggered_by.to_owned()));
-            self.verdict
-                .ok_or_else(|| CreationError::Db("preflight not scripted".to_owned()))
+            match self.verdict {
+                Some(v) => Ok(v),
+                None => panic!("preflight consulted outside its script"),
+            }
+        }
+
+        async fn pod_once_preflight(
+            &mut self,
+            _issue_id: Uuid,
+            _creator_id: Uuid,
+            _pod_id: Uuid,
+        ) -> Result<Option<String>, CreationError> {
+            Ok(None)
         }
     }
 
@@ -2370,6 +2416,7 @@ mod tests {
             now,
             jitter_secs: 0.0,
             created_by: None,
+            pod_once: false,
         }
     }
 

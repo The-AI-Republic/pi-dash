@@ -457,6 +457,17 @@ pub(crate) mod test_support {
     pub(crate) struct UnreachedPreflight;
 
     impl PreflightSeam for UnreachedPreflight {
+        async fn pod_once_preflight(
+            &mut self,
+            _issue_id: Uuid,
+            _creator_id: Uuid,
+            _pod_id: Uuid,
+        ) -> Result<Option<String>, CreationError> {
+            Err(CreationError::Db(
+                "signal test: preflight is unreachable on this path".to_owned(),
+            ))
+        }
+
         async fn preflight_eligibility_or_bounce(
             &mut self,
             _issue_id: Uuid,

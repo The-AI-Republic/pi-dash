@@ -351,6 +351,41 @@ where
         }
         Ok(out.outcome.proceed)
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, CreationError> {
+        use sea_orm::EntityTrait;
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let issue = pidash_db::entity::issues::Entity::find_by_id(issue_id)
+            .one(&conn)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?
+            .ok_or_else(|| CreationError::Db("issue not found".to_owned()))?;
+        if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+            &conn,
+            &issue,
+            Some(creator_id),
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?
+        {
+            return Ok(Some(code.to_owned()));
+        }
+        let has = self
+            .matcher
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, Some(creator_id), true, true)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(if has {
+            None
+        } else {
+            Some("no_eligible_runner_in_pod".to_owned())
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

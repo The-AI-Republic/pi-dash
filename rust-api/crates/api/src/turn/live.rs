@@ -2285,7 +2285,7 @@ mod tests {
             .iter()
             .map(|schema| schema.name.to_owned())
             .collect();
-        assert_eq!(local.len(), 17, "the 17 local tools");
+        assert_eq!(local.len(), 18, "the 18 local tools");
         assert_eq!(
             &expected[..local.len()],
             local.as_slice(),

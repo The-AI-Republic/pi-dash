@@ -1289,6 +1289,15 @@ impl PreflightSeam for FixedPreflight {
         self.consulted = true;
         Ok(self.proceed)
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        _issue_id: uuid::Uuid,
+        _creator_id: uuid::Uuid,
+        _pod_id: uuid::Uuid,
+    ) -> Result<Option<String>, CreationError> {
+        Ok(None)
+    }
 }
 
 impl SeedStore for PgSeedStore {

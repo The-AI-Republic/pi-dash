@@ -123,6 +123,10 @@ pub struct IssueRow {
     pub priority: String,
     pub description_stripped: Option<String>,
     pub created_by_id: Option<Uuid>,
+    /// Dedicated target (PDASHOSS01-350): the pod / runner the issue
+    /// routes to (`None` = pod default / any runner in the pod).
+    pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     /// Read for the `-updated_at` page order (never rendered).
     pub updated_at: DateTime<Utc>,
 }
@@ -166,6 +170,13 @@ pub struct AgentRunRow {
     pub id: Uuid,
     pub status: String,
     pub created_at: Option<DateTime<Utc>>,
+    /// The run's pin (PDASHOSS01-350): the dedicated runner and kind.
+    pub pinned_runner_id: Option<Uuid>,
+    pub pinned_runner_name: Option<String>,
+    pub pin_kind: String,
+    /// The waiting object while the run waits for its runner (null
+    /// otherwise), shaped by the store from the domain service.
+    pub dispatch_wait: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -208,8 +219,20 @@ pub struct TransitionOutcome {
     pub reason: String,
 }
 
+/// The `get_issue` execution detail (PDASHOSS01-350).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionDetail {
+    /// The dedicated runner detail (null when undedicated).
+    pub runner_detail: Value,
+    /// The latest run's waiting object (null when nothing waits).
+    pub dispatch_wait: Value,
+}
+
 /// Inputs to the issue create (`issues.create_issue :265-277` plus the
-/// `Issue.save` housekeeping the store applies).
+/// `Issue.save` housekeeping the store applies). `assigned_pod_id` /
+/// `assigned_runner_id` carry the dedicated target (PDASHOSS01-350);
+/// the executor validates them through the shared service first and
+/// applies the runner after the create, as the API serializers do.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewIssueInput {
     pub project_id: Uuid,
@@ -222,6 +245,8 @@ pub struct NewIssueInput {
     pub parent_id: Option<Uuid>,
     pub created_by: Uuid,
     pub created_via: String,
+    pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
 }
 
 /// Field patch for the issue update (`issues.update_issue :337-361`).
@@ -238,6 +263,15 @@ pub struct IssuePatch {
     pub state_id: Option<Uuid>,
     pub parent_touched: bool,
     pub parent_id: Option<Uuid>,
+    /// Pod write (PDASHOSS01-350): set to the requested pod, or `None`
+    /// to clear when `pod_touched`.
+    pub pod_touched: bool,
+    pub pod_id: Option<Uuid>,
+    /// Dedicated-runner apply (PDASHOSS01-350): when set, the fused
+    /// transaction stamps the choice after the save and before the
+    /// dispatch (the Django order), through the shared service.
+    pub apply_runner: bool,
+    pub new_runner_id: Option<Uuid>,
 }
 
 /// Inputs to the comment create (`comments.create_comment :53-65` plus
@@ -386,6 +420,78 @@ pub trait ToolStore {
     /// (`runs.get_run_status :24`).
     async fn agent_runs(&self, issue_id: &Uuid) -> Result<Vec<AgentRunRow>, StoreError>;
 
+    /// Runners of a project visible to the acting user for name
+    /// resolution (PDASHOSS01-350): `(id, name)` newest-first.
+    async fn list_runners_for_resolution(
+        &self,
+        project_id: &Uuid,
+        actor_id: &Uuid,
+    ) -> Result<Vec<(Uuid, String)>, StoreError>;
+
+    /// Pods of a project for name resolution (PDASHOSS01-350):
+    /// `(id, name)` in name order.
+    async fn list_pods_for_resolution(
+        &self,
+        project_id: &Uuid,
+    ) -> Result<Vec<(Uuid, String)>, StoreError>;
+
+    /// A runner by id within a project (`None` when it does not exist
+    /// or belongs to another project). Returns the runner id and its
+    /// pod (the pod follows the runner, §7.2).
+    async fn runner_by_id_in_project(
+        &self,
+        project_id: &Uuid,
+        runner_id: &Uuid,
+    ) -> Result<Option<(Uuid, Uuid)>, StoreError>;
+
+    /// A pod by id within a project (`None` otherwise).
+    async fn pod_by_id_in_project(
+        &self,
+        project_id: &Uuid,
+        pod_id: &Uuid,
+    ) -> Result<Option<Uuid>, StoreError>;
+
+    /// The shared E-code validation (PDASHOSS01-350): an `E-code`
+    /// refusal surfaces as `StoreError::Transition` carrying the
+    /// tool-channel message (detail + machine code).
+    async fn validate_execution_target_write(
+        &self,
+        write: &pidash_services::domain::issue_assignment::ExecutionTargetWrite,
+    ) -> Result<(), StoreError>;
+
+    /// The post-commit apply (PDASHOSS01-350): stamps the runner (+ pod),
+    /// re-points a queued run, and writes the activity row in its own
+    /// transaction (the create-path order; the update path fuses this
+    /// into `update_issue_row`).
+    async fn apply_execution_target_post_commit(
+        &self,
+        issue_id: &Uuid,
+        new_runner_id: Option<Uuid>,
+        actor_id: &Uuid,
+    ) -> Result<(), StoreError>;
+
+    /// Whether the issue has a blocking run (the pod-change guard,
+    /// PDASHOSS01-350).
+    async fn has_blocking_run(&self, issue_id: &Uuid) -> Result<bool, StoreError>;
+
+    /// The `get_issue` execution detail (PDASHOSS01-350): the dedicated
+    /// runner detail and the latest run's waiting object.
+    async fn execution_detail(
+        &self,
+        issue_id: &Uuid,
+        actor_id: &Uuid,
+    ) -> Result<ExecutionDetail, StoreError>;
+
+    /// The `list_project_runners` read (PDASHOSS01-350): the visible
+    /// runners of a project, most-recent-first, with the optional
+    /// assignability row fields.
+    async fn list_project_runners(
+        &self,
+        project_id: &Uuid,
+        actor_id: &Uuid,
+        assignable_for: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError>;
+
     /// `scoped_issues.filter(project__identifier__iexact,
     /// sequence_id)` — the identifier arm of `resolve_refs`.
     async fn scoped_issue_by_identifier(
@@ -486,6 +592,7 @@ pub trait ToolStore {
     /// path. A finalized run is a normal outcome, not an error: the
     /// prompt-build failure path commits the FAILED run with no
     /// exception, so the drive commits and drains its publish pair.
+    #[allow(clippy::too_many_arguments)]
     async fn drive_transition(
         &self,
         issue_id: &Uuid,
@@ -494,6 +601,7 @@ pub trait ToolStore {
         actor_id: &Uuid,
         created_by: Option<Uuid>,
         now: &DateTime<Utc>,
+        pod_once: bool,
     ) -> Result<TransitionOutcome, StoreError>;
 
     /// The `create_issue` post-save fire (`signals.py:74-108`): a
@@ -588,7 +696,7 @@ use pidash_db::entity::{
     agent_run, assistant_event, assistant_message, assistant_thread, assistant_turn,
     assistant_user_llm_config, git_provider_accounts, git_repositories, git_repository_bindings,
     github_repositories, github_repository_syncs, issue_comments, issue_relations, issue_sequences,
-    issues, labels, pod, project_members, projects, states, users, workspaces,
+    issues, labels, pod, project_members, projects, runner, states, users, workspaces,
 };
 use pidash_services::assistant::tools_issues::ListFilterPredicates;
 use sea_orm::sea_query::{Alias, Expr, Func};
@@ -982,6 +1090,8 @@ struct IssueJoinedRow {
     priority: String,
     description_stripped: Option<String>,
     created_by_id: Option<Uuid>,
+    assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     updated_at: DateTime<Utc>,
 }
 
@@ -1000,6 +1110,8 @@ fn issue_row_from_joined(row: IssueJoinedRow) -> IssueRow {
         priority: row.priority,
         description_stripped: row.description_stripped,
         created_by_id: row.created_by_id,
+        assigned_pod_id: row.assigned_pod_id,
+        assigned_runner_id: row.assigned_runner_id,
         updated_at: row.updated_at,
     }
 }
@@ -1051,6 +1163,8 @@ fn issue_row_projection(query: sea_orm::Select<issues::Entity>) -> sea_orm::Sele
             issues::Column::Priority,
             issues::Column::DescriptionStripped,
             issues::Column::CreatedById,
+            issues::Column::AssignedPodId,
+            issues::Column::AssignedRunnerId,
             issues::Column::UpdatedAt,
         ])
         .column_as(projects::Column::Identifier, "project_identifier")
@@ -1520,35 +1634,285 @@ impl ToolStore for PgToolStore {
     }
 
     async fn agent_runs(&self, issue_id: &Uuid) -> Result<Vec<AgentRunRow>, StoreError> {
-        #[derive(Debug, FromQueryResult)]
-        struct RunRow {
-            id: Uuid,
-            status: String,
-            created_at: Option<DateTime<Utc>>,
-        }
+        // Full models: `build_dispatch_wait` needs the whole run for the
+        // ahead-count + waiting comment (no select-only projection).
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        let rows: Vec<RunRow> = agent_run::Entity::find()
-            .select_only()
-            .columns([
-                agent_run::Column::Id,
-                agent_run::Column::Status,
-                agent_run::Column::CreatedAt,
-            ])
+        let runs = agent_run::Entity::find()
             .filter(agent_run::Column::WorkItemId.eq(*issue_id))
             .order_by_desc(agent_run::Column::CreatedAt)
             .limit(5)
-            .into_model()
             .all(&db)
             .await
             .map_err(orm_err)?;
-        Ok(rows
-            .into_iter()
-            .map(|row| AgentRunRow {
-                id: row.id,
-                status: row.status,
-                created_at: row.created_at,
+        let mut out = Vec::with_capacity(runs.len());
+        for run in runs {
+            let pinned_runner_name = match run.pinned_runner_id {
+                Some(id) => runner::Entity::find_by_id(id)
+                    .select_only()
+                    .column(runner::Column::Name)
+                    .into_tuple()
+                    .one(&db)
+                    .await
+                    .map_err(orm_err)?
+                    .flatten(),
+                None => None,
+            };
+            let wait = pidash_services::domain::issue_assignment::build_dispatch_wait(
+                &db,
+                &pidash_services::domain::issue_assignment::RunWaitInputs::from(&run),
+                None,
+            )
+            .await
+            .map_err(orm_err)?;
+            out.push(AgentRunRow {
+                id: run.id,
+                status: run.status.clone(),
+                created_at: Some(chrono::DateTime::<Utc>::from(run.created_at)),
+                pinned_runner_id: run.pinned_runner_id,
+                pinned_runner_name,
+                pin_kind: run.pin_kind.clone(),
+                dispatch_wait: wait,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn list_runners_for_resolution(
+        &self,
+        project_id: &Uuid,
+        actor_id: &Uuid,
+    ) -> Result<Vec<(Uuid, String)>, StoreError> {
+        use sea_orm::EntityTrait;
+        let to_pod: sea_orm::RelationDef = runner::Entity::belongs_to(pod::Entity)
+            .from(runner::Column::PodId)
+            .to(pod::Column::Id)
+            .into();
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, String)> = runner::Entity::find()
+            .select_only()
+            .columns([runner::Column::Id, runner::Column::Name])
+            .join(sea_orm::JoinType::InnerJoin, to_pod)
+            .filter(pod::Column::ProjectId.eq(*project_id))
+            .filter(runner::Column::OwnerId.eq(*actor_id))
+            .filter(runner::Column::Visibility.eq(0_i16))
+            .order_by_asc(runner::Column::Name)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(rows)
+    }
+
+    async fn list_pods_for_resolution(
+        &self,
+        project_id: &Uuid,
+    ) -> Result<Vec<(Uuid, String)>, StoreError> {
+        use sea_orm::EntityTrait;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let rows: Vec<(Uuid, String)> = pod::Entity::find()
+            .select_only()
+            .columns([pod::Column::Id, pod::Column::Name])
+            .filter(pod::Column::ProjectId.eq(*project_id))
+            .order_by_asc(pod::Column::Name)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(rows)
+    }
+
+    async fn runner_by_id_in_project(
+        &self,
+        project_id: &Uuid,
+        runner_id: &Uuid,
+    ) -> Result<Option<(Uuid, Uuid)>, StoreError> {
+        use sea_orm::EntityTrait;
+        let to_pod: sea_orm::RelationDef = runner::Entity::belongs_to(pod::Entity)
+            .from(runner::Column::PodId)
+            .to(pod::Column::Id)
+            .into();
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row: Option<(Uuid, Uuid)> = runner::Entity::find()
+            .select_only()
+            .columns([runner::Column::Id, runner::Column::PodId])
+            .join(sea_orm::JoinType::InnerJoin, to_pod)
+            .filter(runner::Column::Id.eq(*runner_id))
+            .filter(pod::Column::ProjectId.eq(*project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(row)
+    }
+
+    async fn pod_by_id_in_project(
+        &self,
+        project_id: &Uuid,
+        pod_id: &Uuid,
+    ) -> Result<Option<Uuid>, StoreError> {
+        use sea_orm::EntityTrait;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row: Option<Uuid> = pod::Entity::find()
+            .select_only()
+            .column(pod::Column::Id)
+            .filter(pod::Column::Id.eq(*pod_id))
+            .filter(pod::Column::ProjectId.eq(*project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        Ok(row)
+    }
+
+    async fn validate_execution_target_write(
+        &self,
+        write: &pidash_services::domain::issue_assignment::ExecutionTargetWrite,
+    ) -> Result<(), StoreError> {
+        use pidash_services::assistant::tools_issues::execution_refusal_message;
+        use pidash_services::domain::issue_assignment::validate_execution_target;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        validate_execution_target(&db, write)
+            .await
+            .map_err(|error| match error {
+                pidash_services::domain::issue_assignment::ValidateError::Field(field) => {
+                    StoreError::Transition(execution_refusal_message(field.detail, field.code))
+                }
+                pidash_services::domain::issue_assignment::ValidateError::Db(error) => {
+                    orm_err(error)
+                }
             })
-            .collect())
+    }
+
+    async fn apply_execution_target_post_commit(
+        &self,
+        issue_id: &Uuid,
+        new_runner_id: Option<Uuid>,
+        actor_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        pidash_services::domain::issue_assignment::apply_execution_target(
+            &db,
+            *issue_id,
+            new_runner_id,
+            *actor_id,
+        )
+        .await
+        .map_err(orm_err)?;
+        Ok(())
+    }
+
+    async fn has_blocking_run(&self, issue_id: &Uuid) -> Result<bool, StoreError> {
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        pidash_services::domain::issue_assignment::has_blocking_run(&db, *issue_id)
+            .await
+            .map_err(orm_err)
+    }
+
+    async fn execution_detail(
+        &self,
+        issue_id: &Uuid,
+        actor_id: &Uuid,
+    ) -> Result<ExecutionDetail, StoreError> {
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let runner_detail = match pidash_db::entity::issues::Entity::find_by_id(*issue_id)
+            .select_only()
+            .column(pidash_db::entity::issues::Column::AssignedRunnerId)
+            .into_tuple::<Option<Uuid>>()
+            .one(&db)
+            .await
+            .map_err(orm_err)?
+            .flatten()
+        {
+            Some(runner_id) => {
+                match runner::Entity::find_by_id(runner_id)
+                    .one(&db)
+                    .await
+                    .map_err(orm_err)?
+                {
+                    Some(runner) => {
+                        pidash_services::domain::issue_assignment::assigned_runner_detail(
+                            &db, &runner,
+                        )
+                        .await
+                        .map_err(orm_err)?
+                    }
+                    None => Value::Null,
+                }
+            }
+            None => Value::Null,
+        };
+        let latest = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(*issue_id))
+            .order_by_desc(agent_run::Column::CreatedAt)
+            .one(&db)
+            .await
+            .map_err(orm_err)?;
+        let dispatch_wait = match latest {
+            Some(run) => pidash_services::domain::issue_assignment::build_dispatch_wait(
+                &db,
+                &pidash_services::domain::issue_assignment::RunWaitInputs::from(&run),
+                Some(*actor_id),
+            )
+            .await
+            .map_err(orm_err)?,
+            None => Value::Null,
+        };
+        Ok(ExecutionDetail {
+            runner_detail,
+            dispatch_wait,
+        })
+    }
+
+    async fn list_project_runners(
+        &self,
+        project_id: &Uuid,
+        actor_id: &Uuid,
+        assignable_for: Option<&str>,
+    ) -> Result<Vec<Value>, StoreError> {
+        use pidash_services::runner_enroll::queries::manage_reads;
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // The web list is workspace-scoped; the tool narrows by project.
+        let workspace_id = projects::Entity::find_by_id(*project_id)
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .into_tuple::<Uuid>()
+            .one(&db)
+            .await
+            .map_err(orm_err)?
+            .ok_or(StoreError::Missing { model: "Project" })?;
+        // `?assignable_for=<issue-id | "new">`: a garbage id behaves as
+        // "new" (Django's `except (ValueError, TypeError)` arm).
+        let assignable_for: Option<Option<Uuid>> = match assignable_for {
+            None => None,
+            Some("new") => Some(None),
+            Some(raw) => Some(raw.parse::<Uuid>().ok()),
+        };
+        let rows = manage_reads::runner_list(
+            &db,
+            workspace_id,
+            *actor_id,
+            0_i16,
+            None,
+            None,
+            Some(*project_id),
+        )
+        .await
+        .map_err(orm_err)?;
+        let mut bodies = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let text = crate::runner_enroll::manage::render_runner_row_ctx(
+                &self.pool,
+                row,
+                Some(*actor_id),
+                assignable_for,
+            )
+            .await
+            .map_err(|_| StoreError::Db("runner row render failed".to_owned()))?;
+            let value: Value =
+                serde_json::from_str(&text).map_err(|error| StoreError::Db(error.to_string()))?;
+            bodies.push(value);
+        }
+        Ok(bodies)
     }
 
     async fn scoped_issue_by_identifier(
@@ -1952,17 +2316,22 @@ impl ToolStore for PgToolStore {
                 state_group = Some(group);
             }
         }
-        // `assigned_pod` (`issue.py:276-284`): the project's default pod.
-        let assigned_pod: Option<Uuid> = pod::Entity::find()
-            .select_only()
-            .column(pod::Column::Id)
-            .filter(pod::Column::ProjectId.eq(input.project_id))
-            .filter(pod::Column::IsDefault.eq(true))
-            .filter(pod::Column::DeletedAt.is_null())
-            .into_tuple()
-            .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
-            .await
-            .map_err(orm_err)?;
+        // `assigned_pod` (`issue.py:276-284`): the project's default pod —
+        // unless the tool asked for a dedicated target, which the
+        // executor already resolved (the pod follows the runner, §7.2).
+        let assigned_pod: Option<Uuid> = match input.assigned_pod_id {
+            Some(pod_id) => Some(pod_id),
+            None => pod::Entity::find()
+                .select_only()
+                .column(pod::Column::Id)
+                .filter(pod::Column::ProjectId.eq(input.project_id))
+                .filter(pod::Column::IsDefault.eq(true))
+                .filter(pod::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(&pidash_db::orm_tx::TxConn::new(&mut tx))
+                .await
+                .map_err(orm_err)?,
+        };
         // `sort_order` (`issue.py:333-340`): max in (project, state) +
         // 10000, else the 65535 default. `Issue.objects` (soft-delete
         // only) — including triage/archived/draft rows.
@@ -2015,6 +2384,7 @@ impl ToolStore for PgToolStore {
                 parent_id: input.parent_id,
                 state_id,
                 pod_id: assigned_pod,
+                runner_id: input.assigned_runner_id,
             },
         )
         .await?;
@@ -2045,6 +2415,8 @@ impl ToolStore for PgToolStore {
             priority: input.priority.clone(),
             description_stripped: stripped,
             created_by_id: Some(input.created_by),
+            assigned_pod_id: assigned_pod,
+            assigned_runner_id: input.assigned_runner_id,
             updated_at: *now,
         })
     }
@@ -2148,6 +2520,8 @@ impl ToolStore for PgToolStore {
                 state_id: patch.state_id,
                 parent_touched: patch.parent_touched,
                 parent_id: patch.parent_id,
+                pod_touched: patch.pod_touched,
+                pod_id: patch.pod_id,
                 updated_by_id: *actor_id,
                 now: *now,
             },
@@ -2163,6 +2537,40 @@ impl ToolStore for PgToolStore {
         let mut row = row
             .map(issue_row_from_joined)
             .ok_or(StoreError::Missing { model: "Issue" })?;
+        // The execution target after the save, before the dispatch
+        // (PDASHOSS01-350): the Django order is save → apply → drive.
+        // A runner change stamps through the shared service on this
+        // transaction; a pod-only change clears a dedicated runner
+        // (§13.1) via the same service.
+        if patch.apply_runner {
+            pidash_services::domain::issue_assignment::apply_execution_target_in(
+                &pidash_db::orm_tx::TxConn::new(tx.inner()),
+                *issue_id,
+                patch.new_runner_id,
+                *actor_id,
+            )
+            .await
+            .map_err(orm_err)?;
+        } else if patch.pod_touched && row.assigned_runner_id.is_some() {
+            pidash_services::domain::issue_assignment::clear_dedicated_runner(
+                &pidash_db::orm_tx::TxConn::new(tx.inner()),
+                *issue_id,
+                "pod changed",
+                Some(*actor_id),
+            )
+            .await
+            .map_err(orm_err)?;
+        }
+        // Re-read after a target apply so the brief reports the
+        // stamped assignment (the apply re-stamps runner + pod).
+        if patch.apply_runner || (patch.pod_touched && row.assigned_runner_id.is_some()) {
+            let fresh = issue_row_projection(unscoped_issue_select(*issue_id))
+                .into_model::<IssueJoinedRow>()
+                .one(&pidash_db::orm_tx::TxConn::new(tx.inner()))
+                .await
+                .map_err(orm_err)?;
+            row = fresh.map(issue_row_from_joined).unwrap_or(row);
+        }
         // The save-time state: the completion-comment decision below
         // stays keyed to the save (`to_state`), exactly as Django's
         // save-time receiver — the post-drive re-read must not move
@@ -2198,6 +2606,7 @@ impl ToolStore for PgToolStore {
                 now: *now,
                 jitter_secs: 0.0,
                 created_by: Some(*actor_id),
+                pod_once: false,
             };
             // Preflight on the fused transaction: Python's bounce
             // atomic nests inside the outer atomic, so the bounce reads
@@ -2396,6 +2805,7 @@ impl ToolStore for PgToolStore {
         Ok((row, drive_outcome))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn drive_transition(
         &self,
         issue_id: &Uuid,
@@ -2404,6 +2814,7 @@ impl ToolStore for PgToolStore {
         actor_id: &Uuid,
         created_by: Option<Uuid>,
         now: &DateTime<Utc>,
+        pod_once: bool,
     ) -> Result<TransitionOutcome, StoreError> {
         use pidash_jobs::admission::RedisAdmissionCache;
         use pidash_jobs::orchestration::{LiveCreationStore, StoreDeps};
@@ -2457,6 +2868,7 @@ impl ToolStore for PgToolStore {
             now: *now,
             jitter_secs: 0.0,
             created_by,
+            pod_once,
         };
         // One transaction for the whole drive. This entry serves the
         // `dispatch_coding_run` path only: Python has no outer atomic
@@ -3137,6 +3549,15 @@ impl pidash_services::orchestration::entries::PreflightSeam for FixedPreflight {
         self.consulted = true;
         Ok(self.proceed)
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        _issue_id: Uuid,
+        _creator_id: Uuid,
+        _pod_id: Uuid,
+    ) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
+        Ok(None)
+    }
 }
 
 /// The human-move preflight (the `v1_work_items` `CorePreflight`
@@ -3196,6 +3617,57 @@ where
         }
         Ok(out.outcome.proceed)
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
+        pod_once_preflight_impl(&self.pool, &self.matcher, issue_id, creator_id, pod_id).await
+    }
+}
+
+/// The live `pod_once` preflight (PDASHOSS01-350, design §23.3): the
+/// domain authorization plus the pod-branch availability over the
+/// tool execution seams. Shared by the turn and tool engines so the
+/// two preflight wrappers cannot drift.
+pub(crate) async fn pod_once_preflight_impl<
+    M: pidash_services::orchestration::dispatch::PodRunnerMatcher,
+>(
+    pool: &PgPool,
+    matcher: &M,
+    issue_id: Uuid,
+    creator_id: Uuid,
+    pod_id: Uuid,
+) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
+    use pidash_services::orchestration::creation::CreationError;
+    use sea_orm::EntityTrait;
+    let conn = pidash_db::pool::sea_orm_connection(pool);
+    let issue = pidash_db::entity::issues::Entity::find_by_id(issue_id)
+        .one(&conn)
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?
+        .ok_or_else(|| CreationError::Db("issue not found".to_owned()))?;
+    if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+        &conn,
+        &issue,
+        Some(creator_id),
+    )
+    .await
+    .map_err(|error| CreationError::Db(error.to_string()))?
+    {
+        return Ok(Some(code.to_owned()));
+    }
+    let has = matcher
+        .pod_has_runner_for_issue_principal(pod_id, issue_id, Some(creator_id), true, true)
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?;
+    Ok(if has {
+        None
+    } else {
+        Some("no_eligible_runner_in_pod".to_owned())
+    })
 }
 
 /// Drain one finalized run's publish pair from a turn drive
@@ -3425,6 +3897,7 @@ mod tests {
         ws: Uuid,
         project: Uuid,
         pod: Uuid,
+        runner: Uuid,
         backlog: Uuid,
         in_progress: Uuid,
         issue: Uuid,
@@ -3443,6 +3916,7 @@ mod tests {
         let ws = Uuid::new_v4();
         let project = Uuid::new_v4();
         let pod = Uuid::new_v4();
+        let runner = Uuid::new_v4();
         let backlog = Uuid::new_v4();
         let in_progress = Uuid::new_v4();
         let issue = Uuid::new_v4();
@@ -3486,10 +3960,10 @@ mod tests {
              logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
              agent_default_max_ticks, agent_review_default_interval_seconds, \
              agent_test_default_interval_seconds, agent_ticking_enabled, \
-             default_agent_executor, workspace_id) \
+             default_agent_executor, workspace_id, dedicated_runner_lost_action) \
              VALUES ($1, $2, $2, 'T1124', $3, '', 2, false, false, false, true, false, false, \
              false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/t1124.git', \
-             'main', 10800, 10, 10800, 10800, true, 'local_runner', $4)",
+             'main', 10800, 10, 10800, 10800, true, 'local_runner', $4, 'fail_to_backlog')",
         )
         .bind(project)
         .bind(seed_at)
@@ -3511,6 +3985,26 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed pod");
+        sqlx::query(
+            "INSERT INTO runner (id, owner_id, workspace_id, pod_id, name, created_at, \
+             updated_at, capabilities, status, dev_metadata, os, arch, \
+             runner_version, protocol_version, host_label, refresh_token_hash, \
+             refresh_token_fingerprint, refresh_token_generation, \
+             previous_refresh_token_hash, access_token_signing_key_version, \
+             enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, \
+             visibility, provisioning) \
+             VALUES ($1, $2, $3, $4, $5, $6, $6, '[]', 'online', '{}', '', '', '', 1, '', \
+             '', '', 0, '', 1, '', '', '', 0, 'manual')",
+        )
+        .bind(runner)
+        .bind(user)
+        .bind(ws)
+        .bind(pod)
+        .bind(format!("t1124-box-{uniq}"))
+        .bind(seed_at)
+        .execute(pool)
+        .await
+        .expect("seed runner");
         for (id, name, group, default, sequence) in [
             (backlog, "Backlog", "backlog", true, 0.0),
             (in_progress, "In Progress", "started", false, 1.0),
@@ -3558,6 +4052,7 @@ mod tests {
             ws,
             project,
             pod,
+            runner,
             backlog,
             in_progress,
             issue,
@@ -3573,6 +4068,7 @@ mod tests {
             ("issues", "id", graph.issue),
             ("states", "id", graph.backlog),
             ("states", "id", graph.in_progress),
+            ("runner", "id", graph.runner),
             ("pod", "id", graph.pod),
             ("projects", "id", graph.project),
             ("workspaces", "id", graph.ws),
@@ -3719,5 +4215,110 @@ mod tests {
         assert_eq!(row.2, "hello", "MLStripper comment_stripped");
         assert_eq!(desc.0, "<p>hello</p>", "description keeps the HTML");
         assert_eq!(desc.1.as_deref(), Some("hello"), "strip_tags row");
+    }
+
+    /// The dedicated-runner fused path (PDASHOSS01-350): a runner patch
+    /// stamps runner + pod (pod follows the runner) on the same
+    /// transaction, `list_project_runners` returns the visible row with
+    /// its assignability fields, resolution sees the runner, and a
+    /// pod-only patch clears the dedicated runner.
+    #[tokio::test]
+    #[ignore = "needs migrated scratch DB via DATABASE_URL"]
+    async fn live_fused_runner_apply_and_list() {
+        let pool = live_pool().await;
+        let graph = seed_live_graph(&pool).await;
+        let store = PgToolStore::new(
+            pool.clone(),
+            None,
+            live_cloud_settings(),
+            live_managed_settings(),
+        )
+        .expect("build store");
+        let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+            .expect("frozen clock")
+            .with_timezone(&Utc);
+
+        // Resolution + runner read before any assignment.
+        let resolved = store
+            .list_runners_for_resolution(&graph.project, &graph.user)
+            .await
+            .expect("resolution list");
+        assert!(
+            resolved
+                .iter()
+                .any(|(id, name)| *id == graph.runner && name.starts_with("t1124-box-")),
+            "seeded runner must resolve by name: {resolved:?}"
+        );
+        let listed = store
+            .list_project_runners(&graph.project, &graph.user, Some(&graph.issue.to_string()))
+            .await
+            .expect("list project runners");
+        let row = listed
+            .iter()
+            .find(|row| row["id"] == serde_json::json!(graph.runner.to_string()))
+            .expect("seeded runner listed");
+        assert_eq!(row["assignable"], true);
+        assert_eq!(row["is_busy"], false);
+        assert_eq!(row["queue_depth"], 0);
+
+        // The shared E-code validation accepts the seeded runner.
+        store
+            .validate_execution_target_write(
+                &pidash_services::domain::issue_assignment::ExecutionTargetWrite {
+                    project_id: Some(graph.project),
+                    issue_id: Some(graph.issue),
+                    pod_id: None,
+                    runner_present: true,
+                    runner_id: Some(graph.runner),
+                    user_id: Some(graph.user),
+                },
+            )
+            .await
+            .expect("validation must pass for a visible online runner");
+
+        // Fused runner patch: stamps runner + pod (pod follows runner).
+        let patch = IssuePatch {
+            apply_runner: true,
+            new_runner_id: Some(graph.runner),
+            ..Default::default()
+        };
+        let (stamped, _) = store
+            .update_issue_row(&patch, &graph.issue, None, &graph.user, &now)
+            .await
+            .expect("fused runner patch must succeed");
+        assert_eq!(stamped.assigned_runner_id, Some(graph.runner));
+        assert_eq!(stamped.assigned_pod_id, Some(graph.pod));
+
+        // The execution detail carries the runner name.
+        let detail = store
+            .execution_detail(&graph.issue, &graph.user)
+            .await
+            .expect("execution detail");
+        assert_eq!(
+            detail.runner_detail["name"],
+            serde_json::json!(resolved[0].1)
+        );
+
+        // Pod-only patch clears the dedicated runner.
+        let patch = IssuePatch {
+            pod_touched: true,
+            pod_id: Some(graph.pod),
+            ..Default::default()
+        };
+        let (cleared, _) = store
+            .update_issue_row(&patch, &graph.issue, None, &graph.user, &now)
+            .await
+            .expect("pod-only patch must succeed");
+        assert_eq!(cleared.assigned_runner_id, None);
+        assert_eq!(cleared.assigned_pod_id, Some(graph.pod));
+
+        // The fused apply writes `issue_activities` rows, which the
+        // shared graph cleanup cannot see.
+        sqlx::query("DELETE FROM issue_activities WHERE issue_id = $1")
+            .bind(graph.issue)
+            .execute(&pool)
+            .await
+            .expect("cleanup activities");
+        cleanup_live_graph(&pool, &graph).await;
     }
 }
