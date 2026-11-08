@@ -537,6 +537,63 @@ describe("local transport", () => {
     expect(h.api.send).toHaveBeenCalledTimes(1);
   });
 
+  it("stops an in-flight turn before deleting its conversation", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "first");
+    await transport.deleteChatSession("s-1");
+    expect(h.api.close).toHaveBeenCalledWith({ workspaceSlug: "acme", sessionId: "s-1" });
+    expect(h.api.deleteSession).toHaveBeenCalledWith("u-1", "s-1");
+    const closeOrder = vi.mocked(h.api.close).mock.invocationCallOrder[0];
+    const deleteOrder = vi.mocked(h.api.deleteSession).mock.invocationCallOrder[0];
+    expect(closeOrder).toBeDefined();
+    expect(deleteOrder).toBeDefined();
+    expect(closeOrder as number).toBeLessThan(deleteOrder as number);
+  });
+
+  it("stops every in-flight turn before clearing history", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "one");
+    await transport.sendChatMessage("s-2", "two");
+    await transport.clearChatHistory();
+    expect(h.api.close).toHaveBeenCalledTimes(2);
+    expect(h.api.close).toHaveBeenCalledWith({ workspaceSlug: "acme", sessionId: "s-1" });
+    expect(h.api.close).toHaveBeenCalledWith({ workspaceSlug: "acme", sessionId: "s-2" });
+    const clearOrder = vi.mocked(h.api.clearHistory).mock.invocationCallOrder[0];
+    expect(clearOrder).toBeDefined();
+    for (const order of vi.mocked(h.api.close).mock.invocationCallOrder) {
+      expect(order).toBeLessThan(clearOrder as number);
+    }
+    expect(h.api.clearHistory).toHaveBeenCalledWith("u-1");
+  });
+
+  it("still deletes when the close fails (dead daemon)", async () => {
+    const h = harness({
+      close: vi.fn(async () => {
+        throw new Error("daemon unreachable");
+      }),
+    });
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "first");
+    await expect(transport.deleteChatSession("s-1")).resolves.toBeUndefined();
+    expect(h.api.close).toHaveBeenCalledWith({ workspaceSlug: "acme", sessionId: "s-1" });
+    expect(h.api.deleteSession).toHaveBeenCalledWith("u-1", "s-1");
+  });
+
+  it("still clears when a close fails (dead daemon)", async () => {
+    const h = harness({
+      close: vi.fn(async () => {
+        throw new Error("daemon unreachable");
+      }),
+    });
+    const transport = transportFor(h);
+    await transport.sendChatMessage("s-1", "one");
+    await expect(transport.clearChatHistory()).resolves.toBeUndefined();
+    expect(h.api.close).toHaveBeenCalledTimes(1);
+    expect(h.api.clearHistory).toHaveBeenCalledWith("u-1");
+  });
+
   it("clearing requires the same signed-in account as every other store verb", async () => {
     const h = harness();
     await expect(transportFor(h, "").clearChatHistory()).rejects.toThrow(/Sign in/);
