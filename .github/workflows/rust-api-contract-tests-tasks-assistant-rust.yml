@@ -24,7 +24,7 @@ concurrency:
 jobs:
   tasks-assistant-rust-replay:
     name: tasks_assistant oracle vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:

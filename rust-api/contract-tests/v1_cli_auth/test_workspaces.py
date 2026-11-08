@@ -82,3 +82,27 @@ def test_workspaces_empty(api, seed):
     r = api.get("/api/v1/auth/workspaces/", headers={"X-Api-Key": key})
     assert r.status_code == 200, r.text
     assert r.json() == {"workspaces": []}
+
+
+def test_workspaces_machine_token_expired_is_generic_403(api, seed, tenant_a, secret):
+    """An idle-expired mt_ (60-day expiry, #2910) no longer
+    authenticates. APIKeyAuthentication keeps its generic message, so
+    an expired token looks exactly like a bogus one here — the pin is
+    the 403 itself (before, this was a 200)."""
+    machine = seed.dev_machine(tenant_a["user"]["id"])
+    raw = seed.machine_token(
+        tenant_a["user"]["id"], tenant_a["workspace"]["id"], machine, secret
+    )
+    assert (
+        api.get("/api/v1/auth/workspaces/", headers={"X-Api-Key": raw}).status_code
+        == 200
+    )
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE machine_token SET expires_at = now() - interval '1 second'"
+            " WHERE dev_machine_id = %s",
+            (machine,),
+        )
+    r = api.get("/api/v1/auth/workspaces/", headers={"X-Api-Key": raw})
+    assert r.status_code == 403, r.text
+    assert r.json() == {"detail": "Given API token is not valid"}

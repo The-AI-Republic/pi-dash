@@ -678,11 +678,13 @@ impl Binder {
 }
 
 /// Render a kernel [`Condition`] to a `WHERE`-ready fragment plus binds.
-/// The `SELECT 1 WHERE` shell keeps user placeholders numbered from `$1`
-/// (`Expr::cust` emits no bind of its own).
+/// The `SELECT 1 WHERE` shell keeps user placeholders numbered from `$1`;
+/// the shell literal is a custom keyword — sea-query renders it bind-free,
+/// so no placeholder of its own leaks into the fragment.
 pub fn render_condition(cond: &Condition) -> (String, Vec<sea_query::Value>) {
     let mut stmt = SelectStatement::new();
-    stmt.expr(Expr::cust("1")).cond_where(cond.clone());
+    stmt.expr(Expr::custom_keyword("1"))
+        .cond_where(cond.clone());
     let (sql, values) = stmt.build(PostgresQueryBuilder);
     let fragment = sql
         .strip_prefix("SELECT 1 WHERE ")
@@ -737,7 +739,10 @@ pub async fn fetch_count(
         .fetch_one(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.try_get::<i64, _>(0).map_err(|_| Denial::ServerError)
+    // Every caller runs a COUNT aggregate; Postgres names it `count`.
+    // Decode by name, never by position (orm-migration.md §1).
+    row.try_get::<i64, _>("count")
+        .map_err(|_| Denial::ServerError)
 }
 
 // ---- filter stack -----------------------------------------------------------

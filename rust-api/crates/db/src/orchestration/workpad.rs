@@ -20,8 +20,10 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use sqlx::postgres::PgRow;
-use sqlx::Row;
+use sea_orm::{ConnectionTrait, EntityTrait, FromQueryResult, QuerySelect};
+
+use crate::entity::issues;
+use crate::orm_tx;
 
 // ---------------------------------------------------------------------------
 // Workpad accessors
@@ -31,23 +33,31 @@ use sqlx::Row;
 /// `$1` is the issue id.
 pub const GET_WORKPAD_SQL: &str = "SELECT workpad FROM issues WHERE id = $1";
 
+#[derive(Debug, Clone, FromQueryResult)]
+struct WorkpadRow {
+    workpad: Option<String>,
+}
+
 /// Return the issue's workpad body, `""` when never written
 /// (`issue.workpad or ""`). A missing row is `RowNotFound` — Python
 /// takes a live instance, so "missing" is unreachable there.
-pub async fn fetch_workpad<'e, E>(ex: E, issue_id: uuid::Uuid) -> Result<String, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<PgRow> = sqlx::query(GET_WORKPAD_SQL)
-        .bind(issue_id)
-        .fetch_optional(ex)
-        .await?;
+///
+/// Takes a [`ConnectionTrait`] (the pool connection or a
+/// transaction-held [`TxConn`](crate::orm_tx::TxConn)).
+pub async fn fetch_workpad(
+    db: &impl ConnectionTrait,
+    issue_id: uuid::Uuid,
+) -> Result<String, sqlx::Error> {
+    let row = issues::Entity::find_by_id(issue_id)
+        .select_only()
+        .column(issues::Column::Workpad)
+        .into_model::<WorkpadRow>()
+        .one(db)
+        .await
+        .map_err(orm_tx::into_sqlx)?;
     match row {
         None => Err(sqlx::Error::RowNotFound),
-        Some(row) => {
-            let body: Option<String> = row.try_get("workpad")?;
-            Ok(body.unwrap_or_default())
-        }
+        Some(row) => Ok(row.workpad.unwrap_or_default()),
     }
 }
 

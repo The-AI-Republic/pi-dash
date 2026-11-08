@@ -71,6 +71,20 @@ def test_revoked_machine_token_keeps_its_code(settings, seeder, daemon_world, ma
     _assert_auth_failed(response, "machine_token_revoked")
 
 
+def test_expired_machine_token_keeps_its_code(settings, seeder, daemon_world, machine_flow):
+    """An idle-expired token (60-day expiry, #2910) fails with its own
+    code on the runner-plane surface — the token resolver runs before
+    the runner lookup, so this is still the 401's detail."""
+    seeder.db.execute(
+        "UPDATE machine_token SET expires_at = now() - interval '1 second'"
+        " WHERE user_id = %s AND host_label = %s",
+        (daemon_world["owner"]["id"], machine_flow["host_label"]),
+    )
+    with bearer_client(settings.base_url, machine_flow["machine_token"]) as client:
+        response = _open_session(client, uuid.uuid4())
+    _assert_auth_failed(response, "machine_token_expired")
+
+
 def test_non_member_machine_token_keeps_its_code(settings, seeder, daemon_world, machine_flow):
     seeder.db.execute(
         "UPDATE workspace_members SET is_active = false WHERE workspace_id = %s AND member_id = %s",

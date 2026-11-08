@@ -25,14 +25,15 @@
 //! pydantic-ai sources and the
 //! `fixtures/assistant/turn-runtime/` captures.
 //!
-//! Nothing here is wired into `worker()` yet — PIDASHCONV-863 does the
-//! wiring — so this module is a tested library until then.
+//! Live seam (PIDASHCONV-863): [`live::LiveTurnSeam`] implements the
+//! assistant turn seam and is composed by the binary in
+//! `bin/pidash-api/src/inventory.rs`; the agent loop serves
+//! `assistant.run_turn` end to end.
 //!
 //! Local tools layer (PIDASHCONV-1113): the 17 local tool schemas +
 //! executors (`assistant/tools/*.py` port). Each layer merges as its own
-//! tested module; PIDASHCONV-863 wires them into `worker()` (agent loop,
-//! live seam, parity flip, replay proof). Until then this tree is
-//! exercised by its unit tests only.
+//! tested module and is exercised by its unit tests plus the assistant
+//! contract suite.
 
 pub mod agent;
 pub mod history;

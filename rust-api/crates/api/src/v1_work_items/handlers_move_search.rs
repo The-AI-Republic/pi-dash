@@ -41,8 +41,9 @@
 //! [`super::handlers_social`]. This module owns the HTTP shells: the
 //! move's `ProjectEntityPermission` POST gate, the search AuthOnly gate
 //! (both search views inherit `IsAuthenticated` from `BaseAPIView` and
-//! declare nothing else), the `:name` → `$N` bind numbering, row
-//! decoding, and the envelopes.
+//! declare nothing else), the sea-query search statements (built here
+//! over the Q3 param parsers and semantics; the Q3 SQL text stays as the
+//! documented reference), their by-name row decoding, and the envelopes.
 //!
 //! Request order (preserved, not redesigned): API-key authentication
 //! (anonymous 401s before any pool or database access — the shared
@@ -129,11 +130,23 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use sea_orm::sea_query::extension::postgres::{PgExpr, PgFunc};
+use sea_orm::sea_query::{
+    Alias, BinOper, Condition, Expr, Func, JoinType, Order, Query as SeaQuery, SelectStatement,
+    SimpleExpr, Value as SqlValue,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, FromQueryResult, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait,
+};
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::entity::{issue_comments, issues, project_members, projects, states, workspaces};
+use pidash_services::app_views_search::fts;
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::transition::IssueTransitionHook;
@@ -381,102 +394,303 @@ fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
 }
 
 // ---------------------------------------------------------------------------
+// Search statements (sea-query over the Q3 semantics)
+// ---------------------------------------------------------------------------
+
+/// Run a built statement into typed rows, decoded by name.
+async fn query_built<T: FromQueryResult>(
+    db: &impl ConnectionTrait,
+    stmt: &SelectStatement,
+) -> Result<Vec<T>, DbErr> {
+    let rows = db.query_all(DbBackend::Postgres.build(stmt)).await?;
+    rows.iter()
+        .map(|row| T::from_query_result(row, ""))
+        .collect()
+}
+
+fn issue(column: issues::Column) -> Expr {
+    Expr::col((issues::Entity, column))
+}
+
+fn state(column: states::Column) -> Expr {
+    Expr::col((states::Entity, column))
+}
+
+fn project(column: projects::Column) -> Expr {
+    Expr::col((projects::Entity, column))
+}
+
+fn workspace(column: workspaces::Column) -> Expr {
+    Expr::col((workspaces::Entity, column))
+}
+
+fn member(column: project_members::Column) -> Expr {
+    Expr::col((project_members::Entity, column))
+}
+
+/// An inline SQL literal, not a bind: the FTS vectors must parse to the
+/// same expression tree as the `issues_fts_idx` / `issue_comments_fts_idx`
+/// index expressions (`fts::issue_vector_sql`), and a bound parameter is
+/// not a constant to the planner's generic plan.
+fn literal<V: Into<SqlValue>>(value: V) -> SimpleExpr {
+    SimpleExpr::Constant(value.into())
+}
+
+/// `'english'::regconfig` ([`fts::FTS_CONFIG`]).
+fn regconfig() -> SimpleExpr {
+    literal(fts::FTS_CONFIG).cast_as(Alias::new("regconfig"))
+}
+
+/// `websearch_to_tsquery('english'::regconfig, <query>)`
+/// ([`fts::websearch_sql`]); websearch operators flow through untouched.
+fn websearch(query: &str) -> SimpleExpr {
+    Func::cust(Alias::new("websearch_to_tsquery"))
+        .arg(regconfig())
+        .arg(Expr::val(query))
+        .into()
+}
+
+/// `ISSUE_SEARCH_VECTOR` ([`fts::issue_vector_sql`]): `to_tsvector(
+/// 'english'::regconfig, COALESCE(name, '') || ' ' ||
+/// COALESCE(description_stripped, ''))` over the outer `issues` row.
+fn issue_vector() -> SimpleExpr {
+    let text = SimpleExpr::from(Func::coalesce([
+        issue(issues::Column::Name).into(),
+        literal(""),
+    ]))
+    .concat(literal(" "))
+    .concat(Func::coalesce([
+        issue(issues::Column::DescriptionStripped).into(),
+        literal(""),
+    ]));
+    Func::cust(Alias::new("to_tsvector"))
+        .arg(regconfig())
+        .arg(text)
+        .into()
+}
+
+/// `ISSUE_COMMENT_SEARCH_VECTOR` ([`fts::comment_vector_sql`]).
+fn comment_vector() -> SimpleExpr {
+    let text = Func::coalesce([
+        Expr::col((
+            issue_comments::Entity,
+            issue_comments::Column::CommentStripped,
+        ))
+        .into(),
+        literal(""),
+    ]);
+    Func::cust(Alias::new("to_tsvector"))
+        .arg(regconfig())
+        .arg(text)
+        .into()
+}
+
+/// `<vector> @@ websearch_to_tsquery(...)` ([`fts::fts_match_sql`]).
+fn fts_match(vector: SimpleExpr, query: &str) -> SimpleExpr {
+    vector.binary(BinOper::Custom("@@"), websearch(query))
+}
+
+/// The `icontains` arm ([`fts::name_fallback_sql`]): `ILIKE '%<escaped>%'`
+/// with the pattern bound whole (`like` is already `escape_icontains`
+/// output, so the added `%` are the only wildcards). No `ESCAPE` clause:
+/// the backslash the helper escapes with is Postgres's default `LIKE`
+/// escape, exactly as Django renders it.
+fn icontains(column: Expr, like: &str) -> SimpleExpr {
+    column.ilike(format!("%{like}%"))
+}
+
+/// The `_build_search_filter` OR-chain ([`fts::search_filter_sql`]) in
+/// Django arm order: FTS, name fallback, optional comment arm (soft-deleted
+/// comments excluded, no `access` filter — BUG-7), sequence ints,
+/// project identifier. `None` when the query is empty
+/// ([`fts::search_applies`]).
+fn search_filter(query: &str, include_comments: bool) -> Option<Condition> {
+    if !fts::search_applies(query) {
+        return None;
+    }
+    let binds = q::search_text_binds(query);
+    let mut chain = Condition::any()
+        .add(fts_match(issue_vector(), &binds.fts))
+        .add(icontains(issue(issues::Column::Name), &binds.like));
+    if include_comments {
+        chain = chain.add(
+            issue(issues::Column::Id).in_subquery(
+                SeaQuery::select()
+                    .column((issue_comments::Entity, issue_comments::Column::IssueId))
+                    .from(issue_comments::Entity)
+                    .cond_where(
+                        Condition::all()
+                            .add(
+                                Expr::col((
+                                    issue_comments::Entity,
+                                    issue_comments::Column::DeletedAt,
+                                ))
+                                .is_null(),
+                            )
+                            .add(fts_match(comment_vector(), &binds.fts)),
+                    )
+                    .take(),
+            ),
+        );
+    }
+    Some(
+        chain
+            .add(issue(issues::Column::SequenceId).eq(PgFunc::any(
+                Expr::val(binds.seq).cast_as(Alias::new("int[]")),
+            )))
+            .add(Expr::exists(
+                SeaQuery::select()
+                    .expr(literal(1))
+                    .from(projects::Entity)
+                    .cond_where(
+                        Condition::all()
+                            .add(
+                                project(projects::Column::Id)
+                                    .equals((issues::Entity, issues::Column::ProjectId)),
+                            )
+                            .add(icontains(
+                                project(projects::Column::Identifier),
+                                &binds.like,
+                            )),
+                    )
+                    .take(),
+            )),
+    )
+}
+
+/// The `FROM` + joins both search endpoints share
+/// ([`q::SEARCH_JOINS_SQL`]: `LEFT` states, `INNER` projects,
+/// `INNER` project_members with no soft-delete arm, `INNER` workspaces)
+/// and the manager + view scope ([`q::search_base_where`]): live,
+/// non-triage (NULL-tolerant), unarchived issue and project, non-draft,
+/// active membership of the caller, the workspace slug.
+fn search_scope(slug: &str, member_id: Uuid) -> SelectStatement {
+    let group = || state(states::Column::Group);
+    let mut stmt = SeaQuery::select();
+    stmt.from(issues::Entity)
+        .join(
+            JoinType::LeftJoin,
+            states::Entity,
+            issue(issues::Column::StateId).equals((states::Entity, states::Column::Id)),
+        )
+        .join(
+            JoinType::InnerJoin,
+            projects::Entity,
+            issue(issues::Column::ProjectId).equals((projects::Entity, projects::Column::Id)),
+        )
+        .join(
+            JoinType::InnerJoin,
+            project_members::Entity,
+            project(projects::Column::Id)
+                .equals((project_members::Entity, project_members::Column::ProjectId)),
+        )
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Entity,
+            issue(issues::Column::WorkspaceId).equals((workspaces::Entity, workspaces::Column::Id)),
+        )
+        .cond_where(
+            Condition::all()
+                .add(issue(issues::Column::DeletedAt).is_null())
+                .add(group().is_null().or(group().eq("triage").not()))
+                .add(issue(issues::Column::ArchivedAt).is_null())
+                .add(project(projects::Column::ArchivedAt).is_null())
+                .add(issue(issues::Column::IsDraft).eq(false))
+                .add(member(project_members::Column::IsActive).eq(true))
+                .add(member(project_members::Column::MemberId).eq(member_id))
+                .add(workspace(workspaces::Column::Slug).eq(slug)),
+        );
+    stmt
+}
+
+// ---------------------------------------------------------------------------
 // Legacy search
 // ---------------------------------------------------------------------------
 
-/// A numbered legacy statement with its binds in `$N` order.
-#[derive(Debug, Clone, PartialEq)]
-struct LegacyStatement {
-    sql: String,
+/// The legacy statement's inputs (`views/issue.py:2696-2718`), parsed
+/// before any statement runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyPlan {
+    query: String,
+    /// `AND "issues"."project_id" = ...` when the gate applies.
     project_id: Option<Uuid>,
-    fts: String,
-    seq: Vec<i64>,
-    like: String,
+    /// `[: int(limit)]` (quirks 1, 14).
+    limit: i64,
 }
 
-/// Compose the legacy statement (`views/issue.py:2696-2718`): the Q3 text
-/// with `:name` placeholders numbered to `$N` (`$1` member, `$2` slug,
-/// `$3` project when the filter applies, then fts/seq/like in order).
-/// `LegacyProject::InvalidUuid` 400s (BUG-2: the `ValidationError` raises
-/// at `filter()` time inside the handler, so `handle_exception` answers
-/// 400 `handlers_social::VALID_DETAIL_BODY`, byte-identical to Django).
-fn legacy_statement(
+/// Parse the legacy inputs. `LegacyProject::InvalidUuid` 400s (BUG-2: the
+/// `ValidationError` raises at `filter()` time inside the handler, so
+/// `handle_exception` answers 400 `handlers_social::VALID_DETAIL_BODY`,
+/// byte-identical to Django); bad limits 500 (BUG-1).
+fn legacy_plan(
     query: &str,
     workspace_search: Option<&str>,
     project_id: Option<&str>,
     limit: Option<&str>,
-) -> Result<LegacyStatement, Denial> {
+) -> Result<LegacyPlan, Denial> {
     let project = q::legacy_project_filter(workspace_search, project_id);
     if matches!(project, q::LegacyProject::InvalidUuid) {
         return Err(Denial::BadError(
             super::handlers_social::VALID_DETAIL_BODY.to_owned(),
         ));
     }
-    let limit_sql = q::legacy_limit_sql(limit).map_err(|_| Denial::ServerError)?;
-    let sql = q::legacy_search_sql(query, project, &limit_sql);
-    let sql = sql.replace(":member_id", "$1").replace(":slug", "$2");
-    let (sql, numbered_project) = match project {
-        q::LegacyProject::Filter(id) => (
-            sql.replace(":project_id", "$3")
-                .replace(":fts", "$4")
-                .replace(":seq", "$5")
-                .replace(":like", "$6"),
-            Some(id),
-        ),
-        // `InvalidUuid` returned above; `None` carries no `:project_id`
-        // occurrence, so only the text binds are numbered.
-        _ => (
-            sql.replace(":fts", "$3")
-                .replace(":seq", "$4")
-                .replace(":like", "$5"),
-            None,
-        ),
-    };
-    let binds = q::search_text_binds(query);
-    Ok(LegacyStatement {
-        sql,
-        project_id: numbered_project,
-        fts: binds.fts,
-        seq: binds.seq,
-        like: binds.like,
+    let limit = legacy_limit(limit)?;
+    Ok(LegacyPlan {
+        query: query.to_owned(),
+        project_id: match project {
+            q::LegacyProject::Filter(id) => Some(id),
+            _ => None,
+        },
+        limit,
     })
 }
 
-/// Fetch the legacy rows. One concrete bind chain per project-filter arm
-/// (each `.bind` changes the query type, so the conditional bind cannot
-/// sit mid-chain).
-async fn fetch_legacy_rows(
-    pool: &PgPool,
-    slug: &str,
-    member_id: &Uuid,
-    stmt: &LegacyStatement,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    if let Some(project_id) = stmt.project_id {
-        sqlx::query(&stmt.sql)
-            .bind(member_id)
-            .bind(slug)
-            .bind(project_id)
-            .bind(&stmt.fts)
-            .bind(&stmt.seq)
-            .bind(&stmt.like)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "search-legacy"))
-    } else {
-        sqlx::query(&stmt.sql)
-            .bind(member_id)
-            .bind(slug)
-            .bind(&stmt.fts)
-            .bind(&stmt.seq)
-            .bind(&stmt.like)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "search-legacy"))
-    }
+/// [`q::legacy_limit_sql`]'s literal as an integer. A literal past `int8`
+/// errors inside Postgres (quirk 1: Django 500s on the overflow); it 500s
+/// here before the statement, same status.
+fn legacy_limit(raw: Option<&str>) -> Result<i64, Denial> {
+    let sql = q::legacy_limit_sql(raw).map_err(|_| Denial::ServerError)?;
+    sql.strip_prefix("LIMIT ")
+        .and_then(|digits| digits.parse::<i64>().ok())
+        .ok_or(Denial::ServerError)
+}
+
+/// The legacy statement ([`q::legacy_search_sql`]): `SELECT DISTINCT` the
+/// six `values()` keys plus the `created_at` Django appends for
+/// `DISTINCT` + `ORDER BY`, the scope, the FTS chain without comments,
+/// the optional project arm, `Meta.ordering` (`-created_at`), the limit.
+fn legacy_select(slug: &str, member_id: Uuid, plan: &LegacyPlan) -> SelectStatement {
+    let mut stmt = search_scope(slug, member_id);
+    stmt.distinct()
+        .expr_as(issue(issues::Column::Name), Alias::new("name"))
+        .expr_as(issue(issues::Column::Id), Alias::new("id"))
+        .expr_as(issue(issues::Column::SequenceId), Alias::new("sequence_id"))
+        .expr_as(
+            project(projects::Column::Identifier),
+            Alias::new("project_identifier"),
+        )
+        .expr_as(issue(issues::Column::ProjectId), Alias::new("project_id"))
+        .expr_as(
+            workspace(workspaces::Column::Slug),
+            Alias::new("workspace_slug"),
+        )
+        .expr_as(issue(issues::Column::CreatedAt), Alias::new("created_at"))
+        .cond_where(
+            Condition::all()
+                .add_option(search_filter(&plan.query, false))
+                .add_option(
+                    plan.project_id
+                        .map(|id| issue(issues::Column::ProjectId).eq(id)),
+                ),
+        )
+        .order_by((issues::Entity, issues::Column::CreatedAt), Order::Desc)
+        .limit(plan.limit as u64);
+    stmt
 }
 
 /// One decoded legacy `values()` row, in
 /// [`LEGACY_VALUES_KEYS`](q::LEGACY_VALUES_KEYS) order.
+#[derive(Debug, FromQueryResult)]
 struct LegacyRow {
     name: String,
     id: Uuid,
@@ -486,17 +700,17 @@ struct LegacyRow {
     workspace_slug: String,
 }
 
-fn decode_legacy_row(row: &sqlx::postgres::PgRow) -> Result<LegacyRow, Denial> {
-    Ok(LegacyRow {
-        name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        sequence_id: row
-            .try_get("sequence_id")
-            .map_err(|_| Denial::ServerError)?,
-        project_identifier: row.try_get("identifier").map_err(|_| Denial::ServerError)?,
-        project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-        workspace_slug: row.try_get("slug").map_err(|_| Denial::ServerError)?,
-    })
+/// Fetch the legacy rows.
+async fn fetch_legacy_rows(
+    pool: &PgPool,
+    slug: &str,
+    member_id: &Uuid,
+    plan: &LegacyPlan,
+) -> Result<Vec<LegacyRow>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    query_built(&db, &legacy_select(slug, *member_id, plan))
+        .await
+        .map_err(|error| db_error(error, "search-legacy"))
 }
 
 /// Render one legacy row: the RAW `values()` mapping (`:2711-2718`) in
@@ -562,17 +776,17 @@ async fn search_inner(
         ));
     }
     let text = raw_query.unwrap_or_default();
-    let stmt = legacy_statement(
+    let plan = legacy_plan(
         &text,
         query_last(query, "workspace_search").as_deref(),
         query_last(query, "project_id").as_deref(),
         query_last(query, "limit").as_deref(),
     )?;
-    let rows = fetch_legacy_rows(&pre.pool, slug, &pre.actor.id, &stmt).await?;
-    let mut rendered = Vec::with_capacity(rows.len());
-    for row in &rows {
-        rendered.push(Value::Object(render_legacy_row(&decode_legacy_row(row)?)));
-    }
+    let rows = fetch_legacy_rows(&pre.pool, slug, &pre.actor.id, &plan).await?;
+    let rendered: Vec<Value> = rows
+        .iter()
+        .map(|row| Value::Object(render_legacy_row(row)))
+        .collect();
     let mut envelope = Map::with_capacity(1);
     envelope.insert("issues".to_owned(), Value::Array(rendered));
     Ok(json_response(
@@ -585,38 +799,44 @@ async fn search_inner(
 // Advanced search
 // ---------------------------------------------------------------------------
 
-/// A numbered advanced statement with its binds in `$N` order. The limit
-/// is inlined as a `LIMIT` literal (a computed `1..=50` integer, exactly
-/// like Django's rendered literal); `limit` is kept for the tests.
-#[derive(Debug, Clone, PartialEq)]
-struct AdvancedStatement {
-    sql: String,
+/// The advanced statement's inputs (`views/issue.py:2809-2876`), parsed
+/// in source order (query → sort → limit → project → status → since)
+/// before any statement runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdvancedPlan {
+    /// The stripped, non-empty `?q=`.
+    query: String,
+    /// A UUID-form or resolved identifier-form `?project=`.
     project_id: Option<Uuid>,
+    status: q::StatusFilter,
     since: Option<DateTime<Utc>>,
-    fts: String,
-    seq: Vec<i64>,
-    like: String,
+    sort: q::Sort,
+    /// The clamped `1..=50` limit.
     limit: i64,
 }
 
+/// `SearchHeadline` options (`search/issue.py:171-182`), the exact
+/// literal Django binds.
+const HEADLINE_OPTIONS: &str =
+    "StartSel='<<', StopSel='>>', MaxWords=20, MinWords=10, ShortWord=3, HighlightAll=false";
+
 /// Resolve the identifier-form `?project=` (`Project.resolve`,
 /// `db/models/project.py:208-217`): strip + upper before the btree
-/// equality lookup. A miss 404s before any statement runs; the UUID
-/// form never 404s (a miss yields empty rows — Q3 quirk 4).
+/// equality lookup, live projects only, the workspace traversal, newest
+/// first. A miss 404s before any statement runs; the UUID form never
+/// 404s (a miss yields empty rows — Q3 quirk 4).
 async fn resolve_advanced_project(pool: &PgPool, slug: &str, text: &str) -> Result<Uuid, Denial> {
-    let sql = format!(
-        "SELECT \"projects\".\"id\" FROM \"projects\" {} WHERE ({}) {}",
-        q::resolve_identifier_joins_sql(),
-        q::resolve_identifier_where_sql()
-            .replace(":slug", "$1")
-            .replace(":identifier", "$2"),
-        q::resolve_identifier_tail_sql(),
-    );
     let normalized = q::normalize_project_identifier(text);
-    let id: Option<Uuid> = sqlx::query_scalar(&sql)
-        .bind(slug)
-        .bind(&normalized)
-        .fetch_optional(pool)
+    let id: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(normalized))
+        .order_by_desc(projects::Column::CreatedAt)
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "search-advanced-project"))?;
     id.ok_or(Denial::ProjectNotFound)
@@ -632,16 +852,13 @@ fn rank_f64(rank: Option<f32>) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Compose the advanced statement (`views/issue.py:2809-2876`): params in
-/// source order (query → sort → limit → project → status → since), then
-/// the Q3 text with `:name` placeholders numbered to `$N` (`$1` member,
-/// `$2` slug, then the project/since arms in application order, then
-/// fts/seq/like). The `LIMIT` is the clamped literal.
-async fn advanced_statement(
+/// Parse the advanced inputs (`views/issue.py:2809-2876`) in source
+/// order; the identifier-form project resolves here (a miss 404s).
+async fn advanced_plan(
     pool: &PgPool,
     slug: &str,
     query: &QueryMap,
-) -> Result<(String, q::Sort, AdvancedStatement), Denial> {
+) -> Result<AdvancedPlan, Denial> {
     let Some(text) = q::parse_advanced_query(query_last(query, "q").as_deref()) else {
         // Unreachable: the caller early-returns `EMPTY_ADVANCED_BODY` on
         // the same predicate before composing.
@@ -662,108 +879,131 @@ async fn advanced_statement(
         q::SinceOutcome::BadFormat(error) => return Err(Denial::BadError(error.body())),
         q::SinceOutcome::InvalidValue(_) => return Err(Denial::ServerError),
     };
-    let sql = q::advanced_search_sql(&q::AdvancedParts {
-        query: &text,
-        project_uuid_filter: project_id.is_some(),
+    Ok(AdvancedPlan {
+        query: text,
+        project_id,
         status,
-        since_filter: since.is_some(),
+        since,
         sort,
-    });
-    let sql = number_advanced_placeholders(&sql, project_id.is_some(), since.is_some(), limit);
-    let binds = q::search_text_binds(&text);
-    Ok((
-        text,
-        sort,
-        AdvancedStatement {
-            sql,
-            project_id,
-            since,
-            fts: binds.fts,
-            seq: binds.seq,
-            like: binds.like,
-            limit,
-        },
-    ))
+        limit,
+    })
 }
 
-/// Number the `:name` placeholders of an advanced statement to `$N`
-/// (`$1` member, `$2` slug, then the project/since arms in application
-/// order, then fts/seq/like). The `LIMIT` becomes the clamped literal.
-fn number_advanced_placeholders(
-    sql: &str,
-    project_filter: bool,
-    since_filter: bool,
-    limit: i64,
-) -> String {
-    let mut next: u32 = 3;
-    let mut sql = sql.replace(":member_id", "$1").replace(":slug", "$2");
-    if project_filter {
-        sql = sql.replace(":project_id", &format!("${next}"));
-        next += 1;
+/// The `?status=` predicate ([`q::status_where_sql`]): `closed` is the
+/// closed groups; `open` is the open groups OR a NULL state (the positive
+/// list keeps stateless issues visible); `all` is none.
+fn status_condition(status: q::StatusFilter) -> Option<Condition> {
+    let group = || state(states::Column::Group);
+    match status {
+        q::StatusFilter::All => None,
+        q::StatusFilter::Closed => {
+            Some(Condition::all().add(group().is_in(q::closed_state_groups().iter().copied())))
+        }
+        q::StatusFilter::Open => Some(
+            Condition::any()
+                .add(group().is_in(q::open_state_groups().iter().copied()))
+                .add(issue(issues::Column::StateId).is_null()),
+        ),
     }
-    if since_filter {
-        sql = sql.replace(":since", &format!("${next}"));
-        next += 1;
-    }
-    let (fts_n, seq_n, like_n) = (next, next + 1, next + 2);
-    sql = sql
-        .replace(":fts", &format!("${fts_n}"))
-        .replace(":seq", &format!("${seq_n}"))
-        .replace(":like", &format!("${like_n}"));
-    sql.replace("LIMIT :limit", &format!("LIMIT {limit}"))
 }
 
-/// Fetch the advanced rows. One concrete bind chain per
-/// project × since arm (each `.bind` changes the query type, so the
-/// conditional binds cannot sit mid-chain).
+/// The advanced statement ([`q::advanced_search_sql`]): `SELECT DISTINCT`
+/// the fourteen `values()` keys (`_headline` / `_rank` via `ts_headline` /
+/// `ts_rank`, [`fts::headline_sql`] / [`fts::rank_sql`]), the scope, then
+/// the arms in source application order (project → status → since → FTS
+/// with comments), the sort ([`q::sort_order_sql`]), the clamped limit.
+/// Every output column carries a unique name (`name` repeats across
+/// issues/states/projects in Django's `values()`), so the row decodes by
+/// name.
+fn advanced_select(slug: &str, member_id: Uuid, plan: &AdvancedPlan) -> SelectStatement {
+    let mut stmt = search_scope(slug, member_id);
+    let headline = Func::cust(Alias::new("ts_headline"))
+        .arg(regconfig())
+        .arg(issue(issues::Column::DescriptionStripped))
+        .arg(websearch(&plan.query))
+        .arg(literal(HEADLINE_OPTIONS));
+    let rank = Func::cust(Alias::new("ts_rank"))
+        .arg(issue_vector())
+        .arg(websearch(&plan.query));
+    stmt.distinct()
+        .expr_as(issue(issues::Column::Id), Alias::new("id"))
+        .expr_as(issue(issues::Column::SequenceId), Alias::new("sequence_id"))
+        .expr_as(issue(issues::Column::Name), Alias::new("name"))
+        .expr_as(headline, Alias::new("fts_headline"))
+        .expr_as(rank, Alias::new("fts_rank"))
+        .expr_as(issue(issues::Column::CreatedAt), Alias::new("created_at"))
+        .expr_as(issue(issues::Column::UpdatedAt), Alias::new("updated_at"))
+        .expr_as(
+            issue(issues::Column::CompletedAt),
+            Alias::new("completed_at"),
+        )
+        .expr_as(state(states::Column::Name), Alias::new("state_name"))
+        .expr_as(state(states::Column::Group), Alias::new("state_group"))
+        .expr_as(issue(issues::Column::ProjectId), Alias::new("project_id"))
+        .expr_as(
+            project(projects::Column::Identifier),
+            Alias::new("project_identifier"),
+        )
+        .expr_as(project(projects::Column::Name), Alias::new("project_name"))
+        .expr_as(
+            workspace(workspaces::Column::Slug),
+            Alias::new("workspace_slug"),
+        )
+        .cond_where(
+            Condition::all()
+                .add_option(
+                    plan.project_id
+                        .map(|id| issue(issues::Column::ProjectId).eq(id)),
+                )
+                .add_option(status_condition(plan.status))
+                .add_option(
+                    plan.since
+                        .map(|since| issue(issues::Column::UpdatedAt).gte(since)),
+                )
+                .add_option(search_filter(&plan.query, true)),
+        );
+    match plan.sort {
+        q::Sort::Rank => stmt
+            .order_by(Alias::new("fts_rank"), Order::Desc)
+            .order_by((issues::Entity, issues::Column::CreatedAt), Order::Desc),
+        q::Sort::Created => stmt.order_by((issues::Entity, issues::Column::CreatedAt), Order::Desc),
+        q::Sort::Updated => stmt.order_by((issues::Entity, issues::Column::UpdatedAt), Order::Desc),
+    };
+    stmt.limit(plan.limit as u64);
+    stmt
+}
+
+/// One advanced `values()` row (`:2860-2875`), decoded by name.
+#[derive(Debug, FromQueryResult)]
+struct AdvancedFetched {
+    id: Uuid,
+    sequence_id: i32,
+    name: String,
+    fts_headline: Option<String>,
+    /// `ts_rank`'s `real`.
+    fts_rank: Option<f32>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+    state_name: Option<String>,
+    state_group: Option<String>,
+    project_id: Uuid,
+    project_identifier: String,
+    project_name: String,
+    workspace_slug: String,
+}
+
+/// Fetch the advanced rows.
 async fn fetch_advanced_rows(
     pool: &PgPool,
     slug: &str,
     member_id: &Uuid,
-    stmt: &AdvancedStatement,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    match (stmt.project_id, stmt.since) {
-        (Some(project_id), Some(since)) => sqlx::query(&stmt.sql)
-            .bind(member_id)
-            .bind(slug)
-            .bind(project_id)
-            .bind(since)
-            .bind(&stmt.fts)
-            .bind(&stmt.seq)
-            .bind(&stmt.like)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "search-advanced")),
-        (Some(project_id), None) => sqlx::query(&stmt.sql)
-            .bind(member_id)
-            .bind(slug)
-            .bind(project_id)
-            .bind(&stmt.fts)
-            .bind(&stmt.seq)
-            .bind(&stmt.like)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "search-advanced")),
-        (None, Some(since)) => sqlx::query(&stmt.sql)
-            .bind(member_id)
-            .bind(slug)
-            .bind(since)
-            .bind(&stmt.fts)
-            .bind(&stmt.seq)
-            .bind(&stmt.like)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "search-advanced")),
-        (None, None) => sqlx::query(&stmt.sql)
-            .bind(member_id)
-            .bind(slug)
-            .bind(&stmt.fts)
-            .bind(&stmt.seq)
-            .bind(&stmt.like)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "search-advanced")),
-    }
+    plan: &AdvancedPlan,
+) -> Result<Vec<AdvancedFetched>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    query_built(&db, &advanced_select(slug, *member_id, plan))
+        .await
+        .map_err(|error| db_error(error, "search-advanced"))
 }
 
 /// Owned advanced row strings: the `AdvancedRow` borrows these across
@@ -783,48 +1023,30 @@ struct AdvancedDecoded {
     workspace_slug: String,
 }
 
-/// Decode one advanced `values()` row by POSITION (`:2860-2875` order —
-/// `name` repeats across issues/states/projects, so by-name decoding
-/// would collide). Datetimes render UTC with a `Z` suffix: the view
-/// copies raw `.values()` datetimes into a plain dict (`:2912-2914`)
-/// with no DRF `DateTimeField`, so `TimezoneMixin` has no effect and
-/// DRF's `JSONEncoder` emits `isoformat()` with `+00:00` rewritten to
-/// `Z`; `_rank` is `ts_rank`'s `real`.
-fn decode_advanced_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<(AdvancedDecoded, i32, Option<f32>), Denial> {
-    let id: Uuid = row.try_get(0).map_err(|_| Denial::ServerError)?;
-    let sequence_id: i32 = row.try_get(1).map_err(|_| Denial::ServerError)?;
-    let name: String = row.try_get(2).map_err(|_| Denial::ServerError)?;
-    let headline: Option<String> = row.try_get(3).map_err(|_| Denial::ServerError)?;
-    let rank: Option<f32> = row.try_get(4).map_err(|_| Denial::ServerError)?;
-    let created_at: DateTime<Utc> = row.try_get(5).map_err(|_| Denial::ServerError)?;
-    let updated_at: DateTime<Utc> = row.try_get(6).map_err(|_| Denial::ServerError)?;
-    let completed_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| Denial::ServerError)?;
-    let state_name: Option<String> = row.try_get(8).map_err(|_| Denial::ServerError)?;
-    let state_group: Option<String> = row.try_get(9).map_err(|_| Denial::ServerError)?;
-    let project_id: Uuid = row.try_get(10).map_err(|_| Denial::ServerError)?;
-    let project_identifier: String = row.try_get(11).map_err(|_| Denial::ServerError)?;
-    let project_name: String = row.try_get(12).map_err(|_| Denial::ServerError)?;
-    let workspace_slug: String = row.try_get(13).map_err(|_| Denial::ServerError)?;
-    Ok((
+/// Render one advanced row's strings. Datetimes render UTC with a `Z`
+/// suffix: the view copies raw `.values()` datetimes into a plain dict
+/// (`:2912-2914`) with no DRF `DateTimeField`, so `TimezoneMixin` has
+/// no effect and DRF's `JSONEncoder` emits `isoformat()` with `+00:00`
+/// rewritten to `Z`.
+fn decode_advanced_row(row: AdvancedFetched) -> (AdvancedDecoded, i32, Option<f32>) {
+    (
         AdvancedDecoded {
-            id: id.to_string(),
-            name,
-            headline,
-            created_at: render_datetime(&created_at),
-            updated_at: render_datetime(&updated_at),
-            completed_at: completed_at.as_ref().map(render_datetime),
-            state_name,
-            state_group,
-            project_id: project_id.to_string(),
-            project_identifier,
-            project_name,
-            workspace_slug,
+            id: row.id.to_string(),
+            name: row.name,
+            headline: row.fts_headline,
+            created_at: render_datetime(&row.created_at),
+            updated_at: render_datetime(&row.updated_at),
+            completed_at: row.completed_at.as_ref().map(render_datetime),
+            state_name: row.state_name,
+            state_group: row.state_group,
+            project_id: row.project_id.to_string(),
+            project_identifier: row.project_identifier,
+            project_name: row.project_name,
+            workspace_slug: row.workspace_slug,
         },
-        sequence_id,
-        rank,
-    ))
+        row.sequence_id,
+        row.fts_rank,
+    )
 }
 
 /// `GET .../search/advanced/` (`views/issue.py:2779-2915`).
@@ -858,15 +1080,16 @@ async fn search_advanced_inner(
             q::EMPTY_ADVANCED_BODY.to_owned(),
         ));
     }
-    let (text, _sort, stmt) = advanced_statement(&pre.pool, slug, query).await?;
-    let rows = fetch_advanced_rows(&pre.pool, slug, &pre.actor.id, &stmt).await?;
+    let plan = advanced_plan(&pre.pool, slug, query).await?;
+    let rows = fetch_advanced_rows(&pre.pool, slug, &pre.actor.id, &plan).await?;
+    let text = plan.query.clone();
     let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
         state.settings().urls.web_url.as_deref(),
         state.settings().urls.app_base_url.as_deref(),
     );
     let mut rendered = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let (decoded, sequence_id, rank) = decode_advanced_row(row)?;
+    for row in rows {
+        let (decoded, sequence_id, rank) = decode_advanced_row(row);
         let url = pidash_services::v1_work_items::shape_issue::issue_url(
             web_base.as_deref(),
             Some(&decoded.workspace_slug),
@@ -1109,13 +1332,12 @@ async fn entity_facts(
     // `role` is `smallint`: sqlx does not widen `INT2` into `i32` on
     // decode, so read `i16` and compare as integers. `deleted_at IS NULL`
     // is the `SoftDeletionManager` scope (`db/mixins.py:56-58`).
-    let roles: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
+    let roles = project_member_roles(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *workspace_id,
+        *user_id,
+        *project_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
     .await
     .map_err(|error| db_error(error, "entity-roles"))?;
     Ok(project::ProjectFacts {
@@ -1131,6 +1353,27 @@ async fn entity_facts(
         has_identifier_membership: false,
         has_project_identifier: false,
     })
+}
+
+/// The roles of the user's active, live `project_members` rows on the
+/// project, workspace-scoped (`project.py:56-116`).
+async fn project_member_roles<C: ConnectionTrait>(
+    db: &C,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    project_id: Uuid,
+) -> Result<Vec<i16>, DbErr> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .filter(project_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(db)
+        .await
 }
 
 /// Run the move route's gate; deny 403 on failure. The move route
@@ -1156,6 +1399,7 @@ async fn require_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
 
     /// F18-11 `calls.search.body`, compact separators (DRF wire bytes).
     const SEARCH_BODY: &str = "{\"issues\":[{\"name\":\"zxcvsearchtoken login flow\",\"id\":\"a7509d00-345f-47fb-bee3-6bcf7d3339e2\",\"sequence_id\":1,\"project__identifier\":\"CT00003\",\"project_id\":\"d715be3d-234f-46ef-89a3-97f0c7c04b7e\",\"workspace__slug\":\"ws-conv659-2\"}]}";
@@ -1166,66 +1410,77 @@ mod tests {
     /// F18-11 `calls.search_advanced` envelope + results, compact separators.
     const ADVANCED_ENVELOPE_BODY: &str = "{\"query\":\"zxcvsearchtoken\",\"count\":1,\"results\":[{\"id\":\"a7509d00-345f-47fb-bee3-6bcf7d3339e2\",\"sequence_id\":1,\"identifier\":\"CT00003-1\",\"name\":\"zxcvsearchtoken login flow\",\"snippet\":\"zxcvsearchtoken the login flow breaks on retry with session expiry\",\"state\":{\"name\":\"Todo\",\"group\":\"unstarted\"},\"project\":{\"id\":\"d715be3d-234f-46ef-89a3-97f0c7c04b7e\",\"identifier\":\"CT00003\",\"name\":\"Conv659 Project\"},\"workspace_slug\":\"ws-conv659-2\",\"created_at\":\"2026-10-02T23:17:12.025108Z\",\"updated_at\":\"2026-10-02T23:17:12.025108Z\",\"completed_at\":null,\"rank\":0.075990885,\"url\":\"http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-1\"}]}";
 
-    #[test]
-    fn legacy_statement_numbers_binds_without_project() {
-        let stmt = legacy_statement("zxcvsearchtoken", None, None, None).expect("statement");
-        assert!(
-            stmt.sql.contains("\"project_members\".\"member_id\" = $1"),
-            "{}",
-            stmt.sql
-        );
-        assert!(
-            stmt.sql.contains("\"workspaces\".\"slug\" = $2"),
-            "{}",
-            stmt.sql
-        );
-        assert!(!stmt.sql.contains("$6"), "{}", stmt.sql);
-        assert!(!stmt.sql.contains(":fts"), "{}", stmt.sql);
-        assert!(!stmt.sql.contains(":seq"), "{}", stmt.sql);
-        assert!(!stmt.sql.contains(":like"), "{}", stmt.sql);
-        assert!(stmt.sql.ends_with("LIMIT 10"), "{}", stmt.sql);
-        assert_eq!(stmt.project_id, None);
-        assert_eq!(stmt.fts, "zxcvsearchtoken");
+    const FIXTURE_PROJECT: &str = "d715be3d-234f-46ef-89a3-97f0c7c04b7e";
+
+    fn render(stmt: &SelectStatement) -> String {
+        stmt.to_string(PostgresQueryBuilder)
     }
 
     #[test]
-    fn legacy_statement_numbers_project_as_third_bind() {
-        let pid = "d715be3d-234f-46ef-89a3-97f0c7c04b7e";
-        let stmt = legacy_statement("q", Some("false"), Some(pid), Some("5")).expect("statement");
+    fn legacy_select_pins_scope_joins_and_values() {
+        let plan = legacy_plan("zxcvsearchtoken", None, None, None).expect("plan");
+        assert_eq!(plan.project_id, None);
+        assert_eq!(plan.limit, 10);
+        let sql = render(&legacy_select("acme", Uuid::nil(), &plan));
+        assert!(sql.starts_with("SELECT DISTINCT \"issues\".\"name\" AS \"name\", \"issues\".\"id\" AS \"id\", \"issues\".\"sequence_id\" AS \"sequence_id\", \"projects\".\"identifier\" AS \"project_identifier\", \"issues\".\"project_id\" AS \"project_id\", \"workspaces\".\"slug\" AS \"workspace_slug\", \"issues\".\"created_at\" AS \"created_at\" FROM \"issues\""), "{sql}");
+        assert!(sql.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#), "{sql}");
+        // Manager + view scope, in order.
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL AND ("states"."group" IS NULL OR (NOT "states"."group" = 'triage')) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND "issues"."is_draft" = FALSE AND "project_members"."is_active" = TRUE AND "project_members"."member_id" = '00000000-0000-0000-0000-000000000000' AND "workspaces"."slug" = 'acme'"#), "{sql}");
+        // The FTS vectors carry inline literals (index-expression parity).
+        assert!(sql.contains("to_tsvector(CAST('english' AS regconfig), COALESCE(\"issues\".\"name\", '') || ' ' || COALESCE(\"issues\".\"description_stripped\", '')) @@ websearch_to_tsquery(CAST('english' AS regconfig), 'zxcvsearchtoken')"), "{sql}");
+        assert!(
+            sql.contains(r#"OR ("issues"."name" ILIKE '%zxcvsearchtoken%') OR"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""issues"."sequence_id" = ANY(CAST('{}' AS int[]))"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#"EXISTS(SELECT 1 FROM "projects" WHERE "projects"."id" = "issues"."project_id" AND ("projects"."identifier" ILIKE"#), "{sql}");
+        // Legacy: no comment arm, no project arm.
+        assert!(!sql.contains("issue_comments"), "{sql}");
+        assert!(!sql.contains(r#""issues"."project_id" = '"#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "issues"."created_at" DESC LIMIT 10"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn legacy_select_adds_project_arm_and_limit() {
+        let plan =
+            legacy_plan("q 42", Some("false"), Some(FIXTURE_PROJECT), Some("5")).expect("plan");
         assert_eq!(
-            stmt.project_id,
-            Some(pid.parse::<Uuid>().expect("fixture uuid"))
+            plan.project_id,
+            Some(FIXTURE_PROJECT.parse().expect("uuid"))
+        );
+        let sql = render(&legacy_select("acme", Uuid::nil(), &plan));
+        assert!(
+            sql.contains(&format!(
+                r#"AND "issues"."project_id" = '{FIXTURE_PROJECT}'"#
+            )),
+            "{sql}"
         );
         assert!(
-            stmt.sql.contains("\"issues\".\"project_id\" = $3"),
-            "{}",
-            stmt.sql
+            sql.contains(r#""issues"."sequence_id" = ANY(CAST(ARRAY [42] AS int[]))"#),
+            "{sql}"
         );
-        assert!(stmt.sql.contains("$6"), "{}", stmt.sql);
-        assert!(!stmt.sql.contains(":project_id"), "{}", stmt.sql);
-        assert!(stmt.sql.ends_with("LIMIT 5"), "{}", stmt.sql);
+        assert!(sql.ends_with("LIMIT 5"), "{sql}");
     }
 
     #[test]
-    fn legacy_statement_empty_workspace_search_disables_filter() {
+    fn legacy_plan_empty_workspace_search_disables_filter() {
         // BUG-6: `workspace_search` matches the exact string `"false"`.
-        let stmt = legacy_statement(
-            "q",
-            Some(""),
-            Some("d715be3d-234f-46ef-89a3-97f0c7c04b7e"),
-            None,
-        )
-        .expect("statement");
-        assert_eq!(stmt.project_id, None);
-        assert!(!stmt.sql.contains("$6"), "{}", stmt.sql);
+        let plan = legacy_plan("q", Some(""), Some(FIXTURE_PROJECT), None).expect("plan");
+        assert_eq!(plan.project_id, None);
     }
 
     #[test]
-    fn legacy_statement_invalid_project_is_400_valid_detail() {
+    fn legacy_plan_invalid_project_is_400_valid_detail() {
         // BUG-2: non-UUID `project_id` 400s — the `ValidationError`
         // raises at `filter()` time inside the handler, so Django's
         // `handle_exception` answers 400 (live-probed, byte-identical).
-        let denial = legacy_statement("q", Some("false"), Some("NOPE"), None)
+        let denial = legacy_plan("q", Some("false"), Some("NOPE"), None)
             .expect_err("non-UUID project_id rejects");
         assert_eq!(
             denial.status_and_body(),
@@ -1237,15 +1492,27 @@ mod tests {
     }
 
     #[test]
-    fn legacy_statement_bad_limit_500() {
-        // BUG-1: garbage and negative limits 500.
+    fn legacy_plan_bad_limit_500() {
+        // BUG-1: garbage, negative and int8-overflowing limits 500.
         assert_eq!(
-            legacy_statement("q", None, None, Some("abc")),
+            legacy_plan("q", None, None, Some("abc")),
             Err(Denial::ServerError)
         );
         assert_eq!(
-            legacy_statement("q", None, None, Some("-3")),
+            legacy_plan("q", None, None, Some("-3")),
             Err(Denial::ServerError)
+        );
+        assert_eq!(
+            legacy_plan("q", None, None, Some("99999999999999999999")),
+            Err(Denial::ServerError)
+        );
+        assert_eq!(
+            legacy_plan("q", None, None, Some(" 0_7 ")).map(|p| p.limit),
+            Ok(7)
+        );
+        assert_eq!(
+            legacy_plan("q", None, None, Some("-0")).map(|p| p.limit),
+            Ok(0)
         );
     }
 
@@ -1326,38 +1593,331 @@ mod tests {
         );
     }
 
-    #[test]
-    fn advanced_numbering_places_optional_arms_in_order() {
-        let base = q::advanced_search_sql(&q::AdvancedParts {
-            query: "q",
-            project_uuid_filter: true,
-            status: q::StatusFilter::All,
-            since_filter: true,
-            sort: q::Sort::Rank,
-        });
-        let sql = number_advanced_placeholders(&base, true, true, 10);
-        assert!(sql.contains("\"issues\".\"project_id\" = $3"), "{sql}");
-        assert!(sql.contains("\"issues\".\"updated_at\" >= $4"), "{sql}");
-        assert!(sql.contains("$7"), "{sql}");
-        assert!(!sql.contains(":fts"), "{sql}");
-        assert!(sql.ends_with("LIMIT 10"), "{sql}");
+    fn plan(
+        project: Option<Uuid>,
+        status: q::StatusFilter,
+        since: Option<DateTime<Utc>>,
+        sort: q::Sort,
+        limit: i64,
+    ) -> AdvancedPlan {
+        AdvancedPlan {
+            query: "q".to_owned(),
+            project_id: project,
+            status,
+            since,
+            sort,
+            limit,
+        }
+    }
 
-        let base = q::advanced_search_sql(&q::AdvancedParts {
-            query: "q",
-            project_uuid_filter: false,
-            status: q::StatusFilter::Open,
-            since_filter: false,
-            sort: q::Sort::Created,
-        });
-        let sql = number_advanced_placeholders(&base, false, false, 50);
-        assert!(!sql.contains(":project_id"), "{sql}");
-        assert!(!sql.contains(":since"), "{sql}");
-        assert!(!sql.contains("$6"), "{sql}");
+    #[test]
+    fn advanced_select_places_optional_arms_in_order() {
+        let since = "2025-01-01T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("since");
+        let project: Uuid = FIXTURE_PROJECT.parse().expect("uuid");
+        let sql = render(&advanced_select(
+            "acme",
+            Uuid::nil(),
+            &plan(
+                Some(project),
+                q::StatusFilter::All,
+                Some(since),
+                q::Sort::Rank,
+                10,
+            ),
+        ));
+        // The fourteen values() keys, every name unique.
+        assert!(sql.contains(r#""issues"."name" AS "name", ts_headline(CAST('english' AS regconfig), "issues"."description_stripped", websearch_to_tsquery(CAST('english' AS regconfig), 'q'), E'StartSel=\'<<\', StopSel=\'>>\', MaxWords=20, MinWords=10, ShortWord=3, HighlightAll=false') AS "fts_headline", ts_rank(to_tsvector("#), "{sql}");
+        assert!(sql.contains(r#""states"."name" AS "state_name", "states"."group" AS "state_group", "issues"."project_id" AS "project_id", "projects"."identifier" AS "project_identifier", "projects"."name" AS "project_name", "workspaces"."slug" AS "workspace_slug" FROM"#), "{sql}");
+        // project → since → FTS (with the comment arm), after the scope.
+        let project_at = sql.find(&format!(r#""workspaces"."slug" = 'acme' AND "issues"."project_id" = '{FIXTURE_PROJECT}' AND "issues"."updated_at" >= "#)).expect("project then since");
+        let fts_at = sql.find("@@").expect("fts");
+        assert!(project_at < fts_at, "{sql}");
+        assert!(sql.contains(r#""issues"."id" IN (SELECT "issue_comments"."issue_id" FROM "issue_comments" WHERE "issue_comments"."deleted_at" IS NULL AND (to_tsvector(CAST('english' AS regconfig), COALESCE("issue_comments"."comment_stripped", '')) @@ websearch_to_tsquery(CAST('english' AS regconfig), 'q')))"#), "{sql}");
         assert!(
-            sql.contains("\"issues\".\"created_at\" DESC LIMIT 50"),
+            sql.ends_with(r#"ORDER BY "fts_rank" DESC, "issues"."created_at" DESC LIMIT 10"#),
             "{sql}"
         );
-        assert!(sql.contains("\"states\".\"group\" IN ("), "{sql}");
+
+        let sql = render(&advanced_select(
+            "acme",
+            Uuid::nil(),
+            &plan(None, q::StatusFilter::Open, None, q::Sort::Created, 50),
+        ));
+        assert!(!sql.contains(r#""issues"."project_id" = '"#), "{sql}");
+        assert!(!sql.contains("updated_at\" >="), "{sql}");
+        assert!(sql.contains(r#"AND ("states"."group" IN ('backlog', 'unstarted', 'started', 'review', 'test') OR "issues"."state_id" IS NULL) AND"#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "issues"."created_at" DESC LIMIT 50"#),
+            "{sql}"
+        );
+
+        let sql = render(&advanced_select(
+            "acme",
+            Uuid::nil(),
+            &plan(None, q::StatusFilter::Closed, None, q::Sort::Updated, 1),
+        ));
+        assert!(
+            sql.contains(r#"AND "states"."group" IN ('completed', 'cancelled') AND"#),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(r#"ORDER BY "issues"."updated_at" DESC LIMIT 1"#),
+            "{sql}"
+        );
+    }
+
+    /// The search statements and the two scalar reads against temp copies
+    /// on one connection (FTS runs without the GIN indexes).
+    #[tokio::test]
+    async fn live_search_reads() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issues",
+            "states",
+            "projects",
+            "project_members",
+            "workspaces",
+            "issue_comments",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, other_ws, user, stranger) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (acme, zeta, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (todo, done, triage) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (a, b, c, archived, draft, triaged, foreign) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme'), ('{other_ws}', 'other')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, name, created_at, deleted_at, archived_at) VALUES \
+                 ('{acme}', '{ws}', 'ACME', 'Acme Proj', '2025-01-01T00:00:00Z', NULL, NULL), \
+                 ('{zeta}', '{ws}', 'ZETA', 'Zeta Proj', '2025-01-02T00:00:00Z', NULL, NULL), \
+                 ('{other}', '{other_ws}', 'ACME', 'Other Acme', '2025-01-03T00:00:00Z', NULL, NULL)"
+            ),
+            format!(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES \
+                 (gen_random_uuid(), '{ws}', '{acme}', '{user}', 20, true, NULL), \
+                 (gen_random_uuid(), '{ws}', '{acme}', '{user}', 5, true, now()), \
+                 (gen_random_uuid(), '{ws}', '{zeta}', '{user}', 15, false, NULL), \
+                 (gen_random_uuid(), '{other_ws}', '{other}', '{stranger}', 15, true, NULL)"
+            ),
+            format!(
+                "INSERT INTO states (id, name, \"group\") VALUES ('{todo}', 'Todo', 'unstarted'), ('{done}', 'Done', 'completed'), ('{triage}', 'Triage', 'triage')"
+            ),
+            format!(
+                "INSERT INTO issues (id, name, description_stripped, sequence_id, project_id, workspace_id, state_id, created_at, updated_at, completed_at, deleted_at, archived_at, is_draft) VALUES \
+                 ('{a}', 'zxcv login flow', 'the zxcv login breaks on retry', 1, '{acme}', '{ws}', '{todo}', '2025-03-01T00:00:00Z', '2025-03-05T00:00:00Z', NULL, NULL, NULL, false), \
+                 ('{b}', 'plain task', 'nothing here', 42, '{acme}', '{ws}', '{done}', '2025-03-02T00:00:00Z', '2025-03-02T00:00:00Z', '2025-03-03T00:00:00Z', NULL, NULL, false), \
+                 ('{c}', 'stateless zxcv', NULL, 7, '{acme}', '{ws}', NULL, '2025-03-03T00:00:00Z', '2025-03-03T00:00:00Z', NULL, NULL, NULL, false), \
+                 ('{archived}', 'zxcv archived', NULL, 8, '{acme}', '{ws}', '{todo}', '2025-03-04T00:00:00Z', '2025-03-04T00:00:00Z', NULL, NULL, '2025-03-04', false), \
+                 ('{draft}', 'zxcv draft', NULL, 9, '{acme}', '{ws}', '{todo}', '2025-03-05T00:00:00Z', '2025-03-05T00:00:00Z', NULL, NULL, NULL, true), \
+                 ('{triaged}', 'zxcv triage', NULL, 10, '{acme}', '{ws}', '{triage}', '2025-03-06T00:00:00Z', '2025-03-06T00:00:00Z', NULL, NULL, NULL, false), \
+                 ('{foreign}', 'zxcv foreign', NULL, 11, '{other}', '{other_ws}', '{todo}', '2025-03-07T00:00:00Z', '2025-03-07T00:00:00Z', NULL, NULL, NULL, false)"
+            ),
+            format!(
+                "INSERT INTO issue_comments (id, issue_id, comment_stripped, deleted_at) VALUES \
+                 (gen_random_uuid(), '{b}', 'a zxcv mention in a comment', NULL), \
+                 (gen_random_uuid(), '{c}', 'deleted zxcv comment', now())"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        // Legacy: FTS + name fallback, newest first; no comment arm; the
+        // manager scope drops archived/draft/triage, membership drops the
+        // other workspace.
+        let plan = legacy_plan("zxcv", None, None, None).expect("plan");
+        let rows = fetch_legacy_rows(&pool, "acme", &user, &plan)
+            .await
+            .expect("legacy");
+        let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        assert_eq!(ids, vec![c, a]);
+        assert_eq!(rows[1].name, "zxcv login flow");
+        assert_eq!(rows[1].sequence_id, 1);
+        assert_eq!(rows[1].project_identifier, "ACME");
+        assert_eq!(rows[1].project_id, acme);
+        assert_eq!(rows[1].workspace_slug, "acme");
+        // Sequence arm and the identifier arm.
+        let plan = legacy_plan("42", None, None, None).expect("plan");
+        let rows = fetch_legacy_rows(&pool, "acme", &user, &plan)
+            .await
+            .expect("legacy");
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![b]);
+        let plan = legacy_plan("acm", None, None, Some("2")).expect("plan");
+        let rows = fetch_legacy_rows(&pool, "acme", &user, &plan)
+            .await
+            .expect("legacy");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![c, b]
+        );
+        // Project arm; the inactive membership on zeta hides it entirely.
+        let plan = legacy_plan("zxcv", Some("false"), Some(&acme.to_string()), None).expect("plan");
+        assert_eq!(
+            fetch_legacy_rows(&pool, "acme", &user, &plan)
+                .await
+                .expect("legacy")
+                .len(),
+            2
+        );
+        let plan = legacy_plan("zxcv", Some("false"), Some(&zeta.to_string()), None).expect("plan");
+        assert!(fetch_legacy_rows(&pool, "acme", &user, &plan)
+            .await
+            .expect("legacy")
+            .is_empty());
+        // The stranger sees nothing under this slug; an unknown slug is empty.
+        let plan = legacy_plan("zxcv", None, None, None).expect("plan");
+        assert!(fetch_legacy_rows(&pool, "acme", &stranger, &plan)
+            .await
+            .expect("legacy")
+            .is_empty());
+        assert!(fetch_legacy_rows(&pool, "nope", &user, &plan)
+            .await
+            .expect("legacy")
+            .is_empty());
+
+        // Advanced: the comment arm surfaces b (rank 0, so after the
+        // ranked hits; ties by created_at desc), headline/rank decode.
+        let rank_plan = |status, since, sort| AdvancedPlan {
+            query: "zxcv".to_owned(),
+            project_id: None,
+            status,
+            since,
+            sort,
+            limit: 10,
+        };
+        let rows = fetch_advanced_rows(
+            &pool,
+            "acme",
+            &user,
+            &rank_plan(q::StatusFilter::All, None, q::Sort::Rank),
+        )
+        .await
+        .expect("advanced");
+        let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[2], b, "the comment-only hit ranks 0 and sorts last");
+        assert!(ids[..2].contains(&a) && ids[..2].contains(&c));
+        let hit_a = rows.iter().find(|row| row.id == a).expect("a");
+        assert!(hit_a.fts_rank.expect("rank") > 0.0);
+        assert!(hit_a
+            .fts_headline
+            .as_deref()
+            .expect("headline")
+            .contains("<<zxcv>>"));
+        assert_eq!(hit_a.state_name.as_deref(), Some("Todo"));
+        assert_eq!(hit_a.state_group.as_deref(), Some("unstarted"));
+        assert_eq!(hit_a.project_name, "Acme Proj");
+        assert_eq!(hit_a.updated_at.to_rfc3339(), "2025-03-05T00:00:00+00:00");
+        let hit_b = rows.iter().find(|row| row.id == b).expect("b");
+        assert_eq!(hit_b.fts_rank, Some(0.0));
+        assert!(hit_b.completed_at.is_some());
+        let hit_c = rows.iter().find(|row| row.id == c).expect("c");
+        assert_eq!(
+            (hit_c.state_name.as_deref(), hit_c.fts_headline.as_deref()),
+            (None, None)
+        );
+        // Status: open keeps the stateless row; closed keeps the done one.
+        let rows = fetch_advanced_rows(
+            &pool,
+            "acme",
+            &user,
+            &rank_plan(q::StatusFilter::Open, None, q::Sort::Created),
+        )
+        .await
+        .expect("advanced");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![c, a]
+        );
+        let rows = fetch_advanced_rows(
+            &pool,
+            "acme",
+            &user,
+            &rank_plan(q::StatusFilter::Closed, None, q::Sort::Updated),
+        )
+        .await
+        .expect("advanced");
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![b]);
+        // Since: updated_at >=.
+        let since = "2025-03-03T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("since");
+        let rows = fetch_advanced_rows(
+            &pool,
+            "acme",
+            &user,
+            &rank_plan(q::StatusFilter::All, Some(since), q::Sort::Updated),
+        )
+        .await
+        .expect("advanced");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![a, c]
+        );
+        // Limit.
+        let mut one = rank_plan(q::StatusFilter::All, None, q::Sort::Created);
+        one.limit = 1;
+        assert_eq!(
+            fetch_advanced_rows(&pool, "acme", &user, &one)
+                .await
+                .expect("advanced")
+                .len(),
+            1
+        );
+
+        // The identifier resolver: strip + upper, live rows, this slug.
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        assert_eq!(
+            resolve_advanced_project(&pool, "acme", " acme ").await,
+            Ok(acme)
+        );
+        assert_eq!(
+            resolve_advanced_project(&pool, "other", "ACME").await,
+            Ok(other)
+        );
+        assert_eq!(
+            resolve_advanced_project(&pool, "acme", "NOPE").await,
+            Err(Denial::ProjectNotFound)
+        );
+        // The gate's roles read.
+        assert_eq!(
+            project_member_roles(&db, ws, user, acme)
+                .await
+                .expect("roles"),
+            vec![20]
+        );
+        assert!(project_member_roles(&db, ws, user, zeta)
+            .await
+            .expect("roles")
+            .is_empty());
     }
 
     #[test]

@@ -262,9 +262,9 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
 }
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
-/// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
-/// non-member's token is revoked, then rejected) — then stamp
-/// `last_used_at`.
+/// `token_hash`, unrevoked, not past its 60-day idle expiry, dev-machine
+/// unrevoked, workspace member (a non-member's token is revoked, then
+/// rejected) — then stamp `last_used_at`.
 #[allow(clippy::result_large_err)]
 async fn authenticate_machine(
     pool: &sqlx::PgPool,
@@ -296,6 +296,12 @@ async fn authenticate_machine(
             .unwrap_or(None);
         match row {
             Some(m) if m.revoked_at.is_some() => return Err(invalid_token()),
+            // `MachineToken.is_expired()`: at-or-past expiry refuses (the same
+            // opaque denial as every other `mt_` arm here); Django order is
+            // revoked, then expired, then machine-revoked (#2910).
+            Some(m) if m.expires_at.is_some_and(|expires| expires <= now) => {
+                return Err(invalid_token())
+            }
             Some(_) => {}
             None => return Err(invalid_token()),
         }
@@ -784,9 +790,12 @@ async fn exchange_in_transaction(
 ) -> Result<(Uuid, String, String, String, Option<(String, String)>), Response> {
     // `_get_or_create_dev_machine` (`device.py:88-109`): lock, then
     // create-or-retry through the Done-layer kernels.
-    let locked = dev_machine::fetch_locked_machine(&mut **tx, params.dev_machine_id)
-        .await
-        .map_err(|_| Failure::server_error().into_response())?;
+    let locked = {
+        let db = pidash_db::orm_tx::TxConn::new(tx);
+        dev_machine::fetch_locked_machine(&db, params.dev_machine_id)
+            .await
+            .map_err(|_| Failure::server_error().into_response())?
+    };
     match locked {
         Some(machine) => {
             // Owner mismatch raises (`device.py:92-94`); the dropped
@@ -795,75 +804,104 @@ async fn exchange_in_transaction(
             if dev_machine::check_owner(machine.owner_id, user_id).is_err() {
                 return Err(not_found("dev_machine_not_found").into_response());
             }
-            dev_machine::touch_dev_machine(
-                &mut **tx,
-                machine.id,
-                &machine.host_label,
-                &machine.label,
-                Some(&params.host_label),
-                now,
-            )
-            .await
-            .map_err(|_| Failure::server_error().into_response())?;
+            {
+                let db = pidash_db::orm_tx::TxConn::new(tx);
+                dev_machine::touch_dev_machine(
+                    &db,
+                    machine.id,
+                    &machine.host_label,
+                    &machine.label,
+                    Some(&params.host_label),
+                    now,
+                )
+                .await
+                .map_err(|_| Failure::server_error().into_response())?;
+            }
         }
         None => {
             // Racing insert under a savepoint (the inner
             // `transaction.atomic()` savepoint of `device.py:96-101`):
-            // a unique violation rolls back to the savepoint and
-            // re-locks; anything else aborts the exchange.
-            sqlx::query("SAVEPOINT dev_machine_create")
-                .execute(&mut **tx)
+            // a sqlx nested transaction stands in for the savepoint; a
+            // unique violation rolls it back and re-locks; anything else
+            // aborts the exchange.
+            use sqlx::Connection as _;
+            let mut savepoint = (**tx)
+                .begin()
                 .await
                 .map_err(|_| Failure::server_error().into_response())?;
-            let created = sqlx::query(dev_machine::CREATE_SQL)
-                .bind(params.dev_machine_id)
-                .bind(user_id)
-                .bind(&params.host_label)
-                .bind(dev_machine::label_from_host_label(&params.host_label))
-                .bind(dev_machine::VISIBILITY_PRIVATE)
-                .bind(dev_machine::PROVISIONING_MANUAL)
-                .bind(now)
-                .bind(None::<DateTime<Utc>>)
-                .bind(now)
-                .bind(now)
-                .execute(&mut **tx)
-                .await;
+            let created = {
+                let db = pidash_db::orm_tx::TxConn::new(&mut savepoint);
+                dev_machine::insert_dev_machine(
+                    &db,
+                    &dev_machine::NewDevMachine {
+                        id: params.dev_machine_id,
+                        owner_id: user_id,
+                        host_label: &params.host_label,
+                        now,
+                    },
+                    &params.host_label,
+                    now,
+                )
+                .await
+            };
             match created {
-                Ok(_) => {
-                    sqlx::query("RELEASE SAVEPOINT dev_machine_create")
-                        .execute(&mut **tx)
+                Ok(()) => {
+                    savepoint
+                        .commit()
                         .await
                         .map_err(|_| Failure::server_error().into_response())?;
                 }
-                Err(err) if dev_machine::is_unique_violation(&err) => {
-                    sqlx::query("ROLLBACK TO SAVEPOINT dev_machine_create")
-                        .execute(&mut **tx)
+                Err(err)
+                    if {
+                        use sea_orm::{DbErr, RuntimeErr};
+                        match &err {
+                            DbErr::Exec(RuntimeErr::SqlxError(inner)) => {
+                                dev_machine::is_unique_violation(inner)
+                            }
+                            DbErr::Query(RuntimeErr::SqlxError(inner)) => {
+                                dev_machine::is_unique_violation(inner)
+                            }
+                            DbErr::Conn(RuntimeErr::SqlxError(inner)) => {
+                                dev_machine::is_unique_violation(inner)
+                            }
+                            _ => false,
+                        }
+                    } =>
+                {
+                    savepoint
+                        .rollback()
                         .await
                         .map_err(|_| Failure::server_error().into_response())?;
                     // `locked is None or owner mismatch -> raise`
                     // (`device.py:105-108`).
-                    let relocked =
-                        dev_machine::fetch_locked_machine(&mut **tx, params.dev_machine_id)
+                    let relocked = {
+                        let db = pidash_db::orm_tx::TxConn::new(tx);
+                        dev_machine::fetch_locked_machine(&db, params.dev_machine_id)
                             .await
-                            .map_err(|_| Failure::server_error().into_response())?;
+                            .map_err(|_| Failure::server_error().into_response())?
+                    };
                     let same_owner = relocked.filter(|machine| {
                         dev_machine::check_owner(machine.owner_id, user_id).is_ok()
                     });
                     let Some(machine) = same_owner else {
                         return Err(not_found("dev_machine_not_found").into_response());
                     };
-                    dev_machine::touch_dev_machine(
-                        &mut **tx,
-                        machine.id,
-                        &machine.host_label,
-                        &machine.label,
-                        Some(&params.host_label),
-                        now,
-                    )
-                    .await
-                    .map_err(|_| Failure::server_error().into_response())?;
+                    {
+                        let db = pidash_db::orm_tx::TxConn::new(tx);
+                        dev_machine::touch_dev_machine(
+                            &db,
+                            machine.id,
+                            &machine.host_label,
+                            &machine.label,
+                            Some(&params.host_label),
+                            now,
+                        )
+                        .await
+                        .map_err(|_| Failure::server_error().into_response())?;
+                    }
                 }
                 Err(_) => {
+                    let _ = savepoint.rollback().await;
                     return Err(Failure::server_error().into_response());
                 }
             }
@@ -965,7 +1003,10 @@ async fn exchange_in_transaction(
                 m.map(|m| m.revoked_at.is_some()).unwrap_or(true)
             };
             if !machine_revoked
-                && pidash_services::domain::engine_credential::instance_can_serve_engine(settings)
+                && pidash_services::domain::engine_credential::engine_profile_for_user_available(
+                    settings,
+                )
+                .0
             {
                 let silent = !interactive_approval;
                 // Check silent allowed via machine's current state.
@@ -980,7 +1021,7 @@ async fn exchange_in_transaction(
                     if let Some(m) = machine_for_silent {
                         pidash_services::domain::engine_credential::silent_issue_allowed(
                             &pidash_db::orm_tx::TxConn::new(tx) as &_,
-                            &m,
+                            m.id,
                             now,
                         )
                         .await
@@ -996,9 +1037,9 @@ async fn exchange_in_transaction(
                     let issued =
                         pidash_services::domain::engine_credential::issue_engine_credential(
                             &dbc,
+                            secret_key,
                             user_id,
                             params.dev_machine_id,
-                            secret_key,
                             silent,
                             now,
                         )
@@ -1096,15 +1137,21 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 tok.and_then(|t| t.dev_machine_id)
             };
             if let Some(mid) = machine_id_opt {
-                // raw-sql: FOR UPDATE lock has no SeaORM equivalent.
-                let lock: Option<(Uuid,)> =
-                    sqlx::query_as(r#"SELECT id FROM dev_machine WHERE id = $1 FOR UPDATE"#)
-                        .bind(mid)
-                        .fetch_optional(&mut *tx)
+                // `SELECT id ... FOR UPDATE` via SeaORM: the lock raises no
+                // error on miss, so a concurrently deleted row is non-fatal —
+                // the revoke below still lands, as Django's `.first()` did.
+                let lock: Option<Uuid> = {
+                    use sea_orm::{EntityTrait as _, QuerySelect as _};
+                    let tx_conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+                    pidash_db::entity::dev_machine::Entity::find_by_id(mid)
+                        .select_only()
+                        .column(pidash_db::entity::dev_machine::Column::Id)
+                        .lock_exclusive()
+                        .into_tuple::<Uuid>()
+                        .one(&tx_conn as &_)
                         .await
-                        .unwrap_or(None);
-                // Missing row (concurrent delete) is non-fatal: the revoke
-                // below still lands; Django's .first() yields None similarly.
+                        .unwrap_or(None)
+                };
                 let _ = lock;
             }
             if pidash_services::domain::tokens::revoke_machine_token_by_id_if_active(
@@ -1143,7 +1190,7 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                     let _ = pidash_services::domain::engine_credential::revoke_engine_credential(
                         &pidash_db::orm_tx::TxConn::new(&mut tx),
                         mid,
-                        pidash_services::domain::engine_credential::revoke_reason::SIGNED_OUT,
+                        "signed_out",
                         now,
                     )
                     .await;
@@ -1463,5 +1510,56 @@ mod tests {
             );
         }
         assert_eq!(token_kernel::MACHINE_TOKEN_PREFIX, "mt_");
+    }
+
+    #[test]
+    fn auth_oauth1_dev_machine_statement_shapes() {
+        // AUTH-OAUTH-1: `SELECT id ... FOR UPDATE` for the concurrent-revoke
+        // serialization (`post_revoke`) renders `FOR UPDATE` on the narrow id.
+        use sea_orm::{DbBackend, EntityTrait, QuerySelect, QueryTrait};
+        let machine_id = Uuid::new_v4();
+        let lock = pidash_db::entity::dev_machine::Entity::find_by_id(machine_id)
+            .select_only()
+            .column(pidash_db::entity::dev_machine::Column::Id)
+            .lock_exclusive()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(lock.contains("FOR UPDATE"), "revoke lock: {lock}");
+        assert!(
+            lock.contains("\"dev_machine\""),
+            "revoke lock table: {lock}"
+        );
+        // The locked-read builder behind the exchange (`_get_or_create`)
+        // filters by pk and locks; the insert builder carries Django
+        // defaults for the `device.py:94-101` create.
+        let fetch = dev_machine::lock_machine_query(machine_id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(fetch.contains("FOR UPDATE"), "locked fetch: {fetch}");
+        assert!(
+            fetch.contains("\"owner_id\""),
+            "locked fetch columns: {fetch}"
+        );
+        let model = dev_machine::new_machine_model(
+            &dev_machine::NewDevMachine {
+                id: machine_id,
+                owner_id: Uuid::new_v4(),
+                host_label: "myhost",
+                now: Utc::now(),
+            },
+            "myhost",
+            Utc::now(),
+        );
+        let create = pidash_db::entity::dev_machine::Entity::insert(model)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            create.contains("INSERT INTO \"dev_machine\""),
+            "create insert: {create}"
+        );
+        assert!(
+            create.contains("\"visibility\"") && create.contains("\"provisioning\""),
+            "create defaults: {create}"
+        );
     }
 }

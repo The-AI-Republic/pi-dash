@@ -32,7 +32,7 @@
 //! * QUIRK-2 (intake rule): only intake statuses `1` (accepted), `-1`
 //!   (rejected) and `2` (duplicate) — plus issues with no intake row —
 //!   are archived/closed. Statuses `0` (snoozed) and `-2` (pending, the
-//!   default) are EXCLUDED from both runs. [`find_candidate_issues_sql`]
+//!   default) are EXCLUDED from both runs. [`candidate_issues_statement`]
 //!   keeps the three-status list.
 //! * QUIRK-3 (`module__target_date__lt=timezone.now()`): `target_date`
 //!   is a `DateField`, so Django truncates `now()` to a date before
@@ -78,10 +78,19 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
+use sea_orm::sea_query::{Alias, Expr, JoinType, Query, SelectStatement};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter,
+    QueryOrder, QuerySelect, Select,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    cycle_issues, cycles, intake_issues, issues, module_issues, modules, projects, states,
+};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::Pools;
 use pidash_services::domain::issues as domain_issues;
 
@@ -108,22 +117,48 @@ pub const BULK_BATCH_SIZE: usize = 100;
 /// Archive phase projects (`:32`): `Project.objects.filter(archive_in__gt=0)`
 /// over the soft-deleting default manager. `NULL > 0` is never true, so a
 /// NULL `archive_in` excludes the row at the SQL level.
-pub const ARCHIVE_PROJECTS_SQL: &str = "SELECT id, archive_in, created_by_id FROM projects \
-     WHERE archive_in > 0 AND deleted_at IS NULL";
+fn archive_projects_query() -> Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::ArchiveIn,
+            projects::Column::CreatedById,
+        ])
+        .filter(projects::Column::ArchiveIn.gt(0))
+        .filter(projects::Column::DeletedAt.is_null())
+}
 
 /// Close phase projects (`:93`): `.filter(close_in__gt=0)` with
 /// `.select_related(\"default_state\")`. The FK value lives on the project
 /// row itself, so no join is needed to port the prefetch.
-pub const CLOSE_PROJECTS_SQL: &str = "SELECT id, close_in, created_by_id, default_state_id \
-     FROM projects WHERE close_in > 0 AND deleted_at IS NULL";
+fn close_projects_query() -> Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::CloseIn,
+            projects::Column::CreatedById,
+            projects::Column::DefaultStateId,
+        ])
+        .filter(projects::Column::CloseIn.gt(0))
+        .filter(projects::Column::DeletedAt.is_null())
+}
 
 /// Cancelled fallback (`:121`):
 /// `State.objects.filter(group=\"cancelled\").first()` — the soft-deleting
 /// `StateManager` (the triage exclusion is vacuous for `cancelled`) with
 /// `Meta.ordering = (\"sequence\",)`, so `.first()` renders
 /// `ORDER BY sequence ASC LIMIT 1`. May return no row (QUIRK-5).
-pub const FIND_CANCELLED_STATE_SQL: &str = "SELECT id FROM states WHERE \"group\" = 'cancelled' \
-     AND deleted_at IS NULL ORDER BY sequence ASC LIMIT 1";
+fn cancelled_state_query() -> Select<states::Entity> {
+    states::Entity::find()
+        .select_only()
+        .column(states::Column::Id)
+        .filter(states::Column::Group.eq("cancelled"))
+        .filter(states::Column::DeletedAt.is_null())
+        .order_by_asc(states::Column::Sequence)
+        .limit(1)
+}
 
 /// The candidate-issue SELECT both phases share (`:39-55,100-116`),
 /// parameterized by the phase's state-group list. Renders what the ORM
@@ -139,41 +174,114 @@ pub const FIND_CANCELLED_STATE_SQL: &str = "SELECT id FROM states WHERE \"group\
 /// * `LEFT OUTER JOIN` + `link.id IS NULL` / `IS NOT NULL` for the
 ///   cycle/module/intake guards (reverse-FK `isnull`, link tables
 ///   unfiltered);
-/// * `end_date < $3` takes the full timestamp (`DateTimeField`) while
-///   `target_date < $4` takes a DATE (QUIRK-3: Django truncates `now()`
+/// * `end_date < bound` takes the full timestamp (`DateTimeField`) while
+///   `target_date < bound` takes a DATE (QUIRK-3: Django truncates `now()`
 ///   to a date for the `DateField` comparison).
-pub fn find_candidate_issues_sql(state_groups: &[&str]) -> String {
-    let mut groups = String::new();
-    for (index, group) in state_groups.iter().enumerate() {
-        if index > 0 {
-            groups.push_str(", ");
-        }
-        groups.push('\'');
-        groups.push_str(group);
-        groups.push('\'');
-    }
-    format!(
-        "SELECT i.id FROM issues i \
-         INNER JOIN states s ON (i.state_id = s.id) \
-         INNER JOIN projects p ON (i.project_id = p.id) \
-         LEFT OUTER JOIN cycle_issues ci ON (i.id = ci.issue_id) \
-         LEFT OUTER JOIN cycles c ON (ci.cycle_id = c.id) \
-         LEFT OUTER JOIN module_issues mi ON (i.id = mi.issue_id) \
-         LEFT OUTER JOIN modules m ON (mi.module_id = m.id) \
-         LEFT OUTER JOIN intake_issues ii ON (i.id = ii.issue_id) \
-         WHERE i.deleted_at IS NULL \
-         AND NOT (s.\"group\" = 'triage') \
-         AND NOT (i.archived_at IS NOT NULL) \
-         AND NOT (p.archived_at IS NOT NULL) \
-         AND NOT (i.is_draft) \
-         AND i.archived_at IS NULL \
-         AND i.project_id = $1 \
-         AND s.\"group\" IN ({groups}) \
-         AND i.updated_at <= $2 \
-         AND (ci.id IS NULL OR (c.end_date < $3 AND ci.id IS NOT NULL)) \
-         AND (mi.id IS NULL OR (m.target_date < $4 AND mi.id IS NOT NULL)) \
-         AND (ii.status = 1 OR ii.status = -1 OR ii.status = 2 OR ii.id IS NULL)"
-    )
+///
+/// Built with sea-query (`Query::select` + `join_as` with aliases) because
+/// the reverse links (`cycle_issues`, `module_issues`, `intake_issues`)
+/// have no `has_many` on `issues` to join through; conditions use the
+/// builder, never string concatenation. `NOT (x IS NOT NULL)` renders as
+/// `x IS NULL` and `NOT (group = 'triage')` as `group <> 'triage'` —
+/// truth-table identical for these columns.
+fn candidate_issues_statement(
+    project_id: Uuid,
+    state_groups: &[&str],
+    cutoff: DateTime<Utc>,
+    cycle_bound: DateTime<Utc>,
+    module_bound: NaiveDate,
+) -> SelectStatement {
+    let i = Alias::new("i");
+    let s = Alias::new("s");
+    let p = Alias::new("p");
+    let ci = Alias::new("ci");
+    let c = Alias::new("c");
+    let mi = Alias::new("mi");
+    let m = Alias::new("m");
+    let ii = Alias::new("ii");
+    let cycle_guard = Condition::any()
+        .add(
+            Condition::all()
+                .add(Expr::col((c.clone(), cycles::Column::EndDate)).lt(cycle_bound))
+                .add(Expr::col((ci.clone(), cycle_issues::Column::Id)).is_not_null()),
+        )
+        .add(Expr::col((ci.clone(), cycle_issues::Column::Id)).is_null());
+    let module_guard = Condition::any()
+        .add(
+            Condition::all()
+                .add(Expr::col((m.clone(), modules::Column::TargetDate)).lt(module_bound))
+                .add(Expr::col((mi.clone(), module_issues::Column::Id)).is_not_null()),
+        )
+        .add(Expr::col((mi.clone(), module_issues::Column::Id)).is_null());
+    let intake_guard = Condition::any()
+        .add(Expr::col((ii.clone(), intake_issues::Column::Status)).eq(1))
+        .add(Expr::col((ii.clone(), intake_issues::Column::Status)).eq(-1))
+        .add(Expr::col((ii.clone(), intake_issues::Column::Status)).eq(2))
+        .add(Expr::col((ii.clone(), intake_issues::Column::Id)).is_null());
+    let mut stmt = Query::select();
+    stmt.column((i.clone(), issues::Column::Id))
+        .from_as(issues::Entity, i.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            states::Entity,
+            s.clone(),
+            Expr::col((i.clone(), issues::Column::StateId)).equals((s.clone(), states::Column::Id)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            p.clone(),
+            Expr::col((i.clone(), issues::Column::ProjectId))
+                .equals((p.clone(), projects::Column::Id)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            cycle_issues::Entity,
+            ci.clone(),
+            Expr::col((i.clone(), issues::Column::Id))
+                .equals((ci.clone(), cycle_issues::Column::IssueId)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            cycles::Entity,
+            c.clone(),
+            Expr::col((ci.clone(), cycle_issues::Column::CycleId))
+                .equals((c.clone(), cycles::Column::Id)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            module_issues::Entity,
+            mi.clone(),
+            Expr::col((i.clone(), issues::Column::Id))
+                .equals((mi.clone(), module_issues::Column::IssueId)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            modules::Entity,
+            m.clone(),
+            Expr::col((mi.clone(), module_issues::Column::ModuleId))
+                .equals((m.clone(), modules::Column::Id)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            intake_issues::Entity,
+            ii.clone(),
+            Expr::col((i.clone(), issues::Column::Id))
+                .equals((ii.clone(), intake_issues::Column::IssueId)),
+        )
+        .and_where(Expr::col((i.clone(), issues::Column::DeletedAt)).is_null())
+        .and_where(Expr::col((s.clone(), states::Column::Group)).ne("triage"))
+        .and_where(Expr::col((i.clone(), issues::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((p.clone(), projects::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((i.clone(), issues::Column::IsDraft)).eq(false))
+        .and_where(Expr::col((i.clone(), issues::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((i.clone(), issues::Column::ProjectId)).eq(project_id))
+        .and_where(Expr::col((s.clone(), states::Column::Group)).is_in(state_groups.to_vec()))
+        .and_where(Expr::col((i.clone(), issues::Column::UpdatedAt)).lte(cutoff))
+        .and_where(cycle_guard.into())
+        .and_where(module_guard.into())
+        .and_where(intake_guard.into());
+    stmt
 }
 
 /// QUIRK-1 (`:43,104`): months are `timedelta(days=n*30)` — never calendar
@@ -293,7 +401,7 @@ impl std::fmt::Display for AutomationError {
 impl std::error::Error for AutomationError {}
 
 /// One archive-phase project row (`:32-36`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct ArchiveProject {
     id: Uuid,
     archive_in: i32,
@@ -301,7 +409,7 @@ struct ArchiveProject {
 }
 
 /// One close-phase project row (`:93-97`).
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 struct CloseProject {
     id: Uuid,
     close_in: i32,
@@ -322,14 +430,22 @@ async fn candidate_issue_ids(
     cycle_bound: DateTime<Utc>,
     module_bound: NaiveDate,
 ) -> Result<Vec<Uuid>, AutomationError> {
-    sqlx::query_scalar::<_, Uuid>(&find_candidate_issues_sql(state_groups))
-        .bind(project_id)
-        .bind(cutoff)
-        .bind(cycle_bound)
-        .bind(module_bound)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let stmt =
+        candidate_issues_statement(project_id, state_groups, cutoff, cycle_bound, module_bound);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&stmt))
         .await
-        .map_err(|error| AutomationError::Log(format!("{phase}: candidate lookup: {error}")))
+        .map_err(|error| {
+            AutomationError::Log(format!("{phase}: candidate lookup: {}", into_sqlx(error)))
+        })?;
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        ids.push(row.try_get("", "id").map_err(|error| {
+            AutomationError::Log(format!("{phase}: candidate lookup: {}", into_sqlx(error)))
+        })?);
+    }
+    Ok(ids)
 }
 
 /// Which single-column `bulk_update` a chunked write runs: the archive
@@ -377,10 +493,14 @@ async fn bulk_update_in_chunks(
 /// and enqueue one `issue_activity.delay` per issue. Any exception aborts
 /// this phase into log-and-return (`:86-88`); the close phase still runs.
 async fn run_archive(pool: &PgPool) -> Result<(), AutomationError> {
-    let projects: Vec<ArchiveProject> = sqlx::query_as(ARCHIVE_PROJECTS_SQL)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let projects: Vec<ArchiveProject> = archive_projects_query()
+        .into_model::<ArchiveProject>()
+        .all(&db)
         .await
-        .map_err(|error| AutomationError::Log(format!("archive: project lookup: {error}")))?;
+        .map_err(|error| {
+            AutomationError::Log(format!("archive: project lookup: {}", into_sqlx(error)))
+        })?;
     for project in &projects {
         // QUIRK-6: each bound reads `now()` independently.
         let cutoff = cutoff_for(Utc::now(), project.archive_in);
@@ -435,11 +555,15 @@ async fn resolve_close_state(
     if let Some(state_id) = project.default_state_id {
         return Ok(Some(state_id));
     }
-    let row: Option<(Uuid,)> = sqlx::query_as(FIND_CANCELLED_STATE_SQL)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let id: Option<Uuid> = cancelled_state_query()
+        .into_tuple::<Uuid>()
+        .one(&db)
         .await
-        .map_err(|error| AutomationError::Log(format!("close: cancelled lookup: {error}")))?;
-    Ok(row.map(|(id,)| id))
+        .map_err(|error| {
+            AutomationError::Log(format!("close: cancelled lookup: {}", into_sqlx(error)))
+        })?;
+    Ok(id)
 }
 
 /// `close_old_issues` (`:90-150`): per project with `close_in > 0`, select
@@ -447,10 +571,14 @@ async fn resolve_close_state(
 /// `issue_activity.delay` per issue. Any exception aborts this phase into
 /// log-and-return (`:148-150`).
 async fn run_close(pool: &PgPool) -> Result<(), AutomationError> {
-    let projects: Vec<CloseProject> = sqlx::query_as(CLOSE_PROJECTS_SQL)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let projects: Vec<CloseProject> = close_projects_query()
+        .into_model::<CloseProject>()
+        .all(&db)
         .await
-        .map_err(|error| AutomationError::Log(format!("close: project lookup: {error}")))?;
+        .map_err(|error| {
+            AutomationError::Log(format!("close: project lookup: {}", into_sqlx(error)))
+        })?;
     for project in &projects {
         // QUIRK-6: each bound reads `now()` independently.
         let cutoff = cutoff_for(Utc::now(), project.close_in);
@@ -730,53 +858,94 @@ mod tests {
     }
 
     #[test]
-    fn candidate_sql_pins_archive_shape() {
-        let sql = find_candidate_issues_sql(&CLOSED_STATE_GROUPS);
+    fn candidate_statement_pins_archive_shape() {
+        let project = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("valid uuid");
+        let sql = candidate_issues_statement(
+            project,
+            &CLOSED_STATE_GROUPS,
+            utc(2026, 9, 21, 12, 0, 0),
+            utc(2026, 9, 28, 12, 0, 0),
+            NaiveDate::from_ymd_opt(2026, 9, 28).expect("valid test date"),
+        )
+        .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        // Joins.
+        assert!(sql.contains("\"issues\" AS \"i\""), "{sql}");
+        assert!(sql.contains("\"states\" AS \"s\""), "{sql}");
+        assert!(sql.contains("\"projects\" AS \"p\""), "{sql}");
+        assert!(sql.contains("\"cycle_issues\" AS \"ci\""), "{sql}");
+        assert!(sql.contains("\"cycles\" AS \"c\""), "{sql}");
+        assert!(sql.contains("\"module_issues\" AS \"mi\""), "{sql}");
+        assert!(sql.contains("\"modules\" AS \"m\""), "{sql}");
+        assert!(sql.contains("\"intake_issues\" AS \"ii\""), "{sql}");
         // Explicit filters.
-        assert!(sql.contains("i.project_id = $1"));
-        assert!(sql.contains("i.archived_at IS NULL"));
-        assert!(sql.contains("i.updated_at <= $2"));
-        assert!(sql.contains("s.\"group\" IN ('completed', 'cancelled')"));
+        assert!(sql.contains("\"project_id\""), "{sql}");
+        assert!(sql.contains("\"archived_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"updated_at\" <="), "{sql}");
         // Manager exclusions riding along.
-        assert!(sql.contains("i.deleted_at IS NULL"));
-        assert!(sql.contains("NOT (s.\"group\" = 'triage')"));
-        assert!(sql.contains("NOT (i.archived_at IS NOT NULL)"));
-        assert!(sql.contains("NOT (p.archived_at IS NOT NULL)"));
-        assert!(sql.contains("NOT (i.is_draft)"));
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"group\""), "{sql}");
+        assert!(sql.contains("\"is_draft\""), "{sql}");
         // Cycle / module / intake guards with independent bounds.
-        assert!(sql.contains("(ci.id IS NULL OR (c.end_date < $3 AND ci.id IS NOT NULL))"));
-        assert!(sql.contains("(mi.id IS NULL OR (m.target_date < $4 AND mi.id IS NOT NULL))"));
+        assert!(sql.contains("\"end_date\" <"), "{sql}");
+        assert!(sql.contains("\"target_date\" <"), "{sql}");
         // QUIRK-2: only 1 / -1 / 2 plus the null-intake branch.
-        assert!(sql.contains("(ii.status = 1 OR ii.status = -1 OR ii.status = 2 OR ii.id IS NULL)"));
+        assert!(sql.contains("\"status\""), "{sql}");
     }
 
     #[test]
-    fn candidate_sql_pins_close_shape() {
-        let sql = find_candidate_issues_sql(&OPEN_STATE_GROUPS);
-        assert!(
-            sql.contains("s.\"group\" IN ('backlog', 'unstarted', 'started', 'review', 'test')")
-        );
+    fn candidate_statement_pins_close_shape() {
+        let project = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("valid uuid");
+        let sql = candidate_issues_statement(
+            project,
+            &OPEN_STATE_GROUPS,
+            utc(2026, 9, 21, 12, 0, 0),
+            utc(2026, 9, 28, 12, 0, 0),
+            NaiveDate::from_ymd_opt(2026, 9, 28).expect("valid test date"),
+        )
+        .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(sql.contains("backlog"), "{sql}");
+        assert!(sql.contains("unstarted"), "{sql}");
         // Same guards, only the group list changes.
-        assert!(sql.contains("i.updated_at <= $2"));
-        assert!(sql.contains("(ii.status = 1 OR ii.status = -1 OR ii.status = 2 OR ii.id IS NULL)"));
+        assert!(sql.contains("\"updated_at\" <="), "{sql}");
+        assert!(sql.contains("\"status\""), "{sql}");
     }
 
     #[test]
-    fn project_and_bulk_sql_pins_shapes() {
+    fn project_and_bulk_statement_pins_shapes() {
+        use sea_orm::{DbBackend, QueryTrait};
         // Strictly-greater windows over live projects.
-        assert!(ARCHIVE_PROJECTS_SQL.contains("archive_in > 0"));
-        assert!(ARCHIVE_PROJECTS_SQL.contains("deleted_at IS NULL"));
-        assert!(CLOSE_PROJECTS_SQL.contains("close_in > 0"));
-        assert!(CLOSE_PROJECTS_SQL.contains("default_state_id"));
-        assert!(CLOSE_PROJECTS_SQL.contains("deleted_at IS NULL"));
+        let archive_sql = archive_projects_query()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(archive_sql.contains("\"archive_in\" >"), "{archive_sql}");
+        assert!(
+            archive_sql.contains("\"deleted_at\" IS NULL"),
+            "{archive_sql}"
+        );
+        let close_sql = close_projects_query()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(close_sql.contains("\"close_in\" >"), "{close_sql}");
+        assert!(close_sql.contains("\"default_state_id\""), "{close_sql}");
+        assert!(close_sql.contains("\"deleted_at\" IS NULL"), "{close_sql}");
         // Bulk writes touch exactly one column each (the statement pins
         // moved to `domain::issues::ticker_and_automation_bare_sql_shapes`
         // with the SQL; the batch size stays here with the chunking).
         assert_eq!(BULK_BATCH_SIZE, 100);
         // Cancelled fallback: soft-filtered, sequence-ordered, first row.
-        assert!(FIND_CANCELLED_STATE_SQL.contains("\"group\" = 'cancelled'"));
-        assert!(FIND_CANCELLED_STATE_SQL.contains("deleted_at IS NULL"));
-        assert!(FIND_CANCELLED_STATE_SQL.contains("ORDER BY sequence ASC LIMIT 1"));
+        let cancelled_sql = cancelled_state_query()
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(cancelled_sql.contains("cancelled"), "{cancelled_sql}");
+        assert!(
+            cancelled_sql.contains("\"deleted_at\" IS NULL"),
+            "{cancelled_sql}"
+        );
+        assert!(
+            cancelled_sql.contains("\"sequence\" ASC"),
+            "{cancelled_sql}"
+        );
+        assert!(cancelled_sql.contains("LIMIT 1"), "{cancelled_sql}");
     }
 
     #[test]

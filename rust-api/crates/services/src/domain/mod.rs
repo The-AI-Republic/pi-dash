@@ -56,6 +56,7 @@ pub mod clock;
 pub mod comments;
 pub mod ctx;
 pub mod engine_credential;
+pub mod engine_state;
 pub mod error;
 pub mod identity;
 pub mod issues;
@@ -66,6 +67,7 @@ pub mod relations;
 pub mod tokens;
 pub mod transition;
 pub mod txn;
+pub mod user_saves;
 pub mod workspaces;
 
 pub use ctx::{WriteActor, WriteCtx, WriteOptions, WriteScope};

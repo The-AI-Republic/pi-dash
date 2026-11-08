@@ -42,6 +42,9 @@ pub const ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/", &["post"]),
     ("/api/v1/runner/dev-machines/{dev_machine_id}/sessions/", &["post"]),
     ("/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/", &["delete"]),
+    ("/api/v1/runner/engine/credential/revoke/", &["post"]),
+    ("/api/v1/runner/engine/model-token/", &["post"]),
+    ("/api/v1/runner/engine/profile/", &["get"]),
     ("/api/v1/runner/health/", &["get"]),
     ("/api/v1/runner/machine-tokens/", &["post"]),
     ("/api/v1/runner/metrics/", &["get"]),
@@ -154,7 +157,7 @@ pub const ROUTES: &[(&str, &[&str])] = &[
 ];
 
 /// Number of paths in [`ROUTES`]. Pinned to the golden file by the tests.
-pub const ROUTE_COUNT: usize = 128;
+pub const ROUTE_COUNT: usize = 131;
 
 /// `{path: sorted methods}` in the `test_routes_golden.route_map` shape,
 /// for golden comparison.
@@ -216,6 +219,6 @@ mod tests {
             }
         }
         let ops: usize = ROUTES.iter().map(|(_, methods)| methods.len()).sum();
-        assert_eq!(ops, 200);
+        assert_eq!(ops, 203);
     }
 }

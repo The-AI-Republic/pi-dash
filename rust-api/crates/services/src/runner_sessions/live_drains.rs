@@ -49,17 +49,21 @@
 //!   as warning lines the executor logs.
 
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::config::RunnerSettings;
+use pidash_db::entity::{agent_run, dev_machine, pod, runner};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
-use pidash_db::runner_sessions::models::runner_session::runner_session_from_row;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
 use pidash_db::runner_sessions::RunnerSession;
 
-use super::drain as drain_kernel;
+use super::drain::{self as drain_kernel, DispatchFacts};
 use super::guards::alive_threshold;
 use super::pubsub::{self as pubsub_kernel, PubsubStore};
 
@@ -130,15 +134,12 @@ impl PubsubStore for PoolPubsubStore {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(pubsub_kernel::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(OutboxError::Db)?;
-        rows.iter()
-            .map(runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::Db)
+        pubsub_kernel::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(&self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| OutboxError::Db(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -188,6 +189,9 @@ pub enum DrainError {
     /// A database failure (`sqlx::Error`).
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
+    /// A SeaORM failure (the kernel statements run through it).
+    #[error("database error: {0}")]
+    Sea(#[from] sea_orm::DbErr),
     /// A post-commit dispatch failure. Only the offline error reaches
     /// here ([`pubsub_kernel::send_to_runner`] swallows the rest into
     /// warnings); the assignment rows are already committed.
@@ -203,6 +207,66 @@ pub enum DrainError {
 // Executors
 // ---------------------------------------------------------------------------
 
+/// The runner's [`DispatchFacts`]: own-agent runners need no machine
+/// read; engines read their machine's pause/team fields. A missing
+/// machine answers unpaused/no-team (matching
+/// `engine_team_runs_enabled` and `engine_paused`).
+async fn dispatch_facts_of(
+    db: &impl ConnectionTrait,
+    provisioning: &str,
+    pod_dispatch: &str,
+    machine_id: Option<Uuid>,
+) -> Result<DispatchFacts, DrainError> {
+    let is_engine = provisioning == "desktop_bundled";
+    let pod_member = pod_dispatch == "pod_member";
+    if !is_engine {
+        return Ok(DispatchFacts {
+            is_engine: false,
+            pod_member,
+            paused: false,
+            team_runs: true,
+        });
+    }
+    let (paused, team_runs) = match machine_id {
+        Some(id) => {
+            let machine = dev_machine::Entity::find_by_id(id).one(db).await?;
+            match machine {
+                Some(machine) => (
+                    machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty(),
+                    machine.engine_team_runs,
+                ),
+                None => (false, false),
+            }
+        }
+        None => (false, false),
+    };
+    Ok(DispatchFacts {
+        is_engine: true,
+        pod_member,
+        paused,
+        team_runs,
+    })
+}
+
+async fn write_assignment(
+    db: &impl ConnectionTrait,
+    owner_id: Uuid,
+    runner_id: Uuid,
+    run_id: Uuid,
+) -> Result<(), DrainError> {
+    // A fresh `timezone.now()` per assignment (`matcher.py:285-289`).
+    use sea_orm::sea_query::Expr;
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::OwnerId, Expr::value(owner_id))
+        .col_expr(agent_run::Column::RunnerId, Expr::value(runner_id))
+        .col_expr(agent_run::Column::Status, Expr::value("assigned"))
+        .col_expr(agent_run::Column::AssignedAt, Expr::value(now_micros()))
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 /// `drain_for_runner_by_id` (`matcher.py:298-304`): runner lookup
 /// (miss ⇒ `Ok(false)`, no transaction), else the single-assignment
 /// drain. Answers whether a run was assigned.
@@ -212,10 +276,8 @@ pub async fn drain_for_runner_by_id(
     runner: &RunnerSettings,
     runner_id: Uuid,
 ) -> Result<bool, DrainError> {
-    let row = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL)
-        .bind(runner_id)
-        .fetch_optional(pool)
-        .await?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = runner::Entity::find_by_id(runner_id).one(&db).await?;
     if row.is_none() {
         return Ok(false);
     }
@@ -232,54 +294,53 @@ async fn drain_for_runner(
     runner: &RunnerSettings,
     runner_id: Uuid,
 ) -> Result<bool, DrainError> {
-    let mut tx = pool.begin().await?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let txn = db.begin().await?;
     let threshold = alive_threshold(now_micros());
-    let locked = sqlx::query(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL)
-        .bind(threshold)
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
+    let locked = txn
+        .query_one(
+            DbBackend::Postgres.build(&drain_kernel::drain_for_runner_lock_stmt(
+                threshold, runner_id,
+            )),
+        )
         .await?;
     let Some(locked) = locked else {
-        tx.commit().await?;
+        txn.commit().await?;
         return Ok(false);
     };
-    let owner_id: Uuid = locked.try_get("owner_id")?;
-    let pod_id: Uuid = locked.try_get("pod_id")?;
-    let provisioning: String = locked.try_get("provisioning")?;
-    let visibility: i16 = locked.try_get("visibility")?;
+    let owner_id: Uuid = locked.try_get("", "owner_id")?;
+    let pod_id: Uuid = locked.try_get("", "pod_id")?;
+    let provisioning: String = locked.try_get("", "provisioning")?;
+    let pod_dispatch: String = locked.try_get("", "pod_dispatch")?;
+    let machine_id: Option<Uuid> = locked.try_get("", "dev_machine_id")?;
+    let visibility: i16 = locked.try_get("", "visibility")?;
+    let facts = dispatch_facts_of(&txn, &provisioning, &pod_dispatch, machine_id).await?;
     // Non-private runners issue no query (the `qs.none()` arm).
-    let Some(next_sql) = drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-    else {
-        tx.commit().await?;
+    let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
+        i32::from(visibility),
+        pod_id,
+        runner_id,
+        owner_id,
+        &facts,
+    ) else {
+        txn.commit().await?;
         return Ok(false);
     };
-    let run = sqlx::query(&next_sql)
-        .bind(pod_id)
-        .bind(runner_id)
-        .bind(owner_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let run = txn.query_one(DbBackend::Postgres.build(&next_stmt)).await?;
     let Some(run) = run else {
-        tx.commit().await?;
+        txn.commit().await?;
         return Ok(false);
     };
-    let run_id: Uuid = run.try_get("id")?;
-    let work_item_id: Option<Uuid> = run.try_get("work_item_id")?;
-    let prompt: String = run.try_get("prompt")?;
-    let run_config: Value = run.try_get("run_config")?;
+    let run_id: Uuid = run.try_get("", "id")?;
+    let work_item_id: Option<Uuid> = run.try_get("", "work_item_id")?;
+    let prompt: String = run.try_get("", "prompt")?;
+    let run_config: Value = run.try_get("", "run_config")?;
     let Value::Object(run_config) = run_config else {
         return Err(DrainError::Config(
             "drain_for_runner: run_config is not an object".to_owned(),
         ));
     };
-    // `$3` is a fresh `timezone.now()` per assignment (`:285-289`).
-    sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-        .bind(owner_id)
-        .bind(runner_id)
-        .bind(now_micros())
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
+    write_assignment(&txn, owner_id, runner_id, run_id).await?;
     let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
         run_id,
         runner_id,
@@ -288,7 +349,7 @@ async fn drain_for_runner(
         prompt,
         run_config,
     });
-    tx.commit().await?;
+    txn.commit().await?;
     let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
     let store = PoolPubsubStore::new(pool.clone(), redis.cloned(), runner.clone());
     let outcome = pubsub_kernel::send_to_runner(&store, *runner_id, message).await?;
@@ -308,9 +369,13 @@ pub async fn drain_pod_by_id(
     runner: &RunnerSettings,
     pod_id: Uuid,
 ) -> Result<usize, DrainError> {
-    let pod = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let pod = pod::Entity::find()
+        .filter(pod::Column::Id.eq(pod_id))
+        .filter(pod::Column::DeletedAt.is_null())
+        .order_by(pod::Column::IsDefault, sea_orm::Order::Desc)
+        .order_by(pod::Column::CreatedAt, sea_orm::Order::Asc)
+        .one(&db)
         .await?;
     if pod.is_none() {
         return Ok(0);
@@ -328,49 +393,46 @@ async fn drain_pod(
     runner: &RunnerSettings,
     pod_id: Uuid,
 ) -> Result<usize, DrainError> {
-    let mut tx = pool.begin().await?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let txn = db.begin().await?;
     let threshold = alive_threshold(now_micros());
-    let runners = sqlx::query(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
+    let runners = txn
+        .query_all(
+            DbBackend::Postgres.build(&drain_kernel::drain_pod_idle_list_stmt(threshold, pod_id)),
+        )
         .await?;
     let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
     for runner_row in &runners {
-        let runner_id: Uuid = runner_row.try_get("id")?;
-        let owner_id: Uuid = runner_row.try_get("owner_id")?;
-        let provisioning: String = runner_row.try_get("provisioning")?;
-        let visibility: i16 = runner_row.try_get("visibility")?;
-        let Some(next_sql) =
-            drain_kernel::next_for_runner_sql(&provisioning, i32::from(visibility))
-        else {
+        let runner_id: Uuid = runner_row.try_get("", "id")?;
+        let owner_id: Uuid = runner_row.try_get("", "owner_id")?;
+        let provisioning: String = runner_row.try_get("", "provisioning")?;
+        let pod_dispatch: String = runner_row.try_get("", "pod_dispatch")?;
+        let machine_id: Option<Uuid> = runner_row.try_get("", "dev_machine_id")?;
+        let visibility: i16 = runner_row.try_get("", "visibility")?;
+        let facts = dispatch_facts_of(&txn, &provisioning, &pod_dispatch, machine_id).await?;
+        let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
+            i32::from(visibility),
+            pod_id,
+            runner_id,
+            owner_id,
+            &facts,
+        ) else {
             continue;
         };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let run = txn.query_one(DbBackend::Postgres.build(&next_stmt)).await?;
         let Some(run) = run else {
             continue;
         };
-        let run_id: Uuid = run.try_get("id")?;
-        let work_item_id: Option<Uuid> = run.try_get("work_item_id")?;
-        let prompt: String = run.try_get("prompt")?;
-        let run_config: Value = run.try_get("run_config")?;
+        let run_id: Uuid = run.try_get("", "id")?;
+        let work_item_id: Option<Uuid> = run.try_get("", "work_item_id")?;
+        let prompt: String = run.try_get("", "prompt")?;
+        let run_config: Value = run.try_get("", "run_config")?;
         let Value::Object(run_config) = run_config else {
             return Err(DrainError::Config(
                 "drain_pod: run_config is not an object".to_owned(),
             ));
         };
-        sqlx::query(drain_kernel::ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(now_micros())
-            .bind(run_id)
-            .execute(&mut *tx)
-            .await?;
+        write_assignment(&txn, owner_id, runner_id, run_id).await?;
         plans.push(drain_kernel::plan_assignment(
             &drain_kernel::AssignmentFacts {
                 run_id,
@@ -382,7 +444,7 @@ async fn drain_pod(
             },
         ));
     }
-    tx.commit().await?;
+    txn.commit().await?;
     let store = PoolPubsubStore::new(pool.clone(), redis.cloned(), runner.clone());
     for plan in &plans {
         let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
@@ -442,15 +504,22 @@ mod tests {
         assert_eq!(error.to_string(), "drain_pod: run_config is not an object");
     }
 
-    /// The executors run the kernel SQL consts verbatim (never a
-    /// fork): the by-id lookups carry the same soft-delete scope and
-    /// ordering the kernel pins against FX-RSES-07.
+    /// The executors run the kernel builders (never a fork): the
+    /// lock and idle statements carry the row lock.
     #[test]
-    fn executors_use_kernel_sql_consts() {
-        assert!(drain_kernel::DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL.contains("FROM \"runner\""));
-        assert!(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL.contains("\"pod\".\"deleted_at\" IS NULL"));
-        assert!(drain_kernel::DRAIN_FOR_RUNNER_LOCK_SQL.contains("FOR UPDATE SKIP LOCKED"));
-        assert!(drain_kernel::DRAIN_POD_IDLE_RUNNERS_SQL.contains("FOR UPDATE SKIP LOCKED"));
+    fn executors_use_kernel_builders() {
+        use sea_query::PostgresQueryBuilder;
+        use uuid::Uuid;
+
+        let threshold = chrono::Utc::now();
+        let lock = drain_kernel::drain_for_runner_lock_stmt(threshold, Uuid::new_v4());
+        assert!(lock.to_string(PostgresQueryBuilder).ends_with(
+            "ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1 FOR UPDATE SKIP LOCKED"
+        ));
+        let idle = drain_kernel::drain_pod_idle_list_stmt(threshold, Uuid::new_v4());
+        assert!(idle
+            .to_string(PostgresQueryBuilder)
+            .contains("FOR UPDATE SKIP LOCKED"));
     }
 
     async fn pool() -> PgPool {

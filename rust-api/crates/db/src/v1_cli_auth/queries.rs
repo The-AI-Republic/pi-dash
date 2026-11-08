@@ -19,20 +19,20 @@
 //! (PIDASHCONV-526). The `#[cfg(test)]` suite asserts the SQL text and
 //! the row shape against those fixtures.
 //!
-//! SQL execution uses runtime `sqlx::query` (no `query!` macros): there
-//! is no build-time database and no `.sqlx` offline cache, following
-//! the merged `license/queries` precedent. Django's `%s` placeholders
-//! render as Postgres `$N` here; the projected column set and order
-//! match the recorded Django SQL exactly.
+//! SQL execution is SeaORM (`runner::Entity::find_by_id`); the projected
+//! column set comes from the entity, whose columns match the recorded
+//! Django SQL exactly. The old `sqlx` string builder is gone; the unit
+//! test pins the built statement shape so transcription drift fails the
+//! build.
 //!
 //! # Port shape vs Django shape (same semantics)
 //!
 //! Django's Q1 carries `ORDER BY "runner"."last_heartbeat_at" DESC,
 //! "runner"."created_at" DESC LIMIT 1` (`Meta.ordering` + `.first()`).
 //! The ordering is semantically vacuous on a pk lookup (at most one row
-//! matches), so the port uses the plain shape — `SELECT <31 cols> FROM
-//! runner WHERE id = $1` — and [`runner_lookup::find_by_pk`] uses
-//! `fetch_optional` for the `.first()` LIMIT-1 cardinality.
+//! matches), so the port is the plain by-pk lookup, and
+//! [`runner_lookup::find_by_pk`] uses `one` for the `.first()` LIMIT-1
+//! cardinality.
 //!
 //! # Ported quirks (translate, don't redesign)
 //!
@@ -41,10 +41,11 @@
 //!   owner-or-admin line are unreachable-but-by-design and stay ported;
 //!   they live in the handler layer (PIDASHCONV-538), not here.
 
-use sqlx::postgres::PgRow;
-use sqlx::Row;
+use chrono::Utc;
+use sea_orm::EntityTrait;
 
 use super::models::runner::Runner;
+use crate::entity::runner as runner_entity;
 
 /// By-pk lookup + guard-facts projection (`views/runner.py:45-51`).
 pub mod runner_lookup {
@@ -52,15 +53,6 @@ pub mod runner_lookup {
 
     /// Django table name (`Meta.db_table`, `runner/models.py:479`).
     pub const TABLE: &str = "runner";
-
-    /// `Runner.objects.filter(pk=runner_id).first()` projected to the
-    /// full 31-column row (`09738d222` adds the pause pair): the guard
-    /// reads (`visibility`, `owner_id`)
-    /// come off it and `delete_runner` takes the row itself, so there
-    /// is no narrow projection. Fixture F3 `q1_by_pk` (Django `%s` →
-    /// `$1`); the vacuous `ORDER BY` + `LIMIT 1` are omitted (see
-    /// module docs).
-    pub const BY_PK_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\", \"runner\".\"paused_at\", \"runner\".\"paused_by_id\" FROM \"runner\" WHERE \"runner\".\"id\" = $1";
 
     /// Guard facts for `can_view_runner` / `can_manage_runner`
     /// (`permissions.py:74-75, :135-136`): the `(visibility, owner_id)`
@@ -82,61 +74,68 @@ pub mod runner_lookup {
         }
     }
 
-    /// Map a Q1 row into [`Runner`], one `try_get` per column in
-    /// `COLUMNS` order (manual mapping follows the `auth_oauth`
-    /// precedent; there is no `FromRow` derive in this crate).
-    pub fn runner_from_row(row: &PgRow) -> Result<Runner, sqlx::Error> {
-        Ok(Runner {
-            id: row.try_get("id")?,
-            owner_id: row.try_get("owner_id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            dev_machine_id: row.try_get("dev_machine_id")?,
-            pod_id: row.try_get("pod_id")?,
-            name: row.try_get("name")?,
-            host_label: row.try_get("host_label")?,
-            provisioning: row.try_get("provisioning")?,
-            visibility: row.try_get("visibility")?,
-            refresh_token_hash: row.try_get("refresh_token_hash")?,
-            refresh_token_fingerprint: row.try_get("refresh_token_fingerprint")?,
-            refresh_token_generation: row.try_get("refresh_token_generation")?,
-            previous_refresh_token_hash: row.try_get("previous_refresh_token_hash")?,
-            access_token_signing_key_version: row.try_get("access_token_signing_key_version")?,
-            enrollment_token_hash: row.try_get("enrollment_token_hash")?,
-            enrollment_token_fingerprint: row.try_get("enrollment_token_fingerprint")?,
-            enrolled_at: row.try_get("enrolled_at")?,
-            capabilities: row.try_get("capabilities")?,
-            status: row.try_get("status")?,
-            os: row.try_get("os")?,
-            arch: row.try_get("arch")?,
-            runner_version: row.try_get("runner_version")?,
-            dev_metadata: row.try_get("dev_metadata")?,
-            protocol_version: row.try_get("protocol_version")?,
-            last_heartbeat_at: row.try_get("last_heartbeat_at")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-            revoked_at: row.try_get("revoked_at")?,
-            revoked_reason: row.try_get("revoked_reason")?,
-            paused_at: row.try_get("paused_at")?,
-            paused_by_id: row.try_get("paused_by_id")?,
-        })
+    fn to_utc(t: chrono::DateTime<chrono::FixedOffset>) -> chrono::DateTime<Utc> {
+        t.with_timezone(&Utc)
+    }
+
+    /// Map the SeaORM entity row into [`Runner`], converting the
+    /// timestamptz columns to `Utc` (the read-model type).
+    pub fn runner_from_model(model: runner_entity::Model) -> Runner {
+        Runner {
+            id: model.id,
+            owner_id: model.owner_id,
+            workspace_id: model.workspace_id,
+            dev_machine_id: model.dev_machine_id,
+            pod_id: model.pod_id,
+            name: model.name,
+            host_label: model.host_label,
+            provisioning: model.provisioning,
+            visibility: model.visibility,
+            refresh_token_hash: model.refresh_token_hash,
+            refresh_token_fingerprint: model.refresh_token_fingerprint,
+            refresh_token_generation: model.refresh_token_generation,
+            previous_refresh_token_hash: model.previous_refresh_token_hash,
+            access_token_signing_key_version: model.access_token_signing_key_version,
+            enrollment_token_hash: model.enrollment_token_hash,
+            enrollment_token_fingerprint: model.enrollment_token_fingerprint,
+            enrolled_at: model.enrolled_at.map(to_utc),
+            capabilities: model.capabilities,
+            status: model.status,
+            os: model.os,
+            arch: model.arch,
+            runner_version: model.runner_version,
+            dev_metadata: model.dev_metadata,
+            protocol_version: model.protocol_version,
+            last_heartbeat_at: model.last_heartbeat_at.map(to_utc),
+            created_at: to_utc(model.created_at),
+            updated_at: to_utc(model.updated_at),
+            revoked_at: model.revoked_at.map(to_utc),
+            revoked_reason: model.revoked_reason,
+            paused_at: model.paused_at.map(to_utc),
+            paused_by_id: model.paused_by_id,
+        }
     }
 
     /// `Runner.objects.filter(pk=runner_id).first()`
     /// (`views/runner.py:45`): `None` when the id is unknown (handler
-    /// 404). Callers pick the pool and pass an executor in; every
-    /// executor is generic over `sqlx::Executor`.
-    pub async fn find_by_pk<'e, E>(
-        ex: E,
+    /// 404). The by-pk entity lookup carries the `.first()` LIMIT-1
+    /// cardinality; Django's vacuous `ORDER BY` rides no statement.
+    pub async fn find_by_pk(
+        pool: &sqlx::PgPool,
         runner_id: uuid::Uuid,
-    ) -> Result<Option<Runner>, sqlx::Error>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-    {
-        let row: Option<PgRow> = sqlx::query(BY_PK_SQL)
-            .bind(runner_id)
-            .fetch_optional(ex)
+    ) -> Result<Option<Runner>, sea_orm::DbErr> {
+        let db = crate::pool::sea_orm_connection(pool);
+        let model = runner_entity::Entity::find_by_id(runner_id)
+            .one(&db)
             .await?;
-        row.map(|r| runner_from_row(&r)).transpose()
+        Ok(model.map(runner_from_model))
+    }
+
+    /// The by-pk statement (`find_by_pk` without a database): pins the
+    /// shape the unit tests assert.
+    pub fn by_pk_stmt(runner_id: uuid::Uuid) -> sea_orm::sea_query::SelectStatement {
+        use sea_orm::QueryTrait;
+        runner_entity::Entity::find_by_id(runner_id).into_query()
     }
 }
 
@@ -192,31 +191,103 @@ mod tests {
     }
 
     #[test]
-    fn f3_port_sql_projects_31_cols_with_plain_pk_filter() {
-        let sql = runner_lookup::BY_PK_SQL;
-        // Same projected set and order as the Django Q1 / F2 columns.
-        let mut cursor = 0;
+    fn f3_port_stmt_projects_31_cols_with_plain_pk_filter() {
+        use sea_query::PostgresQueryBuilder;
+        let sql = runner_lookup::by_pk_stmt(
+            uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+        )
+        .to_string(PostgresQueryBuilder);
+        // Same projected set as the Django Q1 / F2 columns (order free:
+        // the entity emits its declaration order).
         for col in runner::COLUMNS {
             let quoted = format!("\"runner\".\"{col}\"");
-            let pos = sql[cursor..]
-                .find(&quoted)
-                .unwrap_or_else(|| panic!("BY_PK_SQL projects {quoted}"));
-            cursor += pos + quoted.len();
+            assert!(sql.contains(&quoted), "by-pk stmt projects {quoted}");
         }
         assert!(sql.contains("FROM \"runner\""), "lookup table");
         assert!(
-            sql.contains("WHERE \"runner\".\"id\" = $1"),
-            "plain pk filter, Django %s rendered as $1"
+            sql.contains("WHERE \"runner\".\"id\" = '22222222-2222-2222-2222-222222222222'"),
+            "plain pk filter"
         );
-        // Vacuous ORDER BY + LIMIT 1 omitted (fetch_optional provides
-        // the .first() cardinality); still no deleted filter, no join.
+        // Vacuous ORDER BY + LIMIT 1 omitted (the pk lookup is already
+        // single-row); still no deleted filter, no join.
         assert!(!sql.contains("ORDER BY"), "no vacuous ordering");
         assert!(!sql.contains("LIMIT"), "no limit clause");
         assert!(!sql.to_lowercase().contains("deleted"), "no deleted filter");
         assert!(!sql.to_lowercase().contains("join"), "no join");
-        // Exactly one bind parameter.
-        assert_eq!(sql.matches("$1").count(), 1, "single bind param");
-        assert!(!sql.contains("$2"), "no second bind param");
+    }
+
+    /// Live-db test over a session-local copy of `runner`: the by-pk
+    /// lookup reads the seeded row back and misses unknown ids. Skips
+    /// without `DATABASE_URL`.
+    #[tokio::test]
+    async fn live_find_by_pk_reads_shadow_row() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.runner')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return;
+        }
+        // Session-scoped twin (the one-connection pool keeps it on the
+        // same session); no ON COMMIT DROP — there is no explicit
+        // transaction, so the table would drop at the first commit.
+        sqlx::query("CREATE TEMP TABLE runner AS SELECT * FROM public.runner WITH NO DATA")
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        let id = uuid::Uuid::new_v4();
+        let owner_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        let pod_id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO runner (id, owner_id, workspace_id, pod_id, name,
+                 host_label, provisioning, visibility, refresh_token_hash,
+                 refresh_token_fingerprint, refresh_token_generation,
+                 previous_refresh_token_hash, access_token_signing_key_version,
+                 enrollment_token_hash, enrollment_token_fingerprint,
+                 capabilities, status, os, arch, runner_version,
+                 dev_metadata, protocol_version, created_at, updated_at,
+                 revoked_reason)
+             VALUES ($1, $2, $3, $4, 'live-runner', '', 'manual', 0, '', '',
+                     0, '', 1, '', '', '[]', 'offline', '', '', '',
+                     '{}', 1, $5, $5, '')",
+        )
+        .bind(id)
+        .bind(owner_id)
+        .bind(workspace_id)
+        .bind(pod_id)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("seed row");
+        let hit = runner_lookup::find_by_pk(&pool, id)
+            .await
+            .expect("lookup")
+            .expect("hit");
+        assert_eq!(hit.id, id);
+        assert_eq!(hit.owner_id, owner_id);
+        assert_eq!(hit.name, "live-runner");
+        assert_eq!(hit.visibility, 0);
+        assert_eq!(hit.status, "offline");
+        assert!(hit.capabilities.is_array());
+        assert!(hit.dev_metadata.is_object());
+        assert!(hit.revoked_at.is_none());
+        let miss = runner_lookup::find_by_pk(&pool, uuid::Uuid::new_v4())
+            .await
+            .expect("lookup");
+        assert!(miss.is_none());
     }
 
     #[test]

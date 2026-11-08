@@ -6,7 +6,10 @@
 //! taking pod work, and the pause flip effects. Drains run after
 //! commit; the caller drains the returned pod/runner ids.
 
-use sea_orm::{ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{
+    sea_query::LockType, ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter,
+    QuerySelect,
+};
 use uuid::Uuid;
 
 use pidash_db::entity::{agent_run, runner};
@@ -16,6 +19,11 @@ use pidash_db::entity::{agent_run, runner};
 /// `pinned_runner`, clear the parent's `thread_id`). Legacy
 /// `managed_runner` runs stay pinned. Must run inside the caller's
 /// transaction. Returns `(released, pod_ids)` for post-commit drains.
+///
+/// The candidate read locks the run rows (`select_for_update(of=
+/// ("self",))` — one table, so plain `FOR UPDATE`) and the
+/// `thread_id` clear mirrors the `if run.parent_run.thread_id` gate:
+/// only parents whose session is actually set are written.
 pub async fn release_locality_pins(
     db: &impl ConnectionTrait,
     runner_ids: &[Uuid],
@@ -29,6 +37,7 @@ pub async fn release_locality_pins(
         .add(agent_run::Column::ExecutorKind.eq("local_runner"));
     let affected = agent_run::Entity::find()
         .filter(filter.clone())
+        .lock(LockType::Update)
         .all(db)
         .await?;
     let mut pod_ids: Vec<Uuid> = Vec::new();
@@ -44,14 +53,25 @@ pub async fn release_locality_pins(
         }
     }
     if !parent_ids.is_empty() {
-        agent_run::Entity::update_many()
-            .col_expr(
-                agent_run::Column::ThreadId,
-                sea_orm::sea_query::Expr::value("".to_owned()),
-            )
+        let parents = agent_run::Entity::find()
             .filter(agent_run::Column::Id.is_in(parent_ids))
-            .exec(db)
+            .all(db)
             .await?;
+        let stale: Vec<Uuid> = parents
+            .into_iter()
+            .filter(|parent| !parent.thread_id.is_empty())
+            .map(|parent| parent.id)
+            .collect();
+        if !stale.is_empty() {
+            agent_run::Entity::update_many()
+                .col_expr(
+                    agent_run::Column::ThreadId,
+                    sea_orm::sea_query::Expr::value("".to_owned()),
+                )
+                .filter(agent_run::Column::Id.is_in(stale))
+                .exec(db)
+                .await?;
+        }
     }
     let rows = agent_run::Entity::update_many()
         .col_expr(

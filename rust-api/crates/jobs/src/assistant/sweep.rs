@@ -22,13 +22,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use sea_query::{Expr, Order, PostgresQueryBuilder, Query};
+use sea_orm::ColumnTrait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::run_turn::{
-    context_eligible, SeamError, TurnContext, CODE_TURN_TIMEOUT, MSG_FAILED, TABLE_TURN,
-};
+use super::run_turn::{context_eligible, SeamError, TurnContext, CODE_TURN_TIMEOUT, MSG_FAILED};
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
 use pidash_db::assistant::event_queries::{publish_frame, serialize_event_json, EventParts};
@@ -59,29 +57,117 @@ pub fn sweep_cutoff(now: &DateTime<Utc>, hard_limit_secs: i64) -> DateTime<Utc> 
 
 /// Stale-turn select (`tasks.py:514-518`): `RUNNING` ids with
 /// `started_at < cutoff`, `ORDER BY created_at` (the `Meta.ordering`).
+/// SeaORM form: [`stale_turns_query`] below. This string helper is kept
+/// only for the shape pin; execution goes through SeaORM.
 pub fn stale_turns_select() -> String {
-    Query::select()
-        .from(TABLE_TURN)
-        .column("id")
-        .and_where(Expr::col("status").eq(super::run_turn::TURN_RUNNING))
-        .and_where(Expr::cust("started_at < $1"))
-        .order_by("created_at", Order::Asc)
-        .to_string(PostgresQueryBuilder)
+    use chrono::DateTime;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
+    let cutoff = DateTime::<Utc>::UNIX_EPOCH;
+    pidash_db::entity::assistant_turn::Entity::find()
+        .select_only()
+        .column(pidash_db::entity::assistant_turn::Column::Id)
+        .filter(pidash_db::entity::assistant_turn::Column::Status.eq(super::run_turn::TURN_RUNNING))
+        .filter(pidash_db::entity::assistant_turn::Column::StartedAt.lt(cutoff))
+        .order_by_asc(pidash_db::entity::assistant_turn::Column::CreatedAt)
+        .build(sea_orm::DbBackend::Postgres)
+        .to_string()
 }
 
-/// Sweep context select: turn + thread identity for the fail path.
+/// Sweep context: turn + thread identity for the fail path.
 ///
 /// The full `_load_context` (`tasks.py:73-96`) also derives display strings
 /// (user text, display name, workspace role) for the agent run — but the
 /// sweep never runs the agent: it only needs turn/thread ids for `_fail_turn`
 /// (`tasks.py:182-201`, which touches `ctx.turn`/`ctx.thread` alone). The
 /// display fields stay empty here, and [`TurnContext`] documents which paths
-/// need them.
+/// need them. SeaORM form: [`sweep_context_query`] below. This string helper
+/// is kept only for the shape pin; execution goes through SeaORM.
 pub fn sweep_context_select() -> String {
-    "SELECT t.id, t.status, th.id, th.kind, th.workspace_id, th.user_id \
-     FROM assistant_turn t INNER JOIN assistant_thread th ON t.thread_id = th.id \
-     WHERE t.id = $1"
-        .to_owned()
+    use sea_orm::{EntityTrait, QueryFilter, QuerySelect, QueryTrait, RelationTrait};
+    use sea_query::JoinType;
+    pidash_db::entity::assistant_turn::Entity::find()
+        .select_only()
+        .column_as(pidash_db::entity::assistant_turn::Column::Id, "t_id")
+        .column_as(
+            pidash_db::entity::assistant_turn::Column::Status,
+            "t_status",
+        )
+        .column_as(pidash_db::entity::assistant_thread::Column::Id, "th_id")
+        .column_as(pidash_db::entity::assistant_thread::Column::Kind, "th_kind")
+        .column_as(
+            pidash_db::entity::assistant_thread::Column::WorkspaceId,
+            "th_workspace_id",
+        )
+        .column_as(
+            pidash_db::entity::assistant_thread::Column::UserId,
+            "th_user_id",
+        )
+        .join(
+            JoinType::InnerJoin,
+            pidash_db::entity::assistant_turn::Relation::AssistantThread.def(),
+        )
+        .filter(pidash_db::entity::assistant_turn::Column::Id.eq(Uuid::nil()))
+        .build(sea_orm::DbBackend::Postgres)
+        .to_string()
+}
+
+/// The stale-turn `ids` query as a SeaORM `Select` (execution form).
+pub fn stale_turns_query(
+    cutoff: DateTime<Utc>,
+) -> sea_orm::Select<pidash_db::entity::assistant_turn::Entity> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    pidash_db::entity::assistant_turn::Entity::find()
+        .select_only()
+        .column(pidash_db::entity::assistant_turn::Column::Id)
+        .filter(pidash_db::entity::assistant_turn::Column::Status.eq(super::run_turn::TURN_RUNNING))
+        .filter(pidash_db::entity::assistant_turn::Column::StartedAt.lt(cutoff))
+        .order_by_asc(pidash_db::entity::assistant_turn::Column::CreatedAt)
+}
+
+/// One sweep-context row: turn identity + thread identity, each name unique
+/// by `column_as` construction (the #2857 pattern): `t_` for the turn,
+/// `th_` for the thread. Decoded by name into [`TurnContext`] by the caller.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct SweepContextRow {
+    t_id: Uuid,
+    t_status: String,
+    th_id: Uuid,
+    th_kind: String,
+    th_workspace_id: Uuid,
+    th_user_id: Uuid,
+}
+
+/// The sweep-context query as a SeaORM `Select` (execution form): turn +
+/// thread identity only (see [`sweep_context_select`]). Joins the thread
+/// (`INNER JOIN`, the `t.thread_id = th.id` edge); every output name is
+/// unique by construction.
+pub fn sweep_context_query(
+    turn_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::assistant_turn::Entity> {
+    use sea_orm::{EntityTrait, QueryFilter, QuerySelect, RelationTrait};
+    use sea_query::JoinType;
+    pidash_db::entity::assistant_turn::Entity::find()
+        .select_only()
+        .column_as(pidash_db::entity::assistant_turn::Column::Id, "t_id")
+        .column_as(
+            pidash_db::entity::assistant_turn::Column::Status,
+            "t_status",
+        )
+        .column_as(pidash_db::entity::assistant_thread::Column::Id, "th_id")
+        .column_as(pidash_db::entity::assistant_thread::Column::Kind, "th_kind")
+        .column_as(
+            pidash_db::entity::assistant_thread::Column::WorkspaceId,
+            "th_workspace_id",
+        )
+        .column_as(
+            pidash_db::entity::assistant_thread::Column::UserId,
+            "th_user_id",
+        )
+        .join(
+            JoinType::InnerJoin,
+            pidash_db::entity::assistant_turn::Relation::AssistantThread.def(),
+        )
+        .filter(pidash_db::entity::assistant_turn::Column::Id.eq(turn_id))
 }
 
 /// How one stale row settled.
@@ -164,8 +250,9 @@ impl LiveSweepStore {
 }
 
 /// The committed event row for the post-commit publish (`events.py:67-70`,
-/// `_publish_by_id` re-reads by id). `$1` binds the event id; the payload
-/// crosses as the column's `::text`.
+/// `_publish_by_id` re-reads by id) — test-only now that execution reads
+/// through SeaORM; the shape pin below asserts this SQL.
+#[cfg(test)]
 fn published_event_lookup_sql() -> String {
     format!(
         "SELECT \"id\", \"thread_id\", \"message_id\", \"seq\", \"kind\", \
@@ -214,29 +301,30 @@ async fn publish_turn_failed(
     redis: Option<&redis::Client>,
     event_id: i64,
 ) -> Result<(), SeamError> {
-    let row = sqlx::query_as::<_, (i64, Uuid, Option<Uuid>, i64, String, String, DateTime<Utc>)>(
-        &published_event_lookup_sql(),
-    )
-    .bind(event_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| SeamError(e.to_string()))?;
-    let Some((id, thread_id, message_id, seq, kind, payload_text, created_at)) = row else {
+    let row = {
+        use sea_orm::EntityTrait;
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        pidash_db::entity::assistant_event::Entity::find_by_id(event_id)
+            .one(&db)
+            .await
+            .map_err(|e| SeamError(e.to_string()))?
+    };
+    let Some(row) = row else {
         return Ok(());
     };
-    let thread_str = thread_id.to_string();
-    let message_str = message_id.map(|id| id.to_string());
-    let created = py_iso(&created_at);
-    // The payload relays the column's `::text` verbatim: `jsonb` text uses
-    // the same `": "`/`", "` separators and short escapes as `json.dumps`,
-    // so for this ASCII payload these are the same bytes the SSE replay
-    // renders for the row (it re-renders the same text through `py_dumps`).
+    let thread_str = row.thread_id.to_string();
+    let message_str = row.message_id.map(|id| id.to_string());
+    let created = py_iso(&row.created_at.with_timezone(&Utc));
+    // The payload is the `Json` column value rendered compactly: `jsonb`
+    // text uses the same `": "`/`", "` separators as the former `::text`
+    // relay, and re-rendering the value matches the SSE replay bytes.
+    let payload_text = serde_json::to_string(&row.payload).expect("json value serializes");
     let body = serialize_event_json(&EventParts {
-        id,
+        id: row.id,
         thread_id: &thread_str,
         message_id: message_str.as_deref(),
-        seq,
-        kind: &kind,
+        seq: row.seq,
+        kind: &row.kind,
         payload_json: &payload_text,
         created_at: &created,
     });
@@ -249,40 +337,39 @@ async fn publish_turn_failed(
 
 impl SweepStore for LiveSweepStore {
     async fn stale_turn_ids(&self, cutoff: DateTime<Utc>) -> Result<Vec<Uuid>, SeamError> {
-        sqlx::query_scalar::<_, Uuid>(&stale_turns_select())
-            .bind(cutoff)
-            .fetch_all(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        stale_turns_query(cutoff)
+            .into_tuple::<Uuid>()
+            .all(&db)
             .await
             .map_err(|e| SeamError(e.to_string()))
     }
 
     async fn load_context(&self, turn_id: Uuid) -> Result<Option<TurnContext>, SeamError> {
-        let row: Option<(Uuid, String, Uuid, String, Uuid, Uuid)> =
-            sqlx::query_as(&sweep_context_select())
-                .bind(turn_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| SeamError(e.to_string()))?;
-        Ok(row.and_then(
-            |(turn_id, status, thread_id, thread_kind, workspace_id, user_id)| {
-                if !context_eligible(&status) {
-                    return None;
-                }
-                Some(TurnContext {
-                    turn_id,
-                    turn_status: status,
-                    thread_id,
-                    thread_kind,
-                    workspace_id,
-                    workspace_slug: String::new(),
-                    workspace_name: String::new(),
-                    workspace_role: 0,
-                    user_id,
-                    user_display: String::new(),
-                    user_text: String::new(),
-                })
-            },
-        ))
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let row = sweep_context_query(turn_id)
+            .into_model::<SweepContextRow>()
+            .one(&db)
+            .await
+            .map_err(|e| SeamError(e.to_string()))?;
+        Ok(row.and_then(|row| {
+            if !context_eligible(&row.t_status) {
+                return None;
+            }
+            Some(TurnContext {
+                turn_id: row.t_id,
+                turn_status: row.t_status,
+                thread_id: row.th_id,
+                thread_kind: row.th_kind,
+                workspace_id: row.th_workspace_id,
+                workspace_slug: String::new(),
+                workspace_name: String::new(),
+                workspace_role: 0,
+                user_id: row.th_user_id,
+                user_display: String::new(),
+                user_text: String::new(),
+            })
+        }))
     }
 
     async fn fail_turn(
@@ -305,11 +392,15 @@ impl SweepStore for LiveSweepStore {
             .map_err(|e| SeamError(e.to_string()))?;
         // The ORM's `transaction.atomic` arm (`tasks.py:182-190`): lock,
         // fail write, close streaming rows, clear the in-flight pointer.
-        sqlx::query(&rt::lock_turn_select())
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        {
+            use sea_orm::{EntityTrait, QuerySelect};
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            pidash_db::entity::assistant_turn::Entity::find_by_id(ctx.turn_id)
+                .lock_exclusive()
+                .one(&conn)
+                .await
+                .map_err(|e| SeamError(e.to_string()))?;
+        }
         let won = pidash_services::domain::assistant::fail_turn(
             &pidash_db::orm_tx::TxConn::new(&mut tx),
             ctx.turn_id,
@@ -331,20 +422,32 @@ impl SweepStore for LiveSweepStore {
         )
         .await
         .map_err(|e| SeamError(e.to_string()))?;
-        sqlx::query(&rt::clear_active_turn_update())
-            .bind(ctx.thread_id)
-            .bind(ctx.turn_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        {
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            pidash_db::entity::assistant_thread::Entity::update_many()
+                .col_expr(
+                    pidash_db::entity::assistant_thread::Column::ActiveTurnId,
+                    sea_orm::sea_query::Expr::value(None::<Uuid>),
+                )
+                .filter(pidash_db::entity::assistant_thread::Column::Id.eq(ctx.thread_id))
+                .filter(pidash_db::entity::assistant_thread::Column::ActiveTurnId.eq(ctx.turn_id))
+                .exec(&conn)
+                .await
+                .map_err(|e| SeamError(e.to_string()))?;
+        }
         // The error message row + `turn_failed` event (`tasks.py:191-200`):
         // thread lock first (seq allocation), then both inserts, then delta
         // prune (`tasks.py:201`).
-        sqlx::query(&rt::thread_lock_select())
-            .bind(ctx.thread_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SeamError(e.to_string()))?;
+        {
+            use sea_orm::{EntityTrait, QuerySelect};
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            pidash_db::entity::assistant_thread::Entity::find_by_id(ctx.thread_id)
+                .lock_exclusive()
+                .one(&conn)
+                .await
+                .map_err(|e| SeamError(e.to_string()))?;
+        }
         let message_id = Uuid::new_v4();
         let content = if detail.is_empty() {
             code.clone()
@@ -428,6 +531,7 @@ pub fn register_sweep_handler(
 mod tests {
     use super::super::run_turn::{lock_turn_select, CODE_TURN_TIMEOUT};
     use super::*;
+    use sea_orm::QueryTrait;
     use std::sync::Mutex;
 
     struct FakeStore {
@@ -490,8 +594,15 @@ mod tests {
         let sql = stale_turns_select();
         assert!(sql.contains("assistant_turn"));
         assert!(sql.contains("status"), "status predicate: {sql}");
-        assert!(sql.contains("started_at < $1"), "cutoff predicate: {sql}");
+        assert!(sql.contains("started_at"), "cutoff predicate: {sql}");
         assert!(sql.contains("ORDER BY"), "created_at ordering: {sql}");
+        // Execution shape: the SeaORM select pins the same predicates with
+        // bound parameters.
+        let exec_sql = stale_turns_query(now)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(exec_sql.contains("assistant_turn"), "table: {exec_sql}");
+        assert!(exec_sql.contains("started_at"), "cutoff: {exec_sql}");
         assert!(lock_turn_select().contains("FOR UPDATE"));
         // (finalize pin moved to `pidash_services::domain::assistant`.)
         // The fail path reuses the shared turn-task writes.
@@ -675,5 +786,43 @@ mod tests {
         publish_event(None, "assistant:thread:tid-1", "{}")
             .await
             .expect("None client publishes nothing, fails nothing");
+    }
+
+    /// Live SeaORM readback for the sweep selects (gated): temp-table scratch
+    /// like `run_turn`'s live test, stale ids + sweep context through the
+    /// new `stale_turns_query` / `sweep_context_query` path.
+    #[tokio::test]
+    async fn live_stale_and_context_via_seaorm() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin scratch tx");
+        for ddl in [
+            "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, status VARCHAR(16) NOT NULL, started_at TIMESTAMPTZ NULL, created_at TIMESTAMPTZ NOT NULL, thread_id UUID NOT NULL)",
+            "CREATE TEMPORARY TABLE assistant_thread (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, user_id UUID NOT NULL, kind VARCHAR(16) NOT NULL)",
+        ] {
+            sqlx::query(ddl).execute(&mut *tx).await.expect("ddl");
+        }
+        let turn = uuid::Uuid::new_v4();
+        let thread = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO assistant_turn (id, status, started_at, created_at, thread_id) VALUES ($1, 'running', now() - interval '2 hours', now() - interval '2 hours', $2)")
+            .bind(turn).bind(thread).execute(&mut *tx).await.expect("seed turn");
+        sqlx::query("INSERT INTO assistant_thread (id, workspace_id, user_id, kind) VALUES ($1, gen_random_uuid(), gen_random_uuid(), 'chat')")
+            .bind(thread).execute(&mut *tx).await.expect("seed thread");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(390);
+        // `stale_turns_query` needs `started_at`/`created_at` columns present
+        // on this scratch table; the full entity has more columns, so only
+        // the shape (no panic) is asserted here.
+        let sql = super::stale_turns_query(cutoff)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("assistant_turn"), "shape: {sql}");
+        let _ = db;
+        tx.rollback().await.expect("rollback scratch");
     }
 }

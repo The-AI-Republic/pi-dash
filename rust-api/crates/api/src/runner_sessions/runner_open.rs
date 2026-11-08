@@ -130,12 +130,11 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::redis::client_from_settings;
-use pidash_db::runner_runs::{
-    chat_event, chat_message, chat_session, AgentChatMessage, AgentChatSession,
-};
-use pidash_db::runner_sessions::models::runner_session::{self, runner_session_from_row};
+use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
+use pidash_services::runner_enroll::revoke as finalize_orm;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
 use pidash_services::runner_runs::chat as chat_kernel;
 use pidash_services::runner_runs::chat::ChatEffect;
@@ -145,9 +144,7 @@ use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
 use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::{
-    AgentChatMessageRole, AgentChatMessageStatus, AgentRunStatus, TERMINAL_RUN_STATUSES,
-};
+use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::keys::runner as runner_keys;
 use pidash_types::runner_sessions::{
     project_mismatch_drf, protocol_version_unsupported_drf, runner_id_mismatch_drf,
@@ -167,6 +164,8 @@ use crate::runner_runs::{
 use crate::state::AppState;
 use crate::v1_cycles_modules::json;
 use pidash_compat::py::py_str;
+
+use super::statements;
 
 /// Revoke reason stamped on the prior session at open (`:181`).
 const REASON_EVICTED_BY_NEW_SESSION: &str = "evicted_by_new_session";
@@ -246,16 +245,6 @@ fn django_isoformat(now: DateTime<Utc>) -> String {
     let truncated =
         DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range");
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
-}
-
-/// Quote an L2 column list for a `SELECT` projection (`"a", "b"`),
-/// so the executing reads cannot drift from the pinned lists.
-fn quoted_columns(table: &str, columns: &[&str]) -> String {
-    columns
-        .iter()
-        .map(|column| format!("\"{table}\".\"{column}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +486,12 @@ impl From<sqlx::Error> for TxnFail {
     }
 }
 
+impl From<sea_orm::DbErr> for TxnFail {
+    fn from(error: sea_orm::DbErr) -> Self {
+        TxnFail::from(into_sqlx(error))
+    }
+}
+
 fn txn_fail_response(fail: TxnFail, runner_id: Uuid) -> Response {
     match fail {
         TxnFail::Timeout => {
@@ -560,15 +555,12 @@ impl PubsubStore for SessionPubsub<'_, '_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<pidash_db::runner_sessions::RunnerSession>, OutboxError> {
-        let rows = sqlx::query(pubsub_kernel::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(OutboxError::Db)?;
-        rows.iter()
-            .map(runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::Db)
+        pubsub_kernel::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| OutboxError::Db(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -774,29 +766,6 @@ struct OpenEffects {
     chat: Vec<ChatEffect>,
 }
 
-/// Read a [`SetClause`] text value (kernel-drift guard: any other
-/// shape is a 500, like the `runs.rs` column pins).
-fn set_text(
-    clauses: &[pidash_services::runner_runs::SetClause],
-    index: usize,
-) -> Result<&str, TxnFail> {
-    match clauses.get(index).map(|clause| &clause.value) {
-        Some(pidash_services::runner_runs::SetValue::Text(text)) => Ok(text),
-        _ => Err(TxnFail::Other),
-    }
-}
-
-/// Read a [`SetClause`] JSON value.
-fn set_json(
-    clauses: &[pidash_services::runner_runs::SetClause],
-    index: usize,
-) -> Result<&Value, TxnFail> {
-    match clauses.get(index).map(|clause| &clause.value) {
-        Some(pidash_services::runner_runs::SetValue::Json(value)) => Ok(value),
-        _ => Err(TxnFail::Other),
-    }
-}
-
 /// The `apply_hello` metadata write (`session_service.py:108-141`):
 /// plan from the authenticated runner row (no extra `SELECT` — the
 /// auth load already fetched it, as `select_related` does), then the
@@ -819,36 +788,19 @@ async fn execute_hello(
         .iter()
         .map(|clause| clause.column)
         .collect();
-    if plan.capabilities_changed {
-        if columns.as_slice() != HELLO_COLUMNS_WITH_CAPS {
-            return Err(TxnFail::Other);
-        }
-        sqlx::query(session_kernel::HELLO_UPDATE_SQL)
-            .bind(set_json(&plan.set_clauses, 0)?)
-            .bind(set_text(&plan.set_clauses, 1)?)
-            .bind(set_text(&plan.set_clauses, 2)?)
-            .bind(set_text(&plan.set_clauses, 3)?)
-            .bind(set_json(&plan.set_clauses, 4)?)
-            .bind(Utc::now())
-            .bind(runner.id)
-            .execute(&mut **tx)
-            .await
-            .map_err(TxnFail::from)?;
+    let expected: &[&str] = if plan.capabilities_changed {
+        &HELLO_COLUMNS_WITH_CAPS
     } else {
-        if columns.as_slice() != HELLO_COLUMNS_BARE {
-            return Err(TxnFail::Other);
-        }
-        sqlx::query(session_kernel::HELLO_UPDATE_NO_CAPABILITIES_SQL)
-            .bind(set_text(&plan.set_clauses, 0)?)
-            .bind(set_text(&plan.set_clauses, 1)?)
-            .bind(set_text(&plan.set_clauses, 2)?)
-            .bind(set_json(&plan.set_clauses, 3)?)
-            .bind(Utc::now())
-            .bind(runner.id)
-            .execute(&mut **tx)
-            .await
-            .map_err(TxnFail::from)?;
+        &HELLO_COLUMNS_BARE
+    };
+    if columns.as_slice() != expected {
+        return Err(TxnFail::Other);
     }
+    statements::hello_update_statement(&plan.set_clauses, runner.id, Utc::now())
+        .map_err(|_| TxnFail::Other)?
+        .exec(&TxConn::new(tx))
+        .await
+        .map_err(TxnFail::from)?;
     Ok(())
 }
 
@@ -865,65 +817,31 @@ async fn execute_reap_finalize(
     detail: &str,
     effects: &mut Vec<LifecycleEffect>,
 ) -> Result<(), TxnFail> {
-    use sqlx::Row;
     let values = session_kernel::plan_reap_finalize(detail);
     let columns: Vec<&str> = values.clauses.iter().map(|clause| clause.column).collect();
     if columns.as_slice() != REAP_FINALIZE_COLUMNS {
         return Err(TxnFail::Other);
     }
-    let lock_sql = finalization::lock_run_for_finalize_sql(true, false);
-    let mut lock = sqlx::query(&lock_sql).bind(run_id);
-    for status in TERMINAL_RUN_STATUSES {
-        lock = lock.bind(status.value());
-    }
-    let found = lock
-        .bind(runner_id)
-        .fetch_optional(&mut **tx)
+    let conn = TxConn::new(tx);
+    let Some(locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
         .await
-        .map_err(TxnFail::from)?;
-    let Some(row) = found else {
+        .map_err(TxnFail::from)?
+    else {
         return Ok(());
     };
-    let error_details = set_json(&values.clauses, 4)?;
-    sqlx::query(&finalization::finalize_update_sql(&values))
-        .bind(AgentRunStatus::Failed.value())
-        .bind(Utc::now())
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(error_details)
-        .bind(run_id)
-        .execute(&mut **tx)
+    finalize_orm::finalize_update(&conn, &values, run_id, Utc::now())
         .await
         .map_err(TxnFail::from)?;
-    let executor_raw: String = row.try_get("executor_kind").map_err(TxnFail::from)?;
-    if executor_raw == AgentExecutorKind::CloudAgent.value() {
-        let exists = sqlx::query_scalar::<_, i32>(finalization::terminal_event_exists_sql())
-            .bind(run_id)
-            .bind("terminal")
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(TxnFail::from)?;
-        if exists.is_none() {
-            let max_seq = sqlx::query_scalar::<_, i32>(finalization::terminal_event_max_seq_sql())
-                .bind(run_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(TxnFail::from)?;
-            let event = finalization::plan_terminal_event(
-                max_seq,
-                AgentRunStatus::Failed,
-                &finalization::finalize_error_code(&values),
-            );
-            sqlx::query(&finalization::terminal_event_insert_sql())
-                .bind(run_id)
-                .bind(event.seq)
-                .bind("terminal")
-                .bind(event.payload)
-                .bind(Utc::now())
-                .execute(&mut **tx)
-                .await
-                .map_err(TxnFail::from)?;
-        }
+    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
+        finalize_orm::append_terminal_event_once(
+            &conn,
+            run_id,
+            AgentRunStatus::Failed,
+            &finalization::finalize_error_code(&values),
+            Utc::now(),
+        )
+        .await
+        .map_err(TxnFail::from)?;
     }
     effects.extend(finalization::plan_publish_effects(run_id));
     Ok(())
@@ -953,45 +871,31 @@ async fn execute_reap_open(
         .transpose()
         .map_err(|_| TxnFail::Other)?;
     let statuses = session_kernel::reapable_statuses(true);
-    let exclude_in_flight = in_flight_id.is_some();
 
-    let stopped_ids: Vec<Uuid> = {
-        let sql = session_kernel::stale_cancel_ids_sql(&statuses, exclude_in_flight);
-        let mut query = sqlx::query_scalar(&sql).bind(cutoff).bind(runner_id);
-        if let Some(id) = in_flight_id {
-            query = query.bind(id);
-        }
-        query.fetch_all(&mut **tx).await.map_err(TxnFail::from)?
-    };
-    let stopped_pods: Vec<Option<Uuid>> = {
-        let sql = session_kernel::stale_cancel_pod_ids_sql(&statuses, exclude_in_flight);
-        let mut query = sqlx::query_scalar(&sql).bind(cutoff).bind(runner_id);
-        if let Some(id) = in_flight_id {
-            query = query.bind(id);
-        }
-        query.fetch_all(&mut **tx).await.map_err(TxnFail::from)?
-    };
+    let conn = TxConn::new(tx);
+    let stopped_ids: Vec<Uuid> =
+        statements::stale_cancel_ids_select(cutoff, runner_id, &statuses, in_flight_id)
+            .all(&conn)
+            .await
+            .map_err(TxnFail::from)?;
+    let stopped_pods: Vec<Option<Uuid>> =
+        statements::stale_cancel_pod_ids_select(cutoff, runner_id, &statuses, in_flight_id)
+            .all(&conn)
+            .await
+            .map_err(TxnFail::from)?;
     if !stopped_ids.is_empty() {
         // Dead on the open path (`CANCEL_REQUESTED` is never
         // reapable here); kept so the executor stays total.
-        let sql = session_kernel::cancel_barrier_update_sql(stopped_ids.len());
-        let mut update = sqlx::query(&sql).bind(now);
-        for id in &stopped_ids {
-            update = update.bind(*id);
-        }
-        update.execute(&mut **tx).await.map_err(TxnFail::from)?;
+        statements::cancel_barrier_update_statement(now, &stopped_ids)
+            .exec(&conn)
+            .await
+            .map_err(TxnFail::from)?;
     }
-    let reaped: Vec<(Uuid, Option<Uuid>)> = {
-        let sql = session_kernel::stale_pairs_sql(&statuses, exclude_in_flight, stopped_ids.len());
-        let mut query = sqlx::query_as(&sql).bind(cutoff).bind(runner_id);
-        if let Some(id) = in_flight_id {
-            query = query.bind(id);
-        }
-        for id in &stopped_ids {
-            query = query.bind(*id);
-        }
-        query.fetch_all(&mut **tx).await.map_err(TxnFail::from)?
-    };
+    let reaped: Vec<(Uuid, Option<Uuid>)> =
+        statements::stale_pairs_select(cutoff, runner_id, &statuses, in_flight_id, &stopped_ids)
+            .all(&conn)
+            .await
+            .map_err(TxnFail::from)?;
     if !session_kernel::should_schedule_drain(reaped.len(), stopped_ids.len()) {
         return Ok(());
     }
@@ -1015,59 +919,6 @@ async fn execute_reap_open(
 // Chat release (`release_active_chats_for_runner`, `chat.py:451-480`)
 // ---------------------------------------------------------------------------
 
-/// Map a locked chat-session row (the `chat_session::COLUMNS`
-/// projection) into the L2 struct. Unknown statuses are the fleet's
-/// 500 (unreachable here — the lock already filters `open`).
-fn chat_session_from_row(row: &sqlx::postgres::PgRow) -> Result<AgentChatSession, TxnFail> {
-    use sqlx::Row;
-    let status_raw: String = row.try_get("status").map_err(TxnFail::from)?;
-    let status = pidash_types::runner_runs::AgentChatSessionStatus::from_value(&status_raw)
-        .ok_or(TxnFail::Other)?;
-    Ok(AgentChatSession {
-        id: row.try_get("id").map_err(TxnFail::from)?,
-        workspace_id: row.try_get("workspace_id").map_err(TxnFail::from)?,
-        runner_id: row.try_get("runner_id").map_err(TxnFail::from)?,
-        created_by_id: row.try_get("created_by_id").map_err(TxnFail::from)?,
-        pod_id: row.try_get("pod_id").map_err(TxnFail::from)?,
-        status,
-        agent_kind: row.try_get("agent_kind").map_err(TxnFail::from)?,
-        local_thread_id: row.try_get("local_thread_id").map_err(TxnFail::from)?,
-        local_session_id: row.try_get("local_session_id").map_err(TxnFail::from)?,
-        cwd: row.try_get("cwd").map_err(TxnFail::from)?,
-        model: row.try_get("model").map_err(TxnFail::from)?,
-        active_turn_id: row.try_get("active_turn_id").map_err(TxnFail::from)?,
-        active_message_id: row.try_get("active_message_id").map_err(TxnFail::from)?,
-        close_requested: row.try_get("close_requested").map_err(TxnFail::from)?,
-        last_message_at: row.try_get("last_message_at").map_err(TxnFail::from)?,
-        closed_at: row.try_get("closed_at").map_err(TxnFail::from)?,
-        error: row.try_get("error").map_err(TxnFail::from)?,
-        created_at: row.try_get("created_at").map_err(TxnFail::from)?,
-        updated_at: row.try_get("updated_at").map_err(TxnFail::from)?,
-    })
-}
-
-/// Map a chat-message row (the `chat_message::COLUMNS` projection).
-fn chat_message_from_row(row: &sqlx::postgres::PgRow) -> Result<AgentChatMessage, TxnFail> {
-    use sqlx::Row;
-    let role_raw: String = row.try_get("role").map_err(TxnFail::from)?;
-    let role = AgentChatMessageRole::from_value(&role_raw).ok_or(TxnFail::Other)?;
-    let status_raw: String = row.try_get("status").map_err(TxnFail::from)?;
-    let status = AgentChatMessageStatus::from_value(&status_raw).ok_or(TxnFail::Other)?;
-    Ok(AgentChatMessage {
-        id: row.try_get("id").map_err(TxnFail::from)?,
-        session_id: row.try_get("session_id").map_err(TxnFail::from)?,
-        role,
-        content: row.try_get("content").map_err(TxnFail::from)?,
-        content_parts: row.try_get("content_parts").map_err(TxnFail::from)?,
-        status,
-        local_item_id: row.try_get("local_item_id").map_err(TxnFail::from)?,
-        local_turn_id: row.try_get("local_turn_id").map_err(TxnFail::from)?,
-        seq: row.try_get("seq").map_err(TxnFail::from)?,
-        created_at: row.try_get("created_at").map_err(TxnFail::from)?,
-        completed_at: row.try_get("completed_at").map_err(TxnFail::from)?,
-    })
-}
-
 /// One `release_active_chats_for_runner` row (`:458-479`): lock the
 /// OPEN session, skip idle rows, finalize to FAILED, clear the turn,
 /// emit `chat_failed`, queue the publish + drain. The per-session
@@ -1078,24 +929,15 @@ async fn execute_release_row(
     session_id: Uuid,
     effects: &mut Vec<ChatEffect>,
 ) -> Result<bool, TxnFail> {
-    let lock_sql = format!(
-        "SELECT {} FROM \"{}\" WHERE (\"{}\".\"id\" = $1 AND \"{}\".\"status\" = 'open') ORDER BY \"{}\".\"last_message_at\" DESC, \"{}\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
-        quoted_columns(chat_session::TABLE, chat_session::COLUMNS),
-        chat_session::TABLE,
-        chat_session::TABLE,
-        chat_session::TABLE,
-        chat_session::TABLE,
-        chat_session::TABLE,
-    );
-    let row = sqlx::query(&lock_sql)
-        .bind(session_id)
-        .fetch_optional(&mut **tx)
+    let conn = TxConn::new(tx);
+    let Some(row) = statements::session_lock_open_select(session_id)
+        .one(&conn)
         .await
-        .map_err(TxnFail::from)?;
-    let Some(row) = row else {
+        .map_err(TxnFail::from)?
+    else {
         return Ok(false);
     };
-    let session = chat_session_from_row(&row)?;
+    let session = statements::chat_session_from_model(row).ok_or(TxnFail::Other)?;
     if !chat_kernel::release_row_applies(&session) {
         return Ok(false);
     }
@@ -1105,29 +947,12 @@ async fn execute_release_row(
     // probe first, lazy fallback).
     let target = chat_kernel::finalize_target_message_id(None, session.active_message_id);
     let explicit = match target {
-        Some(id) => {
-            let lookup_sql = format!(
-                "SELECT {} FROM \"{}\" INNER JOIN \"{}\" ON (\"{}\".\"session_id\" = \"{}\".\"id\") WHERE (\"{}\".\"id\" = $1 AND \"{}\".\"session_id\" = $2) ORDER BY \"{}\".\"last_message_at\" DESC, \"{}\".\"created_at\" DESC, \"{}\".\"seq\" ASC LIMIT 1",
-                quoted_columns(chat_message::TABLE, chat_message::COLUMNS),
-                chat_message::TABLE,
-                chat_session::TABLE,
-                chat_message::TABLE,
-                chat_session::TABLE,
-                chat_message::TABLE,
-                chat_message::TABLE,
-                chat_session::TABLE,
-                chat_session::TABLE,
-                chat_message::TABLE,
-            );
-            sqlx::query(&lookup_sql)
-                .bind(id)
-                .bind(session.id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(TxnFail::from)?
-                .map(|row| chat_message_from_row(&row))
-                .transpose()?
-        }
+        Some(id) => statements::finalize_explicit_lookup_select(session.id, id)
+            .one(&conn)
+            .await
+            .map_err(TxnFail::from)?
+            .map(|row| statements::chat_message_from_model(row).ok_or(TxnFail::Other))
+            .transpose()?,
         None => None,
     };
     // `active_assistant_message_locked`: the turn-scoped hit wins;
@@ -1136,45 +961,19 @@ async fn execute_release_row(
     // session has no active turn).
     let mut assistant = None;
     if !session.active_turn_id.is_empty() {
-        let scoped_sql = format!(
-            "SELECT {} FROM \"{}\" WHERE (\"{}\".\"role\" = '{}' AND \"{}\".\"session_id\" = $1 AND \"{}\".\"status\" = '{}' AND \"{}\".\"local_turn_id\" = $2) ORDER BY \"{}\".\"created_at\" DESC LIMIT 1",
-            quoted_columns(chat_message::TABLE, chat_message::COLUMNS),
-            chat_message::TABLE,
-            chat_message::TABLE,
-            AgentChatMessageRole::Assistant.value(),
-            chat_message::TABLE,
-            chat_message::TABLE,
-            AgentChatMessageStatus::Streaming.value(),
-            chat_message::TABLE,
-            chat_message::TABLE,
-        );
-        assistant = sqlx::query(&scoped_sql)
-            .bind(session.id)
-            .bind(&session.active_turn_id)
-            .fetch_optional(&mut **tx)
+        assistant = statements::assistant_turn_scoped_select(session.id, &session.active_turn_id)
+            .one(&conn)
             .await
             .map_err(TxnFail::from)?
-            .map(|row| chat_message_from_row(&row))
+            .map(|row| statements::chat_message_from_model(row).ok_or(TxnFail::Other))
             .transpose()?;
     }
     if assistant.is_none() {
-        let fallback_sql = format!(
-            "SELECT {} FROM \"{}\" WHERE (\"{}\".\"role\" = '{}' AND \"{}\".\"session_id\" = $1 AND \"{}\".\"status\" = '{}') ORDER BY \"{}\".\"created_at\" DESC LIMIT 1",
-            quoted_columns(chat_message::TABLE, chat_message::COLUMNS),
-            chat_message::TABLE,
-            chat_message::TABLE,
-            AgentChatMessageRole::Assistant.value(),
-            chat_message::TABLE,
-            chat_message::TABLE,
-            AgentChatMessageStatus::Streaming.value(),
-            chat_message::TABLE,
-        );
-        assistant = sqlx::query(&fallback_sql)
-            .bind(session.id)
-            .fetch_optional(&mut **tx)
+        assistant = statements::assistant_fallback_select(session.id)
+            .one(&conn)
             .await
             .map_err(TxnFail::from)?
-            .map(|row| chat_message_from_row(&row))
+            .map(|row| statements::chat_message_from_model(row).ok_or(TxnFail::Other))
             .transpose()?;
     }
 
@@ -1190,56 +989,27 @@ async fn execute_release_row(
         "release rows never close (chat.py:471 has no close arm)"
     );
     for update in &plan.finalize.updates {
-        sqlx::query(&format!(
-            "UPDATE \"{}\" SET \"status\" = $1, \"completed_at\" = $2 WHERE \"{}\".\"id\" = $3",
-            chat_message::TABLE,
-            chat_message::TABLE,
-        ))
-        .bind(update.status.value())
-        .bind(update.completed_at)
-        .bind(update.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(TxnFail::from)?;
+        statements::message_status_update_statement(update)
+            .exec(&conn)
+            .await
+            .map_err(TxnFail::from)?;
     }
-    sqlx::query(&format!(
-        "UPDATE \"{}\" SET \"active_turn_id\" = '', \"active_message_id\" = NULL, \"error\" = $1, \"updated_at\" = $2 WHERE \"{}\".\"id\" = $3",
-        chat_session::TABLE,
-        chat_session::TABLE,
-    ))
-    .bind(&plan.session_error)
-    .bind(Utc::now())
-    .bind(session.id)
-    .execute(&mut **tx)
-    .await
-    .map_err(TxnFail::from)?;
-    for event in &plan.events {
-        let max: Option<i32> = sqlx::query_scalar::<_, Option<i32>>(&format!(
-            "SELECT MAX(\"{}\".\"seq\") AS \"seq__max\" FROM \"{}\" WHERE \"{}\".\"session_id\" = $1",
-            chat_event::TABLE,
-            chat_event::TABLE,
-            chat_event::TABLE,
-        ))
-        .bind(session.id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(TxnFail::from)?
-        .flatten();
-        let seq = chat_kernel::next_seq_after_max(max);
-        let id: i64 = sqlx::query_scalar(&format!(
-            "INSERT INTO \"{}\" (\"session_id\", \"message_id\", \"seq\", \"source_key\", \"kind\", \"payload\", \"created_at\") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING \"id\"",
-            chat_event::TABLE,
-        ))
-        .bind(session.id)
-        .bind(event.message_id)
-        .bind(seq)
-        .bind(&event.source_key)
-        .bind(&event.kind)
-        .bind(&event.payload)
-        .bind(Utc::now())
-        .fetch_one(&mut **tx)
+    statements::fail_session_update_statement(session.id, &plan, Utc::now())
+        .exec(&conn)
         .await
         .map_err(TxnFail::from)?;
+    for event in &plan.events {
+        let max: Option<i32> = statements::next_event_seq_select(session.id)
+            .one(&conn)
+            .await
+            .map_err(TxnFail::from)?
+            .flatten();
+        let seq = chat_kernel::next_seq_after_max(max);
+        let id: i64 = statements::insert_event_statement(session.id, seq, event, Utc::now())
+            .exec(&conn)
+            .await
+            .map_err(TxnFail::from)?
+            .last_insert_id;
         effects.push(ChatEffect::PublishEvent { event_id: id });
     }
     if plan.queue_drain {
@@ -1259,15 +1029,10 @@ async fn execute_chat_release(
     runner_id: Uuid,
     effects: &mut Vec<ChatEffect>,
 ) -> Result<usize, TxnFail> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT \"{table}\".\"id\" FROM \"{table}\" WHERE (\"{table}\".\"runner_id\" = $1 AND \"{table}\".\"status\" = 'open' AND ({})) ORDER BY \"{table}\".\"last_message_at\" DESC, \"{table}\".\"created_at\" DESC",
-        chat_kernel::ACTIVE_TURN_PREDICATE_SQL,
-        table = chat_session::TABLE,
-    ))
-    .bind(runner_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(TxnFail::from)?;
+    let ids: Vec<Uuid> = statements::active_chat_session_ids_select(runner_id)
+        .all(&TxConn::new(tx))
+        .await
+        .map_err(TxnFail::from)?;
     let mut count = 0usize;
     for session_id in ids {
         if execute_release_row(tx, session_id, effects).await? {
@@ -1301,26 +1066,26 @@ async fn open_transaction(
     new_sid: Uuid,
 ) -> Result<(OpenTxnOutcome, OpenEffects), TxnFail> {
     let mut tx = pool.begin().await.map_err(TxnFail::from)?;
+    // raw-sql: `SET LOCAL` is a session setting, not a statement sea-query builds.
     sqlx::query(&format!(
         "SET LOCAL lock_timeout = '{TXN_LOCK_TIMEOUT_MS}ms'"
     ))
     .execute(&mut *tx)
     .await
     .map_err(TxnFail::from)?;
+    // raw-sql: `SET LOCAL` is a session setting, not a statement sea-query builds.
     sqlx::query(&format!(
         "SET LOCAL statement_timeout = '{TXN_STATEMENT_TIMEOUT_MS}ms'"
     ))
     .execute(&mut *tx)
     .await
     .map_err(TxnFail::from)?;
-    let prior = sqlx::query(runner_session::OPEN_PRIOR_SQL)
-        .bind(runner.id)
-        .fetch_optional(&mut *tx)
+    let prior = runner_session::open_prior_select(runner.id)
+        .one(&TxConn::new(&mut tx))
         .await
         .map_err(TxnFail::from)?;
     let mut old_session_id = None;
-    if let Some(row) = prior {
-        let prior = runner_session_from_row(&row).map_err(TxnFail::from)?;
+    if let Some(prior) = prior {
         old_session_id = Some(prior.id.to_string());
         pidash_services::domain::tokens::revoke_runner_session(
             &pidash_db::orm_tx::TxConn::new(&mut tx),
@@ -1418,13 +1183,11 @@ fn project_slug_mismatch(slug: &Value, expected: Option<String>) -> Option<Strin
 /// data: `None` when the join finds no row, the runner has no pod,
 /// or the project partner is missing.
 async fn resolve_project_slug(pool: &PgPool, runner_id: Uuid) -> Result<Option<String>, Response> {
-    use sqlx::Row;
-    let row = sqlx::query(&session_kernel::resolve_runner_slug_sql())
-        .bind(runner_id)
-        .fetch_optional(pool)
+    let row = statements::resolve_runner_slug_select(runner_id)
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some((pod_id, identifier)) = row else {
         return Ok(session_kernel::resolve_slug(&session_kernel::SlugFacts {
             row_found: false,
             pod_id: None,
@@ -1433,8 +1196,8 @@ async fn resolve_project_slug(pool: &PgPool, runner_id: Uuid) -> Result<Option<S
     };
     let facts = session_kernel::SlugFacts {
         row_found: true,
-        pod_id: row.try_get("pod_id").map_err(|_| server_error())?,
-        project_identifier: row.try_get("identifier").map_err(|_| server_error())?,
+        pod_id: Some(pod_id),
+        project_identifier: identifier,
     };
     Ok(session_kernel::resolve_slug(&facts))
 }
@@ -1447,26 +1210,22 @@ async fn open_resume_ack(
     runner_id: Uuid,
     in_flight: &Value,
 ) -> Result<Value, Response> {
-    use sqlx::Row;
     let run_id = py_str(in_flight);
     // Django's `filter(id=…)` validates before issuing SQL
     // (`ValidationError` → 500, no query); the typed bind then needs
     // no `uuid = text` operator either.
     let run_uuid: Uuid = run_id.parse().map_err(|_| server_error())?;
-    let row = sqlx::query(&session_kernel::resume_ack_lookup_sql())
-        .bind(run_uuid)
-        .bind(runner_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = statements::resume_ack_lookup_select(run_uuid, runner_id)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some((status_raw, thread_id)) = row else {
         return Ok(Value::Object(session_kernel::plan_resume_ack(
             &run_id, None, None,
         )));
     };
-    let status_raw: String = row.try_get("status").map_err(|_| server_error())?;
     let status = AgentRunStatus::from_value(&status_raw).ok_or_else(server_error)?;
-    let thread_id: String = row.try_get("thread_id").map_err(|_| server_error())?;
     let facts = session_kernel::ResumeAckFacts { status, thread_id };
     if facts.status == AgentRunStatus::CancelRequested || facts.status.is_terminal() {
         return Ok(Value::Object(session_kernel::plan_resume_ack(
@@ -1475,9 +1234,8 @@ async fn open_resume_ack(
             None,
         )));
     }
-    let last_seq: Option<i32> = sqlx::query_scalar(session_kernel::RESUME_ACK_LAST_SEQ_SQL)
-        .bind(run_uuid)
-        .fetch_optional(pool)
+    let last_seq: Option<i32> = statements::last_event_seq_select(run_uuid)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
     Ok(Value::Object(session_kernel::plan_resume_ack(
@@ -1494,7 +1252,6 @@ async fn open_redeliver(
     runner_id: Uuid,
     in_flight: Option<&Value>,
 ) -> Result<Option<Value>, Response> {
-    use sqlx::Row;
     let skip = session_kernel::parse_skip_id(in_flight);
     // Parser-validated, so the re-parse is infallible; typed because
     // Postgres has no `uuid = text` operator.
@@ -1503,28 +1260,19 @@ async fn open_redeliver(
         .map(str::parse)
         .transpose()
         .map_err(|_| server_error())?;
-    let cancel_sql = session_kernel::redeliver_cancel_sql(skip_id.is_some());
-    let mut cancel = sqlx::query(&cancel_sql).bind(runner_id);
-    if let Some(id) = skip_id {
-        cancel = cancel.bind(id);
-    }
-    let cancel_row = cancel
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let cancel_row = statements::redeliver_cancel_select(runner_id, skip_id)
+        .one(&db)
         .await
         .map_err(|_| server_error())?;
-    let facts = if let Some(row) = cancel_row {
+    let facts = if let Some(cancel_run_id) = cancel_row {
         session_kernel::RedeliverFacts {
-            cancel_run_id: Some(row.try_get("id").map_err(|_| server_error())?),
+            cancel_run_id: Some(cancel_run_id),
             assign_run: None,
         }
     } else {
-        let assign_sql = session_kernel::redeliver_assign_sql(skip_id.is_some());
-        let mut assign = sqlx::query(&assign_sql).bind(runner_id);
-        if let Some(id) = skip_id {
-            assign = assign.bind(id);
-        }
-        let assign_row = assign
-            .fetch_optional(pool)
+        let assign_row = statements::redeliver_assign_select(runner_id, skip_id)
+            .one(&db)
             .await
             .map_err(|_| server_error())?;
         match assign_row {
@@ -1533,16 +1281,15 @@ async fn open_redeliver(
                 assign_run: None,
             },
             Some(row) => {
-                let run_config: Value = row.try_get("run_config").map_err(|_| server_error())?;
-                let Value::Object(run_config) = run_config else {
+                let Value::Object(run_config) = row.run_config else {
                     return Err(server_error());
                 };
                 session_kernel::RedeliverFacts {
                     cancel_run_id: None,
                     assign_run: Some(session_kernel::RedeliverAssignFacts {
-                        run_id: row.try_get("id").map_err(|_| server_error())?,
-                        work_item_id: row.try_get("work_item_id").map_err(|_| server_error())?,
-                        prompt: row.try_get("prompt").map_err(|_| server_error())?,
+                        run_id: row.id,
+                        work_item_id: row.work_item_id,
+                        prompt: row.prompt,
                         run_config,
                     }),
                 }
@@ -1837,10 +1584,9 @@ async fn runner_session_delete_inner(
     // Canonical (lowercase) rendering: the marker key must match what
     // the open/poll paths write however the URL spelled the id.
     let sid_str = sid.to_string();
-    let row = match sqlx::query(runner_session::DELETE_GET_SQL)
-        .bind(sid)
-        .bind(runner_id)
-        .fetch_optional(&pool)
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let row = match runner_session::delete_get_select(sid, runner_id)
+        .one(&db)
         .await
     {
         Ok(row) => row,
@@ -1856,7 +1602,7 @@ async fn runner_session_delete_inner(
         return StatusCode::NO_CONTENT.into_response();
     }
     if pidash_services::domain::tokens::revoke_runner_session(
-        &pidash_db::pool::sea_orm_connection(&pool),
+        &db,
         sid,
         Utc::now(),
         REASON_CLEAN_SHUTDOWN,
@@ -1866,9 +1612,8 @@ async fn runner_session_delete_inner(
     {
         return server_error();
     }
-    if sqlx::query(session_kernel::MARK_RUNNER_OFFLINE_SQL)
-        .bind(runner_id)
-        .execute(&pool)
+    if statements::mark_runner_offline_statement(runner_id)
+        .exec(&db)
         .await
         .is_err()
     {

@@ -78,6 +78,11 @@ use axum::Router;
 use chrono::Utc;
 use sqlx::PgPool;
 
+use pidash_db::entity::{
+    accounts, project_member_invites, users, workspace_member_invites, workspace_members,
+    workspaces,
+};
+
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -999,19 +1004,6 @@ fn sanitize_email(raw: &serde_json::Value) -> Result<String, ProviderError> {
 // User pipeline (`Adapter.complete_login_or_signup`, `base.py:289-360`)
 // ---------------------------------------------------------------------------
 
-/// The user row the pipeline reads (`User.objects.filter(email)`
-/// + the login/save/sync touches).
-type UserRow = (
-    uuid::Uuid,
-    Option<String>,
-    String,
-    bool,
-    bool,
-    bool,
-    String,
-    String,
-);
-
 /// The user columns the pipeline reads (`User.objects.filter(email)`
 /// + the login/save/sync touches).
 struct DbUser {
@@ -1028,27 +1020,26 @@ struct DbUser {
 /// `User.objects.filter(email=email).first()` (`base.py:295-297`):
 /// exact match, newest first (`Meta.ordering = ("-created_at",)`).
 async fn find_user_by_email(pool: &PgPool, email: &str) -> Result<Option<DbUser>, Denial> {
-    let row: Option<UserRow> = sqlx::query_as(
-        r#"SELECT id, email, password, is_active, is_superuser, is_staff,
-                  display_name, avatar
-           FROM "users" WHERE email = $1 ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(
-        |(id, email, password, is_active, is_superuser, is_staff, display_name, avatar)| DbUser {
-            id,
-            email: email.unwrap_or_default(),
-            password,
-            is_active,
-            is_superuser,
-            is_staff,
-            display_name,
-            avatar,
-        },
-    ))
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .order_by_desc(users::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(model.map(|user| DbUser {
+        id: user.id,
+        email: user.email.unwrap_or_default(),
+        password: user.password,
+        is_active: user.is_active,
+        is_superuser: user.is_superuser,
+        is_staff: user.is_staff,
+        display_name: user.display_name,
+        avatar: user.avatar,
+    }))
 }
 
 /// `SIGNUP_DISABLED` code + name (`adapter/error.py:28`).
@@ -1090,13 +1081,19 @@ async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<()
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| CallbackOutcome::Server)?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let invited: Option<uuid::Uuid> = workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspace_member_invites::Column::Id)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackOutcome::Server)?;
     if invited.is_none() {
         return Err(CallbackOutcome::Provider(ProviderError::with_payload(
             SIGNUP_DISABLED_CODE,
@@ -1239,7 +1236,7 @@ async fn sync_user_data(
 ) -> Result<(), Denial> {
     let is_staff = user.is_staff || user.is_superuser;
     pidash_services::domain::identity::sync_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &pidash_services::domain::identity::SyncUpdate {
             first_name,
@@ -1290,7 +1287,7 @@ async fn save_user_data(
     };
     let is_staff = user.is_staff || user.is_superuser;
     pidash_services::domain::identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &pidash_services::domain::identity::LoginStamps {
             medium: Some("gitlab"),
@@ -1416,15 +1413,25 @@ async fn accepted_project_invites(
     pool: &PgPool,
     email: &str,
 ) -> Result<Vec<ProjectInvite>, Denial> {
-    let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
-        r#"SELECT "workspace_id", "project_id", "role", "created_by_id"
-           FROM "project_member_invites"
-           WHERE "email" = $1 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> =
+        project_member_invites::Entity::find()
+            .select_only()
+            .columns([
+                project_member_invites::Column::WorkspaceId,
+                project_member_invites::Column::ProjectId,
+                project_member_invites::Column::Role,
+                project_member_invites::Column::CreatedById,
+            ])
+            .filter(project_member_invites::Column::Email.eq(email))
+            .filter(project_member_invites::Column::Accepted.eq(true))
+            .filter(project_member_invites::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)
+            .map_err(|_| Denial::ServerError)?;
     Ok(rows
         .into_iter()
         .map(
@@ -1524,24 +1531,32 @@ async fn process_invitations(
 
     // Soft-delete (`SoftDeletionQuerySet.delete()`, `db/mixins.py:48-53`):
     // stamp `deleted_at` instead of removing rows.
-    sqlx::query(
-        r#"UPDATE "workspace_member_invites" SET "deleted_at" = $1
-           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
-    )
-    .bind(now)
-    .bind(email)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    sqlx::query(
-        r#"UPDATE "project_member_invites" SET "deleted_at" = $1
-           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
-    )
-    .bind(now)
-    .bind(email)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::Accepted.eq(true))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| Denial::ServerError)?;
+    project_member_invites::Entity::update_many()
+        .col_expr(
+            project_member_invites::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(project_member_invites::Column::Email.eq(email))
+        .filter(project_member_invites::Column::Accepted.eq(true))
+        .filter(project_member_invites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1557,17 +1572,28 @@ async fn accepted_workspace_invites(
     pool: &PgPool,
     email: &str,
 ) -> Result<Vec<WorkspaceInvite>, Denial> {
-    let rows: Vec<(uuid::Uuid, i16, String)> = sqlx::query_as(
-        r#"SELECT i."workspace_id", i."role", w."slug"
-           FROM "workspace_member_invites" i
-           JOIN "workspaces" w ON w."id" = i."workspace_id"
-           WHERE i."email" = $1 AND i."accepted" = TRUE
-             AND i."deleted_at" IS NULL AND w."deleted_at" IS NULL"#,
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<(uuid::Uuid, i16, String)> = workspace_member_invites::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_member_invites::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .columns([
+            workspace_member_invites::Column::WorkspaceId,
+            workspace_member_invites::Column::Role,
+        ])
+        .column_as(workspaces::Column::Slug, "slug")
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::Accepted.eq(true))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| Denial::ServerError)?;
     Ok(rows
         .into_iter()
         .map(|(workspace_id, role, slug)| WorkspaceInvite {
@@ -1615,9 +1641,15 @@ async fn bulk_insert_workspace_members(
             created_by: member.created_by_id,
         })
         .collect();
-    members::bulk_add(pool, &bulk_rows, &view_props, &issue_props, now)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &view_props,
+        &issue_props,
+        now,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1650,9 +1682,15 @@ async fn bulk_insert_project_members(
             },
         )
         .collect();
-    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &view_props, &prefs, false)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::projects::members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk,
+        &view_props,
+        &prefs,
+        false,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1684,8 +1722,13 @@ async fn redirection_path(
     now: chrono::DateTime<Utc>,
 ) -> Result<String, Denial> {
     // `Profile.objects.get_or_create(user=user)`.
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+        RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let path = pidash_services::domain::identity::get_or_create_profile(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         now,
         &random_color(),
@@ -1697,44 +1740,57 @@ async fn redirection_path(
         return Ok("onboarding".to_owned());
     }
     if let Some(last_id) = last_workspace_id {
-        let slug: Option<(String,)> = sqlx::query_as(
-            r#"SELECT w."slug" FROM "workspaces" w
-               JOIN "workspace_members" m ON m."workspace_id" = w."id"
-               WHERE w."id" = $1 AND m."member_id" = $2 AND m."is_active" = TRUE
-                 AND m."deleted_at" IS NULL AND w."deleted_at" IS NULL"#,
-        )
-        .bind(last_id)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if let Some((slug,)) = slug {
+        let slug: Option<String> = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.eq(last_id))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)
+            .map_err(|_| Denial::ServerError)?;
+        if let Some(slug) = slug {
             return Ok(slug);
         }
     }
-    let fallback: Option<(String,)> = sqlx::query_as(
-        r#"SELECT w."slug" FROM "workspaces" w
-           JOIN "workspace_members" m ON m."workspace_id" = w."id"
-           WHERE m."member_id" = $1 AND m."is_active" = TRUE
-             AND m."deleted_at" IS NULL AND w."deleted_at" IS NULL
-           ORDER BY w."created_at" ASC LIMIT 1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let Some((slug,)) = fallback {
+    let fallback: Option<String> = workspaces::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Relation::WorkspaceMembers.def(),
+        )
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .order_by_asc(workspaces::Column::CreatedAt)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| Denial::ServerError)?;
+    if let Some(slug) = fallback {
         return Ok(slug);
     }
-    let invites: (i64,) = sqlx::query_as(
-        r#"SELECT COUNT(*) FROM "workspace_member_invites"
-           WHERE "email" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(email)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if invites.0 > 0 {
+    let invites: u64 = workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| Denial::ServerError)?;
+    if invites > 0 {
         return Ok("invitations".to_owned());
     }
     Ok("create-workspace".to_owned())
@@ -1916,9 +1972,13 @@ async fn callback_success(
                 )
                 .await
                 {
-                    pidash_services::domain::identity::stamp_avatar_asset(pool, id, asset_id)
-                        .await
-                        .map_err(|_| Denial::ServerError)?;
+                    pidash_services::domain::identity::stamp_avatar_asset(
+                        &pidash_db::pool::sea_orm_connection(pool),
+                        id,
+                        asset_id,
+                    )
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
                     signup_asset = Some(asset_id);
                 }
             }
@@ -2113,22 +2173,33 @@ async fn create_update_account(
             now,
             metadata: None,
         };
-        let _ = create_account(pool, &params).await;
+        let _ = create_account(&pidash_db::pool::sea_orm_connection(pool), &params).await;
         return;
     };
-    let account_id = find_account_id(pool, *user_id, PROVIDER, &provider_account_id).await;
+    let account_id = find_account_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *user_id,
+        PROVIDER,
+        &provider_account_id,
+    )
+    .await;
     match account_id {
         Ok(Some(id)) => {
-            let loaded: Result<Option<(chrono::DateTime<Utc>, serde_json::Value)>, sqlx::Error> =
-                sqlx::query_as(
-                    r#"SELECT "created_at", "metadata" FROM "accounts" WHERE "id" = $1"#,
-                )
-                .bind(id)
-                .fetch_optional(pool)
-                .await;
+            use sea_orm::{EntityTrait, QuerySelect};
+            let db = pidash_db::pool::sea_orm_connection(pool);
+            let loaded = accounts::Entity::find_by_id(id)
+                .select_only()
+                .columns([accounts::Column::CreatedAt, accounts::Column::Metadata])
+                .into_tuple::<(chrono::DateTime<chrono::FixedOffset>, serde_json::Value)>()
+                .one(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)
+                .map(|row| {
+                    row.map(|(created_at, metadata)| (created_at.with_timezone(&Utc), metadata))
+                });
             if let Ok(Some((created_at, metadata))) = loaded {
                 let _ = rotate_account_tokens(
-                    pool,
+                    &pidash_db::pool::sea_orm_connection(pool),
                     id,
                     created_at,
                     *user_id,
@@ -2151,7 +2222,7 @@ async fn create_update_account(
                 now,
                 metadata: None,
             };
-            let _ = create_account(pool, &params).await;
+            let _ = create_account(&pidash_db::pool::sea_orm_connection(pool), &params).await;
         }
         // B6: the filter itself failing is swallowed too.
         Err(_) => {}
@@ -2162,6 +2233,103 @@ async fn create_update_account(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The invite + redirection selects keep the raw-SQL shape: inner
+    /// joins, live rows only, the same filters and order (no database
+    /// needed, orm-migration.md §3.2).
+    #[test]
+    fn invite_and_redirection_statement_shapes() {
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+            QueryTrait, RelationTrait,
+        };
+        let user_id = uuid::Uuid::nil();
+
+        // Accepted workspace invites with slugs (no ORDER BY on this
+        // arm, matching the old `query_as`).
+        let ws = workspace_member_invites::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspace_member_invites::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .columns([
+                workspace_member_invites::Column::WorkspaceId,
+                workspace_member_invites::Column::Role,
+            ])
+            .column_as(workspaces::Column::Slug, "slug")
+            .filter(workspace_member_invites::Column::Email.eq("a@b.test"))
+            .filter(workspace_member_invites::Column::Accepted.eq(true))
+            .filter(workspace_member_invites::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(ws.contains("INNER JOIN"), "ws join: {ws}");
+        assert!(ws.contains("\"slug\""), "ws slug: {ws}");
+        assert!(ws.contains("\"deleted_at\" IS NULL"), "ws live rows: {ws}");
+        assert!(!ws.contains("ORDER BY"), "ws unordered: {ws}");
+
+        // Accepted project invites, no order.
+        let pr = project_member_invites::Entity::find()
+            .select_only()
+            .columns([
+                project_member_invites::Column::WorkspaceId,
+                project_member_invites::Column::ProjectId,
+                project_member_invites::Column::Role,
+                project_member_invites::Column::CreatedById,
+            ])
+            .filter(project_member_invites::Column::Email.eq("a@b.test"))
+            .filter(project_member_invites::Column::Accepted.eq(true))
+            .filter(project_member_invites::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!pr.contains("ORDER BY"), "pr unordered: {pr}");
+        assert!(pr.contains("\"deleted_at\" IS NULL"), "pr live rows: {pr}");
+
+        // Redirection last-workspace lookup: joined, both live,
+        // LIMIT 1, no order.
+        let last_id = uuid::Uuid::nil();
+        let last = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.eq(last_id))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(last.contains("INNER JOIN"), "last join: {last}");
+        assert!(last.contains("LIMIT 1"), "last limit: {last}");
+        assert!(!last.contains("ORDER BY"), "last unordered: {last}");
+
+        // Redirection fallback: earliest-created workspace first.
+        let fallback = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_asc(workspaces::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            fallback.contains("ORDER BY \"workspaces\".\"created_at\" ASC"),
+            "fallback order: {fallback}"
+        );
+        assert!(fallback.contains("LIMIT 1"), "fallback limit: {fallback}");
+    }
 
     #[test]
     fn overlong_redirect_location_answers_400() {

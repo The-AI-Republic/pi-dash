@@ -150,6 +150,24 @@ async fn get_profile(
     // here rather than making the client combine two flags and risk
     // showing an available engine on a disabled instance.
     let available = enabled && profile.available;
+    // Legacy desktop machines take the profile outcome (§9, #2910);
+    // never fails the request.
+    {
+        let sea = pidash_db::pool::sea_orm_connection(&pool);
+        pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+            &sea,
+            actor.id,
+            if available {
+                ""
+            } else if !enabled {
+                "engine_disabled"
+            } else {
+                "profile_unavailable"
+            },
+            chrono::Utc::now(),
+        )
+        .await;
+    }
     // `""` exactly when available, else the seam's reason (or the
     // operator-switch code when the seam has none).
     let reason_code = if available {
@@ -204,11 +222,31 @@ async fn post_token(
     ) {
         return Denial::throttled().into_response();
     }
-    match state
+    let result = state
         .assistant_seam()
         .agent_model_credential(actor.id)
-        .await
-    {
+        .await;
+    // Legacy desktop machines take the token outcome (§9, #2910): a
+    // profile refusal pauses `profile_unavailable`, a wallet failure
+    // pauses `wallet_empty`, success clears the profile pauses. A
+    // classified gateway failure makes no legacy statement (the
+    // daemon's to see). Never fails the request.
+    if let Some(legacy_reason) = match &result {
+        Ok(..) => Some(""),
+        Err(CredentialError::Unavailable(..)) => Some("profile_unavailable"),
+        Err(CredentialError::WalletEmpty { .. }) => Some("wallet_empty"),
+        Err(CredentialError::Classified { .. }) => None,
+    } {
+        let sea = pidash_db::pool::sea_orm_connection(&pool);
+        pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+            &sea,
+            actor.id,
+            legacy_reason,
+            chrono::Utc::now(),
+        )
+        .await;
+    }
+    match result {
         Ok((token, expires_at)) => {
             // Cloud-overlay shape only; CE always takes the error branch
             // below. Audited by issuance, never the token.
@@ -254,6 +292,22 @@ async fn post_token(
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             error_response(status, serde_json::json!({ "error": code }))
         }
+        Err(CredentialError::WalletEmpty { detail }) => {
+            // The built-in engine's wallet classification maps onto this
+            // endpoint's transient arm, exactly as Django's
+            // `_classify_credential_error` mapped a wallet failure onto
+            // `gateway_unavailable` (503): the app keeps the current
+            // token until it expires. The response is unchanged.
+            tracing::warn!(
+                user = %actor.id,
+                detail = %detail,
+                "managed_runner.token_refresh_failed"
+            );
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                serde_json::json!({ "error": "gateway_unavailable" }),
+            )
+        }
     }
 }
 
@@ -282,19 +336,17 @@ pub fn is_desktop_from_extension(
 /// (`runtime/llm.py:67-68` + `models.py:260-262`): the row for the user,
 /// whether its encrypted key is non-empty.
 async fn fetch_llm_has_key(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<bool, Denial> {
-    let row = sqlx::query(
-        "SELECT \"api_key_encrypted\" FROM \"assistant_user_llm_config\" WHERE \"user_id\" = $1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use sqlx::Row as _;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_user_llm_config::Entity::find()
+        .filter(pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(*user_id))
+        .select_only()
+        .column(pidash_db::entity::assistant_user_llm_config::Column::ApiKeyEncrypted)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row
-        .map(|row| {
-            let encrypted: Option<Vec<u8>> = row.try_get("api_key_encrypted").unwrap_or(None);
-            pidash_db::assistant::models::has_secret(&encrypted)
-        })
+        .map(|row| pidash_db::assistant::models::has_secret(&row.api_key_encrypted))
         .unwrap_or(false))
 }
 

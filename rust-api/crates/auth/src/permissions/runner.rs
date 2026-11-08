@@ -54,23 +54,102 @@ pub fn can_use_runner(facts: &RunnerFacts) -> bool {
 /// Which of the four `filter_runs_usable_by_runner` clauses a run
 /// satisfies; each is one `EXISTS` (or direct column match) in the port's
 /// SQL, evaluated for the runner's owner.
+///
+/// `is_engine` / `team_runs` / `automatic` select the built-in-engine
+/// branch (PO-3, design `built_engine_as_runner` §8, #2903): a private
+/// engine whose machine has `engine_team_runs = false` admits only runs
+/// its owner created, plus automatic runs (tick/scheduler trigger, i.e.
+/// `not human`) on the owner's issues or from the owner's scheduler
+/// bindings. The `owned_by_owner` clause is dropped in that branch.
 pub struct RunUsability {
     pub created_by_owner: bool,
     pub owned_by_owner: bool,
     pub issue_involves_owner: bool,
     pub scheduler_authored_by_owner: bool,
+    pub is_engine: bool,
+    /// `DevMachine.engine_team_runs` is on (own-agent runners pass true).
+    pub team_runs: bool,
+    /// The run is automatic: its trigger is not in `HUMAN_TRIGGERS`.
+    pub automatic: bool,
 }
 
 /// Mirror of the annotated `.filter(Q(...) | Q(...) | ...)` for private
 /// runners; non-private runners see nothing.
+///
+/// Built-in engine runners without `engine_team_runs` use the narrower
+/// PO-3 rule: owner-created runs, plus automatic runs on owner issues or
+/// from owner-authored bindings. Engines with `engine_team_runs` fall
+/// back to the ordinary own-agent rule.
 pub fn run_visible_to_runner(visibility: i32, usability: &RunUsability) -> bool {
     if visibility != VISIBILITY_PRIVATE {
         return false;
+    }
+    if usability.is_engine && !usability.team_runs {
+        return usability.created_by_owner
+            || (usability.automatic
+                && (usability.issue_involves_owner || usability.scheduler_authored_by_owner));
     }
     usability.created_by_owner
         || usability.owned_by_owner
         || usability.issue_involves_owner
         || usability.scheduler_authored_by_owner
+}
+
+/// Python form of the usage rule (`dispatch_rules.runner_may_take`), for
+/// preflight: may `runner` take a run with these facts?
+///
+/// A run its owner created is always takable. Otherwise the owner must be
+/// involved (on the issue, or the binding's author). For an engine, an
+/// involved run is takable only when it is automatic (`human == false`)
+/// or `team_runs` is on. Note Django has no `owned_by_owner` clause here:
+/// `owner` is written from the runner at assignment, so it never admits
+/// an unassigned run.
+pub fn runner_may_take(
+    is_engine: bool,
+    team_runs: bool,
+    created_by_owner: bool,
+    human: bool,
+    issue_involves_owner: bool,
+    scheduler_authored_by_owner: bool,
+) -> bool {
+    if created_by_owner {
+        return true;
+    }
+    let involved = issue_involves_owner || scheduler_authored_by_owner;
+    if !involved {
+        return false;
+    }
+    if !is_engine {
+        return true;
+    }
+    !human || team_runs
+}
+
+/// `engine_takes_pod_work` (`dispatch_rules.py`): an engine takes pins and
+/// unpinned pod work only while it is a `pod_member` and its machine's
+/// engine is not paused. `pod_member` is `pod_dispatch == 'pod_member'`;
+/// `paused` is `Runner.engine_paused`. Callers map their data to these.
+pub fn engine_takes_pod_work(pod_member: bool, paused: bool) -> bool {
+    pod_member && !paused
+}
+
+/// `locality_pin_allowed` (`dispatch_rules.py`): may a continuation be
+/// pinned to this runner for repo locality? Own-agent runners: always.
+/// Engines: only while they take pod work. `runner_present` is false
+/// when there is no runner.
+pub fn locality_pin_allowed(
+    runner_present: bool,
+    is_engine: bool,
+    pod_member: bool,
+    paused: bool,
+) -> bool {
+    if !runner_present {
+        return false;
+    }
+    if !is_engine {
+        return true;
+    }
+    engine_takes_pod_work(pod_member, paused)
 }
 
 /// Facts for `can_manage_runner`: the view check plus ownership and the
@@ -129,6 +208,9 @@ mod tests {
             owned_by_owner: false,
             issue_involves_owner: false,
             scheduler_authored_by_owner: false,
+            is_engine: false,
+            team_runs: true,
+            automatic: true,
         }
     }
 
@@ -166,6 +248,89 @@ mod tests {
         u.created_by_owner = true;
         u.owned_by_owner = true;
         assert!(!run_visible_to_runner(99, &u));
+    }
+
+    #[test]
+    fn engine_branch_drops_owner_clause() {
+        // PO-3: private engine, team_runs off.
+        let mut u = usability();
+        u.is_engine = true;
+        u.team_runs = false;
+        u.owned_by_owner = true;
+        // owner_id alone never admits for an engine.
+        assert!(!run_visible_to_runner(VISIBILITY_PRIVATE, &u));
+        // Owner-created runs still admit.
+        u.owned_by_owner = false;
+        u.created_by_owner = true;
+        assert!(run_visible_to_runner(VISIBILITY_PRIVATE, &u));
+        // Automatic runs on owner issues/bindings admit...
+        u.created_by_owner = false;
+        u.automatic = true;
+        u.issue_involves_owner = true;
+        assert!(run_visible_to_runner(VISIBILITY_PRIVATE, &u));
+        // ...but human-triggered ones do not.
+        u.automatic = false;
+        assert!(!run_visible_to_runner(VISIBILITY_PRIVATE, &u));
+        // team_runs on restores the ordinary rule (owner clause back).
+        u.team_runs = true;
+        assert!(run_visible_to_runner(VISIBILITY_PRIVATE, &u));
+        u.issue_involves_owner = false;
+        u.owned_by_owner = true;
+        assert!(run_visible_to_runner(VISIBILITY_PRIVATE, &u));
+        // Non-private engine sees nothing.
+        assert!(!run_visible_to_runner(99, &u));
+    }
+
+    #[test]
+    fn may_take_matches_django() {
+        // (is_engine, team, created, human, issue, sched, expected)
+        let cases: &[(bool, bool, bool, bool, bool, bool, bool)] = &[
+            // Created by owner: always, even human click on a stranger issue.
+            (true, false, true, true, false, false, true),
+            (true, false, true, false, false, false, true),
+            (false, false, true, true, false, false, true),
+            // No involvement: never.
+            (true, false, false, false, false, false, false),
+            (false, false, false, false, false, false, false),
+            (true, true, false, false, false, false, false),
+            // Own-agent involved: always.
+            (false, false, false, true, true, false, true),
+            (false, false, false, false, false, true, true),
+            // Engine involved, automatic: yes; human click: team gate.
+            (true, false, false, false, true, false, true),
+            (true, false, false, false, false, true, true),
+            (true, false, false, true, true, false, false),
+            (true, false, false, true, false, true, false),
+            (true, true, false, true, true, false, true),
+            (true, true, false, true, false, true, true),
+        ];
+        for &(is_engine, team, created, human, issue, sched, expected) in cases {
+            assert_eq!(
+                runner_may_take(is_engine, team, created, human, issue, sched),
+                expected,
+                "is_engine={is_engine} team={team} created={created} \
+                 human={human} issue={issue} sched={sched}"
+            );
+        }
+    }
+
+    #[test]
+    fn locality_tables() {
+        // engine_takes_pod_work: pod_member AND not paused.
+        assert!(engine_takes_pod_work(true, false));
+        assert!(!engine_takes_pod_work(true, true));
+        assert!(!engine_takes_pod_work(false, false));
+        assert!(!engine_takes_pod_work(false, true));
+        // locality_pin_allowed: none -> false; own-agent -> true;
+        // engine -> pod-member + unpaused.
+        assert!(!locality_pin_allowed(false, false, true, false));
+        assert!(!locality_pin_allowed(false, true, true, false));
+        assert!(locality_pin_allowed(true, false, true, true));
+        assert!(locality_pin_allowed(true, false, false, false));
+        assert!(locality_pin_allowed(true, true, true, false));
+        assert!(!locality_pin_allowed(true, true, true, true));
+        assert!(!locality_pin_allowed(true, true, false, false));
+        assert!(!locality_pin_allowed(true, true, false, true));
     }
 
     #[test]

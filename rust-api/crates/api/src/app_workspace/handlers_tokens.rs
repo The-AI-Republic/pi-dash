@@ -90,11 +90,10 @@ use axum::Router;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Offset as _, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::Serialize;
-use sqlx::Row;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use pidash_services::app_workspace::{queries_user, ser_account_token};
+use pidash_services::app_workspace::ser_account_token;
 
 use super::gates;
 use crate::app_issues::Denial;
@@ -105,6 +104,8 @@ use crate::v1_cycles_modules::json::{
 };
 use pidash_compat::db::is_unique_violation;
 use pidash_compat::response::{empty_response_no_content_type as empty_response, json_response};
+use pidash_db::entity::{api_tokens, users};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// Collection path (`app/urls/api.py:10-14`).
 pub const API_TOKENS_PATH: &str = "/api/users/api-tokens/";
@@ -216,12 +217,14 @@ async fn actor_facts(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<(Tz, bool, String), Denial> {
-    let row: Option<(String, bool)> =
-        sqlx::query_as(r#"SELECT u.user_timezone, u.is_bot FROM users u WHERE u.id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = users::Entity::find_by_id(*user_id)
+        .select_only()
+        .columns([users::Column::UserTimezone, users::Column::IsBot])
+        .into_tuple::<(String, bool)>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let (zone_name, is_bot) = row.ok_or(Denial::Unauthorized)?;
     let zone = zone_name
         .parse::<Tz>()
@@ -257,36 +260,26 @@ struct TokenRow {
     workspace_id: Option<uuid::Uuid>,
 }
 
-fn token_row_from(row: &sqlx::postgres::PgRow) -> Result<TokenRow, Denial> {
-    Ok(TokenRow {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-        deleted_at: row.try_get("deleted_at").map_err(|_| Denial::ServerError)?,
-        label: row.try_get("label").map_err(|_| Denial::ServerError)?,
-        description: row
-            .try_get("description")
-            .map_err(|_| Denial::ServerError)?,
-        is_active: row.try_get("is_active").map_err(|_| Denial::ServerError)?,
-        last_used: row.try_get("last_used").map_err(|_| Denial::ServerError)?,
-        token: row.try_get("token").map_err(|_| Denial::ServerError)?,
-        user_type: row.try_get("user_type").map_err(|_| Denial::ServerError)?,
-        expired_at: row.try_get("expired_at").map_err(|_| Denial::ServerError)?,
-        is_service: row.try_get("is_service").map_err(|_| Denial::ServerError)?,
-        allowed_rate_limit: row
-            .try_get("allowed_rate_limit")
-            .map_err(|_| Denial::ServerError)?,
-        created_by: row
-            .try_get("created_by_id")
-            .map_err(|_| Denial::ServerError)?,
-        updated_by: row
-            .try_get("updated_by_id")
-            .map_err(|_| Denial::ServerError)?,
-        user_id: row.try_get("user_id").map_err(|_| Denial::ServerError)?,
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(|_| Denial::ServerError)?,
-    })
+fn token_row_from(model: &api_tokens::Model) -> TokenRow {
+    TokenRow {
+        id: model.id,
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+        deleted_at: model.deleted_at.as_ref().map(|d| d.with_timezone(&Utc)),
+        label: model.label.clone(),
+        description: model.description.clone(),
+        is_active: model.is_active,
+        last_used: model.last_used.as_ref().map(|d| d.with_timezone(&Utc)),
+        token: model.token.clone(),
+        user_type: model.user_type,
+        expired_at: model.expired_at.as_ref().map(|d| d.with_timezone(&Utc)),
+        is_service: model.is_service,
+        allowed_rate_limit: model.allowed_rate_limit.clone(),
+        created_by: model.created_by_id,
+        updated_by: model.updated_by_id,
+        user_id: model.user_id,
+        workspace_id: model.workspace_id,
+    }
 }
 
 /// Rendered strings backing one serializer view (lifetimes need owned
@@ -382,46 +375,6 @@ fn create_body(rendered: &RenderedToken, expired_echo: Option<&str>) -> String {
     };
     let view = ser_account_token::api_token_to_representation(&row);
     serde_json::to_string(&view).expect("create view serializes")
-}
-
-/// Swap the services builders' symbolic placeholders for positional
-/// binds, left to right. `:now` takes a FRESH number per occurrence
-/// (`auto_now_add` / `auto_now` / `delete()` are separate `now()`
-/// calls); every other name reuses its first number.
-fn bind_placeholders(fragment: String) -> String {
-    let mut out = String::with_capacity(fragment.len());
-    let mut numbers: BTreeMap<String, usize> = BTreeMap::new();
-    let mut next = 0usize;
-    let bytes = fragment.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b':'
-            && index + 1 < bytes.len()
-            && (bytes[index + 1].is_ascii_alphabetic() || bytes[index + 1] == b'_')
-        {
-            let mut end = index + 1;
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-                end += 1;
-            }
-            let name = &fragment[index + 1..end];
-            if name == "now" {
-                next += 1;
-                out.push_str(&format!("${next}"));
-            } else {
-                let number = *numbers.entry(name.to_owned()).or_insert_with(|| {
-                    next += 1;
-                    next
-                });
-                out.push_str(&format!("${number}"));
-            }
-            index = end;
-        } else {
-            out.push(byte as char);
-            index += 1;
-        }
-    }
-    out
 }
 
 /// Parse `request.data` through content negotiation: empty is `{}`,
@@ -1552,17 +1505,21 @@ async fn token_list(
         Ok(facts) => facts,
         Err(denial) => return denial.into_response(),
     };
-    let sql = bind_placeholders(queries_user::api_token_list_sql());
-    let rows = match sqlx::query(&sql).bind(user_id).fetch_all(&pool).await {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let rows = match api_tokens::Entity::find()
+        .filter(api_tokens::Column::UserId.eq(user_id))
+        .filter(api_tokens::Column::IsService.eq(false))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .order_by_desc(api_tokens::Column::CreatedAt)
+        .all(&db)
+        .await
+    {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let mut bodies = Vec::with_capacity(rows.len());
     for row in &rows {
-        let token = match token_row_from(row) {
-            Ok(token) => token,
-            Err(denial) => return denial.into_response(),
-        };
+        let token = token_row_from(row);
         let rendered = render_token(&token, &zone);
         let active = ser_account_token::api_token_is_active(token.expired_at, Utc::now());
         bodies.push(read_body(&rendered, active));
@@ -1596,11 +1553,12 @@ async fn token_detail(
         Ok(facts) => facts,
         Err(denial) => return denial.into_response(),
     };
-    let sql = bind_placeholders(queries_user::api_token_detail_sql());
-    let row = match sqlx::query(&sql)
-        .bind(user_id)
-        .bind(pk)
-        .fetch_optional(&pool)
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let row = match api_tokens::Entity::find()
+        .filter(api_tokens::Column::UserId.eq(user_id))
+        .filter(api_tokens::Column::Id.eq(pk))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
         Ok(row) => row,
@@ -1610,10 +1568,7 @@ async fn token_detail(
         Some(row) => row,
         None => return Denial::NotFound.into_response(),
     };
-    let token = match token_row_from(&row) {
-        Ok(token) => token,
-        Err(denial) => return denial.into_response(),
-    };
+    let token = token_row_from(&row);
     let rendered = render_token(&token, &zone);
     let active = ser_account_token::api_token_is_active(token.expired_at, Utc::now());
     json_response(StatusCode::OK, read_body(&rendered, active))
@@ -1644,11 +1599,13 @@ async fn token_delete(
     if let Err(denial) = actor_facts(&pool, &user_id).await {
         return denial.into_response();
     }
-    let lookup = bind_placeholders(queries_user::api_token_delete_lookup_sql());
-    let found = match sqlx::query(&lookup)
-        .bind(user_id)
-        .bind(pk)
-        .fetch_optional(&pool)
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let found = match api_tokens::Entity::find()
+        .filter(api_tokens::Column::UserId.eq(user_id))
+        .filter(api_tokens::Column::Id.eq(pk))
+        .filter(api_tokens::Column::IsService.eq(false))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .one(&db)
         .await
     {
         Ok(found) => found,
@@ -1866,11 +1823,15 @@ async fn token_patch(
         Ok(facts) => facts,
         Err(denial) => return denial.into_response(),
     };
-    let lookup = bind_placeholders(queries_user::api_token_patch_lookup_sql());
-    let row = match sqlx::query(&lookup)
-        .bind(user_id)
-        .bind(pk)
-        .fetch_optional(&pool)
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let row = match api_tokens::Entity::find()
+        .filter(api_tokens::Column::UserId.eq(user_id))
+        .filter(api_tokens::Column::Id.eq(pk))
+        .filter(api_tokens::Column::IsService.eq(false))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .order_by_desc(api_tokens::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
         .await
     {
         Ok(row) => row,
@@ -1880,10 +1841,7 @@ async fn token_patch(
         Some(row) => row,
         None => return empty_response(StatusCode::NOT_FOUND),
     };
-    let mut token = match token_row_from(&row) {
-        Ok(token) => token,
-        Err(denial) => return denial.into_response(),
-    };
+    let mut token = token_row_from(&row);
     let data = match negotiate_data(&headers, &body, &TOKEN_PATCH_SPEC) {
         Ok(data) => data,
         Err(response) => return response,
@@ -2111,9 +2069,11 @@ async fn token_patch(
 /// `User.objects.get(pk=...)` existence half (the queryset uses the
 /// default manager — no soft-delete filter).
 async fn user_exists(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<bool, Denial> {
-    sqlx::query("SELECT 1 FROM users WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    users::Entity::find_by_id(*id)
+        .select_only()
+        .column(users::Column::Id)
+        .one(&db)
         .await
         .map(|row| row.is_some())
         .map_err(|_| Denial::ServerError)

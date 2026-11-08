@@ -174,6 +174,81 @@ pub mod runner_session {
         })
     }
 
+    // -----------------------------------------------------------------------
+    // SeaORM twins of the statements above
+    // -----------------------------------------------------------------------
+    //
+    // Same predicates, ordering, `LIMIT` and lock as the captured text;
+    // Django's `.get()` `LIMIT 21` becomes `.one()` on a primary-key
+    // match (at most one row either way).
+
+    /// A [`RunnerSession`] from the entity row (SeaORM decodes
+    /// `timestamptz` as `DateTime<FixedOffset>`; the row model keeps
+    /// `Utc`).
+    pub fn runner_session_from_model(model: crate::entity::runner_session::Model) -> RunnerSession {
+        RunnerSession {
+            id: model.id,
+            runner_id: model.runner_id,
+            protocol_version: model.protocol_version,
+            created_at: model.created_at.with_timezone(&chrono::Utc),
+            last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_at: model.revoked_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_reason: model.revoked_reason,
+        }
+    }
+
+    /// The runner's active rows, newest first
+    /// (`filter(runner_id=…, revoked_at__isnull=True)` under
+    /// `Meta.ordering`): the shared core of [`OPEN_PRIOR_SQL`],
+    /// [`ACTIVE_ID_SQL`] and the pubsub close list.
+    pub fn active_select(
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use crate::entity::runner_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+        Entity::find()
+            .filter(Column::RevokedAt.is_null())
+            .filter(Column::RunnerId.eq(runner_id))
+            .order_by_desc(Column::CreatedAt)
+    }
+
+    /// [`OPEN_PRIOR_SQL`] on SeaORM: the active row, `LIMIT 1 FOR
+    /// UPDATE`. Run inside the open transaction.
+    pub fn open_prior_select(
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use sea_orm::QuerySelect;
+        active_select(runner_id).limit(1).lock_exclusive()
+    }
+
+    /// [`DELETE_GET_SQL`] on SeaORM: `get(id=sid, runner=runner,
+    /// revoked_at__isnull=True)`.
+    pub fn delete_get_select(
+        session_id: uuid::Uuid,
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use crate::entity::runner_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::Id.eq(session_id))
+            .filter(Column::RevokedAt.is_null())
+            .filter(Column::RunnerId.eq(runner_id))
+    }
+
+    /// [`POLL_GET_SQL`] on SeaORM: `get(id=sid, runner=runner)` — no
+    /// `revoked_at` filter; the caller rejects a revoked row with its
+    /// reason.
+    pub fn poll_get_select(
+        session_id: uuid::Uuid,
+        runner_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::runner_session::Entity> {
+        use crate::entity::runner_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::Id.eq(session_id))
+            .filter(Column::RunnerId.eq(runner_id))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -365,6 +440,131 @@ pub mod runner_session {
 
         // (The touch SQL pin moved with the statement to
         // `pidash_services::domain::tokens`.)
+
+        /// SeaORM twins against constraint-free temp copies on one
+        /// transaction (`TxConn`): the active/open/delete/poll reads
+        /// and the machine open-insert/revoke/touch writes.
+        #[tokio::test]
+        async fn live_session_twins_on_temp_tables() {
+            use sea_orm::EntityTrait;
+
+            let Ok(url) = std::env::var("DATABASE_URL") else {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            };
+            let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+            let mut tx = pool.begin().await.expect("begin");
+            for table in ["runner_session", "machine_session"] {
+                sqlx::query(&format!(
+                    "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+                ))
+                .execute(&mut *tx)
+                .await
+                .expect("temp table");
+            }
+            let (runner, session, other) = (
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+            );
+            let now = chrono::Utc::now();
+            sqlx::query(&format!(
+                "INSERT INTO runner_session (id, runner_id, protocol_version, created_at, last_seen_at, revoked_at, revoked_reason) VALUES \
+                 ('{session}', '{runner}', 4, '{now}', '{now}', NULL, ''), \
+                 ('{other}', '{runner}', 4, '{now}', '{now}', '{now}', 'evicted_by_new_session')"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("seed runner_session");
+            {
+                let conn = crate::orm_tx::TxConn::new(&mut tx);
+                // `active_select` carries only the newest active row; the
+                // revoked row is invisible.
+                let active = active_select(runner)
+                    .one(&conn)
+                    .await
+                    .expect("active")
+                    .expect("row");
+                assert_eq!(active.id, session);
+                let prior = open_prior_select(runner)
+                    .one(&conn)
+                    .await
+                    .expect("prior")
+                    .expect("row");
+                assert_eq!(prior.id, session);
+                let fetched = delete_get_select(session, runner)
+                    .one(&conn)
+                    .await
+                    .expect("delete get")
+                    .expect("row");
+                assert_eq!(fetched.id, session);
+                // Poll has no revoked_at filter: the revoked row is fetched.
+                let polled = poll_get_select(other, runner)
+                    .one(&conn)
+                    .await
+                    .expect("poll get")
+                    .expect("row");
+                assert_eq!(polled.revoked_reason, "evicted_by_new_session");
+                let mapped = runner_session_from_model(active);
+                assert_eq!(mapped.id, session);
+
+                // Machine twin: insert via SeaORM, touch, revoke, reads.
+                let machine = uuid::Uuid::new_v4();
+                let msid = uuid::Uuid::new_v4();
+                crate::entity::machine_session::Entity::insert(
+                    crate::runner_sessions::models::machine_session::open_insert_row(
+                        msid, machine, now, now, None,
+                    ),
+                )
+                .exec_without_returning(&conn)
+                .await
+                .expect("machine insert");
+                let mprior =
+                    crate::runner_sessions::models::machine_session::open_prior_select(machine)
+                        .one(&conn)
+                        .await
+                        .expect("machine prior")
+                        .expect("row");
+                assert_eq!(mprior.id, msid);
+                let later = chrono::Utc::now();
+                crate::runner_sessions::models::machine_session::touch_statement(msid, later)
+                    .exec(&conn)
+                    .await
+                    .expect("machine touch");
+                let mtouched =
+                    crate::runner_sessions::models::machine_session::poll_get_select(machine, msid)
+                        .one(&conn)
+                        .await
+                        .expect("machine poll")
+                        .expect("row");
+                assert!(mtouched.last_seen_at.unwrap() >= later - chrono::Duration::seconds(1));
+                crate::runner_sessions::models::machine_session::revoke_statement(
+                    msid,
+                    later,
+                    "clean_shutdown",
+                )
+                .exec(&conn)
+                .await
+                .expect("machine revoke");
+                assert!(
+                    crate::runner_sessions::models::machine_session::delete_get_select(
+                        machine, msid
+                    )
+                    .one(&conn)
+                    .await
+                    .expect("machine delete")
+                    .is_none()
+                );
+                let mrevoked =
+                    crate::runner_sessions::models::machine_session::poll_get_select(machine, msid)
+                        .one(&conn)
+                        .await
+                        .expect("machine poll revoked")
+                        .expect("row");
+                assert_eq!(mrevoked.revoked_reason, "clean_shutdown");
+            }
+            tx.rollback().await.expect("rollback");
+        }
     }
 }
 
@@ -445,18 +645,21 @@ pub mod machine_session {
     /// the `IS NULL` term (captured order). Machine open runs no
     /// `_bound_txn_waits` and maps no timeout to 503 — the
     /// runner-only asymmetry noted in the parent module docs.
-    pub const OPEN_PRIOR_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
+    pub const OPEN_PRIOR_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\", \"machine_session\".\"machine_token_id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"revoked_at\" IS NULL) ORDER BY \"machine_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
     /// Session-open insert (`views/machine_sessions.py:100-105`):
     /// `create(id=new_sid, dev_machine=machine,
-    /// protocol_version=RUNNER_PROTOCOL_VERSION,
-    /// last_seen_at=now)`. Params in column order: `$1` id (fresh
-    /// `uuid4`, caller-supplied), `$2` machine id, `$3` protocol
-    /// version, `$4` `created_at` (`auto_now_add`, Python-side
-    /// `now`), `$5` `last_seen_at`, `$6` `revoked_at` (`NULL`: no
-    /// default, nullable), `$7` `revoked_reason` (`""` default). No
-    /// `RETURNING`: the PK is supplied, so Django fetches nothing
-    /// back.
-    pub const OPEN_INSERT_SQL: &str = "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ($1, $2, $3, $4, $5, $6, $7)";
+    /// machine_token=auth_token,
+    /// protocol_version=RUNNER_PROTOCOL_VERSION, last_seen_at=now)`.
+    /// Params in column order: `$1` id (fresh `uuid4`,
+    /// caller-supplied), `$2` machine id, `$3` protocol version, `$4`
+    /// `created_at` (`auto_now_add`, Python-side `now`), `$5`
+    /// `last_seen_at`, `$6` `revoked_at` (`NULL`: no default,
+    /// nullable), `$7` `revoked_reason` (`""` default), `$8` the
+    /// authenticating token id — any workspace's token of the machine
+    /// may open the one session (#2910 §4.9; the poll evicts when this
+    /// token dies). No `RETURNING`: the PK is supplied, so Django
+    /// fetches nothing back.
+    pub const OPEN_INSERT_SQL: &str = "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\", \"machine_token_id\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
     /// Session revoke (`views/machine_sessions.py:96-98`
     /// open-eviction with reason `"evicted_by_new_session"`,
     /// `:155-157` delete with `"clean_shutdown"`):
@@ -469,13 +672,13 @@ pub mod machine_session {
     /// returns 204 (`:152-154`). `$1` machine id, `$2` session id
     /// (captured term order). `.get()` clears `Meta.ordering` and
     /// caps at `LIMIT 21`.
-    pub const DELETE_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2 AND \"machine_session\".\"revoked_at\" IS NULL) LIMIT 21";
+    pub const DELETE_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\", \"machine_session\".\"machine_token_id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2 AND \"machine_session\".\"revoked_at\" IS NULL) LIMIT 21";
     /// Poll-bookkeeping lookup (`views/machine_sessions.py:181`):
     /// `get(id=sid, dev_machine=machine)` — note: no `revoked_at`
     /// filter; a revoked row is fetched and rejected with its reason
     /// (`:187-194`). `$1` machine id, `$2` session id. Ordering
     /// cleared, `LIMIT 21`, like every `.get()`.
-    pub const POLL_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2) LIMIT 21";
+    pub const POLL_GET_SQL: &str = "SELECT \"machine_session\".\"id\", \"machine_session\".\"dev_machine_id\", \"machine_session\".\"protocol_version\", \"machine_session\".\"created_at\", \"machine_session\".\"last_seen_at\", \"machine_session\".\"revoked_at\", \"machine_session\".\"revoked_reason\", \"machine_session\".\"machine_token_id\" FROM \"machine_session\" WHERE (\"machine_session\".\"dev_machine_id\" = $1 AND \"machine_session\".\"id\" = $2) LIMIT 21";
     /// Poll-bookkeeping touch (`views/machine_sessions.py:199-200`):
     /// `save(update_fields=["last_seen_at"])`. `$1` last_seen_at,
     /// `$2` session id. (The sibling `DevMachine.last_seen_at`
@@ -525,6 +728,127 @@ pub mod machine_session {
             revoked_at: row.try_get("revoked_at")?,
             revoked_reason: row.try_get("revoked_reason")?,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // SeaORM twins of the statements above
+    // -----------------------------------------------------------------------
+    //
+    // Same predicates, ordering, `LIMIT` and lock as the captured text;
+    // Django's `.get()` `LIMIT 21` becomes `.one()` on a primary-key
+    // match. `machine_session` is not a design §4 table, so the writes
+    // run from the handlers directly.
+
+    /// A [`MachineSession`] from the entity row.
+    pub fn machine_session_from_model(
+        model: crate::entity::machine_session::Model,
+    ) -> MachineSession {
+        MachineSession {
+            id: model.id,
+            dev_machine_id: model.dev_machine_id,
+            protocol_version: model.protocol_version,
+            created_at: model.created_at.with_timezone(&chrono::Utc),
+            last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_at: model.revoked_at.map(|at| at.with_timezone(&chrono::Utc)),
+            revoked_reason: model.revoked_reason,
+        }
+    }
+
+    /// [`OPEN_PRIOR_SQL`] on SeaORM: the machine's active row, newest
+    /// first, `LIMIT 1 FOR UPDATE`. Run inside the open transaction.
+    pub fn open_prior_select(
+        dev_machine_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        Entity::find()
+            .filter(Column::DevMachineId.eq(dev_machine_id))
+            .filter(Column::RevokedAt.is_null())
+            .order_by_desc(Column::CreatedAt)
+            .limit(1)
+            .lock_exclusive()
+    }
+
+    /// [`OPEN_INSERT_SQL`] on SeaORM: the `create(…)` row — every
+    /// column supplied (the pk is caller-minted), `revoked_at` null,
+    /// `revoked_reason` the `''` default, protocol version
+    /// [`DEFAULT_PROTOCOL_VERSION`]. `machine_token_id` is the token
+    /// the session was opened with (#2910 §4.9); `None` on pre-#2910
+    /// rows keeps the session (§4.9 poll guard).
+    pub fn open_insert_row(
+        id: uuid::Uuid,
+        dev_machine_id: uuid::Uuid,
+        created_at: chrono::DateTime<chrono::Utc>,
+        last_seen_at: chrono::DateTime<chrono::Utc>,
+        machine_token_id: Option<uuid::Uuid>,
+    ) -> crate::entity::machine_session::ActiveModel {
+        use sea_orm::Set;
+        crate::entity::machine_session::ActiveModel {
+            id: Set(id),
+            dev_machine_id: Set(dev_machine_id),
+            protocol_version: Set(DEFAULT_PROTOCOL_VERSION),
+            created_at: Set(created_at.into()),
+            last_seen_at: Set(Some(last_seen_at.into())),
+            revoked_at: Set(None),
+            revoked_reason: Set(DEFAULT_REVOKED_REASON.to_owned()),
+            machine_token_id: Set(machine_token_id),
+        }
+    }
+
+    /// [`REVOKE_SQL`] on SeaORM: `save(update_fields=["revoked_at",
+    /// "revoked_reason"])` on one row.
+    pub fn revoke_statement(
+        session_id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        reason: &str,
+    ) -> sea_orm::UpdateMany<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::update_many()
+            .col_expr(Column::RevokedAt, Expr::value(now))
+            .col_expr(Column::RevokedReason, Expr::value(reason.to_owned()))
+            .filter(Column::Id.eq(session_id))
+    }
+
+    /// [`DELETE_GET_SQL`] on SeaORM: `get(dev_machine=…, id=sid,
+    /// revoked_at__isnull=True)`.
+    pub fn delete_get_select(
+        dev_machine_id: uuid::Uuid,
+        session_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::DevMachineId.eq(dev_machine_id))
+            .filter(Column::Id.eq(session_id))
+            .filter(Column::RevokedAt.is_null())
+    }
+
+    /// [`POLL_GET_SQL`] on SeaORM: `get(dev_machine=…, id=sid)` — no
+    /// `revoked_at` filter; the caller rejects a revoked row.
+    pub fn poll_get_select(
+        dev_machine_id: uuid::Uuid,
+        session_id: uuid::Uuid,
+    ) -> sea_orm::Select<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::find()
+            .filter(Column::DevMachineId.eq(dev_machine_id))
+            .filter(Column::Id.eq(session_id))
+    }
+
+    /// [`TOUCH_SQL`] on SeaORM: `save(update_fields=["last_seen_at"])`.
+    pub fn touch_statement(
+        session_id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> sea_orm::UpdateMany<crate::entity::machine_session::Entity> {
+        use crate::entity::machine_session::{Column, Entity};
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        Entity::update_many()
+            .col_expr(Column::LastSeenAt, Expr::value(now))
+            .filter(Column::Id.eq(session_id))
     }
 
     #[cfg(test)]
@@ -681,8 +1005,8 @@ pub mod machine_session {
             assert_terms_in_order(
                 sql,
                 &[
-                    "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\")",
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO \"machine_session\" (\"id\", \"dev_machine_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\", \"machine_token_id\")",
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 ],
             );
             assert!(

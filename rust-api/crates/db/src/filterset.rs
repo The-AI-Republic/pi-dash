@@ -635,7 +635,7 @@ pub fn archived_condition(value: &Value) -> SimpleExpr {
         Some(true) => col.is_not_null(),
         Some(false) => col.is_null(),
         // Method skipped: no filter.
-        None => Expr::cust("1 = 1"),
+        None => Expr::custom_keyword("1 = 1").into(),
     }
 }
 
@@ -868,7 +868,7 @@ pub fn compile_leaf(
                 let ids = uuid_in_list(field, value)?;
                 if ids.is_empty() {
                     // `Q(x__in=[])`: matches nothing.
-                    Ok(Expr::cust("FALSE"))
+                    Ok(Expr::custom_keyword("FALSE").into())
                 } else {
                     Ok(target.is_in(ids))
                 }
@@ -893,7 +893,7 @@ pub fn compile_leaf(
                 if parts.is_empty() {
                     // The custom method is skipped on empty input
                     // (`Filter.filter` empty-check): match-all, no guard.
-                    Ok(Expr::cust("1 = 1"))
+                    Ok(Expr::custom_keyword("1 = 1").into())
                 } else {
                     let mut ids = Vec::with_capacity(parts.len());
                     for part in &parts {
@@ -905,7 +905,7 @@ pub fn compile_leaf(
                         // Every part cleaned to `None`: the method runs
                         // against `[]` (`EmptyResultSet`) and matches
                         // nothing.
-                        Ok(Expr::cust("FALSE"))
+                        Ok(Expr::custom_keyword("FALSE").into())
                     } else {
                         Ok(target.is_in(ids).and(guard))
                     }
@@ -915,7 +915,7 @@ pub fn compile_leaf(
                 match parse_uuid_field(field, &text)? {
                     Some(id) => Ok(target.eq(id).and(guard)),
                     // The custom method is skipped: match-all, no guard.
-                    None => Ok(Expr::cust("1 = 1")),
+                    None => Ok(Expr::custom_keyword("1 = 1").into()),
                 }
             }
         }
@@ -930,7 +930,7 @@ pub fn compile_leaf(
                 // list is `Q(x__in=[])` and matches nothing.
                 let parts = csv_parts(field, value)?;
                 if parts.is_empty() {
-                    Ok(Expr::cust("FALSE"))
+                    Ok(Expr::custom_keyword("FALSE").into())
                 } else {
                     Ok(target.is_in(parts))
                 }

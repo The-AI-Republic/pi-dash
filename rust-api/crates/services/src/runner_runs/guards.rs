@@ -60,7 +60,9 @@
 //!   returns `None` for that arm — the caller applies match-nothing.
 
 use pidash_types::runner_runs::{DEFAULT_PER_PAGE, MAX_PER_PAGE};
+use sea_query::{Alias, Condition, Expr, JoinType, Query, SimpleExpr};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Pagination (`runs.py:67-84`)
@@ -279,49 +281,117 @@ pub fn runner_visible_predicate_anon(runner_alias: &str) -> String {
     format!(r#""{a}"."id" IS NULL"#, a = runner_alias)
 }
 
-/// `filter_runs_usable_by_runner` (`permissions.py:83-123`): the `OR` over
-/// the four usability arms for the runner owner's param.
+/// The annotated `_runner_visible_issue` filter: the issue the run sits
+/// on involves `owner_id` (created by, or assigned through a live
+/// `IssueAssignee` row — the through-model join with `deleted_at IS
+/// NULL` in the same condition so both bind to one row). Join aliases
+/// `U0` / `U2`, `SELECT 1 AS "a"`, `LIMIT 1` mirror Django's
+/// annotation. `run_alias` is the `agent_run` table (or its join alias).
+pub fn runner_visible_issue_exists(owner_id: Uuid, run_alias: &str) -> SimpleExpr {
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("issues"), Alias::new("U0"))
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("issue_assignees"),
+            Alias::new("U2"),
+            Expr::col((Alias::new("U0"), "id")).eq(Expr::col((Alias::new("U2"), "issue_id"))),
+        )
+        .and_where(Expr::col((Alias::new("U0"), "deleted_at")).is_null())
+        .and_where(
+            Expr::col((Alias::new("U0"), "id"))
+                .eq(Expr::col((Alias::new(run_alias), "work_item_id"))),
+        )
+        .cond_where(
+            Condition::any()
+                .add(Expr::col((Alias::new("U0"), "created_by_id")).eq(owner_id))
+                .add(
+                    Condition::all()
+                        .add(Expr::col((Alias::new("U2"), "assignee_id")).eq(owner_id))
+                        .add(Expr::col((Alias::new("U2"), "deleted_at")).is_null()),
+                ),
+        )
+        .limit(1u64)
+        .to_owned();
+    Expr::exists(sub)
+}
+
+/// The annotated `_runner_visible_scheduler` filter: the run's scheduler
+/// binding was authored by `owner_id`.
+pub fn runner_visible_scheduler_exists(owner_id: Uuid, run_alias: &str) -> SimpleExpr {
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("scheduler_bindings"), Alias::new("U0"))
+        .and_where(Expr::col((Alias::new("U0"), "deleted_at")).is_null())
+        .and_where(Expr::col((Alias::new("U0"), "actor_id")).eq(owner_id))
+        .and_where(
+            Expr::col((Alias::new("U0"), "id"))
+                .eq(Expr::col((Alias::new(run_alias), "scheduler_binding_id"))),
+        )
+        .limit(1u64)
+        .to_owned();
+    Expr::exists(sub)
+}
+
+/// `filter_runs_usable_by_runner` (`permissions.py:83-146`): the `OR`
+/// over the usability arms for the runner owner's id (a
+/// [`sea_query::Condition`], embedded with `.and_where_condition`).
 ///
 /// Private runners consume work created by their owner, billed to their
 /// owner, involving their owner (issue created by, or assigned through a
-/// live `IssueAssignee` row — the through-model join with
-/// `deleted_at IS NULL` in the same condition so both bind to one row),
-/// or scheduler work authored by their owner. The two `EXISTS` subqueries
-/// are Django's annotated filters rendered verbatim (join aliases `U0` /
-/// `U2`, `SELECT 1 AS "a"`, `LIMIT 1`) with `%s` params as `owner_param`.
+/// live `IssueAssignee` row), or scheduler work authored by their owner.
+///
+/// Built-in engine runners without `engine_team_runs` use the narrower
+/// PO-3 rule (#2903): owner-created runs, plus *automatic* runs
+/// (`trigger NOT IN HUMAN_TRIGGERS`) on owner issues or from
+/// owner-authored bindings — the `owner_id` arm is dropped.
 ///
 /// Cross-domain tables are inlined as predicate SQL only (no code calls
 /// into other domains): `"issues"` ← `Issue`, `"issue_assignees"` ←
 /// `IssueAssignee`, `"scheduler_bindings"` ← `SchedulerBinding`.
 ///
 /// Non-private runners get `qs.none()` (`permissions.py:123`): `None`
-/// here — the caller applies match-nothing (`str()` raises
-/// `EmptyResultSet` in Python and execution yields `[]`).
+/// here — the caller applies match-nothing (execution yields `[]`).
 pub fn runs_usable_by_runner_predicate(
     visibility: i32,
-    owner_param: &str,
+    owner_id: Uuid,
     run_alias: &str,
-) -> Option<String> {
+    is_engine: bool,
+    team_runs: bool,
+) -> Option<Condition> {
     if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE {
         return None;
     }
-    let issue_exists = format!(
-        r#"EXISTS(SELECT 1 AS "a" FROM "issues" U0 LEFT OUTER JOIN "issue_assignees" U2 ON (U0."id" = U2."issue_id") WHERE (U0."deleted_at" IS NULL AND U0."id" = ("{r}"."work_item_id") AND (U0."created_by_id" = {p} OR (U2."assignee_id" = {p} AND U2."deleted_at" IS NULL))) LIMIT 1)"#,
-        r = run_alias,
-        p = owner_param
-    );
-    let scheduler_exists = format!(
-        r#"EXISTS(SELECT 1 AS "a" FROM "scheduler_bindings" U0 WHERE (U0."deleted_at" IS NULL AND U0."actor_id" = {p} AND U0."id" = ("{r}"."scheduler_binding_id")) LIMIT 1)"#,
-        r = run_alias,
-        p = owner_param
-    );
-    Some(format!(
-        r#"("{r}"."created_by_id" = {p} OR "{r}"."owner_id" = {p} OR {issue} OR {sched})"#,
-        r = run_alias,
-        p = owner_param,
-        issue = issue_exists,
-        sched = scheduler_exists
-    ))
+    let issue = runner_visible_issue_exists(owner_id, run_alias);
+    let sched = runner_visible_scheduler_exists(owner_id, run_alias);
+    if is_engine && !team_runs {
+        let triggers: Vec<SimpleExpr> = pidash_types::runner_runs::enums::HUMAN_TRIGGERS
+            .iter()
+            .map(|trigger| trigger.value().into())
+            .collect();
+        return Some(
+            Condition::any()
+                .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
+                .add(
+                    Condition::all()
+                        .add(Expr::col((Alias::new(run_alias), "trigger")).is_not_in(triggers))
+                        .add(Condition::any().add(issue).add(sched)),
+                ),
+        );
+    }
+    Some(
+        Condition::any()
+            .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
+            .add(Expr::col((Alias::new(run_alias), "owner_id")).eq(owner_id))
+            .add(issue)
+            .add(sched),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -756,24 +826,64 @@ mod tests {
 
     #[test]
     fn runs_usable_predicate_matches_django() {
+        use sea_query::PostgresQueryBuilder;
+
         let sql = &fx04()["filter_runs_usable_by_runner_sql"];
+        // Django's annotated form (fixture documents it).
         let django = sql["private"].as_str().expect("sql");
-        let ours = runs_usable_by_runner_predicate(0, OWNER_LITERAL, "agent_run").expect("private");
-        // Our fragment is exactly the outer WHERE term: the `EXISTS`
-        // subqueries nest their own WHEREs, so anchor on the FROM clause.
-        let where_term = django
-            .split_once(r#"FROM "agent_run" WHERE "#)
-            .expect("outer WHERE")
-            .1
-            .strip_suffix(r#" ORDER BY "agent_run"."created_at" DESC"#)
-            .expect("ORDER BY tail");
-        assert_eq!(ours, where_term);
-        // The through-model `deleted_at` guard binds to the same joined
-        // row as the owner match.
-        assert!(ours.contains(r#"(U2."assignee_id" = 5cd0df65-d07d-496f-beff-db9750c1f375 AND U2."deleted_at" IS NULL)"#));
+        assert!(django.contains(r#"FROM "agent_run" WHERE "#));
+        let owner = Uuid::parse_str(OWNER_LITERAL).expect("owner");
+        let cond =
+            runs_usable_by_runner_predicate(0, owner, "agent_run", false, true).expect("private");
+        let ours = Query::select()
+            .from(Alias::new("agent_run"))
+            .cond_where(cond)
+            .to_owned()
+            .to_string(PostgresQueryBuilder);
+        // The four arms: created by, owned by, issue involvement,
+        // scheduler authorship. The through-model `deleted_at` guard
+        // binds to the same joined row as the owner match.
+        for arm in [
+            "\"agent_run\".\"created_by_id\"",
+            "\"agent_run\".\"owner_id\"",
+            "FROM \"issues\" AS \"U0\"",
+            "FROM \"scheduler_bindings\" AS \"U0\"",
+        ] {
+            assert!(ours.contains(arm), "arm present: {arm}");
+        }
+        assert!(ours.contains("U2"));
+        assert!(ours.contains("\"deleted_at\" IS NULL"));
+        // Engine branch (PO-3): owner arm dropped, trigger gate added.
+        let engine = Query::select()
+            .from(Alias::new("agent_run"))
+            .cond_where(
+                runs_usable_by_runner_predicate(0, owner, "agent_run", true, false)
+                    .expect("engine"),
+            )
+            .to_owned()
+            .to_string(PostgresQueryBuilder);
+        assert!(!engine.contains("\"agent_run\".\"owner_id\""));
+        assert!(engine.contains("NOT IN"));
+        for trigger in [
+            "'state_transition'",
+            "'run_ai'",
+            "'direct'",
+            "'comment_and_run'",
+        ] {
+            assert!(engine.contains(trigger), "human trigger listed: {trigger}");
+        }
+        // team_runs on restores the ordinary rule.
+        let team = Query::select()
+            .from(Alias::new("agent_run"))
+            .cond_where(
+                runs_usable_by_runner_predicate(0, owner, "agent_run", true, true).expect("team"),
+            )
+            .to_owned()
+            .to_string(PostgresQueryBuilder);
+        assert!(team.contains("\"agent_run\".\"owner_id\""));
         // Non-private runners match nothing (`qs.none()`).
         assert_eq!(
-            runs_usable_by_runner_predicate(99, OWNER_LITERAL, "agent_run"),
+            runs_usable_by_runner_predicate(99, owner, "agent_run", false, true),
             None
         );
         assert!(sql["non_private_is_none_qs"].as_bool().expect("flag"));

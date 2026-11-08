@@ -37,7 +37,7 @@
 //! - validation kernel: `pidash_types::v1_assets::sticky`
 //!   (`validate_sticky_descriptions`, `strip_ignored_sticky_keys`);
 //! - list SQL: `pidash_db::v1_assets::sticky_queries`
-//!   (`sticky_list_sql`, `icontains_pattern`);
+//!   (`sticky_list`, `sticky_list_count`, `icontains_pattern`);
 //! - columns/defaults/save rules: `pidash_db::v1_assets::model::sticky`
 //!   (`COLUMNS`, `stripped_description`, `sort_order_on_create`);
 //! - gates/denial bodies: [`super::permissions`]
@@ -129,13 +129,20 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Datelike, LocalResult, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
+use sea_orm::sea_query::{Expr, Func};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
+    JoinType, QueryFilter, QuerySelect, Set,
+};
 use serde_json::{Map, Value};
-use sqlx::Row;
 use uuid::Uuid;
 
 use pidash_auth::permissions::workspace::WorkspaceFacts;
 use pidash_auth::scope::TenantScope;
 use pidash_auth::token as token_kernel;
+use pidash_db::entity::{
+    api_tokens, dev_machine, machine_token, stickies, users, workspace_members, workspaces,
+};
 use pidash_db::v1_assets::{model::sticky as sticky_model, sticky_queries};
 use pidash_types::v1_assets::sticky as sticky_types;
 use pidash_types::WorkspaceId;
@@ -335,20 +342,54 @@ async fn authenticate(
     }
 }
 
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    id: Uuid,
+    user_id: Uuid,
+    is_active: bool,
+    expired_at: Option<DateTime<Utc>>,
+}
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS NULL`,
+/// the `SoftDeletionManager` scope, `db/mixins.py:56-66`: a soft-deleted
+/// token 403s instead of authenticating).
+async fn live_api_token(
+    pool: &sqlx::PgPool,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::Id,
+            api_tokens::Column::UserId,
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 /// `validate_api_token` (`api_authentication.py:30-43`): exact token match,
 /// `is_active`, unexpired — then stamp `last_used`. The `deleted_at IS
 /// NULL` conjunct is the `SoftDeletionManager` scope
 /// (`db/mixins.py:56-66`): a soft-deleted token 403s.
 async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, Denial> {
     let now = Utc::now();
-    let row: Option<(Uuid, Uuid, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"SELECT id, user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((id, user_id, is_active, expired_at)) = row else {
+    let row = live_api_token(pool, presented).await?;
+    let Some(ApiTokenLookup {
+        id,
+        user_id,
+        is_active,
+        expired_at,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     if !is_active {
@@ -372,26 +413,81 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Uuid, 
     Ok(user_id)
 }
 
-/// `is_workspace_member` for machine tokens
-/// (`core/permissions.py:28-34`): active row, any role, through the
-/// default manager (soft-deleted rows do not count — the
-/// `handlers_members` precedent carries the same conjunct).
-/// Binds: `$1` workspace id, `$2` user id.
-const MACHINE_MEMBER_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM workspace_members
-           WHERE workspace_id = $1 AND member_id = $2 AND is_active AND deleted_at IS NULL)"#;
+/// One `machine_token` row for the lookup, with the linked dev-machine
+/// revocation state (all three come from the `LEFT JOIN`: a token with
+/// no device reads `None` for each).
+#[derive(Debug, FromQueryResult)]
+struct MachineTokenLookup {
+    id: Uuid,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    revoked_at: Option<DateTime<Utc>>,
+    dev_machine_id: Option<Uuid>,
+    dm_revoked: Option<DateTime<Utc>>,
+    dm_found: Option<Uuid>,
+}
 
-/// One `machine_token` + `dev_machine` lookup row: token id, user id,
-/// workspace id, token revocation, dev-machine id, dev-machine
-/// revocation, dev-machine id again (the join-hit proof).
-type MachineTokenRow = (
-    Uuid,
-    Uuid,
-    Uuid,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-    Option<DateTime<Utc>>,
-    Option<Uuid>,
-);
+/// `machine_token` by hash, LEFT JOIN `dev_machine` for its id and
+/// revocation (`api_authentication.py:47-70`). No liveness scope: the
+/// tables have no soft delete.
+async fn machine_token_with_device(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::DevMachineId,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)),
+            "dm_revoked",
+        )
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::Id)),
+            "dm_found",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`):
+/// an active, live `workspace_members` row.
+async fn is_active_workspace_member(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit: Option<Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
+}
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
 /// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
@@ -404,18 +500,16 @@ async fn authenticate_machine(
 ) -> Result<Uuid, Denial> {
     let now = Utc::now();
     let token_hash = token_kernel::hash_token(presented, secret_key);
-    let row: Option<MachineTokenRow> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at, dm.id
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((id, user_id, workspace_id, revoked_at, dev_machine_id, dm_revoked, dm_found)) = row
+    let row = machine_token_with_device(pool, &token_hash).await?;
+    let Some(MachineTokenLookup {
+        id,
+        user_id,
+        workspace_id,
+        revoked_at,
+        dev_machine_id,
+        dm_revoked,
+        dm_found,
+    }) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -430,13 +524,7 @@ async fn authenticate_machine(
             return Err(Denial::InvalidToken);
         }
     }
-    let member: Option<bool> = sqlx::query_scalar(MACHINE_MEMBER_SQL)
-        .bind(workspace_id)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    if !member.unwrap_or(false) {
+    if !is_active_workspace_member(pool, workspace_id, user_id).await? {
         pidash_services::domain::tokens::revoke_machine_token_by_id(
             &pidash_db::pool::sea_orm_connection(pool),
             id,
@@ -463,6 +551,40 @@ async fn authenticate_machine(
 // Permission gate (`WorkspaceUserPermission`, `sticky.py:28`)
 // ---------------------------------------------------------------------------
 
+/// `workspace_members.role` for one `(user, slug)`: the live, active
+/// membership row joined to its workspace (the `WorkspaceUserPermission`
+/// fact source). `None` when there is no such row.
+fn member_role_select(slug: &str, user_id: &Uuid) -> sea_orm::Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(*user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+async fn member_role(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    user_id: &Uuid,
+) -> Result<Option<i16>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    member_role_select(slug, user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
 /// Enforce `WorkspaceUserPermission` for one `(user, slug)`: anonymous was
 /// already 401'd, so any denial here is the DRF-default 403. The membership
 /// row is fetched with the exact `(member, workspace__slug, is_active)`
@@ -472,17 +594,7 @@ async fn require_workspace_user(
     slug: &str,
     user_id: &Uuid,
 ) -> Result<(), Denial> {
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let role = member_role(pool, slug, user_id).await?;
     let facts = WorkspaceFacts {
         workspace: WorkspaceId::from(slug.to_owned()),
         authenticated: true,
@@ -503,12 +615,15 @@ async fn require_workspace_user(
 /// `user_timezone`), loaded but NOT parsed — parsing happens in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Option<String>, Denial> {
-    let zone: Option<String> =
-        sqlx::query_scalar(r#"SELECT user_timezone FROM users WHERE id = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let zone: Option<String> = users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(zone)
 }
 
@@ -564,42 +679,26 @@ struct StickyRow {
 }
 
 impl StickyRow {
-    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, Denial> {
-        Ok(Self {
-            id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-            created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-            updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-            created_by_id: row
-                .try_get("created_by_id")
-                .map_err(|_| Denial::ServerError)?,
-            updated_by_id: row
-                .try_get("updated_by_id")
-                .map_err(|_| Denial::ServerError)?,
-            deleted_at: row.try_get("deleted_at").map_err(|_| Denial::ServerError)?,
-            name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-            description: row
-                .try_get("description")
-                .map_err(|_| Denial::ServerError)?,
-            description_html: row
-                .try_get("description_html")
-                .map_err(|_| Denial::ServerError)?,
-            description_stripped: row
-                .try_get("description_stripped")
-                .map_err(|_| Denial::ServerError)?,
-            description_binary: row
-                .try_get("description_binary")
-                .map_err(|_| Denial::ServerError)?,
-            logo_props: row.try_get("logo_props").map_err(|_| Denial::ServerError)?,
-            color: row.try_get("color").map_err(|_| Denial::ServerError)?,
-            background_color: row
-                .try_get("background_color")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_id: row
-                .try_get("workspace_id")
-                .map_err(|_| Denial::ServerError)?,
-            owner_id: row.try_get("owner_id").map_err(|_| Denial::ServerError)?,
-            sort_order: row.try_get("sort_order").map_err(|_| Denial::ServerError)?,
-        })
+    fn from_model(model: &stickies::Model) -> Self {
+        Self {
+            id: model.id,
+            created_at: model.created_at.with_timezone(&Utc),
+            updated_at: model.updated_at.with_timezone(&Utc),
+            created_by_id: model.created_by_id,
+            updated_by_id: model.updated_by_id,
+            deleted_at: model.deleted_at.map(|t| t.with_timezone(&Utc)),
+            name: model.name.clone(),
+            description: model.description.clone(),
+            description_html: model.description_html.clone(),
+            description_stripped: model.description_stripped.clone(),
+            description_binary: model.description_binary.clone(),
+            logo_props: model.logo_props.clone(),
+            color: model.color.clone(),
+            background_color: model.background_color.clone(),
+            workspace_id: model.workspace_id,
+            owner_id: model.owner_id,
+            sort_order: model.sort_order,
+        }
     }
 }
 
@@ -1432,14 +1531,19 @@ async fn resolve_pk_lookups(
     write: &mut StickyWrite,
     pending: &[PendingPk],
 ) -> Result<Vec<(String, Vec<String>)>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let mut errors = Vec::new();
     for item in pending {
-        let found: Option<bool> = sqlx::query_scalar(USER_EXISTS_SQL)
-            .bind(item.uuid)
-            .fetch_optional(pool)
+        // `User.objects.get(pk=...)`: the plain `UserManager`, no
+        // soft-delete filter — the `users` table has no `deleted_at`.
+        let found = users::Entity::find_by_id(item.uuid)
+            .select_only()
+            .column(users::Column::Id)
+            .one(&db)
             .await
-            .map_err(|_| Denial::ServerError)?;
-        if found.unwrap_or(false) {
+            .map_err(|_| Denial::ServerError)?
+            .is_some();
+        if found {
             if item.field == "created_by" {
                 write.created_by = Some(Some(item.uuid));
             }
@@ -1457,103 +1561,104 @@ async fn resolve_pk_lookups(
 }
 
 // ---------------------------------------------------------------------------
-// SQL (bind order documented per statement; reads honor the soft-delete
-// manager, writes hit the table so partial unique indexes keep working)
+// Statements (reads honor the soft-delete manager, writes hit the table so
+// partial unique indexes keep working)
 // ---------------------------------------------------------------------------
 
+/// `stickies` aggregate row for the `MAX(sort_order)` read.
+#[derive(Debug, FromQueryResult)]
+struct MaxSortRow {
+    max_sort: Option<f64>,
+}
+
 /// Workspace lookup for create (`Workspace.objects.get(slug=slug)` through
-/// the default manager: `deleted_at IS NULL`; miss is the 404 above).
-/// Binds: `$1` workspace slug.
-const WORKSPACE_ID_SQL: &str =
-    r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#;
+/// the default manager: `deleted_at IS NULL`; miss is the 404).
+async fn workspace_id_by_slug(pool: &sqlx::PgPool, slug: &str) -> Result<Option<Uuid>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
 
 /// `StickyViewSet.get_object` (`sticky.py:85,96,110`): the `get_queryset`
 /// scope (`sticky.py:30-37`) plus the pk lookup. Miss (unknown pk or
 /// another owner's row) is [`Denial::NotFoundDetail`].
-/// Binds: `$1` workspace slug, `$2` owner id, `$3` sticky pk.
-fn sticky_get_sql() -> String {
-    let cols: Vec<String> = sticky_model::COLUMNS
-        .iter()
-        .map(|col| format!("\"stickies\".\"{col}\""))
-        .collect();
-    format!(
-        "SELECT DISTINCT {} FROM \"stickies\" \
-         INNER JOIN \"workspaces\" ON (\"stickies\".\"workspace_id\" = \"workspaces\".\"id\") \
-         WHERE (\"stickies\".\"deleted_at\" IS NULL \
-         AND \"workspaces\".\"slug\" = $1 AND \"stickies\".\"owner_id\" = $2 \
-         AND \"stickies\".\"id\" = $3)",
-        cols.join(", ")
-    )
+fn sticky_get_select(slug: &str, owner_id: &Uuid, pk: &Uuid) -> sea_orm::Select<stickies::Entity> {
+    stickies::Entity::find()
+        .distinct()
+        .join(
+            JoinType::InnerJoin,
+            stickies::Entity::belongs_to(workspaces::Entity)
+                .from(stickies::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(stickies::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(stickies::Column::OwnerId.eq(*owner_id))
+        .filter(stickies::Column::Id.eq(*pk))
 }
 
-/// `MAX(sort_order)` per workspace for create (`models/sticky.py:51` via
-/// the default manager: soft-deleted rows do not count).
-/// Binds: `$1` workspace id.
-const STICKY_MAX_SORT_SQL: &str =
-    r#"SELECT MAX(sort_order) FROM stickies WHERE workspace_id = $1 AND deleted_at IS NULL"#;
-
-/// Sticky insert (all 17 columns; application defaults supplied explicitly
-/// — the live tables carry no `column_default`).
-/// Binds: `$1..$17` in [`sticky_model::COLUMNS`] order.
-const STICKY_INSERT_SQL: &str = r#"INSERT INTO stickies (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, name, description, description_html, description_stripped, description_binary, logo_props, color, background_color, workspace_id, owner_id, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#;
-
-/// Sticky update: every mutable column is written back (changed or not —
-/// identical values are a no-op in effect). `sort_order` keeps its stored
-/// value unless the input carried one (`save()` touches it only on
-/// create); `updated_at`/`updated_by` always advance (`auto_now` /
-/// `BaseModel.save`); `created_by` is rewritten only when the input
-/// carried it (writable audit FK — `save()` leaves it alone on update).
-/// Binds: `$1..$12` the twelve set columns below, `$13` the pk.
-const STICKY_UPDATE_SQL: &str = r#"UPDATE stickies SET name = $1, description = $2, description_html = $3, description_stripped = $4, logo_props = $5, color = $6, background_color = $7, sort_order = $8, updated_at = $9, updated_by_id = $10, created_by_id = $11, deleted_at = $12 WHERE id = $13"#;
-
-/// Soft delete (`sticky.py:112` instance `.delete()` — which resolves to
-/// `SoftDeleteModel.delete(soft=True)`, `db/mixins.py:72-82`: the row is
-/// TOMBSTONED, not removed). The `save()` inside the tombstone also bumps
-/// `updated_at`/`updated_by_id` (`auto_now` / `BaseModel.save` via crum).
-/// Binds: `$1` tombstone stamp, `$2` update stamp, `$3` acting user, `$4`
-/// sticky pk.
-const STICKY_SOFT_DELETE_SQL: &str =
-    r#"UPDATE stickies SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4"#;
+async fn get_sticky(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    owner_id: &Uuid,
+    pk: &Uuid,
+) -> Result<StickyRow, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = sticky_get_select(slug, owner_id, pk)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let model = model.ok_or(Denial::NotFoundDetail)?;
+    Ok(StickyRow::from_model(&model))
+}
 
 /// Post-write render fetch: Django renders the saved *instance* (even a
 /// born-deleted or just-tombstoned row), so the create/update responses
 /// re-read by pk *without* the soft-delete scope. A scoped re-read would
 /// 404 a row `deleted_at` input just tombstoned, where Django answers
-/// 201/200 with the row.
-/// Binds: `$1` sticky pk.
-fn sticky_get_by_pk_sql() -> String {
-    let cols: Vec<String> = sticky_model::COLUMNS
-        .iter()
-        .map(|col| format!("\"stickies\".\"{col}\""))
-        .collect();
-    format!(
-        "SELECT {} FROM \"stickies\" WHERE \"stickies\".\"id\" = $1",
-        cols.join(", ")
-    )
+/// 201/200 with the row. A miss here is unreachable (no path removes
+/// rows), so it is the 500 Python's `DoesNotExist`-outside-a-view shape
+/// becomes.
+fn sticky_by_pk_select(pk: &Uuid) -> sea_orm::Select<stickies::Entity> {
+    stickies::Entity::find_by_id(*pk)
 }
 
-/// Users existence lookup for `created_by`/`updated_by` inputs
-/// (`User.objects.get(pk=...)`: the plain `UserManager`, no soft-delete
-/// filter — the `users` table has no `deleted_at`).
-/// Binds: `$1` user id.
-const USER_EXISTS_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)"#;
+async fn get_sticky_by_pk(pool: &sqlx::PgPool, pk: &Uuid) -> Result<StickyRow, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = sticky_by_pk_select(pk)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let model = model.ok_or(Denial::ServerError)?;
+    Ok(StickyRow::from_model(&model))
+}
 
-/// Total-match count for the list envelope: the list query's `FROM`/`WHERE`
-/// with `COUNT(DISTINCT id)` in place of the projection (equivalent to
-/// Django's `queryset.count()` over the `DISTINCT` queryset: ids are unique,
-/// so distinct-row and distinct-id counts agree).
-fn sticky_count_sql(list_sql: &str) -> String {
-    let from = list_sql
-        .find(" FROM \"stickies\"")
-        .expect("list sql carries the stickies from clause");
-    let mut count = format!(
-        "SELECT COUNT(DISTINCT \"stickies\".\"id\"){}",
-        &list_sql[from..]
-    );
-    if let Some(order) = count.find(" ORDER BY ") {
-        count.truncate(order);
-    }
-    count
+/// `MAX(sort_order)` per workspace for create (`models/sticky.py:51` via
+/// the default manager: soft-deleted rows do not count). `None` when the
+/// workspace has no live rows.
+async fn max_sort_order(pool: &sqlx::PgPool, workspace_id: Uuid) -> Result<Option<f64>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = stickies::Entity::find()
+        .select_only()
+        .column_as(
+            sea_query::SimpleExpr::from(Func::max(Expr::col(stickies::Column::SortOrder))),
+            "max_sort",
+        )
+        .filter(stickies::Column::WorkspaceId.eq(workspace_id))
+        .filter(stickies::Column::DeletedAt.is_null())
+        .into_model::<MaxSortRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.and_then(|row| row.max_sort))
 }
 
 // ---------------------------------------------------------------------------
@@ -1632,40 +1737,6 @@ fn query_last(params: &HashMap<String, String>, key: &str) -> Option<String> {
 /// raised outside `get_object`, which this view has none of).
 fn parse_uuid_or_invalid(raw: &str) -> Result<Uuid, Denial> {
     raw.parse::<Uuid>().map_err(|_| Denial::InvalidPk)
-}
-
-/// `get_object` for one `(slug, owner, pk)`: the scoped lookup above; any
-/// miss (unknown pk or another owner's row) is the model's `Http404`
-/// message.
-async fn get_sticky(
-    pool: &sqlx::PgPool,
-    slug: &str,
-    owner_id: &Uuid,
-    pk: &Uuid,
-) -> Result<StickyRow, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sticky_get_sql())
-        .bind(slug)
-        .bind(owner_id)
-        .bind(pk)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let row = row.ok_or(Denial::NotFoundDetail)?;
-    StickyRow::from_row(&row)
-}
-
-/// Post-write render fetch ([`sticky_get_by_pk_sql`]): unscoped by-pk, for
-/// the create/update responses. A miss here is unreachable (no path
-/// removes rows), so it is the 500 Python's `DoesNotExist`-outside-a-view
-/// shape becomes.
-async fn get_sticky_by_pk(pool: &sqlx::PgPool, pk: &Uuid) -> Result<StickyRow, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sticky_get_by_pk_sql())
-        .bind(pk)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let row = row.ok_or(Denial::ServerError)?;
-    StickyRow::from_row(&row)
 }
 
 /// Run the full serializer write path: pure field validation, the users
@@ -1757,12 +1828,9 @@ async fn create_inner(
     let ctx = context(state, headers, slug).await?;
     // Python order (`sticky.py:48-51`): the workspace lookup runs before
     // validation, so an unknown slug 404s even with an invalid body.
-    let workspace_id: Option<Uuid> = sqlx::query_scalar(WORKSPACE_ID_SQL)
-        .bind(slug)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let workspace_id = workspace_id.ok_or(Denial::WorkspaceMissing)?;
+    let workspace_id = workspace_id_by_slug(&ctx.pool, slug)
+        .await?
+        .ok_or(Denial::WorkspaceMissing)?;
     let parsed = parse_json_body(body, headers, state.settings().file_size_limit)?;
     let (write, html) = validated_write(&ctx.pool, &ctx.timezone, &parsed).await?;
     // `Sticky.save` (`models/sticky.py:38-53`): stripped text recomputed on
@@ -1770,41 +1838,41 @@ async fn create_inner(
     // input value is overwritten then), else the input or the 65535 default.
     let final_html = html.unwrap_or_else(|| "<p></p>".to_owned());
     let stripped = sticky_model::stripped_description(Some(&final_html));
-    let existing_max: Option<f64> = sqlx::query_scalar(STICKY_MAX_SORT_SQL)
-        .bind(workspace_id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?
-        .flatten();
+    let existing_max = max_sort_order(&ctx.pool, workspace_id).await?;
     let sort_order = match existing_max {
         Some(max) => max + sticky_model::SORT_ORDER_STEP,
         None => write.sort_order.unwrap_or(sticky_model::DEFAULT_SORT_ORDER),
     };
     let now = Utc::now();
+    let typed_now: chrono::DateTime<chrono::FixedOffset> = now.into();
     let id = Uuid::new_v4();
-    sqlx::query(STICKY_INSERT_SQL)
-        .bind(id)
-        .bind(now)
-        .bind(now)
+    // `BaseModel.save` overwrites any `created_by` input from the request
+    // user and leaves `updated_by` null on create. A `deleted_at` input is
+    // honored: the row is born deleted (and still answers 201 with the
+    // row, rendered unscoped below).
+    let record = stickies::ActiveModel {
+        id: Set(id),
+        created_at: Set(typed_now),
+        updated_at: Set(typed_now),
         // `BaseModel.save` overwrites any `created_by` input from the
         // request user and leaves `updated_by` null on create.
-        .bind(ctx.user_id)
-        .bind(Option::<Uuid>::None)
-        // A `deleted_at` input is honored: the row is born deleted (and
-        // still answers 201 with the row, rendered unscoped below).
-        .bind(write.deleted_at.unwrap_or(None))
-        .bind(write.name.unwrap_or(None))
-        .bind(write.description.unwrap_or_else(|| serde_json::json!({})))
-        .bind(final_html)
-        .bind(stripped)
-        .bind(Option::<Vec<u8>>::None)
-        .bind(write.logo_props.unwrap_or_else(|| serde_json::json!({})))
-        .bind(write.color.unwrap_or(None))
-        .bind(write.background_color.unwrap_or(None))
-        .bind(workspace_id)
-        .bind(ctx.user_id)
-        .bind(sort_order)
-        .execute(&ctx.pool)
+        created_by_id: Set(Some(ctx.user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(write.deleted_at.unwrap_or(None).map(chrono::DateTime::from)),
+        name: Set(write.name.unwrap_or(None)),
+        description: Set(write.description.unwrap_or_else(|| serde_json::json!({}))),
+        description_html: Set(final_html),
+        description_stripped: Set(stripped),
+        description_binary: Set(None),
+        logo_props: Set(write.logo_props.unwrap_or_else(|| serde_json::json!({}))),
+        color: Set(write.color.unwrap_or(None)),
+        background_color: Set(write.background_color.unwrap_or(None)),
+        workspace_id: Set(workspace_id),
+        owner_id: Set(ctx.user_id),
+        sort_order: Set(sort_order),
+    };
+    record
+        .insert(&pidash_db::pool::sea_orm_connection(&ctx.pool))
         .await
         .map_err(|_| Denial::ServerError)?;
     // Re-read the stored row (never render the pre-insert values: the
@@ -1857,54 +1925,39 @@ async fn list_inner(
     let limit = per_page.min(1000);
     let window = offset_window(limit, cursor.offset, cursor.value, cursor.is_prev, None)
         .map_err(page_denial)?;
-    let mut list_sql = sticky_queries::sticky_list_sql(query_filter);
-    list_sql.push_str(&format!(
-        " LIMIT {} OFFSET {}",
-        window.stop - window.offset,
-        window.offset
-    ));
-    let count_sql = sticky_count_sql(&sticky_queries::sticky_list_sql(query_filter));
-    let pattern = query_filter.map(sticky_queries::icontains_pattern);
-    let rows: Vec<sqlx::postgres::PgRow> = if let Some(pattern) = pattern.as_deref() {
-        sqlx::query(&list_sql)
-            .bind(slug)
-            .bind(ctx.user_id)
-            .bind(pattern)
-            .fetch_all(&ctx.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-    } else {
-        sqlx::query(&list_sql)
-            .bind(slug)
-            .bind(ctx.user_id)
-            .fetch_all(&ctx.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-    };
+    let db = pidash_db::pool::sea_orm_connection(&ctx.pool);
+    let mut list = sticky_queries::sticky_list(slug, ctx.user_id, query_filter);
+    list.limit((window.stop - window.offset) as u64)
+        .offset(window.offset as u64);
+    let count_stmt = sticky_queries::sticky_list_count(slug, ctx.user_id, query_filter);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&list))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let has_more = rows.len() as i64 > limit;
     let sticky_rows: Vec<StickyRow> = rows
         .iter()
-        .map(StickyRow::from_row)
+        .map(|row| {
+            stickies::Model::from_query_result(row, "")
+                .map(|model| StickyRow::from_model(&model))
+                .map_err(|_| Denial::ServerError)
+        })
         .collect::<Result<_, _>>()?;
     let page = apply_offset_window(&sticky_rows, limit).map_err(page_denial)?;
     // `COUNT` always yields exactly one non-null row.
-    let total_count: i64 = if let Some(pattern) = pattern.as_deref() {
-        sqlx::query_scalar(&count_sql)
-            .bind(slug)
-            .bind(ctx.user_id)
-            .bind(pattern)
-            .fetch_optional(&ctx.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .unwrap_or(0)
-    } else {
-        sqlx::query_scalar(&count_sql)
-            .bind(slug)
-            .bind(ctx.user_id)
-            .fetch_optional(&ctx.pool)
-            .await
-            .map_err(|_| Denial::ServerError)?
-            .unwrap_or(0)
+    #[derive(sea_orm::FromQueryResult)]
+    struct CountRow {
+        n: i64,
+    }
+    let total_count: i64 = match db
+        .query_one(DbBackend::Postgres.build(&count_stmt))
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        Some(row) => CountRow::from_query_result(&row, "")
+            .map(|row| row.n)
+            .map_err(|_| Denial::ServerError)?,
+        None => 0,
     };
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
@@ -2057,12 +2110,20 @@ async fn detail_inner(
             // plus `updated_by` from the request user, then the related
             // sweep task (best-effort; the 204 stands without it).
             let deleted_at = Utc::now();
-            sqlx::query(STICKY_SOFT_DELETE_SQL)
-                .bind(deleted_at)
-                .bind(Utc::now())
-                .bind(ctx.user_id)
-                .bind(pk)
-                .execute(&ctx.pool)
+            let typed_deleted: chrono::DateTime<chrono::FixedOffset> = deleted_at.into();
+            let typed_updated: chrono::DateTime<chrono::FixedOffset> = Utc::now().into();
+            stickies::Entity::update_many()
+                .col_expr(
+                    stickies::Column::DeletedAt,
+                    Expr::value(Some(typed_deleted)),
+                )
+                .col_expr(stickies::Column::UpdatedAt, Expr::value(typed_updated))
+                .col_expr(
+                    stickies::Column::UpdatedById,
+                    Expr::value(Some(ctx.user_id)),
+                )
+                .filter(stickies::Column::Id.eq(pk))
+                .exec(&pidash_db::pool::sea_orm_connection(&ctx.pool))
                 .await
                 .map_err(|_| Denial::ServerError)?;
             enqueue_soft_delete(&ctx.pool, &pk).await;
@@ -2079,29 +2140,71 @@ async fn detail_inner(
             // `sort_order` is untouched on update.
             let final_html = html.unwrap_or_else(|| row.description_html.clone());
             let stripped = sticky_model::stripped_description(Some(&final_html));
-            sqlx::query(STICKY_UPDATE_SQL)
-                .bind(write.name.unwrap_or_else(|| row.name.clone()))
-                .bind(write.description.unwrap_or_else(|| row.description.clone()))
-                .bind(
-                    write
-                        .description_html
-                        .unwrap_or_else(|| row.description_html.clone()),
+            let typed_updated: chrono::DateTime<chrono::FixedOffset> = Utc::now().into();
+            // Sticky update: every mutable column is written back (changed
+            // or not — identical values are a no-op in effect).
+            // `updated_at`/`updated_by` always advance (`auto_now` /
+            // `BaseModel.save`); `created_by` is rewritten only when the
+            // input carried it (writable audit FK — `save()` leaves it
+            // alone on update).
+            stickies::Entity::update_many()
+                .col_expr(
+                    stickies::Column::Name,
+                    Expr::value(write.name.unwrap_or_else(|| row.name.clone())),
                 )
-                .bind(stripped)
-                .bind(write.logo_props.unwrap_or_else(|| row.logo_props.clone()))
-                .bind(write.color.unwrap_or_else(|| row.color.clone()))
-                .bind(
-                    write
-                        .background_color
-                        .unwrap_or_else(|| row.background_color.clone()),
+                .col_expr(
+                    stickies::Column::Description,
+                    Expr::value(write.description.unwrap_or_else(|| row.description.clone())),
                 )
-                .bind(write.sort_order.unwrap_or(row.sort_order))
-                .bind(Utc::now())
-                .bind(ctx.user_id)
-                .bind(write.created_by.unwrap_or(row.created_by_id))
-                .bind(write.deleted_at.unwrap_or(row.deleted_at))
-                .bind(pk)
-                .execute(&ctx.pool)
+                .col_expr(
+                    stickies::Column::DescriptionHtml,
+                    Expr::value(
+                        write
+                            .description_html
+                            .unwrap_or_else(|| row.description_html.clone()),
+                    ),
+                )
+                .col_expr(stickies::Column::DescriptionStripped, Expr::value(stripped))
+                .col_expr(
+                    stickies::Column::LogoProps,
+                    Expr::value(write.logo_props.unwrap_or_else(|| row.logo_props.clone())),
+                )
+                .col_expr(
+                    stickies::Column::Color,
+                    Expr::value(write.color.unwrap_or_else(|| row.color.clone())),
+                )
+                .col_expr(
+                    stickies::Column::BackgroundColor,
+                    Expr::value(
+                        write
+                            .background_color
+                            .unwrap_or_else(|| row.background_color.clone()),
+                    ),
+                )
+                .col_expr(
+                    stickies::Column::SortOrder,
+                    Expr::value(write.sort_order.unwrap_or(row.sort_order)),
+                )
+                .col_expr(stickies::Column::UpdatedAt, Expr::value(typed_updated))
+                .col_expr(
+                    stickies::Column::UpdatedById,
+                    Expr::value(Some(ctx.user_id)),
+                )
+                .col_expr(
+                    stickies::Column::CreatedById,
+                    Expr::value(write.created_by.unwrap_or(row.created_by_id)),
+                )
+                .col_expr(
+                    stickies::Column::DeletedAt,
+                    Expr::value(
+                        write
+                            .deleted_at
+                            .unwrap_or(row.deleted_at)
+                            .map(chrono::DateTime::<chrono::FixedOffset>::from),
+                    ),
+                )
+                .filter(stickies::Column::Id.eq(pk))
+                .exec(&pidash_db::pool::sea_orm_connection(&ctx.pool))
                 .await
                 .map_err(|_| Denial::ServerError)?;
             // Unscoped: Django renders the saved instance even when a
@@ -2341,45 +2444,66 @@ mod tests {
 
     #[test]
     fn query_falsy_guard_matches_the_view() {
+        use sea_query::PostgresQueryBuilder;
+        let owner = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
         // `request.query_params.get("query", False)` + `if query:` — absent
         // and empty both yield the unfiltered list (fx-q-sticky).
-        let base = sticky_queries::sticky_list_sql(None);
-        assert_eq!(sticky_queries::sticky_list_sql(Some("")), base);
+        let base = sticky_queries::sticky_list("acme", owner, None).to_string(PostgresQueryBuilder);
+        assert_eq!(
+            sticky_queries::sticky_list("acme", owner, Some("")).to_string(PostgresQueryBuilder),
+            base
+        );
         assert!(!base.contains("LIKE"));
         assert!(
-            sticky_queries::sticky_list_sql(Some("pineapple")).contains("LIKE"),
+            sticky_queries::sticky_list("acme", owner, Some("pineapple"))
+                .to_string(PostgresQueryBuilder)
+                .contains("LIKE"),
             "truthy query filters"
         );
     }
 
     #[test]
     fn list_sql_carries_limit_offset_and_count_drops_order() {
-        let mut list_sql = sticky_queries::sticky_list_sql(Some("x"));
-        list_sql.push_str(&format!(" LIMIT {} OFFSET {}", 21, 0));
+        use sea_query::PostgresQueryBuilder;
+        let owner = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let mut list = sticky_queries::sticky_list("acme", owner, Some("x"));
+        list.limit(21).offset(0);
+        let list_sql = list.to_string(PostgresQueryBuilder);
         assert!(list_sql.contains("SELECT DISTINCT "), "{list_sql}");
         assert!(
             list_sql.contains("ORDER BY \"stickies\".\"created_at\" DESC"),
             "{list_sql}"
         );
         assert!(list_sql.ends_with("LIMIT 21 OFFSET 0"), "{list_sql}");
-        let count = sticky_count_sql(&list_sql);
+        let count = sticky_queries::sticky_list_count("acme", owner, Some("x"))
+            .to_string(PostgresQueryBuilder);
         assert!(
-            count.starts_with("SELECT COUNT(DISTINCT \"stickies\".\"id\") FROM \"stickies\""),
+            count.starts_with(
+                "SELECT COUNT(DISTINCT \"stickies\".\"id\") AS \"n\" FROM \"stickies\""
+            ),
             "{count}"
         );
         assert!(!count.contains("ORDER BY"), "{count}");
         assert!(count.contains("LIKE"), "{count}");
         // Unfiltered count keeps the scope and drops nothing else.
-        let plain = sticky_count_sql(&sticky_queries::sticky_list_sql(None));
-        assert!(plain.contains("\"workspaces\".\"slug\" = ($1)"), "{plain}");
+        let plain =
+            sticky_queries::sticky_list_count("acme", owner, None).to_string(PostgresQueryBuilder);
+        assert!(
+            plain.contains("\"workspaces\".\"slug\" = 'acme'"),
+            "{plain}"
+        );
         assert!(!plain.contains("LIKE"), "{plain}");
     }
 
-    // -- get SQL (get_queryset scope + pk) --
+    // -- get shape (get_queryset scope + pk) --
 
     #[test]
     fn get_sql_scopes_slug_owner_pk_and_projects_all_columns() {
-        let sql = sticky_get_sql();
+        use sea_orm::QueryTrait;
+        let owner = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let pk = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let stmt = sticky_get_select("acme", &owner, &pk).build(DbBackend::Postgres);
+        let sql = stmt.sql;
         assert!(sql.starts_with("SELECT DISTINCT "), "{sql}");
         for col in sticky_model::COLUMNS {
             assert!(
@@ -2391,69 +2515,210 @@ mod tests {
         assert!(sql.contains("\"stickies\".\"owner_id\" = $2"), "{sql}");
         assert!(sql.contains("\"stickies\".\"id\" = $3"), "{sql}");
         assert!(sql.contains("\"stickies\".\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("INNER JOIN \"workspaces\""), "{sql}");
+    }
+
+    /// Live-db test over session-local copies of the lookup tables:
+    /// every module-level lookup helper (auth, gate, zone, workspace,
+    /// sort max, scoped get, by-pk reread) reads back its seeded rows.
+    /// Skips without `DATABASE_URL`.
+    #[tokio::test]
+    async fn live_lookup_helpers_read_shadow_rows() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.stickies')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return;
+        }
+        // Session-local copies without keys or constraints, so the test
+        // needs no seeded parents; they shadow the real tables on this
+        // single session. No ON COMMIT DROP: there is no explicit
+        // transaction, so the tables would drop at the first commit.
+        for table in [
+            "api_tokens",
+            "machine_token",
+            "dev_machine",
+            "workspace_members",
+            "workspaces",
+            "users",
+            "stickies",
+        ] {
+            let sql =
+                format!("CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA");
+            sqlx::query(&sql).execute(&pool).await.expect("temp table");
+        }
+        let user_id = Uuid::new_v4();
+        let ws_id = Uuid::new_v4();
+        let member_id = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query("INSERT INTO users (id, user_timezone) VALUES ($1, 'Europe/Berlin')")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("seed user");
+        sqlx::query("INSERT INTO workspaces (id, slug) VALUES ($1, 'acme')")
+            .bind(ws_id)
+            .execute(&pool)
+            .await
+            .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO workspace_members (id, workspace_id, member_id, role, is_active)
+             VALUES ($1, $2, $3, 15, true)",
+        )
+        .bind(member_id)
+        .bind(ws_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed member");
+        sqlx::query(
+            "INSERT INTO api_tokens (id, user_id, token, is_active) VALUES ($1, $2, 'tok-1', true)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed api token");
+        sqlx::query(
+            "INSERT INTO machine_token (id, user_id, workspace_id, token_hash)
+             VALUES ($1, $2, $3, 'hash-1')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(ws_id)
+        .execute(&pool)
+        .await
+        .expect("seed machine token");
+        let pk = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO stickies (id, created_at, updated_at, description,
+                 description_html, logo_props, workspace_id, owner_id, sort_order)
+             VALUES ($1, $2, $2, '{}', '<p>x</p>', '{}', $3, $4, 42.0)",
+        )
+        .bind(pk)
+        .bind(now)
+        .bind(ws_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed sticky");
+        assert_eq!(
+            load_timezone_name(&pool, &user_id).await.expect("zone"),
+            Some("Europe/Berlin".to_owned())
+        );
+        assert_eq!(
+            load_timezone_name(&pool, &Uuid::new_v4())
+                .await
+                .expect("zone"),
+            None
+        );
+        assert_eq!(
+            member_role(&pool, "acme", &user_id).await.expect("role"),
+            Some(15)
+        );
+        assert_eq!(
+            member_role(&pool, "other", &user_id).await.expect("role"),
+            None
+        );
+        assert!(is_active_workspace_member(&pool, ws_id, user_id)
+            .await
+            .expect("member"));
+        assert!(!is_active_workspace_member(&pool, ws_id, Uuid::new_v4())
+            .await
+            .expect("member"));
+        assert_eq!(
+            live_api_token(&pool, "tok-1")
+                .await
+                .expect("token")
+                .map(|t| t.user_id),
+            Some(user_id)
+        );
+        assert!(live_api_token(&pool, "missing")
+            .await
+            .expect("token")
+            .is_none());
+        let machine = machine_token_with_device(&pool, "hash-1")
+            .await
+            .expect("machine")
+            .expect("hit");
+        assert_eq!(machine.user_id, user_id);
+        assert!(machine.dev_machine_id.is_none());
+        assert!(machine.dm_found.is_none());
+        assert!(machine_token_with_device(&pool, "nope")
+            .await
+            .expect("machine")
+            .is_none());
+        assert_eq!(
+            workspace_id_by_slug(&pool, "acme").await.expect("ws"),
+            Some(ws_id)
+        );
+        assert_eq!(
+            workspace_id_by_slug(&pool, "other").await.expect("ws"),
+            None
+        );
+        assert_eq!(max_sort_order(&pool, ws_id).await.expect("max"), Some(42.0));
+        assert_eq!(
+            max_sort_order(&pool, Uuid::new_v4()).await.expect("max"),
+            None
+        );
+        let got = get_sticky(&pool, "acme", &user_id, &pk).await.expect("get");
+        assert_eq!(got.id, pk);
+        assert_eq!(got.description_html, "<p>x</p>");
+        assert!(get_sticky_by_pk(&pool, &pk).await.is_ok());
+        assert!(matches!(
+            get_sticky(&pool, "acme", &user_id, &Uuid::new_v4()).await,
+            Err(Denial::NotFoundDetail)
+        ));
+        assert!(matches!(
+            get_sticky_by_pk(&pool, &Uuid::new_v4()).await,
+            Err(Denial::ServerError)
+        ));
     }
 
     #[test]
-    fn write_statements_hit_the_table() {
-        // Soft delete (`SoftDeleteModel.delete(soft=True)`): tombstone +
-        // the inner `save()`'s `updated_at`/`updated_by` bump.
-        assert_eq!(
-            STICKY_SOFT_DELETE_SQL,
-            "UPDATE stickies SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4"
+    fn member_role_lookup_carries_manager_scope_and_limit() {
+        use sea_orm::QueryTrait;
+        let user_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let stmt = member_role_select("acme", &user_id).build(DbBackend::Postgres);
+        let sql = stmt.sql;
+        assert!(sql.contains("\"workspace_members\".\"role\""), "{sql}");
+        assert!(sql.contains("INNER JOIN \"workspaces\""), "{sql}");
+        assert!(
+            sql.contains("\"workspace_members\".\"member_id\" = $1"),
+            "{sql}"
+        );
+        assert!(sql.contains("\"workspaces\".\"slug\" = $2"), "{sql}");
+        assert!(
+            sql.contains("\"workspace_members\".\"is_active\" = $3"),
+            "{sql}"
         );
         assert!(
-            STICKY_INSERT_SQL.starts_with("INSERT INTO stickies ("),
-            "{STICKY_INSERT_SQL}"
+            sql.contains("\"workspace_members\".\"deleted_at\" IS NULL"),
+            "{sql}"
         );
-        assert!(
-            STICKY_INSERT_SQL.contains("VALUES ($1"),
-            "{STICKY_INSERT_SQL}"
-        );
-        assert!(
-            STICKY_UPDATE_SQL.starts_with("UPDATE stickies SET "),
-            "{STICKY_UPDATE_SQL}"
-        );
-        assert!(
-            STICKY_UPDATE_SQL.ends_with("WHERE id = $13"),
-            "{STICKY_UPDATE_SQL}"
-        );
-        // `created_by` (writable audit FK) and `deleted_at` ride along;
-        // the read-only columns stay guarded (the `WHERE id = $13` tail
-        // is the pk lookup, not a write).
-        assert!(
-            STICKY_UPDATE_SQL.contains("created_by_id = $11"),
-            "{STICKY_UPDATE_SQL}"
-        );
-        assert!(
-            STICKY_UPDATE_SQL.contains("deleted_at = $12"),
-            "{STICKY_UPDATE_SQL}"
-        );
-        for guarded in ["workspace_id", "owner_id", "created_at = $"] {
-            assert!(
-                !STICKY_UPDATE_SQL.contains(guarded),
-                "{STICKY_UPDATE_SQL}: {guarded}"
-            );
-        }
-        assert!(
-            WORKSPACE_ID_SQL.contains("deleted_at IS NULL"),
-            "{WORKSPACE_ID_SQL}"
-        );
-        // Machine-token membership honors the soft-delete manager.
-        assert!(
-            MACHINE_MEMBER_SQL.contains("deleted_at IS NULL"),
-            "{MACHINE_MEMBER_SQL}"
-        );
-        assert_eq!(
-            USER_EXISTS_SQL,
-            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)"
-        );
+        assert!(sql.contains("LIMIT $4"), "{sql}");
     }
 
     #[test]
     fn post_write_reread_is_unscoped_by_pk() {
+        use sea_orm::QueryTrait;
         // Django renders the saved instance even when born deleted, so
         // the create/update responses must not apply the manager scope.
-        let sql = sticky_get_by_pk_sql();
+        let pk = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let stmt = sticky_by_pk_select(&pk).build(DbBackend::Postgres);
+        let sql = stmt.sql;
         assert!(!sql.contains("deleted_at IS NULL"), "{sql}");
         assert!(!sql.contains("DISTINCT"), "{sql}");
         assert!(sql.contains("WHERE \"stickies\".\"id\" = $1"), "{sql}");

@@ -83,7 +83,12 @@ pub struct CredentialUnavailable {
 /// `ManagedRunnerUnavailable` arm (the client should have consulted the
 /// profile first); `Classified` is the `_classify_credential_error` arm —
 /// the cloud seam's pre-classified gateway outcome. CE only ever produces
-/// `Unavailable`.
+/// `Unavailable`. `WalletEmpty` is the built-in engine's model-token
+/// classification (§8, `runner/views/engine.py:_classify_gateway_error`):
+/// the gateway's wallet ran out, so the engine pauses with
+/// `wallet_empty` (402). The legacy agent-token endpoint renders it as
+/// the transient arm it always rendered wallet failures as
+/// (`gateway_unavailable`, 503), so its response is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialError {
     /// Profile-refused: renders `409 {error: reason, detail}`.
@@ -92,6 +97,11 @@ pub enum CredentialError {
     /// `detail` key at `status` (401 `gateway_session_revoked` or 503
     /// `gateway_unavailable`).
     Classified { code: String, status: u16 },
+    /// Wallet-exhausted gateway failure (402 on the engine model-token
+    /// endpoint; `detail` is the classifier's exception name, never a
+    /// provider body). The legacy agent-token endpoint maps it to its
+    /// transient arm.
+    WalletEmpty { detail: String },
 }
 
 /// BYOK title inputs for [`TitleRequest`]: the caller's read of the user's

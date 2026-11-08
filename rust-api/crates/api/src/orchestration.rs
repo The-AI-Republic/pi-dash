@@ -27,14 +27,14 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::redis::client_from_settings;
 use pidash_db::runner_sessions::machine_outbox::{self, MachineOutboxError};
-use pidash_db::runner_sessions::models::runner_session;
 use pidash_db::runner_sessions::outbox as runner_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_db::runner_sessions::RunnerSession;
@@ -42,13 +42,11 @@ use pidash_services::domain::issues_move::MoveDrainError;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_sessions::drain::{
-    drain_pod_log, next_for_runner_sql, plan_assignment, AssignmentFacts, DrainEffect,
-    ASSIGN_RUN_UPDATE_SQL, DRAIN_POD_BY_ID_LOOKUP_SQL, DRAIN_POD_IDLE_RUNNERS_SQL,
+    drain_pod_idle_list_stmt, drain_pod_log, next_for_runner_stmt, plan_assignment,
+    AssignmentFacts, DispatchFacts, DrainEffect,
 };
 use pidash_services::runner_sessions::guards::alive_threshold;
-use pidash_services::runner_sessions::pubsub::{
-    send_to_runner, PubsubStore, CLOSE_ACTIVE_SESSIONS_SQL,
-};
+use pidash_services::runner_sessions::pubsub::{send_to_runner, PubsubStore};
 
 use crate::state::AppState;
 use pidash_services::dispatch::admission::RedisAdmissionCache;
@@ -141,6 +139,33 @@ pub(crate) struct MovePubsub<'p> {
     pub(crate) runner: &'p RunnerSettings,
 }
 
+/// The `CLOSE_ACTIVE_SESSIONS_SQL` read (`pubsub.py:95-99`): active
+/// sessions for one runner, newest first — same guards, same order,
+/// full-row projection, no `LIMIT`.
+fn active_sessions_select(
+    runner_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::runner_session::Entity> {
+    use pidash_db::entity::runner_session;
+    runner_session::Entity::find()
+        .filter(runner_session::Column::RunnerId.eq(runner_id))
+        .filter(runner_session::Column::RevokedAt.is_null())
+        .order_by_desc(runner_session::Column::CreatedAt)
+}
+
+fn session_from_model(
+    model: pidash_db::entity::runner_session::Model,
+) -> Result<RunnerSession, OutboxError> {
+    Ok(RunnerSession {
+        id: model.id,
+        runner_id: model.runner_id,
+        protocol_version: model.protocol_version,
+        created_at: model.created_at.with_timezone(&Utc),
+        last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&Utc)),
+        revoked_at: model.revoked_at.map(|at| at.with_timezone(&Utc)),
+        revoked_reason: model.revoked_reason,
+    })
+}
+
 impl PubsubStore for MovePubsub<'_> {
     async fn enqueue_for_runner(
         &self,
@@ -170,14 +195,12 @@ impl PubsubStore for MovePubsub<'_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<RunnerSession>, OutboxError> {
-        let rows = sqlx::query(CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await?;
-        rows.iter()
-            .map(runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(OutboxError::from)
+        let db = pidash_db::pool::sea_orm_connection(self.pool);
+        let rows = active_sessions_select(runner_id)
+            .all(&db)
+            .await
+            .map_err(|error| OutboxError::from(pidash_db::orm_tx::into_sqlx(error)))?;
+        rows.into_iter().map(session_from_model).collect()
     }
 
     async fn revoke_runner_session(
@@ -230,64 +253,90 @@ pub(crate) async fn drain_pod_by_id(
     pubsub: &MovePubsub<'_>,
     pod_id: Uuid,
 ) -> Result<(), MoveDrainError> {
-    let pod: Option<(Uuid,)> = sqlx::query_as(DRAIN_POD_BY_ID_LOOKUP_SQL)
-        .bind(pod_id)
-        .fetch_optional(pool)
+    use pidash_db::entity::{agent_run, dev_machine, pod};
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder,
+        TransactionTrait,
+    };
+
+    let map = |error: sea_orm::DbErr| MoveDrainError(error.to_string());
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let pod = pod::Entity::find()
+        .filter(pod::Column::Id.eq(pod_id))
+        .filter(pod::Column::DeletedAt.is_null())
+        .order_by(pod::Column::IsDefault, sea_orm::Order::Desc)
+        .order_by(pod::Column::CreatedAt, sea_orm::Order::Asc)
+        .one(&db)
         .await
-        .map_err(|error| MoveDrainError(error.to_string()))?;
+        .map_err(map)?;
     if pod.is_none() {
         return Ok(());
     }
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| MoveDrainError(error.to_string()))?;
+    let txn = db.begin().await.map_err(map)?;
     let threshold = alive_threshold(Utc::now());
-    let runners = sqlx::query(DRAIN_POD_IDLE_RUNNERS_SQL)
-        .bind(threshold)
-        .bind(pod_id)
-        .fetch_all(&mut *tx)
+    let runners = txn
+        .query_all(DbBackend::Postgres.build(&drain_pod_idle_list_stmt(threshold, pod_id)))
         .await
-        .map_err(|error| MoveDrainError(error.to_string()))?;
+        .map_err(map)?;
     let mut effects = Vec::new();
-    for runner in &runners {
-        let runner_id: Uuid = runner
-            .try_get("id")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
-        let owner_id: Uuid = runner
-            .try_get("owner_id")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
-        let provisioning: String = runner
-            .try_get("provisioning")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
-        let visibility: i32 = runner
-            .try_get("visibility")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
-        let Some(next_sql) = next_for_runner_sql(&provisioning, visibility) else {
+    for runner_row in &runners {
+        let runner_id: Uuid = runner_row.try_get("", "id").map_err(map)?;
+        let owner_id: Uuid = runner_row.try_get("", "owner_id").map_err(map)?;
+        let provisioning: String = runner_row.try_get("", "provisioning").map_err(map)?;
+        let pod_dispatch: String = runner_row.try_get("", "pod_dispatch").map_err(map)?;
+        let machine_id: Option<Uuid> = runner_row.try_get("", "dev_machine_id").map_err(map)?;
+        let visibility: i32 = runner_row.try_get("", "visibility").map_err(map)?;
+        let facts = {
+            let is_engine = provisioning == "desktop_bundled";
+            let pod_member = pod_dispatch == "pod_member";
+            if !is_engine {
+                DispatchFacts {
+                    is_engine: false,
+                    pod_member,
+                    paused: false,
+                    team_runs: true,
+                }
+            } else {
+                let (paused, team_runs) = match machine_id {
+                    Some(id) => {
+                        let machine = dev_machine::Entity::find_by_id(id)
+                            .one(&txn)
+                            .await
+                            .map_err(map)?;
+                        match machine {
+                            Some(machine) => (
+                                machine.engine_paused_by_owner
+                                    || !machine.engine_auto_pause_reason.is_empty(),
+                                machine.engine_team_runs,
+                            ),
+                            None => (false, false),
+                        }
+                    }
+                    None => (false, false),
+                };
+                DispatchFacts {
+                    is_engine: true,
+                    pod_member,
+                    paused,
+                    team_runs,
+                }
+            }
+        };
+        let Some(next_stmt) = next_for_runner_stmt(visibility, pod_id, runner_id, owner_id, &facts)
+        else {
             continue;
         };
-        let run = sqlx::query(&next_sql)
-            .bind(pod_id)
-            .bind(runner_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *tx)
+        let run = txn
+            .query_one(DbBackend::Postgres.build(&next_stmt))
             .await
-            .map_err(|error| MoveDrainError(error.to_string()))?;
+            .map_err(map)?;
         let Some(run) = run else {
             continue;
         };
-        let run_id: Uuid = run
-            .try_get("id")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
-        let work_item_id: Option<Uuid> = run
-            .try_get("work_item_id")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
-        let prompt: String = run
-            .try_get("prompt")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
-        let run_config: Option<Value> = run
-            .try_get("run_config")
-            .map_err(|error| MoveDrainError(error.to_string()))?;
+        let run_id: Uuid = run.try_get("", "id").map_err(map)?;
+        let work_item_id: Option<Uuid> = run.try_get("", "work_item_id").map_err(map)?;
+        let prompt: String = run.try_get("", "prompt").map_err(map)?;
+        let run_config: Option<Value> = run.try_get("", "run_config").map_err(map)?;
         let run_config = run_config
             .and_then(|config| config.as_object().cloned())
             .ok_or_else(|| {
@@ -301,19 +350,19 @@ pub(crate) async fn drain_pod_by_id(
             prompt,
             run_config,
         });
-        sqlx::query(ASSIGN_RUN_UPDATE_SQL)
-            .bind(owner_id)
-            .bind(runner_id)
-            .bind(Utc::now())
-            .bind(run_id)
-            .execute(&mut *tx)
+        use sea_orm::sea_query::Expr;
+        agent_run::Entity::update_many()
+            .col_expr(agent_run::Column::OwnerId, Expr::value(owner_id))
+            .col_expr(agent_run::Column::RunnerId, Expr::value(runner_id))
+            .col_expr(agent_run::Column::Status, Expr::value("assigned"))
+            .col_expr(agent_run::Column::AssignedAt, Expr::value(Utc::now()))
+            .filter(agent_run::Column::Id.eq(run_id))
+            .exec(&txn)
             .await
-            .map_err(|error| MoveDrainError(error.to_string()))?;
+            .map_err(map)?;
         effects.push(plan.after_commit);
     }
-    tx.commit()
-        .await
-        .map_err(|error| MoveDrainError(error.to_string()))?;
+    txn.commit().await.map_err(map)?;
     for effect in &effects {
         let DrainEffect::SendAssign { runner_id, message } = effect;
         send_to_runner(pubsub, *runner_id, message)

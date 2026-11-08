@@ -446,6 +446,11 @@ pub const POD_WRONG_PROJECT_BODY: &str = r#"{"assigned_pod":["pod is in a differ
 /// `validate()` pod-reassign guard (`:211-216`).
 pub const POD_REASSIGN_ACTIVE_RUN_BODY: &str =
     r#"{"assigned_pod":["cannot reassign pod while the issue has an active run"]}"#;
+/// `normalize_issue_executor` unknown value
+/// (`runner/services/issue_assignment.py:37-38`).
+pub const EXECUTOR_UNKNOWN_BODY: &str = r#"{"agent_executor":["unknown agent executor"]}"#;
+/// `normalize_issue_executor` mid-flight guard (`:40-47`).
+pub const EXECUTOR_MID_FLIGHT_BODY: &str = r#"{"agent_executor":["cannot change the execution target while the issue has an active run"]}"#;
 /// `normalize_description_input` non-string markdown (`:100-101`).
 pub const MARKDOWN_NON_STRING_BODY: &str = r#"{"description_markdown":["Must be a string."]}"#;
 
@@ -577,6 +582,11 @@ pub enum ValidateError {
     BinaryInvalid,
     /// `state` is not a state of this project (`:261-265`).
     StateWrongProject,
+    /// `normalize_issue_executor` unknown value
+    /// (`issue_assignment.py:37-38`).
+    ExecutorUnknown,
+    /// `normalize_issue_executor` mid-flight guard (`:40-47`).
+    ExecutorMidFlight,
     /// `parent` is not an issue of this workspace+project (`:267-276`).
     ParentWrongProject,
     /// `estimate_point` is not one of this workspace+project (`:278-286`).
@@ -599,6 +609,8 @@ impl ValidateError {
             ValidateError::HtmlContentInvalid => HTML_CONTENT_INVALID_BODY,
             ValidateError::BinaryInvalid => BINARY_INVALID_BODY,
             ValidateError::StateWrongProject => STATE_WRONG_PROJECT_BODY,
+            ValidateError::ExecutorUnknown => EXECUTOR_UNKNOWN_BODY,
+            ValidateError::ExecutorMidFlight => EXECUTOR_MID_FLIGHT_BODY,
             ValidateError::ParentWrongProject => PARENT_WRONG_PROJECT_BODY,
             ValidateError::EstimatePointWrongProject => ESTIMATE_POINT_WRONG_PROJECT_BODY,
         }

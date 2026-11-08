@@ -33,11 +33,15 @@ use std::future::Future;
 
 use chrono::{DateTime, Utc};
 use mongodb::bson::{spec::BinarySubtype, Binary, Bson, Document};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder};
+use sea_query::{Alias, Expr, Query};
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::entity::{api_activity_logs, email_notification_logs, webhook_logs};
+use crate::orm_tx::into_sqlx;
 use pidash_types::tasks_cleanup::cleanup_dto::{
     self, ApiLogRow, BlobValue, EmailLogRow, IssueDescriptionVersionRow, PageVersionRow, ScalarKey,
     WebhookLogRow,
@@ -547,10 +551,14 @@ impl<'a> PgDeleter<'a> {
 
 impl BatchDeleter for PgDeleter<'_> {
     async fn delete(&self, table: &str, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(&delete_by_ids_sql(table))
-            .bind(ids)
-            .execute(self.pool)
-            .await?;
+        let conn = crate::pool::sea_orm_connection(self.pool);
+        let mut stmt = Query::delete();
+        stmt.from_table(Alias::new(table.to_owned()))
+            .and_where(Expr::col(Alias::new("id".to_owned())).is_in(ids.iter().cloned()));
+        let result = conn
+            .execute(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(into_sqlx)?;
         Ok(result.rows_affected())
     }
 }
@@ -713,6 +721,158 @@ fn decode_row(task: CleanupTask, row: &PgRow) -> Result<(Document, Uuid), sqlx::
     }
 }
 
+/// Parse the Django-literal `cutoff` render
+/// (`2026-08-29 06:00:00[.ffffff]+00:00`) back into the typed bound the
+/// SeaORM filters bind. The cutoff is always rendered internally by
+/// [`render_cutoff`], never caller input.
+fn parse_cutoff(cutoff: &str) -> Result<DateTime<Utc>, CleanupError> {
+    for format in ["%Y-%m-%d %H:%M:%S%.f%:z", "%Y-%m-%d %H:%M:%S%:z"] {
+        if let Ok(parsed) = DateTime::parse_from_str(cutoff, format) {
+            return Ok(parsed.with_timezone(&Utc));
+        }
+    }
+    Err(CleanupError::Db(sqlx::Error::Protocol(format!(
+        "unparsable cleanup cutoff: {cutoff}"
+    ))))
+}
+
+/// Shared batching driver: one accumulator, total accounting, and the two
+/// `flush_batch` call sites (full batch + final partial).
+struct FlushDriver<'a, A: BatchArchiver + Sync, D: BatchDeleter + Sync> {
+    archiver: Option<&'a A>,
+    mongo_available: bool,
+    collection: &'a str,
+    table: &'a str,
+    deleter: &'a D,
+    batches: BatchAccumulator<(Document, Uuid)>,
+    total_processed: u64,
+    total_batches: u64,
+}
+
+impl<'a, A: BatchArchiver + Sync, D: BatchDeleter + Sync> FlushDriver<'a, A, D> {
+    async fn push(&mut self, item: (Document, Uuid)) -> Result<(), CleanupError> {
+        if let Some(items) = self.batches.push(item) {
+            self.total_batches += 1;
+            let (docs, ids): (Vec<Document>, Vec<Uuid>) = items.into_iter().unzip();
+            self.total_processed += ids.len() as u64;
+            flush_batch(
+                self.archiver,
+                self.mongo_available,
+                self.collection,
+                self.table,
+                docs,
+                ids,
+                self.deleter,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn finish(self) -> Result<(u64, u64), CleanupError> {
+        let Self {
+            archiver,
+            mongo_available,
+            collection,
+            table,
+            deleter,
+            mut batches,
+            mut total_processed,
+            mut total_batches,
+        } = self;
+        if let Some(items) = batches.finish() {
+            total_batches += 1;
+            let (docs, ids): (Vec<Document>, Vec<Uuid>) = items.into_iter().unzip();
+            total_processed += ids.len() as u64;
+            flush_batch(
+                archiver,
+                mongo_available,
+                collection,
+                table,
+                docs,
+                ids,
+                deleter,
+            )
+            .await?;
+        }
+        Ok((total_processed, total_batches))
+    }
+}
+
+fn api_log_doc(model: &api_activity_logs::Model) -> (Document, Uuid) {
+    let record = ApiLogRow {
+        id: ScalarKey::Uuid(model.id),
+        created_at: Some(model.created_at.with_timezone(&Utc)),
+        token_identifier: model.token_identifier.clone(),
+        path: model.path.clone(),
+        method: model.method.clone(),
+        query_params: model.query_params.clone().map(Value::String),
+        headers: model.headers.clone().map(Value::String),
+        body: model.body.clone().map(Value::String),
+        response_code: model.response_code,
+        response_body: model.response_body.clone().map(Value::String),
+        ip_address: model.ip_address.clone(),
+        user_agent: model.user_agent.clone(),
+        created_by_id: model.created_by_id.map(ScalarKey::Uuid),
+    };
+    let doc = json_to_bson(&Value::Object(cleanup_dto::doc_map(
+        &cleanup_dto::transform_api_log(&record),
+    )))
+    .as_document()
+    .expect("docs are objects")
+    .clone();
+    (doc, model.id)
+}
+
+fn email_log_doc(model: &email_notification_logs::Model) -> (Document, Uuid) {
+    let record = EmailLogRow {
+        id: ScalarKey::Uuid(model.id),
+        created_at: Some(model.created_at.with_timezone(&Utc)),
+        receiver_id: Some(ScalarKey::Uuid(model.receiver_id)),
+        triggered_by_id: Some(ScalarKey::Uuid(model.triggered_by_id)),
+        entity_identifier: model.entity_identifier.map(ScalarKey::Uuid),
+        entity_name: model.entity_name.clone(),
+        data: model.data.clone(),
+        processed_at: model.processed_at.map(|d| d.with_timezone(&Utc)),
+        sent_at: model.sent_at.map(|d| d.with_timezone(&Utc)),
+        entity: model.entity.clone(),
+        old_value: model.old_value.clone().map(ScalarKey::Text),
+        new_value: model.new_value.clone().map(ScalarKey::Text),
+        created_by_id: model.created_by_id.map(ScalarKey::Uuid),
+    };
+    let doc = json_to_bson(&Value::Object(cleanup_dto::doc_map(
+        &cleanup_dto::transform_email_log(&record),
+    )))
+    .as_document()
+    .expect("docs are objects")
+    .clone();
+    (doc, model.id)
+}
+
+fn webhook_log_doc(model: &webhook_logs::Model) -> (Document, Uuid) {
+    let record = WebhookLogRow {
+        id: ScalarKey::Uuid(model.id),
+        created_at: Some(model.created_at.with_timezone(&Utc)),
+        workspace_id: Some(ScalarKey::Uuid(model.workspace_id)),
+        webhook: Some(ScalarKey::Uuid(model.webhook)),
+        event_type: model.event_type.clone().map(ScalarKey::Text),
+        request_method: model.request_method.clone().map(ScalarKey::Text),
+        request_headers: model.request_headers.clone().map(ScalarKey::Text),
+        request_body: model.request_body.clone().map(ScalarKey::Text),
+        response_status: model.response_status.clone().map(ScalarKey::Text),
+        response_body: model.response_body.clone().map(ScalarKey::Text),
+        response_headers: model.response_headers.clone().map(ScalarKey::Text),
+        retry_count: model.retry_count,
+    };
+    let doc = json_to_bson(&Value::Object(cleanup_dto::doc_map(
+        &cleanup_dto::transform_webhook_log(&record),
+    )))
+    .as_document()
+    .expect("docs are objects")
+    .clone();
+    (doc, model.id)
+}
+
 /// Port of `process_cleanup_task`: sample `mongo_available` once, stream
 /// the queryset, transform each record, flush every [`BATCH_SIZE`], flush
 /// the final partial batch, and report totals.
@@ -727,55 +887,85 @@ pub async fn run_cleanup(
     task_name: &str,
     collection: &str,
 ) -> Result<TaskOutcome, CleanupError> {
-    use futures_util::TryStreamExt;
+    use futures_util::{StreamExt, TryStreamExt};
 
     tracing::info!(task_name, "starting cleanup task");
     let mongo_available = mongo.is_some();
     if mongo_available {
         tracing::info!("MongoDB collection '{collection}' connected successfully");
     }
-    let sql = task.select_sql_for_exec(cutoff);
     let table = task.table();
     let deleter = PgDeleter::new(pool);
 
-    let mut stream = sqlx::query(&sql).fetch(pool);
-    let mut batches = BatchAccumulator::new(BATCH_SIZE);
-    let mut total_processed: u64 = 0;
-    let mut total_batches: u64 = 0;
+    // The three log tasks stream through SeaORM entity queries (the same
+    // predicates and order as the fixture-pinned SQL text); the two
+    // version tasks keep the fixture-pinned window statements (see the
+    // `// raw-sql:` note below).
+    let mut driver = FlushDriver {
+        archiver: mongo,
+        mongo_available,
+        collection,
+        table,
+        deleter: &deleter,
+        batches: BatchAccumulator::new(BATCH_SIZE),
+        total_processed: 0,
+        total_batches: 0,
+    };
 
-    while let Some(row) = stream.try_next().await? {
-        let (doc, id) = decode_row(task, &row)?;
-        if let Some(items) = batches.push((doc, id)) {
-            total_batches += 1;
-            let (docs, ids): (Vec<Document>, Vec<Uuid>) = items.into_iter().unzip();
-            total_processed += ids.len() as u64;
-            flush_batch(
-                mongo,
-                mongo_available,
-                collection,
-                table,
-                docs,
-                ids,
-                &deleter,
-            )
-            .await?;
+    match task {
+        CleanupTask::ApiLogs | CleanupTask::EmailLogs | CleanupTask::WebhookLogs => {
+            let conn = crate::pool::sea_orm_connection(pool);
+            let bound = parse_cutoff(cutoff)?;
+            match task {
+                CleanupTask::ApiLogs => {
+                    let mut stream = api_activity_logs::Entity::find()
+                        .filter(api_activity_logs::Column::CreatedAt.lte(bound))
+                        .order_by_desc(api_activity_logs::Column::CreatedAt)
+                        .stream(&conn)
+                        .await
+                        .map_err(into_sqlx)?;
+                    while let Some(row) = stream.next().await {
+                        let row = row.map_err(into_sqlx)?;
+                        driver.push(api_log_doc(&row)).await?;
+                    }
+                }
+                CleanupTask::EmailLogs => {
+                    let mut stream = email_notification_logs::Entity::find()
+                        .filter(email_notification_logs::Column::SentAt.lte(bound))
+                        .order_by_desc(email_notification_logs::Column::CreatedAt)
+                        .stream(&conn)
+                        .await
+                        .map_err(into_sqlx)?;
+                    while let Some(row) = stream.next().await {
+                        let row = row.map_err(into_sqlx)?;
+                        driver.push(email_log_doc(&row)).await?;
+                    }
+                }
+                CleanupTask::WebhookLogs => {
+                    let mut stream = webhook_logs::Entity::find()
+                        .filter(webhook_logs::Column::CreatedAt.lte(bound))
+                        .order_by_asc(webhook_logs::Column::CreatedAt)
+                        .stream(&conn)
+                        .await
+                        .map_err(into_sqlx)?;
+                    while let Some(row) = stream.next().await {
+                        let row = row.map_err(into_sqlx)?;
+                        driver.push(webhook_log_doc(&row)).await?;
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        CleanupTask::PageVersions | CleanupTask::IssueDescriptionVersions => {
+            let sql = task.select_sql_for_exec(cutoff);
+            // raw-sql: window function `ROW_NUMBER()` (newest-20 retention cut) is not expressible with sea-query 0.32 (`Func` has no `row_number` constructor; only `Expr::cust`), so the fixture-pinned Django text runs through sqlx for these two tasks.
+            let mut stream = sqlx::query(&sql).fetch(pool);
+            while let Some(row) = stream.try_next().await? {
+                driver.push(decode_row(task, &row)?).await?;
+            }
         }
     }
-    if let Some(items) = batches.finish() {
-        total_batches += 1;
-        let (docs, ids): (Vec<Document>, Vec<Uuid>) = items.into_iter().unzip();
-        total_processed += ids.len() as u64;
-        flush_batch(
-            mongo,
-            mongo_available,
-            collection,
-            table,
-            docs,
-            ids,
-            &deleter,
-        )
-        .await?;
-    }
+    let (total_processed, total_batches) = driver.finish().await?;
 
     tracing::info!(
         task_name,
@@ -795,6 +985,7 @@ pub async fn run_cleanup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_query::PostgresQueryBuilder;
     use std::sync::{Arc, Mutex};
 
     /// Same committed evidence as the DTO tests:
@@ -819,6 +1010,72 @@ mod tests {
             api_logs_sql(FROZEN_CUTOFF),
             q["api_logs_sql"].as_str().unwrap()
         );
+    }
+
+    #[test]
+    fn orm_paths_pin_statement_shapes() {
+        // TASK-CLEANUP-1: the ORM execution paths keep the Django
+        // predicates and order (the same ones the fixture-pinned SQL
+        // text spells out).
+        use sea_orm::{DbBackend, QueryTrait};
+        let bound = parse_cutoff(FROZEN_CUTOFF).unwrap();
+        let api_sql = api_activity_logs::Entity::find()
+            .filter(api_activity_logs::Column::CreatedAt.lte(bound))
+            .order_by_desc(api_activity_logs::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(api_sql.contains("\"api_activity_logs\""), "{api_sql}");
+        assert!(
+            api_sql.contains("ORDER BY \"api_activity_logs\".\"created_at\" DESC"),
+            "{api_sql}"
+        );
+        let email_sql = email_notification_logs::Entity::find()
+            .filter(email_notification_logs::Column::SentAt.lte(bound))
+            .order_by_desc(email_notification_logs::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        // Email predicate is `sent_at__lte`, not `created_at__lte`.
+        assert!(email_sql.contains("\"sent_at\" <="), "{email_sql}");
+        assert!(
+            email_sql.contains("ORDER BY \"email_notification_logs\".\"created_at\" DESC"),
+            "{email_sql}"
+        );
+        let webhook_sql = webhook_logs::Entity::find()
+            .filter(webhook_logs::Column::CreatedAt.lte(bound))
+            .order_by_asc(webhook_logs::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            webhook_sql.ends_with("ORDER BY \"webhook_logs\".\"created_at\" ASC"),
+            "{webhook_sql}"
+        );
+        // Batch delete keeps the table-scoped `id = ANY($1)` shape.
+        let ids = [Uuid::nil(), Uuid::max()];
+        let mut stmt = Query::delete();
+        stmt.from_table(Alias::new(TABLE_API_LOGS.to_owned()))
+            .and_where(Expr::col(Alias::new("id".to_owned())).is_in(ids.iter().cloned()));
+        let delete_sql = stmt.to_string(PostgresQueryBuilder);
+        assert!(delete_sql.starts_with("DELETE FROM"), "{delete_sql}");
+        assert!(delete_sql.contains("\"api_activity_logs\""), "{delete_sql}");
+    }
+
+    #[test]
+    fn cutoff_parses_back_to_typed_bound() {
+        // `render_cutoff` output (space separator, optional `.ffffff`)
+        // parses to the bound the filters bind.
+        let parsed = parse_cutoff(FROZEN_CUTOFF).unwrap();
+        assert_eq!(
+            parsed,
+            "2026-08-29T06:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let fractional = parse_cutoff("2026-08-29 06:00:00.123456+00:00").unwrap();
+        assert_eq!(
+            fractional,
+            "2026-08-29T06:00:00.123456Z"
+                .parse::<DateTime<Utc>>()
+                .unwrap()
+        );
+        assert!(parse_cutoff("call-me-maybe").is_err());
     }
 
     #[test]
@@ -976,14 +1233,14 @@ mod tests {
     #[tokio::test]
     async fn archive_then_delete_ordering() {
         let (archiver, deleter) = fakes(None);
-        let ids = vec![Uuid::nil(), Uuid::max()];
+        let ids = [Uuid::nil(), Uuid::max()];
         let outcome = flush_batch(
             Some(&archiver),
             true,
             "api_activity_logs",
             TABLE_API_LOGS,
             vec![doc(1), doc(2)],
-            ids,
+            ids.to_vec(),
             &deleter,
         )
         .await
