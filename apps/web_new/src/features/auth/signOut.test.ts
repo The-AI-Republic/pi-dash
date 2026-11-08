@@ -180,7 +180,7 @@ describe("performSignOut", () => {
     expect(notifyError).not.toHaveBeenCalled();
   });
 
-  it("disposes the runtime before the POST once confirmed", async () => {
+  it("disposes the runtime only after the POST succeeds, once confirmed", async () => {
     const client = stubClient(async () => ({ url: "https://app.test/" }));
     const queryClient = new QueryClient();
     const choice = { deleteChatHistory: true, signOutComputer: false };
@@ -198,9 +198,32 @@ describe("performSignOut", () => {
     expect(disposeRuntimeForSignOut).toHaveBeenCalledWith(choice);
     const disposeOrder = disposeRuntimeForSignOut.mock.invocationCallOrder[0] ?? 0;
     const postOrder = vi.mocked(client.post).mock.invocationCallOrder[0] ?? 0;
-    expect(disposeOrder).toBeGreaterThan(0);
-    expect(disposeOrder).toBeLessThan(postOrder);
+    expect(disposeOrder).toBeGreaterThan(postOrder);
     expect(useSessionStore.getState().status).toBe("signed-out");
+  });
+
+  it("never disposes the runtime when the POST fails, so history and the agent survive", async () => {
+    const client = stubClient(async () => {
+      throw new Error("boom");
+    });
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["session", "me"], { id: "user-1" });
+    const choice = { deleteChatHistory: true, signOutComputer: true };
+    const confirmRuntimeSignOut = vi.fn(async () => choice);
+    const disposeRuntimeForSignOut = vi.fn(async () => undefined);
+    const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
+
+    try {
+      await expect(performSignOut({ client: client as never, queryClient })).rejects.toThrow("boom");
+    } finally {
+      unregister();
+    }
+
+    expect(confirmRuntimeSignOut).toHaveBeenCalledTimes(1);
+    expect(disposeRuntimeForSignOut).not.toHaveBeenCalled();
+    expect(notifyError).toHaveBeenCalledWith(SIGN_OUT_FAILED_TITLE, SIGN_OUT_FAILED_MESSAGE);
+    expect(queryClient.getQueryData(["session", "me"])).toEqual({ id: "user-1" });
+    expect(useSessionStore.getState().status).toBe("authenticated");
   });
 
   it("signs nothing out when the runtime confirmation is cancelled", async () => {
