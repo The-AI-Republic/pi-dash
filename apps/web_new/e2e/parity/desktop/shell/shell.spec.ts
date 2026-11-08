@@ -897,10 +897,10 @@ async function expectHandOff(driver: ParityDriver, path: string): Promise<void> 
   if (text.includes(NEW_HANDOFF_NO_ADDRESS)) {
     // Gate builds without a baked hosted origin say plainly that they
     // cannot open the screen; nothing is handed to the OS.
-    expect(await desktopInvocations(driver.page, "plugin:opener|open_url")).toEqual([]);
+    expect(await desktopInvocations(driver.page, "open_in_browser")).toEqual([]);
     return;
   }
-  const opened = await desktopInvocations(driver.page, "plugin:opener|open_url");
+  const opened = await desktopInvocations(driver.page, "open_in_browser");
   const urls = opened.map((entry) => (entry.args as { url?: unknown } | undefined)?.url);
   expect(urls).toContain(new URL(path, `${parityOracleUrl(process.env)}/`).toString());
 }
