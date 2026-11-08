@@ -39,10 +39,9 @@ use pidash_db::orm_tx::TxConn;
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::admission::RedisAdmissionCache;
 use pidash_services::dispatch::{
-    consume_admission_token, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
+    consume_admission_token, DeferredConsume, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
@@ -859,13 +858,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
                 .map_err(|detail| ExecutionError::Store(CreationError::Db(detail)))?,
             None => false,
         };
-        let profile = {
-            let mapped = assistant_seams::agent_model_profile_for_user(has_key);
-            LlmProfile {
-                available: mapped.available,
-                reason_code: mapped.reason_code,
-            }
-        };
         // The driver short-circuits a missing actor before consulting
         // the closure, so only a present actor consults the seam (and a
         // missing one never pays for the overlay's reads). Clone the seam
@@ -910,7 +902,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
             ExecutionSeams {
                 has_usable_llm_config: move || has_llm,
                 toolsets: toolsets.clone(),
-                llm_profile: move || profile,
             },
         )
         .await;

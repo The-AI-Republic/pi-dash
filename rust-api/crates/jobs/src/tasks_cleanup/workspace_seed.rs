@@ -549,22 +549,11 @@ impl RunInput {
     }
 }
 
-/// `get_default_agent_executor` (`core/agent_execution.py:26-31`):
-/// `DEFAULT_AGENT_EXECUTOR` (`settings/common.py:545`, itself
-/// `get_config("DEFAULT_AGENT_EXECUTOR", "local_runner")`) validated
-/// against the executor choices, else `local_runner`.
+/// `get_default_agent_executor` (`core/agent_execution.py:48-55`, #2903):
+/// always `local_runner`; the setting is ignored (reported by the
+/// `managed.W001` system check, not refused).
 pub fn default_agent_executor() -> String {
-    match std::env::var("DEFAULT_AGENT_EXECUTOR") {
-        Ok(value)
-            if matches!(
-                value.as_str(),
-                "local_runner" | "cloud_agent" | "managed_runner"
-            ) =>
-        {
-            value
-        }
-        _ => "local_runner".to_owned(),
-    }
+    "local_runner".to_owned()
 }
 
 /// What one [`run`] seeded, in orchestration order — the DB before/after

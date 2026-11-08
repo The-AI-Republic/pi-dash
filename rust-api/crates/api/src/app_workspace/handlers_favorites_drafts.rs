@@ -7765,6 +7765,7 @@ mod tests {
             description_html: None,
             assignee_ids: None,
             label_ids: None,
+            agent_executor: None,
         };
         let project = uuid("33333333-3333-3333-3333-333333333333");
         let workspace = uuid("44444444-4444-4444-4444-444444444444");
@@ -7795,6 +7796,7 @@ mod tests {
             description_html: Some("<p>clean</p>".to_owned()),
             assignee_ids: None,
             label_ids: None,
+            agent_executor: None,
         };
         let values = vec![
             ("name".to_owned(), FieldValue::Text("n".to_owned())),

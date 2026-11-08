@@ -31,12 +31,11 @@ use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_types::dispatch::AgentExecutorKind;
 
-use crate::assistant::seams as assistant_seams;
 use crate::dispatch::execution::{
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
     ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
-use crate::dispatch::{DeferredConsume, LlmProfile};
+use crate::dispatch::DeferredConsume;
 use crate::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use crate::orchestration::creation::{
     finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
@@ -336,13 +335,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
                 .map_err(|detail| ExecutionError::Store(CreationError::Db(detail)))?,
             None => false,
         };
-        let profile = {
-            let mapped = assistant_seams::agent_model_profile_for_user(has_key);
-            LlmProfile {
-                available: mapped.available,
-                reason_code: mapped.reason_code,
-            }
-        };
         // The driver short-circuits a missing actor before consulting
         // the closure, so only a present actor consults the seam (and a
         // missing one never pays for the overlay's reads). Clone the seam
@@ -379,7 +371,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
             ExecutionSeams {
                 has_usable_llm_config: move || has_llm,
                 toolsets: self.toolsets.clone(),
-                llm_profile: move || profile,
             },
         )
         .await;

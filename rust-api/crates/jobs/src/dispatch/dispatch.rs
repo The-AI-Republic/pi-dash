@@ -224,10 +224,8 @@ pub const EVENTS_TRUNCATED_KIND: &str = "events_truncated";
 /// `pidash_jobs::dispatch::…` path stable.
 pub use pidash_services::dispatch::execution::{
     defer_admission_error, execution_fields, lock_cloud_creation_capacity, lock_workspace,
-    managed_execution_decision, managed_refusal_detail, quota_verdict, ActorScope,
-    DeferredAdmissionError, ExecutionFields, ExecutionFieldsError, ExecutionInputs, ExecutionSeams,
-    ManagedFields, ProjectScope, ENROLLED_LATEST_RUNNER_SQL, QUEUED_CLOUD_COUNT_SQL,
-    WORKSPACE_LOCK_SQL,
+    quota_verdict, ActorScope, DeferredAdmissionError, ExecutionFields, ExecutionFieldsError,
+    ExecutionInputs, ExecutionSeams, ProjectScope, QUEUED_CLOUD_COUNT_SQL, WORKSPACE_LOCK_SQL,
 };
 
 // ---------------------------------------------------------------------------
@@ -585,12 +583,11 @@ mod tests {
     use super::*;
     use pidash_db::config::ManagedRunnerSettings;
     use pidash_services::dispatch::{
-        build_tool_plan, AdmissionCache, CloudAgentAdmissionError, DeferredConsume, LlmProfile,
+        build_tool_plan, AdmissionCache, CloudAgentAdmissionError, DeferredConsume,
         ResolveExecutorError, UserFlags,
     };
     use pidash_services::extensions::CloudAgentToolsetsSeam;
     use pidash_services::extensions::NoExtraToolsets;
-    use pidash_types::dispatch::ManagedRunnerReason;
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -723,55 +720,11 @@ mod tests {
         }
     }
 
-    fn panic_seams() -> ExecutionSeams<impl FnOnce() -> bool, impl FnOnce() -> LlmProfile> {
+    fn panic_seams() -> ExecutionSeams<impl FnOnce() -> bool> {
         ExecutionSeams {
             has_usable_llm_config: || panic!("llm seam must not be consulted"),
             toolsets: Arc::new(PanicToolsets("toolsets seam must not be consulted")),
-            llm_profile: || panic!("profile seam must not be consulted"),
         }
-    }
-
-    // -- fixture: refusal map ------------------------------------------------
-
-    #[test]
-    fn managed_refusal_details_match_fixture_verbatim() {
-        let details = &fixture()["managed_refusal_detail"];
-        for (reason, expected) in [
-            ("managed_runner_disabled", "Pi Dash Agent is not enabled on this instance."),
-            (
-                "desktop_not_connected",
-                "Open the Pi Dash desktop app on the machine you want this to run on.",
-            ),
-            (
-                "llm_config_missing",
-                "The run creator has no AI provider configured. Configure one in Pi Dash AI settings.",
-            ),
-            (
-                "gateway_scopes_missing",
-                "Sign in to Pi Dash again to refresh your AI access.",
-            ),
-            (
-                "byok_not_supported_on_desktop",
-                "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; \
-                 Pi Dash AI and the Cloud Agent keep using your own key.",
-            ),
-            (
-                "no_managed_runner_for_project",
-                "This project has no Pi Dash Agent on your desktop yet.",
-            ),
-            (
-                "managed_runner_paused",
-                "Your Pi Dash Agent for this project is paused. Resume it to run here.",
-            ),
-        ] {
-            assert_eq!(details[reason], expected, "fixture row {reason}");
-            assert_eq!(managed_refusal_detail(reason), expected, "port {reason}");
-        }
-        // The `.get(reason, …)` default (`creation.py:132`) has no fixture row.
-        assert_eq!(
-            managed_refusal_detail("something_new"),
-            "Pi Dash Agent is not available"
-        );
     }
 
     // -- quota verdict (pure core of both capacity gates) --------------------
@@ -812,83 +765,6 @@ mod tests {
             }
         );
     }
-
-    // -- managed branches (pure core) ----------------------------------------
-
-    #[test]
-    fn managed_decision_matrix() {
-        let pin = Uuid::new_v4();
-        // Available: pinned to the re-queried online runner, no marker.
-        assert_eq!(
-            managed_execution_decision(true, "", false, Some(pin), None, false),
-            Ok(ManagedFields {
-                pinned_runner_id: Some(pin),
-                error_code: None,
-            })
-        );
-        // A lost race pins nothing — Python assigns the `None` too.
-        assert_eq!(
-            managed_execution_decision(true, "", false, None, None, false),
-            Ok(ManagedFields {
-                pinned_runner_id: None,
-                error_code: None,
-            })
-        );
-        // Automatic + transient: pinned to the latest heartbeat, waiting marker.
-        assert_eq!(
-            managed_execution_decision(
-                false,
-                ManagedRunnerReason::NOT_CONNECTED,
-                true,
-                None,
-                Some(pin),
-                true,
-            ),
-            Ok(ManagedFields {
-                pinned_runner_id: Some(pin),
-                error_code: Some(ManagedRunnerReason::NOT_CONNECTED),
-            })
-        );
-        // Manual + transient: refused (`creation.py:124` needs `automatic`).
-        let err = managed_execution_decision(
-            false,
-            ManagedRunnerReason::NOT_CONNECTED,
-            true,
-            None,
-            Some(pin),
-            false,
-        )
-        .expect_err("manual transient raises");
-        assert_eq!(err.code(), ManagedRunnerReason::NOT_CONNECTED);
-        assert_eq!(
-            err.to_string(),
-            "Open the Pi Dash desktop app on the machine you want this to run on."
-        );
-        // Structural failures refuse automatic runs too (`creation.py:120-122`).
-        for reason in [
-            ManagedRunnerReason::DISABLED,
-            ManagedRunnerReason::LLM_CONFIG_MISSING,
-            ManagedRunnerReason::NO_RUNNER_FOR_PROJECT,
-        ] {
-            let err = managed_execution_decision(false, reason, true, None, None, true)
-                .expect_err("structural raises");
-            assert_eq!(err.code(), reason);
-            assert_eq!(err.to_string(), managed_refusal_detail(reason));
-        }
-        // Offline but nothing enrolled: not transient, refused.
-        let err = managed_execution_decision(
-            false,
-            ManagedRunnerReason::NOT_CONNECTED,
-            false,
-            None,
-            None,
-            true,
-        )
-        .expect_err("unenrolled raises");
-        assert_eq!(err.code(), ManagedRunnerReason::NOT_CONNECTED);
-    }
-
-    // -- dispatch math --------------------------------------------------------
 
     #[test]
     fn capacity_clamps_at_zero() {
@@ -1152,11 +1028,7 @@ mod tests {
 
     #[test]
     fn all_statements_parse_as_postgres() {
-        for sql in [
-            WORKSPACE_LOCK_SQL,
-            QUEUED_CLOUD_COUNT_SQL,
-            ENROLLED_LATEST_RUNNER_SQL,
-        ] {
+        for sql in [WORKSPACE_LOCK_SQL, QUEUED_CLOUD_COUNT_SQL] {
             parse_postgres(sql);
         }
     }
@@ -1274,11 +1146,7 @@ mod tests {
 
     #[test]
     fn statements_touch_dispatch_tables_only() {
-        for sql in [
-            WORKSPACE_LOCK_SQL,
-            QUEUED_CLOUD_COUNT_SQL,
-            ENROLLED_LATEST_RUNNER_SQL,
-        ] {
+        for sql in [WORKSPACE_LOCK_SQL, QUEUED_CLOUD_COUNT_SQL] {
             assert!(
                 sql.contains("agent_run")
                     || sql.contains("workspaces")
@@ -1287,9 +1155,6 @@ mod tests {
                 "unexpected table in: {sql}"
             );
         }
-        assert!(
-            ENROLLED_LATEST_RUNNER_SQL.contains("ORDER BY runner.last_heartbeat_at DESC LIMIT 1")
-        );
     }
 
     // -- live Postgres (ignored; needs a migrated scratch DB) ------------------
@@ -1330,13 +1195,6 @@ mod tests {
             CloudAgentSettings {
                 enabled: true,
                 ..django_cloud_settings()
-            }
-        }
-
-        fn managed_on() -> ManagedRunnerSettings {
-            ManagedRunnerSettings {
-                enabled: true,
-                ..django_managed_settings()
             }
         }
 
@@ -1461,39 +1319,6 @@ mod tests {
             .execute(pool)
             .await
             .expect("seed run");
-            id
-        }
-
-        async fn seed_runner(
-            pool: &PgPool,
-            graph: &Graph,
-            owner: Uuid,
-            status: &str,
-            heartbeat: Option<DateTime<Utc>>,
-        ) -> Uuid {
-            let id = Uuid::new_v4();
-            sqlx::query(
-                "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, \
-                 name, host_label, provisioning, pod_dispatch, visibility, refresh_token_hash, \
-                 refresh_token_fingerprint, refresh_token_generation, \
-                 previous_refresh_token_hash, access_token_signing_key_version, \
-                 enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
-                 os, arch, runner_version, dev_metadata, protocol_version, last_heartbeat_at, \
-                 revoked_reason) \
-                 VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 'pinned_only', 0, '', '', 0, '', \
-                 1, '', '', '[]', $7, '', '', '', '{}', 1, $8, '')",
-            )
-            .bind(id)
-            .bind(Utc::now())
-            .bind(owner)
-            .bind(graph.ws)
-            .bind(graph.pod)
-            .bind(format!("l6-{}", &id.to_string()[..8]))
-            .bind(status)
-            .bind(heartbeat)
-            .execute(pool)
-            .await
-            .expect("seed runner");
             id
         }
 
@@ -1902,7 +1727,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(NoExtraToolsets),
-                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )
             .await
@@ -1990,7 +1814,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(OptedInToolsets),
-                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )
             .await
@@ -1999,125 +1822,6 @@ mod tests {
             assert_eq!(fields.executor_kind, AgentExecutorKind::CloudAgent);
             assert_eq!(fields.tool_plan["extra_toolsets"], true);
             cleanup(&pool, &graph, &[], &[]).await;
-        }
-
-        #[tokio::test]
-        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
-        async fn live_execution_fields_managed_branches() {
-            let pool = pool().await;
-            let graph = seed_graph(&pool, "managed").await;
-            let now = Utc::now();
-            let runner = seed_runner(&pool, &graph, graph.user, "online", Some(now)).await;
-            let project = ProjectScope {
-                project_id: graph.project,
-                workspace_id: graph.ws,
-                default_agent_executor: "managed_runner".to_owned(),
-            };
-            let actor = ActorScope {
-                id: graph.user,
-                flags: UserFlags {
-                    is_active: true,
-                    is_bot: false,
-                },
-            };
-            let profile = || LlmProfile {
-                available: true,
-                reason_code: String::new(),
-            };
-            let inputs_for = |automatic| ExecutionInputs {
-                project: &project,
-                run_kind: "issue",
-                has_issue: true,
-                required_capabilities: &[],
-                actor: Some(&actor),
-                automatic,
-                requested: None,
-                now_unix_secs: now.timestamp(),
-            };
-            let cache = FakeCache::default();
-            // Online: pinned to the creator's own runner, no marker.
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let fields = execution_fields(
-                &mut tx,
-                &inputs_for(false),
-                &django_cloud_settings(),
-                &managed_on(),
-                &cache,
-                &mut collect,
-                ExecutionSeams {
-                    has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
-                    llm_profile: profile,
-                },
-            )
-            .await
-            .expect("managed fields");
-            tx.rollback().await.expect("rollback");
-            assert_eq!(fields.executor_kind, AgentExecutorKind::ManagedRunner);
-            assert_eq!(fields.tool_plan, serde_json::json!({}));
-            assert_eq!(fields.pinned_runner_id, Some(runner));
-            assert_eq!(fields.error_code, None);
-            // Offline but enrolled: manual refuses, automatic waits visibly.
-            sqlx::query(
-                "UPDATE runner SET status = 'offline', last_heartbeat_at = $1 WHERE id = $2",
-            )
-            .bind(now - ChronoDuration::hours(1))
-            .bind(runner)
-            .execute(&pool)
-            .await
-            .expect("take runner offline");
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let err = execution_fields(
-                &mut tx,
-                &inputs_for(false),
-                &django_cloud_settings(),
-                &managed_on(),
-                &cache,
-                &mut collect,
-                ExecutionSeams {
-                    has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
-                    llm_profile: profile,
-                },
-            )
-            .await
-            .expect_err("manual offline raises");
-            tx.rollback().await.expect("rollback");
-            match err {
-                ExecutionFieldsError::Managed(refused) => {
-                    assert_eq!(refused.code(), ManagedRunnerReason::NOT_CONNECTED);
-                }
-                other => panic!("wrong variant: {other:?}"),
-            }
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let fields = execution_fields(
-                &mut tx,
-                &inputs_for(true),
-                &django_cloud_settings(),
-                &managed_on(),
-                &cache,
-                &mut collect,
-                ExecutionSeams {
-                    has_usable_llm_config: || panic!("cloud seam unreachable here"),
-                    toolsets: Arc::new(PanicToolsets("cloud seam unreachable here")),
-                    llm_profile: profile,
-                },
-            )
-            .await
-            .expect("automatic waits");
-            tx.rollback().await.expect("rollback");
-            assert_eq!(fields.pinned_runner_id, Some(runner));
-            assert_eq!(
-                fields.error_code.as_deref(),
-                Some(ManagedRunnerReason::NOT_CONNECTED)
-            );
-            cleanup(&pool, &graph, &[], &[runner]).await;
         }
 
         #[tokio::test]
@@ -2353,7 +2057,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(PanicToolsets("no plan is built on refuse")),
-                    llm_profile: || panic!("managed seam unreachable here"),
                 },
             )
             .await
@@ -2362,47 +2065,6 @@ mod tests {
             assert!(matches!(err, ExecutionFieldsError::Admission(_)));
             assert_eq!(err.to_string(), "Cloud Agent creation rate exceeded");
             // The failed bucket registers nothing (`creation.py:49-50` returns).
-            assert!(deferred.is_empty());
-        }
-
-        #[tokio::test]
-        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
-        async fn live_managed_disabled_raises_at_resolve() {
-            let pool = pool().await;
-            let project = project("managed_runner");
-            let actor = actor(true, false);
-            let inputs = ExecutionInputs {
-                project: &project,
-                run_kind: "issue",
-                has_issue: true,
-                required_capabilities: &[],
-                actor: Some(&actor),
-                automatic: false,
-                requested: None,
-                now_unix_secs: 1_700_000_000,
-            };
-            let cache = FakeCache::default();
-            let mut deferred = Vec::new();
-            let mut collect = |consume: DeferredConsume| deferred.push(consume);
-            let mut tx = Transaction::begin(&pool).await.expect("begin");
-            let err = execution_fields(
-                &mut tx,
-                &inputs,
-                &django_cloud_settings(),
-                &django_managed_settings(),
-                &cache,
-                &mut collect,
-                panic_seams(),
-            )
-            .await
-            .expect_err("disabled managed raises");
-            tx.rollback().await.expect("rollback");
-            match err {
-                ExecutionFieldsError::Resolve(ResolveExecutorError::ManagedRunner(unavailable)) => {
-                    assert_eq!(unavailable.code(), ManagedRunnerReason::DISABLED);
-                }
-                other => panic!("wrong variant: {other:?}"),
-            }
             assert!(deferred.is_empty());
         }
 
@@ -2457,7 +2119,6 @@ mod tests {
                 ExecutionSeams {
                     has_usable_llm_config: || true,
                     toolsets: Arc::new(NoExtraToolsets),
-                    llm_profile: || panic!("managed seam unreachable on the cloud path"),
                 },
             )
             .await
