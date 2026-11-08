@@ -332,7 +332,7 @@ export function IssuePeek({
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           issueId={issue.id}
-          editable={editable}
+          editable={writable}
         />
       ),
     },
@@ -355,9 +355,9 @@ export function IssuePeek({
                 workspaceSlug={workspaceSlug}
                 issue={issue}
                 project={project}
-                editable={editable}
+                editable={writable}
                 projectIdentifier={resolved.identifier}
-                canWrite={editable}
+                canWrite={writable}
                 onOpen={(row: SubIssueItem, identifier: string) => {
                   openNested({ issueId: row.id, projectId: row.project_id, issueKey: identifier });
                 }}
