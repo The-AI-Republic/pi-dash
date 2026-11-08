@@ -33,6 +33,7 @@ use crate::ipc::protocol::{
     version_lt,
 };
 use crate::ipc::server::IpcServer;
+use crate::util::fs::create_dir_all_private;
 use crate::util::paths::{Paths, RunnerPaths};
 
 pub struct Supervisor {
@@ -622,7 +623,7 @@ impl RunnerSpawnCtx {
 
         self.stop_runner_locked(runner_id).await;
         if let Some(dir) = &changes.working_dir
-            && let Err(e) = std::fs::create_dir_all(dir)
+            && let Err(e) = create_dir_all_private(dir)
         {
             self.add_runner_locked(inst.config.clone()).await?;
             anyhow::bail!("creating working dir {}: {e}", dir.display());
@@ -3451,7 +3452,7 @@ impl ChatWorker {
         // prompt. This is the PDASHOSS01-83 fix: a warm-runner chat message does
         // no git operation before the agent spawns.
         let workspace_path = self.runner_config.workspace.working_dir.clone();
-        std::fs::create_dir_all(&workspace_path)?;
+        create_dir_all_private(&workspace_path)?;
         if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
             let requested = std::path::PathBuf::from(cwd);
             let requested = if requested.is_absolute() {

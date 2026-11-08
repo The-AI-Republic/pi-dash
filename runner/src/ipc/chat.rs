@@ -63,6 +63,7 @@ use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, De
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, ApprovalMode};
 use crate::config::schema::RunnerConfig;
 use crate::daemon::runner_instance::RunnerInstance;
+use crate::util::fs::create_dir_all_private;
 
 /// How long a resolved approval / cancel wait is allowed to hold a turn.
 const APPROVAL_TTL_MINUTES: i64 = 10;
@@ -1135,14 +1136,14 @@ fn resolve_chat_workspace(config: &RunnerConfig, cwd: Option<&str>) -> Result<Pa
             }
             return Ok(requested_rel);
         }
-        std::fs::create_dir_all(&workspace_path)?;
+        create_dir_all_private(&workspace_path)?;
         let requested = workspace_path.join(requested_rel);
         if !requested.starts_with(&workspace_path) {
             anyhow::bail!("chat cwd is outside runner workspace");
         }
         return Ok(requested);
     }
-    std::fs::create_dir_all(&workspace_path)?;
+    create_dir_all_private(&workspace_path)?;
     Ok(workspace_path)
 }
 
