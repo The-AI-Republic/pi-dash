@@ -155,6 +155,49 @@ export interface DaemonEngineRunner {
   working_dir: string;
 }
 
+/** One engine runner block of a legacy per-workspace tree still on disk. */
+export interface LegacyEngineRunner {
+  name: string;
+  runner_id: string | null;
+  project: string;
+  working_dir: string;
+}
+
+/** A legacy private-daemon tree still to migrate (shell `LegacyTree`). */
+export interface LegacyTree {
+  workspace: string;
+  dir: string;
+  cloud_url: string | null;
+  dev_machine_id: string | null;
+  engine_runners: LegacyEngineRunner[];
+}
+
+/** A legacy task folder the migration left unused (design §13, "Collision"). */
+export interface LegacyFolderNotice {
+  workspace: string;
+  project: string;
+  path: string;
+}
+
+/** A project whose engine became a pod member on upgrade (PO-11). */
+export interface PodMemberNotice {
+  runner_id: string;
+  workspace: string;
+  project: string;
+}
+
+/** The one-time notices still to show (shell `Notices`). */
+export interface DesktopNotices {
+  legacy_folders: LegacyFolderNotice[];
+  pod_member_projects: PodMemberNotice[];
+}
+
+/** What the host reads: pending notices and dismissed keys (shell `NoticesView`). */
+export interface NoticesView {
+  notices: DesktopNotices;
+  dismissed: string[];
+}
+
 /**
  * The app as a client of this computer's Pi Dash daemon (desktop only).
  * The daemon is the command-line tool's, run as a user service: the app
@@ -184,6 +227,20 @@ export interface AgentRuntimeApi {
   saveApprovalModes(account: string, modes: Record<string, string>): Promise<void>;
   /** Read back the modes stashed for an account (empty when there are none). */
   loadApprovalModes(account: string): Promise<Record<string, string>>;
+  /** Legacy trees still holding a config (design §13, step 1). */
+  scanLegacyTrees(): Promise<LegacyTree[]>;
+  /** Move one tree's engine home and delete its config (steps 4–5). */
+  finishLegacyTree(input: { dir: string; account: string; daemonAccount: string | null }): Promise<void>;
+  /** Point a re-added engine runner back at its legacy folder. */
+  restoreLegacyFolder(input: { runner: string; workingDir: string }): Promise<void>;
+  /** Pending one-time notices and dismissed keys for an account. */
+  loadNotices(account: string): Promise<NoticesView>;
+  /** Record new notices; pending or dismissed ones are dropped by the host. */
+  recordNotices(account: string, notices: DesktopNotices): Promise<NoticesView>;
+  /** Dismiss notices (or decline a replace prompt) for good. */
+  dismissNotices(account: string, keys: string[]): Promise<NoticesView>;
+  /** Sign the computer's Pi Dash daemon out (`pidash auth logout`). */
+  signOutComputer(): Promise<void>;
 }
 
 /**

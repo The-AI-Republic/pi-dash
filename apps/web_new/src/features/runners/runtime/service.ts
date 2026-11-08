@@ -138,6 +138,16 @@ export function compatibleHello(discovery: DaemonDiscovery | null = state.discov
   return discovery?.kind === "compatible" ? discovery.hello : null;
 }
 
+/** The account key the daemon keys its engine home by: user id, else e-mail. */
+export function daemonAccountKey(hello: DaemonHello | null): string | undefined {
+  return hello?.account?.user_id ?? hello?.account?.email ?? undefined;
+}
+
+/** Whether the sign-out dialog should offer to sign out the computer too. */
+export function canSignOutComputer(): boolean {
+  return compatibleHello() !== null;
+}
+
 /**
  * Why the app's engine features are off, in the user's words; `null` when
  * the daemon is compatible. Every other part of the app keeps working.
@@ -333,6 +343,27 @@ export async function setUpDaemon(
 }
 
 /**
+ * Sign the daemon in to one more workspace with an app-approved grant
+ * (design §4.9), then have the daemon re-read its tokens. The migration
+ * and the replace flow need this when the daemon does not yet hold the
+ * workspace's credential.
+ */
+export async function signInWorkspace(
+  input: { workspaceSlug: string; cli: CliSetupApi | undefined } & RuntimeDeps
+): Promise<void> {
+  const { client, runtime, cli, workspaceSlug } = input;
+  const identity = state.identity;
+  if (!runtime || !identity) throw new Error("The local agent is signed out.");
+  if (!cli) throw new Error("This build cannot sign Pi Dash on this computer in to that workspace.");
+  const grant = await startDeviceGrant(client);
+  await approveDeviceCode(client, grant.user_code, { interactive: false, workspaceSlug });
+  // The tool finishes the exchange and owns everything it writes.
+  await cli.login({ deviceCode: grant.device_code, cloudUrl: identity.cloudUrl, workspace: workspaceSlug });
+  await runtime.reloadCredentials().catch(() => undefined);
+  await rediscover(runtime);
+}
+
+/**
  * A daemon the app can use, set up on the user's say-so when there is
  * none. Throws the reason when there is still none.
  */
@@ -445,9 +476,10 @@ function defaultSleep(ms: number): Promise<void> {
 
 /**
  * The app half of a sign-out. The daemon, the engine and every runner stay
- * signed in — they are independent of the app. Approval modes are handed
- * to the host before the webview wipe; chat history goes only when the
- * dialog asked for it. Never rejects.
+ * signed in (they are independent of the app) unless the user ticked "Also
+ * sign out Pi Dash on this computer". Approval modes are handed to the host
+ * before the webview wipe; chat history goes only when the dialog asked for
+ * it. Never rejects.
  */
 export async function disposeRuntimeForSignOut(
   input: { choice: RuntimeSignOutChoice; chat?: Pick<LocalChatApi, "clearHistory"> | undefined } & RuntimeDeps
@@ -465,6 +497,14 @@ export async function disposeRuntimeForSignOut(
       await chat.clearHistory(account);
     } catch {
       // Deleting history failed; the sign-out itself still goes ahead.
+    }
+  }
+  if (choice.signOutComputer) {
+    try {
+      await runtime.signOutComputer();
+    } catch {
+      // Signing out Pi Dash on this computer failed; the sign-out itself
+      // still goes ahead.
     }
   }
   // The account stays readable until the page navigates away; discovery

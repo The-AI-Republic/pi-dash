@@ -35,7 +35,9 @@ import type {
   DaemonLocalRunner,
 } from "../../../core/platform/index.js";
 import {
+  canSignOutComputer,
   compatibleHello,
+  daemonAccountKey,
   discoverDaemon,
   discoveryProblem,
   disposeRuntimeForSignOut,
@@ -52,6 +54,7 @@ import {
   resetRuntimeServiceForTests,
   resumeRuntime,
   setUpDaemon,
+  signInWorkspace,
   SILENT_RENEW_RETRY_MS,
   turnOnEngineForProject,
   type DaemonSetUpStep,
@@ -100,6 +103,13 @@ function fakeRuntime(discovery: DaemonDiscovery = compatible()): FakeRuntime {
     reloadCredentials: vi.fn(async () => undefined),
     saveApprovalModes: vi.fn(async () => undefined),
     loadApprovalModes: vi.fn(async () => ({})),
+    scanLegacyTrees: vi.fn(async () => []),
+    finishLegacyTree: vi.fn(async () => undefined),
+    restoreLegacyFolder: vi.fn(async () => undefined),
+    loadNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    recordNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    dismissNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    signOutComputer: vi.fn(async () => undefined),
   } as unknown as FakeRuntime;
 }
 
@@ -195,7 +205,9 @@ describe("resume and discovery", () => {
     await expect(
       prepareAgentRun({ client, target: { workspaceSlug: "ws", projectId: "p", issueId: "i" } })
     ).resolves.toBeUndefined();
-    await expect(disposeRuntimeForSignOut({ client, choice: { deleteChatHistory: true } })).resolves.toBeUndefined();
+    await expect(
+      disposeRuntimeForSignOut({ client, choice: { deleteChatHistory: true, signOutComputer: false } })
+    ).resolves.toBeUndefined();
     expect(getProject).not.toHaveBeenCalled();
   });
 
@@ -489,15 +501,61 @@ describe("prepareAgentRun", () => {
   });
 });
 
+describe("signInWorkspace and sign-out gating", () => {
+  it("signs the daemon in to one more workspace with an approved grant", async () => {
+    const runtime = fakeRuntime(compatible());
+    const cli = fakeCli();
+    resume(runtime);
+    await discoverDaemon(runtime);
+    await signInWorkspace({ client, runtime, cli, workspaceSlug: "ws" });
+    expect(vi.mocked(startDeviceGrant)).toHaveBeenCalledWith(client);
+    expect(vi.mocked(approveDeviceCode)).toHaveBeenCalledWith(client, "USER-1", {
+      interactive: false,
+      workspaceSlug: "ws",
+    });
+    expect(cli.login).toHaveBeenCalledWith({ deviceCode: "device-1", cloudUrl: CLOUD, workspace: "ws" });
+    expect(runtime.reloadCredentials).toHaveBeenCalledTimes(1);
+    expect(runtime.discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("keys the engine home by user id, else e-mail", async () => {
+    expect(daemonAccountKey(hello())).toBe("u1");
+    expect(daemonAccountKey({ ...hello(), account: { cloud_url: CLOUD, email: "e@test" } })).toBe("e@test");
+    expect(daemonAccountKey(null)).toBeUndefined();
+  });
+
+  it("offers computer sign-out only when the daemon is the account's", async () => {
+    const runtime = fakeRuntime(compatible());
+    resume(runtime);
+    await discoverDaemon(runtime);
+    expect(canSignOutComputer()).toBe(true);
+    resetRuntimeServiceForTests();
+    expect(canSignOutComputer()).toBe(false);
+    resume(runtime);
+    await discoverDaemon(fakeRuntime(NO_DAEMON));
+    expect(canSignOutComputer()).toBe(false);
+  });
+});
+
 describe("disposeRuntimeForSignOut", () => {
   it("deletes this account's chat history only when asked", async () => {
     const runtime = fakeRuntime();
     const chat = { clearHistory: vi.fn(async () => undefined) };
     resume(runtime);
-    await disposeRuntimeForSignOut({ client, runtime, chat, choice: { deleteChatHistory: false } });
+    await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      chat,
+      choice: { deleteChatHistory: false, signOutComputer: false },
+    });
     expect(chat.clearHistory).not.toHaveBeenCalled();
     resume(runtime);
-    await disposeRuntimeForSignOut({ client, runtime, chat, choice: { deleteChatHistory: true } });
+    await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      chat,
+      choice: { deleteChatHistory: true, signOutComputer: false },
+    });
     expect(chat.clearHistory).toHaveBeenCalledWith("u1");
   });
 
@@ -505,7 +563,7 @@ describe("disposeRuntimeForSignOut", () => {
     const runtime = fakeRuntime();
     resume(runtime);
     await discoverDaemon(runtime);
-    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false } });
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
     expect(runtime.engineLogin).not.toHaveBeenCalled();
     expect(compatibleHello()).toBeNull();
     await expect(discoverDaemon(runtime)).resolves.toBeNull();
@@ -520,7 +578,22 @@ describe("disposeRuntimeForSignOut", () => {
     const chat = { clearHistory: vi.fn(async () => Promise.reject(new Error("io"))) };
     resume(runtime);
     await expect(
-      disposeRuntimeForSignOut({ client, runtime, chat, choice: { deleteChatHistory: true } })
+      disposeRuntimeForSignOut({ client, runtime, chat, choice: { deleteChatHistory: true, signOutComputer: false } })
+    ).resolves.toBeUndefined();
+  });
+
+  it("signs out the computer only when ticked, and never rejects when it fails", async () => {
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    expect(runtime.signOutComputer).not.toHaveBeenCalled();
+    resume(runtime);
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } });
+    expect(runtime.signOutComputer).toHaveBeenCalledTimes(1);
+    resume(runtime);
+    runtime.signOutComputer.mockRejectedValue(new Error("logout failed"));
+    await expect(
+      disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } })
     ).resolves.toBeUndefined();
   });
 });

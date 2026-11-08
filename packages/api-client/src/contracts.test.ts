@@ -341,6 +341,8 @@ import {
   deleteDevMachine,
   getCreateRunnerStatus,
   listDevMachines,
+  listReplaceCandidates,
+  mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
 } from "./contracts/dev-machines.js";
@@ -4316,6 +4318,44 @@ describe("dev-machines contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...machine, id: 7 }]) });
     const error = await listDevMachines(client, UUID2).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("merges a machine into the computer that replaced it", async () => {
+    const result = {
+      source_dev_machine_id: UUID,
+      target_dev_machine_id: UUID2,
+      merged_at: "2026-10-17T04:00:00.000Z",
+      moved_runner_ids: [UUID],
+      collisions: [{ revoked_runner_id: UUID, survivor_runner_id: UUID2 }],
+    };
+    const transport = mutating(result);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(mergeDevMachineInto(client, UUID, UUID2)).resolves.toEqual(result);
+    const mergeCall = transport.calls.find((call) => call.url.endsWith(`/dev-machines/${UUID}/merge-into/`));
+    expect(mergeCall?.init.method).toBe("POST");
+    expect(mergeCall?.init.body).toBe(JSON.stringify({ target: UUID2 }));
+  });
+
+  it("lists replace candidates for a machine", async () => {
+    const candidates = {
+      candidates: [
+        {
+          id: UUID,
+          label: "rich-laptop",
+          host_label: "rich-laptop",
+          display_name: null,
+          last_seen_at: "2026-10-30T12:00:00.000Z",
+          created_at: "2026-10-01T04:00:00.000Z",
+          provisioning: "manual",
+          live_runner_count: 1,
+        },
+      ],
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(candidates) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(listReplaceCandidates(client, UUID2)).resolves.toEqual(candidates);
+    const call = transport.calls[0];
+    expect(call?.url.endsWith(`/dev-machines/${UUID2}/replace-candidates/`)).toBe(true);
   });
 });
 

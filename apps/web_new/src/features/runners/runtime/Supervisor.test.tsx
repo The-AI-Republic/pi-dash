@@ -12,6 +12,8 @@ const harness = vi.hoisted(() => ({
   unsubscribe: vi.fn(),
   resume: vi.fn(),
   refresh: vi.fn(),
+  migrate: vi.fn(),
+  offerReplace: vi.fn(),
 }));
 
 vi.mock("../../../core/platform/index.js", async (importOriginal) => {
@@ -41,6 +43,17 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => {
 vi.mock("./service.js", () => ({
   resumeRuntime: (...args: Array<unknown>) => harness.resume(...args),
   refreshRuntime: (...args: Array<unknown>) => harness.refresh(...args),
+  compatibleHello: () => null,
+  currentDiscovery: () => null,
+  signInWorkspace: vi.fn(),
+}));
+
+vi.mock("./desktop-migration.js", () => ({
+  migrateLegacyTrees: (...args: Array<unknown>) => harness.migrate(...args),
+}));
+
+vi.mock("./desktop-replace.js", () => ({
+  offerReplace: (...args: Array<unknown>) => harness.offerReplace(...args),
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -50,12 +63,22 @@ function SetupStub(): React.ReactElement {
   return <div data-testid="setup-host" />;
 }
 
+function NoticesStub(): React.ReactElement {
+  return <div data-testid="notices-host" />;
+}
+
+function ReplaceStub(): React.ReactElement {
+  return <div data-testid="replace-host" />;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   harness.me = { data: { id: "u1", email: "u1@test.dev" } };
   harness.desktop = true;
   harness.focusListeners = [];
   harness.refresh.mockResolvedValue(undefined);
+  harness.migrate.mockResolvedValue({ status: "nothing_to_do" });
+  harness.offerReplace.mockResolvedValue(false);
   createAppClient("https://api.test");
 });
 
@@ -66,7 +89,12 @@ afterEach(() => {
 
 function renderSupervisor(props: { registerChatTransport?: () => void } = {}) {
   return render(
-    <RuntimeSupervisor registerChatTransport={props.registerChatTransport ?? vi.fn()} setupDialog={SetupStub} />
+    <RuntimeSupervisor
+      registerChatTransport={props.registerChatTransport ?? vi.fn()}
+      setupDialog={SetupStub}
+      noticesDialog={NoticesStub}
+      replaceDialog={ReplaceStub}
+    />
   );
 }
 

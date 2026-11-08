@@ -45,6 +45,24 @@ export interface DesktopMockConfig {
    * blocked, warm absorbed, cancel).
    */
   chatHold?: boolean;
+  /** The machine id the discover `Hello` carries (replace-machine prompt). */
+  machineId?: string;
+  /** Legacy trees still on disk (`legacy_scan` answers these). */
+  legacyTrees?: Array<{
+    workspace: string;
+    dir: string;
+    cloud_url: string | null;
+    dev_machine_id: string | null;
+    engine_runners: { name: string; runner_id: string | null; project: string; working_dir: string }[];
+  }>;
+  /** Seeded notices store (per-account, in-memory). */
+  notices?: {
+    notices: {
+      legacy_folders: { workspace: string; project: string; path: string }[];
+      pod_member_projects: { runner_id: string; workspace: string; project: string }[];
+    };
+    dismissed: string[];
+  };
 }
 
 /** One recorded native invoke. */
@@ -125,6 +143,13 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
     store.config.chatEcho ??= "mocked assistant reply";
     store.config.approvalModes ??= {};
     store.config.chatHold ??= false;
+    store.config.machineId ??= "machine-new";
+    // Legacy trees the mock holds in memory; `legacy_finish` clears one.
+    store.config.legacyTrees ??= [];
+    store.config.notices ??= {
+      notices: { legacy_folders: [], pod_member_projects: [] },
+      dismissed: [],
+    };
 
     function savePersisted(): void {
       try {
@@ -339,6 +364,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
               cloud_url: cloudUrl,
               account: { user_id: String(identity["userId"] ?? ""), email: identity["email"], cloud_url: cloudUrl },
               workspaces: [],
+              machine_id: store.config.machineId,
               engine,
               engine_detail: {
                 state: engine,
@@ -410,7 +436,54 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           }
         }
         case "pidash_cli_login":
+        case "pidash_cli_logout":
           return null;
+        case "legacy_scan":
+          return store.config.legacyTrees;
+        case "legacy_finish": {
+          const dir = String(params["dir"] ?? "");
+          store.config.legacyTrees = store.config.legacyTrees.filter((t: { dir: string }) => t.dir !== dir);
+          return null;
+        }
+        case "legacy_restore_folder": {
+          const runner = String(params["runner"] ?? "");
+          const workingDir = String(params["workingDir"] ?? "");
+          const local = localRunners.find((r) => r["name"] === runner);
+          if (local) local["working_dir"] = workingDir;
+          return null;
+        }
+        case "desktop_notices_load":
+          return store.config.notices;
+        case "desktop_notices_record": {
+          const next = params["notices"] as {
+            legacy_folders: { workspace: string; project: string; path: string }[];
+            pod_member_projects: { runner_id: string; workspace: string; project: string }[];
+          };
+          const dismissed = new Set<string>(store.config.notices.dismissed);
+          const legacy = (next.legacy_folders ?? []).filter((n) => !dismissed.has(`folder:${n.path}`));
+          const pod = (next.pod_member_projects ?? []).filter((n) => !dismissed.has(`pod:${n.runner_id}`));
+          store.config.notices = {
+            notices: { legacy_folders: legacy, pod_member_projects: pod },
+            dismissed: [...dismissed],
+          };
+          return store.config.notices;
+        }
+        case "desktop_notices_dismiss": {
+          const keys = (params["keys"] as string[] | undefined) ?? [];
+          const dismissed = new Set<string>([...store.config.notices.dismissed, ...keys]);
+          store.config.notices = {
+            notices: {
+              legacy_folders: store.config.notices.notices.legacy_folders.filter(
+                (n) => !dismissed.has(`folder:${n.path}`)
+              ),
+              pod_member_projects: store.config.notices.notices.pod_member_projects.filter(
+                (n) => !dismissed.has(`pod:${n.runner_id}`)
+              ),
+            },
+            dismissed: [...dismissed],
+          };
+          return store.config.notices;
+        }
         case "chat_create_session": {
           const account = String(params["account"] ?? "");
           const session = (params["session"] as Record<string, unknown> | undefined) ?? {};

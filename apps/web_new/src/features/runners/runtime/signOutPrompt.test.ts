@@ -27,7 +27,7 @@ afterEach(() => {
 
 describe("confirmRuntimeSignOut", () => {
   it("keeps the history when no dialog is expected", async () => {
-    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 
   it("waits while the dialog chunk is loading and asks it once registered", async () => {
@@ -36,16 +36,16 @@ describe("confirmRuntimeSignOut", () => {
     const pending = track();
     await Promise.resolve();
     expect(pending.settled()).toBe(false);
-    registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true }));
-    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: true });
+    registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true, signOutComputer: false }));
+    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: true, signOutComputer: false });
   });
 
   it("settles a queued request with the keep-history default when the fetch fails", async () => {
     beginSignOutPromptLoad();
     const pending = track();
     failSignOutPromptLoad();
-    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false });
-    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
+    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 
   it("settles a queued request and later requests when the dialog goes away", async () => {
@@ -55,8 +55,8 @@ describe("confirmRuntimeSignOut", () => {
     beginSignOutPromptLoad();
     const pending = track();
     registerSignOutPrompt(null);
-    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false });
-    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
+    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 });
 
@@ -69,8 +69,8 @@ describe("confirmation host lifetime", () => {
     await Promise.resolve();
     expect(pending.settled()).toBe(false);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false });
-    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
+    await expect(confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false, signOutComputer: false });
   });
 
   it("keeps a queued request waiting across a remount in the same commit", async () => {
@@ -94,8 +94,8 @@ describe("confirmation host lifetime", () => {
     detachSignOutPromptHost();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(pending.settled()).toBe(false);
-    registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true }));
-    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: true });
+    registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true, signOutComputer: false }));
+    await expect(pending.promise).resolves.toEqual({ deleteChatHistory: true, signOutComputer: false });
     detachSignOutPromptHost();
     registerSignOutPrompt(null);
   });

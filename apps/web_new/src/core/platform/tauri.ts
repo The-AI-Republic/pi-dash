@@ -13,18 +13,21 @@ import { isWebAddress } from "./urls.js";
 import type {
   AgentAppIdentity,
   AgentRuntimeApi,
+  CliSetupApi,
+  CliStatus,
   DaemonDiscovery,
   DaemonEngineRunner,
   DaemonLocalRunner,
-  CliSetupApi,
-  CliStatus,
   DeepLinkApi,
+  DesktopNotices,
   EventStream,
   FetchInit,
+  LegacyTree,
   LocalChatApi,
   LocalChatDecision,
   LocalChatFrame,
   LocalChatNewSession,
+  NoticesView,
   PendingUpdate,
   Platform,
   SessionTeardownApi,
@@ -575,6 +578,17 @@ const desktopAgentRuntime: AgentRuntimeApi = {
     const modes = await invokeNative<Record<string, string> | null>("chat_approval_modes_load", { account });
     return modes ?? {};
   },
+  scanLegacyTrees: () => invokeNative<LegacyTree[]>("legacy_scan"),
+  finishLegacyTree: (input: { dir: string; account: string; daemonAccount: string | null }) =>
+    invokeNative("legacy_finish", { dir: input.dir, account: input.account, daemonAccount: input.daemonAccount }),
+  restoreLegacyFolder: (input: { runner: string; workingDir: string }) =>
+    invokeNative("legacy_restore_folder", { runner: input.runner, workingDir: input.workingDir }),
+  loadNotices: (account: string) => invokeNative<NoticesView>("desktop_notices_load", { account }),
+  recordNotices: (account: string, notices: DesktopNotices) =>
+    invokeNative<NoticesView>("desktop_notices_record", { account, notices }),
+  dismissNotices: (account: string, keys: string[]) =>
+    invokeNative<NoticesView>("desktop_notices_dismiss", { account, keys }),
+  signOutComputer: () => invokeNative("pidash_cli_logout", { engine: false }),
 };
 
 const desktopSessionTeardown: SessionTeardownApi = {
