@@ -20,6 +20,7 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { shareableOrigin } from "../../../shared/shell/shareLink.js";
 
 export const PUBLISH_FAILED_TITLE = "Couldn't publish the project";
 export const PUBLISHED_TITLE = "Project published";
@@ -166,7 +167,7 @@ export function boardFormDirty(form: BoardForm, board: ProjectDeployBoardStatus 
  */
 export function publishedBoardLink(anchor: string): string {
   const configured = (import.meta.env.VITE_SPACE_BASE_URL as string | undefined) ?? "";
-  const base = configured.trim() === "" ? globalThis.location.origin : configured;
+  const base = configured.trim() === "" ? shareableOrigin() : configured.trim();
   const path = (import.meta.env.VITE_SPACE_BASE_PATH as string | undefined) ?? "";
   return `${base}${path}/issues/${anchor}`;
 }
