@@ -2426,6 +2426,108 @@ def test_rust_soft_delete_entry_models_ack(
         ), "SET_NULL parity broken: agent_run still points at the stamped binding"
 
 
+def test_rust_soft_delete_issue_nulls_agent_run_work_item(db_conn):
+    """NEWPIDASH-135: soft-deleting an issue nulls its
+    ``agent_run.work_item_id`` (SET_NULL) and cascades ``issue_links``.
+
+    The Rust port bound SET NULL as ``None::<&str>`` (text) and Postgres
+    rejected uuid columns — ``column "work_item_id" is of type uuid but
+    expression is of type text`` — so the job failed and every child
+    stayed live. This replay via ``rust_queue`` pins the parity with
+    the Django oracle: children get ``deleted_at`` and
+    ``agent_run.work_item_id`` is nulled. Fails on Rust before the
+    typed-NULL fix.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"135rissue{tag}")
+    issue_id = chain["issue"]["id"]
+    owner_id = chain["owner"]["id"]
+    project_id = chain["project"]["id"]
+    workspace_id = chain["workspace"]["id"]
+
+    link1 = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "NEWPIDASH-135 link 1",
+            "url": f"https://example.com/{tag}/1",
+            "issue_id": str(issue_id),
+            "project_id": str(project_id),
+            "workspace_id": str(workspace_id),
+            "created_by_id": str(owner_id),
+            "updated_by_id": str(owner_id),
+            "metadata": {},
+        },
+    )
+    link2 = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "NEWPIDASH-135 link 2",
+            "url": f"https://example.com/{tag}/2",
+            "issue_id": str(issue_id),
+            "project_id": str(project_id),
+            "workspace_id": str(workspace_id),
+            "created_by_id": str(owner_id),
+            "updated_by_id": str(owner_id),
+            "metadata": {},
+        },
+    )
+    pod = insert_row(
+        db_conn,
+        "pod",
+        {
+            "workspace_id": str(workspace_id),
+            "project_id": str(project_id),
+            "name": f"135r-pod-{tag}",
+            "description": "",
+            "is_default": False,
+        },
+    )
+    run = insert_row(
+        db_conn,
+        "agent_run",
+        {
+            "status": "queued",
+            "prompt": "135 probe",
+            "run_config": {},
+            "required_capabilities": [],
+            "thread_id": uuid.uuid4().hex,
+            "error_details": {},
+            "workspace_id": str(workspace_id),
+            "pod_id": str(pod["id"]),
+            "created_by_id": str(owner_id),
+            "llm_model": "",
+            "trigger": "manual",
+            "executor_kind": "local_runner",
+            "dispatch_attempts": 0,
+            "cancel_reason": "",
+            "tool_plan": {},
+            "phase_kind": "",
+            "agent_metadata": {},
+            "usage": {},
+            "work_item_id": str(issue_id),
+        },
+    )
+
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "issue", str(issue_id)],
+        kwargs={"using": None},
+    )
+    _assert_rust_soft_delete_acked(db_conn, celery_id, "issue")
+    assert _soft_deleted(db_conn, "issues", issue_id), "issue row not stamped"
+    assert _soft_deleted(db_conn, "issue_links", link1["id"]), (
+        "cascade parity broken: live issue_links row under a stamped issue"
+    )
+    assert _soft_deleted(db_conn, "issue_links", link2["id"]), (
+        "cascade parity broken: live issue_links row under a stamped issue"
+    )
+    assert _column_is_null(db_conn, "agent_run", run["id"], "work_item_id"), (
+        "SET_NULL parity broken: agent_run still points at the stamped issue"
+    )
+
+
 def test_rust_sync_description_version_large_workspace(db_conn):
     """Rust replay of `test_sync_description_version_large_workspace`.
 

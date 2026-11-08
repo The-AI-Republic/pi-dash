@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DbBackend, QueryResult};
-use sea_query::{Alias, Expr, Func, Order, Query, SimpleExpr};
+use sea_query::{Alias, Expr, Func, Keyword, Order, Query, SimpleExpr};
 use sqlx::PgPool;
 
 use crate::orm_tx::{into_sqlx, TxConn};
@@ -451,7 +451,10 @@ pub fn null_fk_one_to_one_stmt(
 ) -> sea_query::UpdateStatement {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()));
-    stmt.value(Alias::new(fk_col.to_owned()), None::<&str>);
+    stmt.value(
+        Alias::new(fk_col.to_owned()),
+        SimpleExpr::Keyword(Keyword::Null),
+    );
     stmt.and_where(Expr::col(Alias::new(child_pk_col.to_owned())).eq(child_pk.as_query_value()));
     stmt
 }
@@ -483,7 +486,10 @@ pub fn null_fk_bulk_stmt(
 ) -> sea_query::UpdateStatement {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()))
-        .value(Alias::new(fk_col.to_owned()), None::<&str>)
+        .value(
+            Alias::new(fk_col.to_owned()),
+            SimpleExpr::Keyword(Keyword::Null),
+        )
         .and_where(Expr::col(Alias::new(fk_col.to_owned())).eq(parent_pk.as_query_value()));
     if scope_live {
         stmt.and_where(Expr::col(Alias::new(DELETED_AT.to_owned())).is_null());
@@ -1769,7 +1775,10 @@ pub fn null_fk_emulation_seed_stmt(
         );
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()))
-        .value(Alias::new(fk_col.to_owned()), None::<&str>)
+        .value(
+            Alias::new(fk_col.to_owned()),
+            SimpleExpr::Keyword(Keyword::Null),
+        )
         .and_where(Expr::col(Alias::new(fk_col.to_owned())).in_subquery(inner));
     stmt
 }
@@ -1783,7 +1792,10 @@ pub fn null_fk_emulation_ids_stmt(
 ) -> sea_query::UpdateStatement {
     let mut stmt = Query::update();
     stmt.table(Alias::new(child_table.to_owned()))
-        .value(Alias::new(fk_col.to_owned()), None::<&str>)
+        .value(
+            Alias::new(fk_col.to_owned()),
+            SimpleExpr::Keyword(Keyword::Null),
+        )
         .and_where(
             Expr::col(Alias::new(fk_col.to_owned())).is_in(ids.iter().map(RowPk::as_query_value)),
         );
