@@ -51,6 +51,7 @@ function fakeRuntime(): AgentRuntimeApi {
     ensureEngine: vi.fn(async () => undefined),
     engineLogin: vi.fn(async () => undefined),
     reloadCredentials: vi.fn(async () => undefined),
+    requestReconnect: vi.fn(async () => undefined),
     saveApprovalModes: vi.fn(async () => undefined),
     loadApprovalModes: vi.fn(async () => ({})),
     scanLegacyTrees: vi.fn(async () => []),

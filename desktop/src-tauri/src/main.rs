@@ -537,6 +537,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             daemon::daemon_engine_runner_rebind,
             daemon::daemon_runners,
             daemon::daemon_credentials_reload,
+            daemon::daemon_reconnect,
             // Set-up, update and sign-in, each through the installed CLI and
             // only on the user's say-so.
             setup::daemon_install_service,

@@ -146,6 +146,16 @@ describe("RuntimeSupervisor", () => {
     expect(harness.refresh).toHaveBeenCalledTimes(3);
   });
 
+  it("re-checks on network recovery", async () => {
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.refresh).toHaveBeenCalledTimes(1);
+    act(() => {
+      globalThis.window.dispatchEvent(new Event("online"));
+    });
+    expect(harness.refresh).toHaveBeenCalledTimes(2);
+  });
+
   it("swallows a failed re-check", async () => {
     harness.refresh.mockRejectedValue(new Error("boom"));
     renderSupervisor();

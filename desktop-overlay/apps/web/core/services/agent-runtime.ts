@@ -37,6 +37,7 @@ import {
   invoke,
   isDesktopHost,
   renewEngineIfAllowed,
+  requestDaemonReconnect,
   setAppIdentity,
   type EngineRunnerInfo,
   type LocalRunner,
@@ -91,14 +92,35 @@ export function resumeAgentRuntime(userId?: string, email?: string) {
   setAppIdentity({ userId, email, cloudUrl: API_BASE_URL });
 }
 
+/** Most often the daemon may be woken for a reconnect: focus events and the
+ * minute tick would otherwise retry a dead cloud connection on every wake
+ * during a long outage, defeating the daemon's backoff. */
+const RECONNECT_MIN_INTERVAL_MS = 30_000;
+let lastReconnectWake = 0;
+
 /**
- * Re-check the daemon and keep the engine signed in: called on launch, on
- * focus and every minute. Silent renewal happens only in the two states that
- * allow it (`expiring`, `expired`). Never throws.
+ * Wake the daemon's cloud connections, rate-limited (PIDESKAPP-181). After a
+ * long outage the daemon's retry backoff can be hours long; a user action
+ * (focus, network recovery, Run) cuts it short so the built-in agent comes
+ * back within seconds. Best-effort: never throws.
+ */
+function wakeDaemonForReconnect() {
+  const now = Date.now();
+  if (now - lastReconnectWake < RECONNECT_MIN_INTERVAL_MS) return;
+  lastReconnectWake = now;
+  void requestDaemonReconnect();
+}
+
+/**
+ * Re-check the daemon, wake its cloud connections, and keep the engine signed
+ * in: called on launch, on focus, on network recovery and every minute.
+ * Silent renewal happens only in the two states that allow it (`expiring`,
+ * `expired`). Never throws.
  */
 export async function refreshAgentRuntime(): Promise<void> {
   if (!isDesktop() || !activeUserId) return;
   await discoverDaemon().catch(() => null);
+  wakeDaemonForReconnect();
   await renewEngineIfAllowed();
   void refreshTopUpUrl();
 }
@@ -216,10 +238,12 @@ async function api<T>(path: string): Promise<T> {
 
 /**
  * Before a Run on an issue set to the built-in engine (the legacy
- * `managed_runner` executor the server still translates): turn the engine on
- * for that project on this computer — the first Run is what enrols it — and
- * wait for the server to see it online. Any other executor is left alone; the
- * Run click never changes the issue's choice.
+ * `managed_runner` executor the server still translates): wake the daemon's
+ * cloud connections (PIDESKAPP-181 — the Run click is a user action, so an
+ * outage's multi-hour backoff must not outlast it), turn the engine on for
+ * that project on this computer — the first Run is what enrols it — and wait
+ * for the server to see it online. Any other executor is left alone; the Run
+ * click never changes the issue's choice.
  */
 export async function prepareAgentRun(target: AgentRunTarget): Promise<void> {
   if (!isDesktop()) return;
@@ -230,6 +254,7 @@ export async function prepareAgentRun(target: AgentRunTarget): Promise<void> {
     api<{ identifier: string; default_agent_executor?: string }>(projectPath),
   ]);
   if ((issue.agent_executor ?? project.default_agent_executor ?? "local_runner") !== "managed_runner") return;
+  wakeDaemonForReconnect();
   await turnOnEngineForProject(workspaceSlug, project.identifier);
   for (let attempt = 0; attempt < 30; attempt++) {
     // eslint-disable-next-line no-await-in-loop -- poll until the engine's first heartbeat arrives

@@ -101,6 +101,7 @@ function fakeRuntime(discovery: DaemonDiscovery = compatible()): FakeRuntime {
     ensureEngine: vi.fn(async () => undefined),
     engineLogin: vi.fn(async () => undefined),
     reloadCredentials: vi.fn(async () => undefined),
+    requestReconnect: vi.fn(async () => undefined),
     saveApprovalModes: vi.fn(async () => undefined),
     loadApprovalModes: vi.fn(async () => ({})),
     scanLegacyTrees: vi.fn(async () => []),
@@ -498,6 +499,53 @@ describe("prepareAgentRun", () => {
     await expect(
       prepareAgentRun({ client, runtime, target, heartbeatPoll: { maxAttempts: 2, sleep: async () => undefined } })
     ).rejects.toThrow(ENGINE_STILL_CONNECTING_TEXT);
+  });
+});
+
+describe("reconnect after an outage", () => {
+  it("wakes the daemon on refresh (window focus and the minute tick)", async () => {
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await refreshRuntime({ client, runtime });
+    expect(runtime.requestReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("rate-limits the wake so focus storms do not hammer the daemon", async () => {
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await refreshRuntime({ client, runtime });
+    await refreshRuntime({ client, runtime });
+    expect(runtime.requestReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("never breaks a refresh when the daemon cannot be woken", async () => {
+    const runtime = fakeRuntime();
+    runtime.requestReconnect.mockRejectedValue(new Error("daemon down"));
+    resume(runtime);
+    await expect(refreshRuntime({ client, runtime })).resolves.toBeUndefined();
+    expect(runtime.requestReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("kicks the daemon before the Run availability poll, and leaves other executors alone", async () => {
+    const target = { workspaceSlug: "ws", projectId: "p1", issueId: "i1" };
+    const runtime = fakeRuntime();
+    resume(runtime);
+    vi.mocked(getIssue).mockResolvedValue(issue("managed_runner"));
+    vi.mocked(getProject).mockResolvedValue(
+      project({ agent_executor_options: [{ kind: "managed_runner", available: true }] } as never)
+    );
+    await prepareAgentRun({ client, runtime, target });
+    expect(runtime.requestReconnect).toHaveBeenCalledTimes(1);
+    expect(runtime.requestReconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      runtime.addEngineRunner.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
+    );
+
+    const other = fakeRuntime();
+    resume(other);
+    vi.mocked(getIssue).mockResolvedValue(issue("local_runner"));
+    vi.mocked(getProject).mockResolvedValue(project());
+    await prepareAgentRun({ client, runtime: other, target });
+    expect(other.requestReconnect).not.toHaveBeenCalled();
   });
 });
 

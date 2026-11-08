@@ -51,6 +51,11 @@ export const HEARTBEAT_POLL_INTERVAL_MS = 1000;
 /** A failed silent renewal is retried after this pause, not on every check. */
 export const SILENT_RENEW_RETRY_MS = 10 * 60 * 1000;
 
+/** Most often the daemon may be woken for a reconnect: focus events and the
+ * minute tick would otherwise retry a dead cloud connection on every wake
+ * during a long outage, defeating the daemon's backoff. */
+export const RECONNECT_MIN_INTERVAL_MS = 30_000;
+
 export const ENGINE_TURN_ON_TEXT = "Turn on the built-in engine in Built-in engine settings to chat with it.";
 export const ENGINE_SIGNED_OUT_TEXT = "The built-in engine is signed out. Sign it in from Built-in engine settings.";
 export const ENGINE_STILL_CONNECTING_TEXT =
@@ -100,6 +105,8 @@ interface RuntimeState {
   discovery: DaemonDiscovery | null;
   lastSilentAttempt: number;
   silentInFlight: Promise<boolean> | null;
+  /** Last reconnect wake, in epoch milliseconds (`Date.now()` basis). */
+  lastReconnectWake: number;
 }
 
 const state: RuntimeState = {
@@ -108,6 +115,7 @@ const state: RuntimeState = {
   discovery: null,
   lastSilentAttempt: 0,
   silentInFlight: null,
+  lastReconnectWake: 0,
 };
 
 /** Drop all runtime state. Tests only; the app resumes instead. */
@@ -117,6 +125,20 @@ export function resetRuntimeServiceForTests(): void {
   state.discovery = null;
   state.lastSilentAttempt = 0;
   state.silentInFlight = null;
+  state.lastReconnectWake = 0;
+}
+
+/**
+ * Wake the daemon's cloud connections, rate-limited (PIDESKAPP-181). After a
+ * long outage the daemon's retry backoff can be hours long; a user action
+ * (focus, network recovery, Run) cuts it short so the built-in agent comes
+ * back within seconds. Best-effort: never throws.
+ */
+function wakeDaemonForReconnect(runtime: AgentRuntimeApi): void {
+  const now = Date.now();
+  if (now - state.lastReconnectWake < RECONNECT_MIN_INTERVAL_MS) return;
+  state.lastReconnectWake = now;
+  void runtime.requestReconnect().catch(() => undefined);
 }
 
 /**
@@ -290,14 +312,15 @@ export function resumeRuntime(
 }
 
 /**
- * Re-check the daemon and keep the engine signed in: called on resume, on
- * focus and every minute. Silent renewal happens only in the two states
- * that allow it. Never throws.
+ * Re-check the daemon, wake its cloud connections, and keep the engine signed
+ * in: called on resume, on focus, on network recovery and every minute.
+ * Silent renewal happens only in the two states that allow it. Never throws.
  */
 export async function refreshRuntime(deps: RuntimeDeps): Promise<void> {
   const { runtime } = deps;
   if (!runtime || !state.identity) return;
   await rediscover(runtime);
+  wakeDaemonForReconnect(runtime);
   await renewEngineIfAllowed(deps);
 }
 
@@ -440,7 +463,9 @@ export async function turnOnEngineForProject(
 
 /**
  * Prepare a user-triggered agent run. Only when the work item targets the
- * built-in engine (explicit pin, else the project default): turn the
+ * built-in engine (explicit pin, else the project default): wake the
+ * daemon's cloud connections (PIDESKAPP-181 — the Run click is a user
+ * action, so an outage's multi-hour backoff must not outlast it), turn the
  * engine on for that project on this computer — the first run is what
  * enrols it — and wait briefly for the server to see it online. Any
  * other executor is left alone; selection is never mutated here.
@@ -456,6 +481,7 @@ export async function prepareAgentRun(
     getProject(client, workspaceSlug, projectId),
   ]);
   if ((issue.agent_executor ?? project.default_agent_executor) !== MANAGED_RUNNER_KIND) return;
+  wakeDaemonForReconnect(runtime);
   await turnOnEngineForProject({ client, runtime, workspaceSlug, project: project.identifier });
   const attempts = input.heartbeatPoll?.maxAttempts ?? HEARTBEAT_POLL_ATTEMPTS;
   const intervalMs = input.heartbeatPoll?.intervalMs ?? HEARTBEAT_POLL_INTERVAL_MS;
