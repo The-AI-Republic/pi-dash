@@ -43,6 +43,8 @@ export const DispatchWait = z.object({
   queued_at: nullableDateTime(),
   runner_last_seen_at: nullableDateTime(),
   runs_ahead: z.number(),
+  pause_reason: z.optional(z.nullable(z.string())),
+  expires_at: z.optional(nullableDateTime()),
   releasable: z.boolean(),
 });
 export type DispatchWait = z.infer<typeof DispatchWait>;
