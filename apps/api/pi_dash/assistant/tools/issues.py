@@ -471,7 +471,11 @@ def update_issue(
     runner_touched = assigned_runner != _EXECUTION_TARGET_UNSET
     pod_touched = assigned_pod != _EXECUTION_TARGET_UNSET
     project = issue.project
-    new_runner = _resolve_runner_ref(deps, project, user, assigned_runner) if runner_touched and assigned_runner else None
+    new_runner = (
+        _resolve_runner_ref(deps, project, user, assigned_runner)
+        if runner_touched and assigned_runner
+        else None
+    )
     new_pod = _resolve_pod_ref(project, assigned_pod) if pod_touched and assigned_pod else None
     if (
         name is None

@@ -75,7 +75,13 @@ def test_create_issue_dedicates_to_runner_by_name(world):
 def test_create_issue_with_pod_only(world):
     ctx = _ctx(world, world.admin)
     pod = _pod(world)
-    res = issues.create_issue(ctx, project_id=str(world.proj_a.id), name="Pod work", assigned_pod=pod.name.split("_", 1)[-1])
+    pod_ref = pod.name.split("_", 1)[-1]
+    res = issues.create_issue(
+        ctx,
+        project_id=str(world.proj_a.id),
+        name="Pod work",
+        assigned_pod=pod_ref,
+    )
     assert res["created"] is True
     assert res["assigned_pod_id"] == str(pod.id)
     assert res["assigned_runner_id"] is None
@@ -174,7 +180,11 @@ def test_list_project_runners_with_assignable_for(world):
 
     runner = _runner(world)
     ctx = _ctx(world, world.admin)
-    rows = project_tools.list_project_runners(ctx, project_id=str(world.proj_a.id), assignable_for=str(world.issue_a.id))
+    rows = project_tools.list_project_runners(
+        ctx,
+        project_id=str(world.proj_a.id),
+        assignable_for=str(world.issue_a.id),
+    )
     row = next(r for r in rows if str(r["id"]) == str(runner.id))
     assert row["assignable"] is True
     assert row["not_assignable_code"] == ""
