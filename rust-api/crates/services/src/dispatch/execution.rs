@@ -516,5 +516,4 @@ mod tests {
         assert!(sql.contains("connected"), "status filter: {sql}");
         assert!(sql.contains("LIMIT 1"), "first-row: {sql}");
     }
-
 }
