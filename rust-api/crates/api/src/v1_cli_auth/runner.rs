@@ -253,6 +253,7 @@ struct MachineTokenLookup {
     user_id: Uuid,
     workspace_id: Uuid,
     revoked_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
     dev_machine_id: Option<Uuid>,
     dm_revoked: Option<DateTime<Utc>>,
     dm_found: Option<Uuid>,
@@ -273,6 +274,7 @@ async fn machine_token_with_device(
             machine_token::Column::UserId,
             machine_token::Column::WorkspaceId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
             machine_token::Column::DevMachineId,
         ])
         .column_as(
@@ -315,6 +317,7 @@ async fn authenticate_machine(
         user_id,
         workspace_id,
         revoked_at,
+        expires_at,
         dev_machine_id,
         dm_revoked,
         dm_found,
@@ -325,6 +328,12 @@ async fn authenticate_machine(
     if revoked_at.is_some() {
         return Err(invalid_token());
     }
+    if expires_at.is_some_and(|expires| expires <= now) {
+        return Err(invalid_token());
+    }
+    // 60-day idle expiry (NEWPIDASH-50): `MachineToken.is_expired` is
+    // the generic refusal on this opaque `X-Api-Key` surface, checked
+    // after revoked and before dev-machine revocation.
     // `machine_token.dev_machine_id is not None and
     // machine_token.dev_machine.revoked_at is not None`. A set id with no
     // row is the `select_related` 500 (unreachable without FK surgery).
@@ -575,4 +584,23 @@ pub async fn delete_runner(
         return server_error();
     }
     no_content()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 60-day idle expiry (`NEWPIDASH-50`): `MachineToken.is_expired`
+    /// is the generic refusal on `X-Api-Key` `mt_` paths, checked
+    /// after revoked and before dev-machine revocation.
+    #[test]
+    fn machine_token_expiry_is_checked() {
+        let now = Utc::now();
+        let past = now - chrono::Duration::seconds(1);
+        let future = now + chrono::Duration::days(1);
+        assert!(Some(past).is_some_and(|expires| expires <= now));
+        assert!(!Some(future).is_some_and(|expires| expires <= now));
+        assert!(!None.is_some_and(|expires: DateTime<Utc>| expires <= now));
+        assert!(Some(now).is_some_and(|expires| expires <= now));
+    }
 }

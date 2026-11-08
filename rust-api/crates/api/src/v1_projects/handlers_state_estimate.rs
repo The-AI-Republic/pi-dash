@@ -129,6 +129,8 @@ struct MachineTokenLookup {
     workspace_id: Uuid,
     dev_machine_id: Option<Uuid>,
     revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (#2910); `None` never expires.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One project lite row for `expand=project` (direct columns + cover asset FK).
@@ -541,6 +543,7 @@ async fn authenticate_machine_token(
             machine_token::Column::WorkspaceId,
             machine_token::Column::DevMachineId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
         ])
         .filter(machine_token::Column::TokenHash.eq(presented_hash.clone()))
         .into_model::<MachineTokenLookup>()
@@ -552,6 +555,7 @@ async fn authenticate_machine_token(
         workspace_id,
         dev_machine_id,
         revoked_at,
+        expires_at,
     }) = row
     else {
         return Err(HandlerError::InvalidToken);
@@ -570,9 +574,14 @@ async fn authenticate_machine_token(
         token_hash: presented_hash.clone(),
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked,
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
-    token_kernel::validate_machine_token_static(Some(&kernel_row), &presented_hash)
-        .map_err(|_| HandlerError::InvalidToken)?;
+    token_kernel::validate_machine_token_static(
+        Some(&kernel_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| HandlerError::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: any active membership row.
     // A non-member is revoked first, then denied (`core/permissions.py:28-36`).
     let member: Option<Uuid> = workspace_members::Entity::find()

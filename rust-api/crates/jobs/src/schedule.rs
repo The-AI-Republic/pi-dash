@@ -270,6 +270,13 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
             task: "runner.mark_offline_runners",
             cadence: Cadence::Crontab(Crontab::parse("*/1", "*", "*", "*", "*").expect("valid")),
         },
+        // Pause the engine of machines whose credential ran out
+        // (`crontab(minute='*/5')`, #2910).
+        BeatEntry {
+            name: "runner-pause-engines-with-expired-credentials",
+            task: "runner.pause_engines_with_expired_credentials",
+            cadence: Cadence::Crontab(Crontab::parse("*/5", "*", "*", "*", "*").expect("valid")),
+        },
         // Recover runs stranded on a runner that stopped heartbeating;
         // without these a stranded run blocks its issue indefinitely
         // (`70d684af`).
@@ -497,7 +504,7 @@ mod tests {
     #[test]
     fn literal_schedule_has_all_24_entries() {
         let schedule = literal_schedule();
-        assert_eq!(schedule.len(), 24);
+        assert_eq!(schedule.len(), 25);
         let names: Vec<_> = schedule.iter().map(|e| e.name).collect();
         for expected in [
             "check-every-five-minutes-to-send-email-notifications",
@@ -514,6 +521,7 @@ mod tests {
             "check-every-day-to-delete-exporter-history",
             "runner-expire-stale-approvals",
             "runner-mark-offline-runners",
+            "runner-pause-engines-with-expired-credentials",
             "runner-release-pins-on-offline-runners",
             "runner-fail-runs-on-offline-runners",
             "runner-reconcile-stalled-runs",
@@ -543,7 +551,7 @@ mod tests {
             std::env::remove_var(var);
         }
         let schedule = beat_schedule();
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 29);
         let find = |name: &str| schedule.iter().find(|e| e.name == name).expect(name);
         assert_eq!(
             find("cloud-agent-scan-queued-runs").cadence,

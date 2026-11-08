@@ -52,8 +52,9 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// the real Django 4.2 loader over `INSTALLED_APPS`
 /// (`settings/common.py:44-68`) at the ported commit (261 graph nodes),
 /// re-synced for the post-port drift: db 0168→0170 (`b4defc50f`, NEWFRONT
-/// merge #2801) and runner 0029→0033 (`b790ee7fa` #1851, `09738d222` #1944,
-/// `04b6d3784` #386, `1998bc658` #447):
+/// merge #2801), runner 0029→0033 (`b790ee7fa` #1851, `09738d222` #1944,
+/// `04b6d3784` #386, `1998bc658` #447), then db 0170→0172 and runner
+/// 0033→0038 (c0ee3148b: #2903, #2910, #2912, #2907):
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields

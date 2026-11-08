@@ -42,6 +42,18 @@ def clean_db(db):
             cur.execute("UPDATE workspaces SET logo_asset_id = NULL")
             cur.execute("UPDATE users SET avatar_asset_id = NULL")
             cur.execute("DELETE FROM file_assets")
+            # Runner rows seeded directly by the engine-credential
+            # deactivate test (dev_machine/machine_token/
+            # engine_credential/machine_session reference users and
+            # workspaces): wipe them before the reset's own user/
+            # workspace deletes, which raw SQL cannot cascade.
+            for runner_table in (
+                "engine_credential",
+                "machine_session",
+                "machine_token",
+                "dev_machine",
+            ):
+                cur.execute(f"DELETE FROM {runner_table}")
             for table in (
                 "issue_sequences",
                 "issue_assignees",

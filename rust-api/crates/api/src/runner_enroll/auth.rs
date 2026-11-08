@@ -101,6 +101,10 @@ use uuid::Uuid;
 pub const CODE_MACHINE_TOKEN_INVALID: &str = "machine_token_invalid";
 /// `mt_` path: token row revoked (`authentication.py:127`).
 pub const CODE_MACHINE_TOKEN_REVOKED: &str = "machine_token_revoked";
+/// `mt_` path: 60-day idle expiry lapsed (`authentication.py:129`,
+/// `is_expired`; the `machine_token_expired` code is Django's own
+/// `AuthenticationFailed` detail).
+pub const CODE_MACHINE_TOKEN_EXPIRED: &str = "machine_token_expired";
 /// Either path: the bound dev-machine row revoked (`authentication.py:129,143`).
 pub const CODE_DEV_MACHINE_REVOKED: &str = "dev_machine_revoked";
 /// Either `mt_` path: owner left the workspace; the token is revoked first,
@@ -377,6 +381,10 @@ pub struct MachineTokenAuthRow {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (`machine_token.expires_at`; `None` on legacy
+    /// rows). `resolve_machine_token` refuses `expires_at <= now`
+    /// (`authentication.py:129`, `MachineToken.is_expired`).
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// `workspaces.slug` (`SlugField`, never null; `None` only if the
     /// workspace row itself is gone, which the FK forbids).
     pub workspace_slug: Option<String>,
@@ -542,6 +550,14 @@ async fn fetch_machine_token(
 /// there is no machine, which the callers check first).
 fn dev_machine_revoked() -> SimpleExpr {
     Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null()
+}
+
+/// `MachineToken.is_expired(now)`: `expires_at` at or past `now` (no
+/// expiry — legacy rows — never expires), the one expiry check every
+/// `mt_` path shares (`resolve_machine_token`,
+/// `authentication.py:129`).
+fn token_expired(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    expires_at.is_some_and(|expires| expires <= chrono::Utc::now())
 }
 
 /// `Runner.objects.select_related("workspace", "pod",
@@ -767,10 +783,10 @@ async fn authenticate_access_jwt(
 }
 
 /// Shared MachineToken path (`authentication.py:120-162`), in order: hash →
-/// row → revoked → machine-revoked → membership-or-revoke → runner-id
-/// required → runner load → runner/machine revoked → binding → `last_used_at`
-/// bump (plain update, NOT best-effort — a DB error escapes to 500) →
-/// payload.
+/// row → revoked → expired → machine-revoked → membership-or-revoke →
+/// runner-id required → runner load → runner/machine revoked → binding →
+/// `last_used_at` bump (plain update, NOT best-effort — a DB error
+/// escapes to 500) → payload.
 #[allow(clippy::result_large_err)]
 async fn authenticate_access_machine_token(
     pool: &PgPool,
@@ -789,6 +805,9 @@ async fn authenticate_access_machine_token(
     };
     if token.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
+    }
+    if token_expired(token.expires_at) {
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_EXPIRED, allow));
     }
     if token.dev_machine_id.is_some() && token.dev_machine_revoked {
         return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
@@ -904,6 +923,9 @@ pub async fn authenticate_machine_token(
     if token.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
     }
+    if token_expired(token.expires_at) {
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_EXPIRED, allow));
+    }
     if token.dev_machine_id.is_some() && token.dev_machine_revoked {
         return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
     }
@@ -986,11 +1008,17 @@ async fn authenticate_api_key_machine(
         token_hash: token.token_hash.clone(),
         revoked_at_unix: token.revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: token.dev_machine_id.is_some() && token.dev_machine_revoked,
+        expires_at_unix: token.expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel checks the
-    // revocation arms. Every arm maps to the one opaque message.
-    if pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .is_err()
+    // revocation arms (an expired token maps to the one opaque message,
+    // like every other arm).
+    if pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .is_err()
     {
         return Ok(ApiKeyOutcome::Invalid);
     }

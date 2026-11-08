@@ -3167,6 +3167,22 @@ pub async fn me_deactivate(
     {
         return error.into_response();
     }
+    // Deactivating signs the engine out everywhere (`base.py:320-322`,
+    // #2910): every machine of the user loses its live credential.
+    {
+        let sea = pidash_db::pool::sea_orm_connection(pool);
+        match pidash_services::domain::engine_credential::revoke_engine_credentials_for_user(
+            &sea, actor.id, now,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(pidash_services::domain::engine_credential::RevokeError::Database(error)) => {
+                return write_denial(error).into_response();
+            }
+            Err(_) => return Denial::ServerError.into_response(),
+        }
+    }
     // Profile reset (`:319-339`; a miss is the 404).
     let profile = match fetch_profile(pool, actor.id).await {
         Ok(profile) => profile,

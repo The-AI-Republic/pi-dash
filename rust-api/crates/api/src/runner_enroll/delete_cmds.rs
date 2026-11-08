@@ -1857,6 +1857,7 @@ mod tests {
             created_at: Utc::now(),
             last_used_at: None,
             revoked_at: None,
+            expires_at: None,
             workspace_slug: None,
             dev_machine_revoked: false,
         };

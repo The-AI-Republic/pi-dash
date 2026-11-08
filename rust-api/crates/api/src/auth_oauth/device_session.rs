@@ -262,9 +262,9 @@ async fn authenticate_api(pool: &sqlx::PgPool, presented: &str) -> Result<Caller
 }
 
 /// `validate_machine_token` (`api_authentication.py:45-63`): match on
-/// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
-/// non-member's token is revoked, then rejected) — then stamp
-/// `last_used_at`.
+/// `token_hash`, unrevoked, not past its 60-day idle expiry, dev-machine
+/// unrevoked, workspace member (a non-member's token is revoked, then
+/// rejected) — then stamp `last_used_at`.
 #[allow(clippy::result_large_err)]
 async fn authenticate_machine(
     pool: &sqlx::PgPool,
@@ -296,6 +296,12 @@ async fn authenticate_machine(
             .unwrap_or(None);
         match row {
             Some(m) if m.revoked_at.is_some() => return Err(invalid_token()),
+            // `MachineToken.is_expired()`: at-or-past expiry refuses (the same
+            // opaque denial as every other `mt_` arm here); Django order is
+            // revoked, then expired, then machine-revoked (#2910).
+            Some(m) if m.expires_at.is_some_and(|expires| expires <= now) => {
+                return Err(invalid_token())
+            }
             Some(_) => {}
             None => return Err(invalid_token()),
         }
@@ -997,7 +1003,10 @@ async fn exchange_in_transaction(
                 m.map(|m| m.revoked_at.is_some()).unwrap_or(true)
             };
             if !machine_revoked
-                && pidash_services::domain::engine_credential::instance_can_serve_engine(settings)
+                && pidash_services::domain::engine_credential::engine_profile_for_user_available(
+                    settings,
+                )
+                .0
             {
                 let silent = !interactive_approval;
                 // Check silent allowed via machine's current state.
@@ -1012,7 +1021,7 @@ async fn exchange_in_transaction(
                     if let Some(m) = machine_for_silent {
                         pidash_services::domain::engine_credential::silent_issue_allowed(
                             &pidash_db::orm_tx::TxConn::new(tx) as &_,
-                            &m,
+                            m.id,
                             now,
                         )
                         .await
@@ -1028,9 +1037,9 @@ async fn exchange_in_transaction(
                     let issued =
                         pidash_services::domain::engine_credential::issue_engine_credential(
                             &dbc,
+                            secret_key,
                             user_id,
                             params.dev_machine_id,
-                            secret_key,
                             silent,
                             now,
                         )
@@ -1181,7 +1190,7 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                     let _ = pidash_services::domain::engine_credential::revoke_engine_credential(
                         &pidash_db::orm_tx::TxConn::new(&mut tx),
                         mid,
-                        pidash_services::domain::engine_credential::revoke_reason::SIGNED_OUT,
+                        "signed_out",
                         now,
                     )
                     .await;

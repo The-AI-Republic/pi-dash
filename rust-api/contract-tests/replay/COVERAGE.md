@@ -1,13 +1,13 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write ``(route, method)`` pairs: **593** total, **494** covered by the corpus.
+Write ``(route, method)`` pairs: **593** total, **497** covered by the corpus.
 
 | bucket | pairs |
 | --- | --- |
-| covered | 494 |
+| covered | 497 |
 | proxied by design | 94 |
 | debug toolbar (dev-only) | 0 |
-| missing with fix issue | 3 |
+| missing with fix issue | 0 |
 | excluded with reason | 0 |
 | owned, no session yet | 2 |
 
@@ -71,6 +71,7 @@ Write ``(route, method)`` pairs: **593** total, **494** covered by the corpus.
 - `DELETE /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle (owned)
 - `PATCH /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/create-runner/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `POST /api/runners/dev-machines/{}/engine-sign-out/` (runner_web) — runner_web_engine_sign_out, runner_web_engine_sign_out, runner_web_engine_sign_out (owned)
 - `POST /api/runners/dev-machines/{}/revoke/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/rotate/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/invites/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
@@ -145,6 +146,8 @@ Write ``(route, method)`` pairs: **593** total, **494** covered by the corpus.
 - `POST /api/v1/runner/dev-machines/{}/sessions/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle (owned)
 - `DELETE /api/v1/runner/dev-machines/{}/sessions/{}/` (runner) — runner_daemon_lifecycle (owned)
 - `POST /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner) — runner_daemon_lifecycle (owned)
+- `POST /api/v1/runner/engine/credential/revoke/` (runner) — runner_engine_credentials, runner_engine_credentials (owned)
+- `POST /api/v1/runner/engine/model-token/` (runner) — runner_engine_credentials, runner_engine_credentials (owned)
 - `POST /api/v1/runner/machine-tokens/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/v1/runner/runners/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/v1/runner/runners/enroll/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle (owned)
@@ -611,9 +614,7 @@ Write ``(route, method)`` pairs: **593** total, **494** covered by the corpus.
 
 ## Missing with fix issue
 
-- `POST /api/runners/dev-machines/{}/engine-sign-out/` (runner_web) — NEWPIDASH-50: engine sign-out endpoint pending
-- `POST /api/v1/runner/engine/credential/revoke/` (runner) — NEWPIDASH-50: engine credential revoke pending
-- `POST /api/v1/runner/engine/model-token/` (runner) — NEWPIDASH-50: engine model-token pending
+(none)
 
 ## Excluded
 

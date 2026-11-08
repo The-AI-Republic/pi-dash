@@ -229,10 +229,7 @@
         "sort_order": 65535.0,
         "member_role": 20,
         "anchor": null,
-        "members": [
-          "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-          "018b320f-5095-415f-a49f-d142f56d58c3"
-        ],
+        "members": ["29976dbf-40ef-4fab-b6c0-f75c09ae8dda", "018b320f-5095-415f-a49f-d142f56d58c3"],
         "cover_image_url": null,
         "inbox_view": false,
         "next_work_item_sequence": 1,
@@ -365,36 +362,26 @@
     "create_empty": {
       "status": 400,
       "body": {
-        "name": [
-          "This field is required."
-        ],
-        "identifier": [
-          "This field is required."
-        ]
+        "name": ["This field is required."],
+        "identifier": ["This field is required."]
       }
     },
     "create_dup_identifier": {
       "status": 400,
       "body": {
-        "identifier": [
-          "PROJECT_IDENTIFIER_ALREADY_EXIST"
-        ]
+        "identifier": ["PROJECT_IDENTIFIER_ALREADY_EXIST"]
       }
     },
     "create_dup_name": {
       "status": 400,
       "body": {
-        "name": [
-          "PROJECT_NAME_ALREADY_EXIST"
-        ]
+        "name": ["PROJECT_NAME_ALREADY_EXIST"]
       }
     },
     "create_special_name": {
       "status": 400,
       "body": {
-        "name": [
-          "PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"
-        ]
+        "name": ["PROJECT_NAME_CANNOT_CONTAIN_SPECIAL_CHARACTERS"]
       }
     },
     "create_cloud_agent_409": {
@@ -442,10 +429,7 @@
           "sort_order": 65535.0,
           "member_role": 20,
           "anchor": null,
-          "members": [
-            "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-            "018b320f-5095-415f-a49f-d142f56d58c3"
-          ],
+          "members": ["29976dbf-40ef-4fab-b6c0-f75c09ae8dda", "018b320f-5095-415f-a49f-d142f56d58c3"],
           "cover_image_url": null,
           "inbox_view": false,
           "next_work_item_sequence": 1,
@@ -526,10 +510,7 @@
           "sort_order": 65535.0,
           "member_role": 20,
           "anchor": null,
-          "members": [
-            "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-            "018b320f-5095-415f-a49f-d142f56d58c3"
-          ],
+          "members": ["29976dbf-40ef-4fab-b6c0-f75c09ae8dda", "018b320f-5095-415f-a49f-d142f56d58c3"],
           "cover_image_url": null,
           "inbox_view": false,
           "next_work_item_sequence": 1,
@@ -622,10 +603,7 @@
             "sort_order": 65535.0,
             "member_role": 20,
             "anchor": null,
-            "members": [
-              "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-              "018b320f-5095-415f-a49f-d142f56d58c3"
-            ],
+            "members": ["29976dbf-40ef-4fab-b6c0-f75c09ae8dda", "018b320f-5095-415f-a49f-d142f56d58c3"],
             "cover_image_url": null,
             "inbox_view": false,
             "next_work_item_sequence": 1,
@@ -779,12 +757,8 @@
     "put_400": {
       "status": 400,
       "body": {
-        "deleted_at": [
-          "This field is required."
-        ],
-        "workspace": [
-          "This field is required."
-        ]
+        "deleted_at": ["This field is required."],
+        "workspace": ["This field is required."]
       }
     },
     "patch": {
@@ -795,10 +769,7 @@
         "sort_order": 65535.0,
         "member_role": 20,
         "anchor": null,
-        "members": [
-          "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-          "018b320f-5095-415f-a49f-d142f56d58c3"
-        ],
+        "members": ["29976dbf-40ef-4fab-b6c0-f75c09ae8dda", "018b320f-5095-415f-a49f-d142f56d58c3"],
         "cover_image_url": null,
         "inbox_view": false,
         "next_work_item_sequence": 1,
@@ -883,10 +854,7 @@
         "sort_order": 65535.0,
         "member_role": 20,
         "anchor": null,
-        "members": [
-          "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-          "018b320f-5095-415f-a49f-d142f56d58c3"
-        ],
+        "members": ["29976dbf-40ef-4fab-b6c0-f75c09ae8dda", "018b320f-5095-415f-a49f-d142f56d58c3"],
         "cover_image_url": null,
         "inbox_view": true,
         "next_work_item_sequence": 1,
@@ -1434,14 +1402,7 @@
     },
     "member_retrieve_guest_view": {
       "status": 200,
-      "keys": [
-        "created_at",
-        "id",
-        "member",
-        "original_role",
-        "project",
-        "role"
-      ]
+      "keys": ["created_at", "id", "member", "original_role", "project", "role"]
     },
     "member_retrieve_404": {
       "status": 404,
@@ -1646,12 +1607,7 @@
     },
     "pref_get": {
       "status": 200,
-      "keys": [
-        "member_id",
-        "preferences",
-        "project_id",
-        "workspace_id"
-      ],
+      "keys": ["member_id", "preferences", "project_id", "workspace_id"],
       "body": {
         "preferences": {
           "pages": {
