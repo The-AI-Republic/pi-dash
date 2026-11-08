@@ -30,11 +30,12 @@ function hits(source: string, tokens: RegExp[]): string[] {
  * cannot emit a dead absolute address once the origin comes from the
  * platform.
  */
-const WINDOW_ADDRESS_TOKENS = [/\blocation\.origin\b/, /\blocation\.href\b/];
+const WINDOW_ADDRESS_TOKENS = [/\blocation[?]?\.(?:origin|href)\b/];
 
 const FILES = [
   "features/pages/lib/share.ts",
   "features/issues/widgets/RelationRow.tsx",
+  "features/issues/subIssues/SubIssueSection.tsx",
   "shared/shell/clipboard.ts",
   "shared/shell/contextual/hooks.tsx",
   "features/spaces/peek/SpaceIssuePeek.tsx",
@@ -56,6 +57,11 @@ describe("share negatives (PIDESKAPP-187)", () => {
 
   it("flags a window-href read in a fixture", () => {
     const fixture = "await navigator.clipboard.writeText(window.location.href);";
+    expect(hits(scanBody(fixture), WINDOW_ADDRESS_TOKENS).length).toBeGreaterThan(0);
+  });
+
+  it("flags an optional-chained window-origin read in a fixture", () => {
+    const fixture = "const url = `${globalThis.location?.origin}/${workspaceSlug}/browse/${key}`;";
     expect(hits(scanBody(fixture), WINDOW_ADDRESS_TOKENS).length).toBeGreaterThan(0);
   });
 
