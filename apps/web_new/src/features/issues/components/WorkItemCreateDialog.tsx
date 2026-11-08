@@ -965,7 +965,6 @@ export function WorkItemCreateDialog({
         },
         onSuccess: (created) => {
           clearWorkItemDraft(workspaceSlug);
-          onCreated?.(created.id);
           const membership = membershipForForm(named);
           if (hasMembership(membership)) {
             attachMembership.mutate(
@@ -981,16 +980,27 @@ export function WorkItemCreateDialog({
             attachAssets.mutate({ projectId, issueId: created.id, assetIds });
           }
           if (!createMore) {
+            // Fired only when the dialog is actually finishing: the
+            // board/list parents unmount on it, so firing while Create
+            // more is on would drop the reset form below (ISS-119).
+            onCreated?.(created.id);
             finishClose();
             return;
           }
-          // Keep the project and the route's cycle/module context, then
-          // re-focus the title; everything else is a new item (ISS-119).
+          // Keep the project and the opener's seed, then re-focus the
+          // title; name and description are a new item (ISS-119). The
+          // seed is the listing prefill the dialog opened with plus the
+          // route cycle/module context, as contextForm built the opener.
           // A seeded parent stays attached to the next item (ISS-175).
+          const opener: CreateFormInitialValues = {
+            ...(initialValues ?? {}),
+            ...(context?.cycleId != null ? { cycleId: context.cycleId } : {}),
+            ...(context?.moduleId != null ? { moduleIds: [context.moduleId] } : {}),
+          };
           setForm(
             seededParent === null
-              ? resetForCreateMore(named)
-              : { ...resetForCreateMore(named), parentId: seededParent.id }
+              ? resetForCreateMore(named, "", opener)
+              : { ...resetForCreateMore(named, "", opener), parentId: seededParent.id }
           );
           setFieldError(null);
           setExecutionError(null);

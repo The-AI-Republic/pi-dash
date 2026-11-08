@@ -1425,6 +1425,18 @@ describe("WorkItemCreateDialog Create more (ISS-119)", () => {
     expect(posts(h.sent)[1]).toEqual({ name: "Second item", ...DEFAULT_TARGET });
   });
 
+  it("does not fire onCreated while Create more is on (parents unmount on it)", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.type(titleField(), "First item");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    await waitFor(() => expect(titleField()).toHaveValue(""));
+    expect(h.onCreated).not.toHaveBeenCalled();
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
   it("clears the description editor between items", async () => {
     const user = userEvent.setup();
     const h = setup();
