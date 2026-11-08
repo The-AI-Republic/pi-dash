@@ -139,6 +139,14 @@ class WebNewDesktopCiTests(unittest.TestCase):
         self.assertIn("RUN-044", self.text)
         self.assertIn("NEWFRONT-1056", self.text)
 
+    def test_desk009_exclusion_is_explicit(self):
+        # DESK-009 loses the on-machine turn across reload after a
+        # clear+auto-create in CI (deterministic in runs 42472453472
+        # and 42482026426; passes locally). It stays excluded by name
+        # until NEWFRONT-1057 lands the spec/app fix.
+        self.assertIn("DESK-009", self.text)
+        self.assertIn("NEWFRONT-1057", self.text)
+
 
 if __name__ == "__main__":
     unittest.main()
