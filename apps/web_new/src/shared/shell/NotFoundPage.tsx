@@ -17,19 +17,31 @@
 import * as React from "react";
 
 import { platform } from "../../core/platform/index.js";
-import { DesktopHostedScreen } from "../coexistence/DesktopHostedScreen.js";
-import { classifyDesktopRoute, currentAddress } from "../coexistence/desktopHandOff.js";
 import { useDocumentHead } from "./document.js";
+
+// Desktop hand-off splits off the initial bundle (size gate): only the
+// desktop build ever needs the classifier and the card, and only for an
+// address another frontend owns, so the web first paint keeps neither.
+const LazyDesktopHandOff = React.lazy(() =>
+  import("../coexistence/DesktopHandOffBoundary.js").then((module) => ({ default: module.DesktopHandOffBoundary }))
+);
 
 export const NOT_FOUND_TITLE = "404 — Pi Dash";
 export const NOT_FOUND_ROBOTS = "noindex, nofollow";
 export const NOT_FOUND_ART = "/illustrations/not-found.svg";
 
 export function NotFoundPage(): React.ReactElement {
-  if (platform.kind === "desktop" && classifyDesktopRoute(currentAddress()).kind === "hand-off") {
-    return <DesktopHostedScreen />;
-  }
-  return <NotFoundNotice />;
+  // The web build is the hosted app: an address nothing there renders is
+  // simply unknown, so it answers at once with no extra chunk.
+  if (platform.kind !== "desktop") return <NotFoundNotice />;
+  // The desktop defers the decision to the split: the backdrop holds the
+  // window for the moment it takes, so it never blinks the not-found page
+  // under an address that does exist elsewhere.
+  return (
+    <React.Suspense fallback={<main className="min-h-screen bg-(--bg)" />}>
+      <LazyDesktopHandOff />
+    </React.Suspense>
+  );
 }
 
 /** The not-found page itself: art, explanation and a way home. */

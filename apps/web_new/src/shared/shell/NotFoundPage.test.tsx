@@ -69,13 +69,13 @@ describe("NotFoundPage", () => {
     expect(harness.openExternal).not.toHaveBeenCalled();
   });
 
-  it("keeps the not-found page on the desktop for a migrated address that resolves to nothing", () => {
+  it("keeps the not-found page on the desktop for a migrated address that resolves to nothing", async () => {
     // An unknown workspace slug matches the workspace route and then fails
     // its gate: a real in-window not-found, not a screen for the browser.
     harness.kind = "desktop";
     window.history.replaceState(null, "", "/no-such-workspace");
     render(<NotFoundPage />);
-    expect(screen.getByRole("heading", { name: "That page does not exist" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "That page does not exist" })).toBeInTheDocument();
     expect(harness.openExternal).not.toHaveBeenCalled();
   });
 
@@ -92,11 +92,22 @@ describe("NotFoundPage", () => {
     );
   });
 
-  it("keeps the root in the window on the desktop", () => {
+  it("keeps the root in the window on the desktop", async () => {
     harness.kind = "desktop";
     window.history.replaceState(null, "", "/");
     render(<NotFoundPage />);
-    expect(screen.getByRole("heading", { name: "That page does not exist" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "That page does not exist" })).toBeInTheDocument();
+  });
+
+  it("holds a bare backdrop while the desktop hand-off chunk loads", () => {
+    // The split must not let the window blink the "does not exist" page
+    // under an address that exists in the hosted app: the first frame is a
+    // plain surface, and the card replaces it when the chunk arrives.
+    harness.kind = "desktop";
+    window.history.replaceState(null, "", "/acme/projects/archives");
+    const { container } = render(<NotFoundPage />);
+    expect(screen.queryByRole("heading", { name: "That page does not exist" })).toBeNull();
+    expect(container.querySelector("main")).not.toBeNull();
   });
 
   it("hands a migrated-elsewhere address to the browser on the desktop", async () => {
