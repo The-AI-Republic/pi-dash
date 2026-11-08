@@ -718,11 +718,16 @@ SESSIONS = (
             # -- owner engine controls (#2903, NEWPIDASH-49): PATCH
             # pod_dispatch + machine PATCH (the moff machine hosts roff,
             # an own-agent runner; pause/team flips are no-op pins here).
+            # The runner PATCH below expects 404, not 400: rdel_id was
+            # deleted earlier in this session, and both backends look
+            # the runner up before validating pod_dispatch (Django
+            # runners.py patch, Rust manage.rs runner_patch), so both
+            # answer 404 {"error":"not found"} (NEWPIDASH-58 req56).
             Request(
                 "PATCH", f"{WEB}/{{rdel_id}}/",
                 route=f"{WEB}/{{runner_id}}/",
                 json={"pod_dispatch": "sometimes"},
-                auth="admin", expect_status=400,
+                auth="admin", expect_status=404,
                 **_csrf("w0"),
             ),
             Request(
