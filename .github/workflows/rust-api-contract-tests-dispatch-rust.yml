@@ -102,7 +102,7 @@ jobs:
       AWS_S3_BUCKET_NAME: pi-dash-contract
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
-      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      CELERY_BROKER_URL: redis://localhost:6379/0
       CONTRACT_REDIS_URL: redis://localhost:6379/0
       CONTRACT_TASK_TIMEOUT: "60"
       SECRET_KEY: "contract-tests-fixed-secret"
