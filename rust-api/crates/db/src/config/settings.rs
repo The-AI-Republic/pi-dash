@@ -64,6 +64,9 @@ const SMTP_BACKEND: &str = "django.core.mail.backends.smtp.EmailBackend";
 const CONSOLE_BACKEND: &str = "django.core.mail.backends.console.EmailBackend";
 const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
 
+/// Known desktop bundle origins. See `apps/api/pi_dash/settings/common.py`.
+const DESKTOP_BUNDLE_ORIGINS: &[&str] = &["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"];
+
 /// Boot-time settings for the Rust server and worker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -259,7 +262,9 @@ pub struct SessionSettings {
     pub cookie_name: String,
     pub cookie_domain: Option<String>,
     /// `SESSION_COOKIE_SECURE = secure_origins`: true when explicit origins
-    /// exist and none is plain `http:`; false with no origins set.
+    /// exist and none is plain `http:`; false with no origins set. Desktop
+    /// bundle origins are ignored (see common.py DESKTOP_BUNDLE_ORIGINS) so
+    /// that http://tauri.localhost does not downgrade an HTTPS deployment.
     pub cookie_secure: bool,
     pub save_every_request: bool,
     pub admin_cookie_age_secs: i64,
@@ -930,9 +935,16 @@ impl Settings {
         let mut app_base_url = validated_base_url(ctx.opt_string("APP_BASE_URL")?);
 
         let cors_allowed_origins = ctx.csv_stripped("CORS_ALLOWED_ORIGINS", "")?;
-        // secure_origins, ported exactly (substring match on "http:").
+        // secure_origins: true unless any non-desktop origin carries "http:".
+        // Desktop bundle origins (see common.py) are exempt — http://tauri.localhost
+        // is a local webview origin, not a plain-HTTP deployment.
         let cookie_secure = !cors_allowed_origins.is_empty()
-            && !cors_allowed_origins.iter().any(|o| o.contains("http:"));
+            && !cors_allowed_origins.iter().any(|o| {
+                o.contains("http:")
+                    && !DESKTOP_BUNDLE_ORIGINS
+                        .iter()
+                        .any(|d| o.trim_end_matches('/').eq_ignore_ascii_case(d))
+            });
 
         match profile {
             Profile::Common => {}
@@ -1727,6 +1739,40 @@ mod tests {
         )
         .expect("resolves");
         assert!(s.session.cookie_secure);
+        // HTTPS deployment + Windows desktop origin -> True (desktop exempt).
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "https://a.example, http://tauri.localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(s.session.cookie_secure);
+        assert!(s.csrf_trusted_origins.contains(&"http://tauri.localhost".to_owned()));
+        // tauri://localhost also exempt (no "http:" anyway, but pinned).
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "https://a.example, tauri://localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(s.session.cookie_secure);
+        // Plain http + desktop still False.
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "http://a.example, http://tauri.localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(!s.session.cookie_secure);
     }
 
     #[test]
