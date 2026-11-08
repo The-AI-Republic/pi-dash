@@ -4,9 +4,9 @@
 
 import pytest
 
-pytestmark = pytest.mark.unit
-
 from pi_dash.settings.common import compute_secure_origins
+
+pytestmark = pytest.mark.unit
 
 
 def test_empty_is_not_secure():

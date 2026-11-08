@@ -65,7 +65,11 @@ const CONSOLE_BACKEND: &str = "django.core.mail.backends.console.EmailBackend";
 const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
 
 /// Known desktop bundle origins. See `apps/api/pi_dash/settings/common.py`.
-const DESKTOP_BUNDLE_ORIGINS: &[&str] = &["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"];
+const DESKTOP_BUNDLE_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+];
 
 /// Boot-time settings for the Rust server and worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -1750,7 +1754,9 @@ mod tests {
         )
         .expect("resolves");
         assert!(s.session.cookie_secure);
-        assert!(s.csrf_trusted_origins.contains(&"http://tauri.localhost".to_owned()));
+        assert!(s
+            .csrf_trusted_origins
+            .contains(&"http://tauri.localhost".to_owned()));
         // tauri://localhost also exempt (no "http:" anyway, but pinned).
         let s = Settings::from_map_with(
             &vars(&[(
