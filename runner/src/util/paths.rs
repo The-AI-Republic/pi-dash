@@ -191,11 +191,41 @@ impl Paths {
         ] {
             create_dir_all_private(dir).with_context(|| format!("creating {dir:?}"))?;
         }
+        // An install made before the daemon created its home owner-only
+        // still has a 0755 data dir, and every engine task folder and runner
+        // history under it stays readable. The data dir is the daemon's own
+        // (never a user-chosen working dir), so tighten it here; that covers
+        // the whole tree beneath it without touching anything the user owns.
+        tighten_daemon_dir(&self.data_dir);
         for name in [SERVICE_OUT_LOG, SERVICE_ERR_LOG] {
             ensure_service_log(&self.logs_dir().join(name))?;
         }
         Ok(())
     }
+}
+
+/// Drop group/other access from a daemon-owned directory that predates
+/// owner-only creation. Best effort: a directory owned by another user, or
+/// a chmod the filesystem refuses, is logged and left alone so the daemon
+/// still starts.
+fn tighten_daemon_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let Ok(meta) = std::fs::metadata(dir) else {
+            return;
+        };
+        if meta.mode() & 0o077 == 0 || meta.uid() != nix::unistd::getuid().as_raw() {
+            return;
+        }
+        let mut perm = meta.permissions();
+        perm.set_mode(meta.mode() & 0o700);
+        if let Err(e) = std::fs::set_permissions(dir, perm) {
+            tracing::warn!(dir = ?dir, error = %e, "could not make daemon dir owner-only");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// Ensure a service log file exists and is owner-only (0600 on Unix).
@@ -513,6 +543,31 @@ mod tests {
             mode, 0o600,
             "existing service log must be tightened to 0600"
         );
+    }
+
+    /// An upgraded install's data dir was created 0755 by an older daemon;
+    /// `ensure` tightens it (the daemon owns it) so the engine task folders
+    /// and histories already under it stop being readable by other users.
+    /// What lies beneath keeps its mode: the data dir alone gates access.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_tightens_an_existing_data_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths_at(tmp.path());
+        let task = p.data_dir.join("engine/workdirs/acme/WEB");
+        std::fs::create_dir_all(&task).unwrap();
+        for dir in [&p.data_dir, &task] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p.ensure().unwrap();
+        let mode = |d: &Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&p.data_dir),
+            0o700,
+            "existing data dir must be tightened"
+        );
+        assert_eq!(mode(&task), 0o755, "contents are not chmodded");
     }
 
     #[test]

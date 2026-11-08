@@ -78,7 +78,6 @@ ExecStart={exe} __run
 Environment=PIDASH_CONFIG_DIR={config_dir}{data_line}{path_line}
 Restart=on-failure
 RestartSec=5
-Umask=0077
 
 [Install]
 WantedBy=default.target
@@ -367,15 +366,15 @@ mod tests {
     }
 
     #[test]
-    fn unit_body_sets_owner_only_umask() {
-        // Every file and directory the daemon creates (agent work products
-        // in working dirs and engine task folders, service logs, runner
-        // histories) must be owner-only even when the daemon runs outside
-        // `Paths::ensure`'s secure creation (e.g. a test or a manual start).
+    fn unit_body_leaves_the_umask_alone() {
+        // The daemon's own folders are made owner-only where it creates them
+        // (`util::fs::create_dir_all_private`). A unit-wide `Umask=` would
+        // also be inherited by git and the agent, changing the mode of every
+        // file they create inside a user's existing repo.
         let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
         assert!(
-            body.contains("\nUmask=0077"),
-            "unit body must set Umask=0077; got:\n{body}"
+            !body.contains("Umask="),
+            "unit must not set Umask; got:\n{body}"
         );
     }
 
