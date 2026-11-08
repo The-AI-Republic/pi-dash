@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
@@ -66,6 +66,16 @@ use crate::daemon::runner_instance::RunnerInstance;
 
 /// How long a resolved approval / cancel wait is allowed to hold a turn.
 const APPROVAL_TTL_MINUTES: i64 = 10;
+
+/// Upper bound on live local chat sessions per registry. Each live session
+/// holds a long-lived engine process, so the set is capped: viewing more
+/// sessions than this evicts the least-recently-used ones (their bridges
+/// torn down) and the next warm/send respawns them.
+const MAX_LIVE_CHAT_SESSIONS: usize = 8;
+
+/// How long a local chat session may sit without a warm/turn before its
+/// engine process is shut down and the session dropped.
+const CHAT_IDLE_TTL_MINUTES: i64 = 10;
 
 // ---------------------------------------------------------------------------
 // Sink abstraction — lets the turn driver stream to the live IPC socket in
@@ -98,9 +108,9 @@ where
 
 // ---------------------------------------------------------------------------
 // Per-runner session registry. Sessions persist across requests (and across
-// connections) so a Codex thread survives between turns — the concrete Codex
-// bridge has no resume-by-id, so continuity depends on keeping the same live
-// bridge process for the session's lifetime.
+// connections) so a Codex thread survives between turns. When the in-memory
+// bridge is gone (restart, Close, failed turn), a fresh bridge resumes the
+// saved thread via `thread/resume`; unknown threads fall back to `thread/start`.
 // ---------------------------------------------------------------------------
 
 /// A single live chat session: its engine bridge plus an out-of-band cancel
@@ -123,6 +133,10 @@ struct SessionRuntime {
     /// life of the thread so a mode change mid-session cannot retune a turn
     /// already in flight — it takes effect on the next thread instead.
     approval_mode: ApprovalMode,
+    /// When this session was last warmed or sent a turn. Stamped on
+    /// creation and on every completed warm/turn; read by the registry
+    /// reaper to evict idle sessions.
+    last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Per-`RunnerInstance` registry of live chat sessions, keyed by
@@ -139,15 +153,93 @@ impl ChatRegistry {
     }
 
     async fn get_or_create(&self, id: Uuid) -> Arc<ChatSession> {
+        if let Some(existing) = self.get(id).await {
+            if let Ok(mut rt) = existing.rt.try_lock() {
+                rt.last_used_at = Some(Utc::now());
+            }
+            self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS).await;
+            return existing;
+        }
+        // Leave room for the session about to be inserted.
+        self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS - 1).await;
         let mut map = self.sessions.lock().await;
         map.entry(id)
             .or_insert_with(|| {
                 Arc::new(ChatSession {
-                    rt: Mutex::new(SessionRuntime::default()),
+                    rt: Mutex::new(SessionRuntime {
+                        last_used_at: Some(Utc::now()),
+                        ..SessionRuntime::default()
+                    }),
                     cancel: Notify::new(),
                 })
             })
             .clone()
+    }
+
+    /// Evict idle sessions: those past their idle TTL first, then the
+    /// least-recently-used ones while the registry exceeds `target`. The
+    /// session being requested (`except`) and any session with a turn in
+    /// flight (its runtime is locked) are never touched. Evicted bridges
+    /// are shut down, tearing down their engine processes; the next
+    /// warm/send for a dropped session respawns it.
+    async fn reap_idle(&self, except: Uuid, target: usize) {
+        let now = Utc::now();
+        let idle_limit = chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES);
+        // Snapshot the eviction candidates under the map lock. `try_lock`
+        // only — a locked runtime means a warm/turn is in flight and the
+        // session must survive.
+        let candidates: Vec<(Uuid, Arc<ChatSession>)> = {
+            let map = self.sessions.lock().await;
+            let mut candidates = Vec::new();
+            let mut by_age: Vec<(Option<DateTime<Utc>>, Uuid, Arc<ChatSession>)> = Vec::new();
+            for (id, session) in map.iter() {
+                if *id == except {
+                    continue;
+                }
+                let Ok(rt) = session.rt.try_lock() else {
+                    continue;
+                };
+                if rt.last_used_at.is_none_or(|t| now - t > idle_limit) {
+                    candidates.push((*id, session.clone()));
+                } else {
+                    by_age.push((rt.last_used_at, *id, session.clone()));
+                }
+            }
+            let excess = map.len().saturating_sub(target);
+            if excess > 0 {
+                by_age.sort_by_key(|(at, _, _)| *at);
+                by_age.truncate(excess);
+                candidates.extend(by_age.into_iter().map(|(_, id, s)| (id, s)));
+            }
+            candidates
+        };
+        for (id, expected) in candidates {
+            // Re-check under the map lock: only evict the exact session
+            // snapshotted. If a concurrent `get_or_create` for the same id
+            // already created a fresh entry, `expected` is stale and must be
+            // left alone — removing/replacing the new entry would orphan the
+            // caller's Arc (two live runtimes for one chat_session_id). A
+            // busy runtime at this point means a turn started after the
+            // snapshot: leave the session entirely untouched, no reinsert.
+            let bridge = {
+                let mut map = self.sessions.lock().await;
+                let Some(current) = map.get(&id) else {
+                    continue;
+                };
+                if !Arc::ptr_eq(current, &expected) {
+                    continue;
+                }
+                let Ok(mut rt) = expected.rt.try_lock() else {
+                    continue;
+                };
+                let session = map.remove(&id).expect("entry checked present");
+                let _ = session;
+                rt.bridge.take()
+            };
+            if let Some(bridge) = bridge {
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
+            }
+        }
     }
 
     async fn get(&self, id: Uuid) -> Option<Arc<ChatSession>> {
@@ -163,6 +255,10 @@ impl ChatRegistry {
         self.sessions.lock().await.contains_key(&id)
     }
 }
+
+// (reap_one removed: eviction is now atomic under the map lock in
+// `reap_idle`, eliminating the blind-reinsert race where a busy session
+// was re-inserted over a concurrently created entry for the same id.)
 
 // ---------------------------------------------------------------------------
 // Chat hosts.
@@ -252,7 +348,7 @@ impl<'a> ChatHost<'a> {
                 )
                 .await
             }
-            Lane::Engine { profile, .. } => profile.spawn(workspace, mode).await,
+            Lane::Engine { profile, .. } => profile.spawn(workspace, mode, resume_id).await,
         }
     }
 }
@@ -416,6 +512,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         payload: serde_json::json!({ "local_session_id": warmed_thread_id }),
     })
     .await?;
+    rt.last_used_at = Some(Utc::now());
     Ok(Response::Ack)
 }
 
@@ -504,6 +601,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
     };
     rt.bridge_seq = bridge_seq;
     rt.started_sent = started_sent;
+    rt.last_used_at = Some(Utc::now());
 
     // A failed turn tears the bridge down so the next send respawns cleanly.
     let terminal = match outcome {
@@ -1891,5 +1989,162 @@ mod tests {
         // otherwise accept `<workspace>/../escape`, which resolves outside.
         assert!(resolve_chat_workspace(&cfg, Some("../escape")).is_err());
         assert!(resolve_chat_workspace(&cfg, Some("sub/../../escape")).is_err());
+    }
+
+    #[tokio::test]
+    async fn warmed_chat_sessions_are_reaped_once_the_registry_grows() {
+        // PIDESKAPP-75: every local chat the user views calls `chat_warm`,
+        // which spawns a long-lived engine process keyed by `chat_session_id`
+        // and nothing ever reaped the entries. N distinct warms must not
+        // leave N live sessions: the least-recently-used ones are evicted
+        // (their bridges torn down) once the registry passes its cap, and
+        // the next warm/send respawns them.
+        let registry = ChatRegistry::new();
+        let first = Uuid::new_v4();
+        registry.get_or_create(first).await;
+        // View more chats than the live cap allows.
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        assert!(
+            !registry.contains(first).await,
+            "the least-recently-warmed chat session must be evicted once the registry exceeds its cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_a_turn_in_flight_is_never_reaped() {
+        // A warm/turn holds the session's runtime lock; the reaper must
+        // leave that session alone no matter how far past the cap the
+        // registry grows.
+        let registry = ChatRegistry::new();
+        let busy = Uuid::new_v4();
+        let busy_session = registry.get_or_create(busy).await;
+        // Simulate an in-flight warm/turn holding the runtime lock.
+        let _in_flight = busy_session.rt.lock().await;
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        drop(_in_flight);
+        assert!(
+            registry.contains(busy).await,
+            "a session with a turn in flight must never be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_is_reaped_on_the_next_warm() {
+        // A session left untouched past the idle TTL must go on the next
+        // registry access, even before the cap is reached.
+        let registry = ChatRegistry::new();
+        let stale = Uuid::new_v4();
+        let stale_session = registry.get_or_create(stale).await;
+        {
+            let mut rt = stale_session.rt.lock().await;
+            rt.last_used_at =
+                Some(Utc::now() - chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES + 1));
+        }
+        registry.get_or_create(Uuid::new_v4()).await;
+        assert!(
+            !registry.contains(stale).await,
+            "a session idle past its TTL must be reaped"
+        );
+    }
+
+    /// After the reaper drops a session, the next warm/send respawns a
+    /// fresh bridge that resumes the saved Codex thread (PIDESKAPP-74 path),
+    /// so the conversation continues on the same thread id. This is the
+    /// thread-continuity half of PIDESKAPP-75's acceptance: without
+    /// `thread/resume` the respawned bridge minted a new id and the engine
+    /// lost all prior turns.
+    #[tokio::test]
+    async fn reaped_session_respawn_resumes_saved_thread() {
+        // Fake app-server: expects thread/resume with the saved id, not
+        // thread/start.
+        let script = r#"
+            set -e
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _
+            read resume
+            case "$resume" in *'"method":"thread/resume"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected thread/resume"}}'; exit 0;; esac
+            case "$resume" in *'"threadId":"th_saved"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected th_saved"}}'; exit 0;; esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"th_saved"}}}'
+            sleep 0.1
+        "#;
+        // Simulate a reaped session: the registry entry is gone, the next
+        // warm for the same chat_session_id spawns a fresh bridge carrying
+        // the saved thread id from the desktop. The bridge must resume it.
+        let registry = ChatRegistry::new();
+        let chat_id = Uuid::new_v4();
+        let old = registry.get_or_create(chat_id).await;
+        {
+            let mut rt = old.rt.lock().await;
+            rt.last_used_at =
+                Some(Utc::now() - chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES + 1));
+        }
+        // Trigger reap on a different id so `chat_id` is dropped.
+        registry.get_or_create(Uuid::new_v4()).await;
+        assert!(
+            !registry.contains(chat_id).await,
+            "stale session must be reaped before respawn"
+        );
+        // Respawn: fresh registry entry with a new Arc (old was dropped).
+        let fresh = registry.get_or_create(chat_id).await;
+        assert!(
+            registry.contains(chat_id).await,
+            "respawned session must be live"
+        );
+        assert!(
+            !Arc::ptr_eq(&old, &fresh),
+            "respawn must allocate a fresh runtime, not resurrect the reaped one"
+        );
+        // Fresh bridge carrying the saved thread must resume it.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        let server = AppServer::spawn_command(cmd)
+            .await
+            .expect("spawn fake codex");
+        let mut bridge = Bridge::from_server(server, None);
+        bridge.set_resume_thread_id(Some("th_saved"));
+        let cwd = std::env::temp_dir();
+        let thread_id = bridge.warm(&cwd).await.expect("respawn must resume");
+        assert_eq!(
+            thread_id, "th_saved",
+            "post-reap warm must resume, not restart"
+        );
+    }
+
+    /// Concurrent `get_or_create` for the same `chat_session_id` must share
+    /// a single `ChatSession` Arc — the reaper's blind-reinsert race
+    /// produced two live runtimes for one chat when a reap overlapped a
+    /// warm. The atomic ptr_eq removal keeps the registry single-sourced.
+    #[tokio::test]
+    async fn concurrent_get_or_create_shares_single_runtime() {
+        let registry = ChatRegistry::new();
+        let id = Uuid::new_v4();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = registry.clone();
+            handles.push(tokio::spawn(async move { r.get_or_create(id).await }));
+        }
+        let mut arcs = Vec::new();
+        for h in handles {
+            arcs.push(h.await.expect("spawned get_or_create"));
+        }
+        for a in arcs.iter().skip(1) {
+            assert!(
+                Arc::ptr_eq(&arcs[0], a),
+                "concurrent get_or_create must share one runtime"
+            );
+        }
+        // And the concurrently obtained Arc must match a fresh lookup.
+        let c = registry.get(id).await.expect("concurrent session present");
+        assert!(
+            Arc::ptr_eq(&arcs[0], &c),
+            "concurrent get_or_create must not duplicate the runtime"
+        );
     }
 }
