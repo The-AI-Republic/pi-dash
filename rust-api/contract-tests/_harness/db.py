@@ -411,10 +411,11 @@ class Database:
                         agent_ticking_enabled, is_default,
                         agent_review_default_interval_seconds,
                         default_agent_executor,
+                        dedicated_runner_lost_action,
                         agent_test_default_interval_seconds)
                        values (%s,%s,%s,%s,'',0,%s,%s,true,true,true,true,true,
                                365,365,'{}',true,false,false,'UTC',true,'','',
-                               10800,10,true,false,10800,'local_runner',10800)""",
+                               10800,10,true,false,10800,'local_runner','fail_to_backlog',10800)""",
                     (now, now, pid, name or f"proj-{identifier}",
                      identifier, workspace_id),
                 )
@@ -732,6 +733,7 @@ def _insert(conn):
                     agent_ticking_enabled, is_default,
                     agent_review_default_interval_seconds,
                     default_agent_executor,
+                    dedicated_runner_lost_action,
                     agent_test_default_interval_seconds
                 ) VALUES (
                     %s, now(), now(), %s, '', 0,
@@ -745,6 +747,7 @@ def _insert(conn):
                     false, false,
                     0,
                     '',
+                    'fail_to_backlog',
                     0
                 )
                 """,
@@ -1090,7 +1093,7 @@ def create_project(conn, workspace_id, tag, *, name=None, identifier=None, creat
                 logo_props, is_time_tracking_enabled, is_issue_type_enabled,
                 guest_view_all_features, timezone, members_can_edit_states,
                 repo_url, base_branch, agent_default_interval_seconds,
-                agent_default_max_ticks, agent_ticking_enabled, is_default,
+                agent_default_max_ticks, agent_ticking_enabled, is_default, dedicated_runner_lost_action,
                 agent_review_default_interval_seconds, default_agent_executor,
                 agent_test_default_interval_seconds, created_at, updated_at)
             VALUES (%s, %s, '', %s, %s,
@@ -1099,7 +1102,7 @@ def create_project(conn, workspace_id, tag, *, name=None, identifier=None, creat
                 '{}', true, true,
                 false, 'UTC', false,
                 '', '', 0,
-                0, false, false,
+                0, false, false, 'fail_to_backlog',
                 0, '', 0, now(), now())
             """,
             (pid, name, NETWORK_SECRET, identifier, workspace_id, created_by_id),
@@ -1197,15 +1200,24 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_TABLE_DEFAULTS: dict[str, dict[str, object]] = {
+    "projects": {"dedicated_runner_lost_action": "fail_to_backlog"},
+    "agent_run": {"pin_kind": "locality"},
+}
+
+
 def insert_row(conn, table: str, values: dict) -> dict:
     """Insert one row, filling audit columns from live table metadata.
 
     ``values`` carries the columns the test cares about. ``id`` (uuid PK),
     ``created_at`` / ``updated_at`` (timestamptz), and ``deleted_at`` (NULL,
     so the row is visible to Django's default soft-delete-scoped managers)
-    are filled automatically when those columns exist. Any other NOT NULL
-    column without a database default must be supplied explicitly — a missing
-    one raises a descriptive error instead of a bare IntegrityError.
+    are filled automatically when those columns exist. ``_TABLE_DEFAULTS``
+    mirrors Django model defaults for NOT NULL columns with Python-only
+    defaults (NEWPIDASH-144); the next additive NOT NULL column is one
+    entry there. Any other NOT NULL column without a database default
+    must be supplied explicitly — a missing one raises a descriptive error
+    instead of a bare IntegrityError.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -1227,6 +1239,9 @@ def insert_row(conn, table: str, values: dict) -> dict:
             row[stamp] = _utcnow_iso()
     if "deleted_at" in meta and "deleted_at" not in row:
         row["deleted_at"] = None
+    for name, default in _TABLE_DEFAULTS.get(table, {}).items():
+        if name in meta and name not in row:
+            row[name] = default
 
     unknown = [c for c in row if c not in meta]
     assert not unknown, f"insert_row({table}): unknown columns {unknown}"
