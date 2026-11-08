@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   me: { data: { id: "u1", email: "u1@test.dev" } as { id: string; email: string } | undefined },
   desktop: true,
+  hello: null as { machine_id: string } | null,
   focusListeners: [] as Array<(focused: boolean) => void>,
   unsubscribe: vi.fn(),
   resume: vi.fn(),
@@ -43,8 +44,8 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => {
 vi.mock("./service.js", () => ({
   resumeRuntime: (...args: Array<unknown>) => harness.resume(...args),
   refreshRuntime: (...args: Array<unknown>) => harness.refresh(...args),
-  compatibleHello: () => null,
-  currentDiscovery: () => null,
+  compatibleHello: () => harness.hello,
+  currentDiscovery: () => (harness.hello ? { kind: "compatible", hello: harness.hello } : null),
   signInWorkspace: vi.fn(),
 }));
 
@@ -75,6 +76,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   harness.me = { data: { id: "u1", email: "u1@test.dev" } };
   harness.desktop = true;
+  harness.hello = null;
   harness.focusListeners = [];
   harness.refresh.mockResolvedValue(undefined);
   harness.migrate.mockResolvedValue({ status: "nothing_to_do" });
@@ -168,5 +170,57 @@ describe("RuntimeSupervisor", () => {
     const { container } = renderSupervisor();
     expect(container).toBeEmptyDOMElement();
     expect(harness.resume).not.toHaveBeenCalled();
+  });
+
+  it("runs the legacy migration on launch and retries next refresh when blocked", async () => {
+    vi.useFakeTimers();
+    harness.migrate.mockResolvedValueOnce({ status: "blocked", reason: "no_daemon" });
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.migrate).toHaveBeenCalledTimes(1);
+    expect(harness.migrate).toHaveBeenCalledWith("u1", expect.anything());
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+    });
+    expect(harness.migrate).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS * 2);
+    });
+    expect(harness.migrate).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers the replace prompt after the migration, once per machine", async () => {
+    vi.useFakeTimers();
+    harness.hello = { machine_id: "machine-1" };
+    harness.migrate.mockResolvedValueOnce({ status: "blocked", reason: "no_daemon" });
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.offerReplace).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i++) {
+      // eslint-disable-next-line no-await-in-loop -- one check per minute
+      await act(async () => {
+        vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+      });
+    }
+    expect(harness.offerReplace).toHaveBeenCalledTimes(1);
+    expect(harness.offerReplace).toHaveBeenCalledWith("u1", expect.anything());
+    harness.hello = { machine_id: "machine-2" };
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+    });
+    expect(harness.offerReplace).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks again next refresh when the replace lookup fails", async () => {
+    vi.useFakeTimers();
+    harness.hello = { machine_id: "machine-1" };
+    harness.offerReplace.mockRejectedValueOnce(new Error("offline"));
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.offerReplace).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+    });
+    expect(harness.offerReplace).toHaveBeenCalledTimes(2);
   });
 });
