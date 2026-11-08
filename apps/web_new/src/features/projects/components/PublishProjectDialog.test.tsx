@@ -17,12 +17,14 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { platform } from "../../../core/platform/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import {
   PUBLISH_LAYOUT_REMOVE_REFUSED,
   PUBLISH_LAYOUT_REQUIRED,
   PUBLISH_LINK_COPY_FAILED_TITLE,
   PUBLISH_LINK_COPIED_TITLE,
+  PUBLISH_LINK_UNAVAILABLE,
   PublishProjectDialog,
 } from "./PublishProjectDialog.js";
 
@@ -133,7 +135,10 @@ function setup(
 }
 
 beforeEach(() => vi.clearAllMocks());
-afterEach(() => resetAppClient());
+afterEach(() => {
+  resetAppClient();
+  vi.restoreAllMocks();
+});
 
 describe("PublishProjectDialog", () => {
   it("shows a loader while settings load, then both layouts with toggles off", async () => {
@@ -195,6 +200,17 @@ describe("PublishProjectDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy published link" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/issues/live-token")));
     expect(notifySuccess).toHaveBeenCalledWith(PUBLISH_LINK_COPIED_TITLE);
+  });
+
+  it("shows the link as unavailable instead of a dead link when the platform refuses", async () => {
+    vi.spyOn(platform, "shareableUrl").mockImplementation(() => {
+      throw new Error("A hosted web origin is required to create a shareable link.");
+    });
+    setup(board());
+    expect(await screen.findByText(PUBLISH_LINK_UNAVAILABLE)).toBeInTheDocument();
+    expect(screen.queryByTestId("publish-live-link")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Open published board" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy published link" })).toBeNull();
   });
 
   it("reports a refused clipboard write", async () => {
