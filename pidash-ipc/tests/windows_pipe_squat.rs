@@ -90,3 +90,21 @@ async fn client_refuses_pipe_owned_by_another_principal() {
         }
     }
 }
+
+#[tokio::test]
+async fn client_accepts_the_owner_only_daemon_pipe() {
+    let dir = std::env::temp_dir().join(format!("pidash-own-{}", uuid::Uuid::new_v4()));
+    let sock = dir.join("pidash.sock");
+    let name = windows_pipe_name(&sock);
+    let server = pidash_ipc::windows_pipe::create_owner_only_pipe(&name, true).unwrap();
+    let served = tokio::spawn(async move {
+        server.connect().await.unwrap();
+        let mut line = String::new();
+        BufReader::new(server).read_line(&mut line).await.unwrap();
+        line
+    });
+    let mut client = Client::connect(&sock).await.expect("own daemon pipe is accepted");
+    let _ = tokio::time::timeout(Duration::from_millis(500), client.call(Request::Hello)).await;
+    let line = tokio::time::timeout(Duration::from_secs(5), served).await.unwrap().unwrap();
+    assert!(line.contains("hello"), "{line}");
+}

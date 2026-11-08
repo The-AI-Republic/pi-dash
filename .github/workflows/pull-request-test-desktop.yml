@@ -18,6 +18,8 @@ on:
       - "pidash-ipc/**"
       # Pinned agent-engine release that prepare-agent.sh stages.
       - "runner/ENGINE_VERSION"
+      # Windows IPC server arm, checked on the Windows leg below.
+      - "runner/src/ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
   # Post-merge validation, same reasoning as the runner workflow: PR checks
   # don't re-run when the base moves.
@@ -32,6 +34,8 @@ on:
       - "pidash-ipc/**"
       # Pinned agent-engine release that prepare-agent.sh stages.
       - "runner/ENGINE_VERSION"
+      # Windows IPC server arm, checked on the Windows leg below.
+      - "runner/src/ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
 
 concurrency:
@@ -101,6 +105,9 @@ jobs:
         run: |
           cargo +1.93 clippy -p pidash-ipc --all-targets --locked -- -D warnings
           cargo +1.93 test -p pidash-ipc --all-targets --locked
+          # The runner's Windows IPC server arm uses the same helpers; it is
+          # otherwise first compiled by the release build.
+          cargo +1.93 check -p pidash --locked
 
       # The packaging helpers are OS-independent Python; one leg is enough.
       - name: Test release packaging helpers

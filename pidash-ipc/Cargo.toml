@@ -19,6 +19,14 @@ chrono = { version = "0.4", default-features = false, features = [
 ] }
 tokio = { version = "1", features = ["io-util", "net", "time"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tokio = { version = "1", features = [
     "io-util",
@@ -28,9 +36,3 @@ tokio = { version = "1", features = [
     "time",
 ] }
 
-[target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_Security_Authorization",
-] }
