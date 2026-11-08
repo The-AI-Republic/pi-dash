@@ -493,10 +493,13 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
 
     deleteChatSession: async (sessionId) => {
       const owner = account();
-      await api.deleteSession(owner, sessionId);
-      // The turn, if any, was cut off with the row; no terminal frame will
-      // arrive for a conversation that no longer exists.
+      // Stop any in-flight turn before its row goes: the daemon owns the
+      // turn and only ends it on ChatCancel/ChatClose, so deleting the row
+      // alone leaves it running with no way to stop it. Best-effort — a
+      // dead daemon must not make the conversation undeletable.
+      await api.close({ workspaceSlug: deps.workspaceSlug(), sessionId }).catch(() => undefined);
       activeTurns.delete(sessionId);
+      await api.deleteSession(owner, sessionId);
       subscribers.delete(sessionId);
       errorSubscribers.delete(sessionId);
       assistantTextBySession.delete(sessionId);
@@ -504,9 +507,19 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     },
 
     clearChatHistory: async () => {
-      await api.clearHistory(account());
-      // Every conversation went with the history, so nothing is in flight.
+      const owner = account();
+      // Stop every in-flight turn before the store (and the working copies
+      // it names) goes, for the same reason as deleting one conversation.
+      const inFlight = [...activeTurns.keys()];
+      await Promise.all(
+        inFlight.map((sessionId) =>
+          api.close({ workspaceSlug: deps.workspaceSlug(), sessionId }).catch(() => undefined)
+        )
+      );
+      await api.clearHistory(owner);
       activeTurns.clear();
+      subscribers.clear();
+      errorSubscribers.clear();
       assistantTextBySession.clear();
       replyStores.clear();
     },
