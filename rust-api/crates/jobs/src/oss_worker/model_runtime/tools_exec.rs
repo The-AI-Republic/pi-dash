@@ -1715,6 +1715,42 @@ where
         emit_logs(&out.outcome.logs);
         Ok(out.outcome.proceed)
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
+        use pidash_services::orchestration::creation::CreationError;
+        use sea_orm::EntityTrait;
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        let issue = pidash_db::entity::issues::Entity::find_by_id(issue_id)
+            .one(&conn)
+            .await
+            .map_err(|error| CreationError::Db(error.to_string()))?
+            .ok_or_else(|| CreationError::Db("issue not found".to_owned()))?;
+        if let Some(code) = pidash_services::domain::issue_assignment::pod_once_auth_code(
+            &conn,
+            &issue,
+            Some(creator_id),
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?
+        {
+            return Ok(Some(code.to_owned()));
+        }
+        let has = pidash_services::orchestration::dispatch::PodRunnerMatcher::pod_has_runner_for_issue_principal(
+            &self.matcher, pod_id, issue_id, Some(creator_id), true, true,
+        )
+        .await
+        .map_err(|error| CreationError::Db(error.to_string()))?;
+        Ok(if has {
+            None
+        } else {
+            Some("no_eligible_runner_in_pod".to_owned())
+        })
+    }
 }
 
 /// The [`StoreDeps`] behind the create fire: the transition shape
@@ -2283,6 +2319,17 @@ impl PreflightSeam for BinPreflight {
             "tool transition reached preflight: agent moves never dispatch_now".to_owned(),
         ))
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        _issue_id: Uuid,
+        _creator_id: Uuid,
+        _pod_id: Uuid,
+    ) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
+        Err(pidash_services::orchestration::creation::CreationError::Db(
+            "tool transition reached preflight: agent moves never dispatch_now".to_owned(),
+        ))
+    }
 }
 
 /// What a state-changing transition hands its caller for the
@@ -2524,6 +2571,7 @@ async fn drive_transition<'a>(
         now,
         jitter_secs: 0.0,
         created_by: None,
+        pod_once: false,
     };
     let mut store = LiveCreationStore::new(tx, &ctx.pool, deps);
     let mut preflight = BinPreflight;

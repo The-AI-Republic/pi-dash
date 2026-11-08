@@ -1554,86 +1554,102 @@ pub async fn apply_execution_target(
 ) -> Result<ApplyOutcome, sea_orm::DbErr> {
     let outcome = db
         .transaction(|txn| {
-            Box::pin(async move {
-                // Lock the issue row first (issue -> run order, §13.2).
-                let issue = issues::Entity::find_by_id(issue_id)
-                    .lock(LockType::Update)
-                    .one(txn)
-                    .await?
-                    .ok_or_else(|| sea_orm::DbErr::RecordNotFound("issue".to_owned()))?;
-                let prev_runner_id = issue.assigned_runner_id;
-                let now = Utc::now();
-                let mut model = issue.clone().into_active_model();
-                model.updated_at = sea_orm::Set(now.into());
-                match new_runner_id {
-                    Some(new_runner_id) => {
-                        model.assigned_runner_id = sea_orm::Set(Some(new_runner_id));
-                        let new_runner = runner::Entity::find_by_id(new_runner_id).one(txn).await?;
-                        if let Some(new_runner) = new_runner {
-                            model.assigned_pod_id = sea_orm::Set(Some(new_runner.pod_id));
-                        }
-                    }
-                    None => {
-                        model.assigned_runner_id = sea_orm::Set(None);
-                    }
-                }
-                model.update(txn).await?;
-                let queued = agent_run::Entity::find()
-                    .filter(agent_run::Column::WorkItemId.eq(issue.id))
-                    .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
-                    .order_by_asc(agent_run::Column::CreatedAt)
-                    .one(txn)
-                    .await?;
-                let mut drain_pod: Option<Uuid> = None;
-                if let Some(queued) = queued {
-                    repoint_queued_run(txn, &queued, new_runner_id, actor_id).await?;
-                    drain_pod = Some(queued.pod_id);
-                }
-                let old_name = match prev_runner_id {
-                    Some(id) => runner::Entity::find_by_id(id)
-                        .one(txn)
-                        .await?
-                        .map(|r| r.name)
-                        .unwrap_or_default(),
-                    None => String::new(),
-                };
-                let new_name = match new_runner_id {
-                    Some(id) => runner::Entity::find_by_id(id)
-                        .one(txn)
-                        .await?
-                        .map(|r| r.name)
-                        .unwrap_or_default(),
-                    None => String::new(),
-                };
-                let activity = issue_activities::ActiveModel {
-                    id: sea_orm::Set(Uuid::new_v4()),
-                    verb: sea_orm::Set("updated".to_owned()),
-                    field: sea_orm::Set(Some("assigned_runner".to_owned())),
-                    old_value: sea_orm::Set(Some(old_name)),
-                    new_value: sea_orm::Set(Some(new_name)),
-                    comment: sea_orm::Set("updated the dedicated runner to".to_owned()),
-                    attachments: sea_orm::Set(Vec::new()),
-                    created_by_id: sea_orm::Set(Some(actor_id)),
-                    issue_id: sea_orm::Set(Some(issue.id)),
-                    issue_comment_id: sea_orm::Set(None),
-                    project_id: sea_orm::Set(issue.project_id),
-                    updated_by_id: sea_orm::Set(Some(actor_id)),
-                    workspace_id: sea_orm::Set(issue.workspace_id),
-                    actor_id: sea_orm::Set(Some(actor_id)),
-                    new_identifier: sea_orm::Set(new_runner_id),
-                    old_identifier: sea_orm::Set(prev_runner_id),
-                    epoch: sea_orm::Set(None),
-                    deleted_at: sea_orm::Set(None),
-                    created_at: sea_orm::Set(now.into()),
-                    updated_at: sea_orm::Set(now.into()),
-                };
-                activity.insert(txn).await?;
-                Ok(ApplyOutcome { drain_pod })
-            })
+            Box::pin(apply_execution_target_in(
+                txn,
+                issue_id,
+                new_runner_id,
+                actor_id,
+            ))
         })
         .await
         .map_err(unmap)?;
     Ok(outcome)
+}
+
+/// The apply body on an already-open connection: lets callers that hold
+/// a transaction (the assistant-tool fused save) stamp the choice on
+/// the same transaction, while the public entry above owns its
+/// transaction. Same steps as [[`apply_execution_target`]].
+pub async fn apply_execution_target_in(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    new_runner_id: Option<Uuid>,
+    actor_id: Uuid,
+) -> Result<ApplyOutcome, sea_orm::DbErr> {
+    // Lock the issue row first (issue -> run order, §13.2).
+    let issue = issues::Entity::find_by_id(issue_id)
+        .lock(LockType::Update)
+        .one(db)
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::RecordNotFound("issue".to_owned()))?;
+    let prev_runner_id = issue.assigned_runner_id;
+    let now = Utc::now();
+    let mut model = issue.clone().into_active_model();
+    model.updated_at = sea_orm::Set(now.into());
+    match new_runner_id {
+        Some(new_runner_id) => {
+            model.assigned_runner_id = sea_orm::Set(Some(new_runner_id));
+            let new_runner = runner::Entity::find_by_id(new_runner_id).one(db).await?;
+            if let Some(new_runner) = new_runner {
+                model.assigned_pod_id = sea_orm::Set(Some(new_runner.pod_id));
+            }
+        }
+        None => {
+            model.assigned_runner_id = sea_orm::Set(None);
+        }
+    }
+    model.update(db).await?;
+    let queued = agent_run::Entity::find()
+        .filter(agent_run::Column::WorkItemId.eq(issue.id))
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .order_by_asc(agent_run::Column::CreatedAt)
+        .one(db)
+        .await?;
+    let mut drain_pod: Option<Uuid> = None;
+    if let Some(queued) = queued {
+        repoint_queued_run(db, &queued, new_runner_id, actor_id).await?;
+        drain_pod = Some(queued.pod_id);
+    }
+    let old_name = match prev_runner_id {
+        Some(id) => runner::Entity::find_by_id(id)
+            .one(db)
+            .await?
+            .map(|r| r.name)
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let new_name = match new_runner_id {
+        Some(id) => runner::Entity::find_by_id(id)
+            .one(db)
+            .await?
+            .map(|r| r.name)
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let activity = issue_activities::ActiveModel {
+        id: sea_orm::Set(Uuid::new_v4()),
+        verb: sea_orm::Set("updated".to_owned()),
+        field: sea_orm::Set(Some("assigned_runner".to_owned())),
+        old_value: sea_orm::Set(Some(old_name)),
+        new_value: sea_orm::Set(Some(new_name)),
+        comment: sea_orm::Set("updated the dedicated runner to".to_owned()),
+        attachments: sea_orm::Set(Vec::new()),
+        created_by_id: sea_orm::Set(Some(actor_id)),
+        issue_id: sea_orm::Set(Some(issue.id)),
+        issue_comment_id: sea_orm::Set(None),
+        project_id: sea_orm::Set(issue.project_id),
+        updated_by_id: sea_orm::Set(Some(actor_id)),
+        workspace_id: sea_orm::Set(issue.workspace_id),
+        actor_id: sea_orm::Set(Some(actor_id)),
+        new_identifier: sea_orm::Set(new_runner_id),
+        old_identifier: sea_orm::Set(prev_runner_id),
+        epoch: sea_orm::Set(None),
+        deleted_at: sea_orm::Set(None),
+        created_at: sea_orm::Set(now.into()),
+        updated_at: sea_orm::Set(now.into()),
+    };
+    activity.insert(db).await?;
+    Ok(ApplyOutcome { drain_pod })
 }
 
 /// What `apply_execution_target` did: the pod whose queue to drain after

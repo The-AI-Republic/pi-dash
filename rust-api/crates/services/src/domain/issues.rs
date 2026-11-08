@@ -2201,6 +2201,9 @@ pub struct ToolIssueInsert<'a> {
     pub parent_id: Option<Uuid>,
     pub state_id: Option<Uuid>,
     pub pod_id: Option<Uuid>,
+    /// The dedicated runner (PDASHOSS01-350); the pod follows the
+    /// runner — the executor resolves pod = requested or runner's pod.
+    pub runner_id: Option<Uuid>,
 }
 
 fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, sqlx::Error> {
@@ -2239,7 +2242,7 @@ fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, s
         estimate_point_id: Set(None),
         type_id: Set(None),
         assigned_pod_id: Set(insert.pod_id),
-        assigned_runner_id: sea_orm::NotSet,
+        assigned_runner_id: Set(insert.runner_id),
     })
 }
 
@@ -2312,6 +2315,10 @@ pub struct ToolIssueUpdate<'a> {
     pub state_id: Option<Uuid>,
     pub parent_touched: bool,
     pub parent_id: Option<Uuid>,
+    /// Pod write (PDASHOSS01-350): set to the requested pod, or `None`
+    /// to clear when `pod_touched`.
+    pub pod_touched: bool,
+    pub pod_id: Option<Uuid>,
     pub updated_by_id: Uuid,
     pub now: DateTime<Utc>,
 }
@@ -2339,6 +2346,9 @@ fn tool_issue_update(upd: &ToolIssueUpdate<'_>) -> sea_orm::UpdateMany<issues::E
     }
     if upd.parent_touched {
         update = update.col_expr(issues::Column::ParentId, Expr::value(upd.parent_id));
+    }
+    if upd.pod_touched {
+        update = update.col_expr(issues::Column::AssignedPodId, Expr::value(upd.pod_id));
     }
     update
         .col_expr(issues::Column::UpdatedAt, Expr::value(upd.now))
@@ -3667,6 +3677,7 @@ mod tests {
             parent_id: None,
             state_id: Some(uid(5)),
             pod_id: None,
+            runner_id: None,
         })
         .expect("row");
         assert_eq!(row.created_by_id, Set(Some(uid(2))));
@@ -3694,6 +3705,8 @@ mod tests {
             state_id: None,
             parent_touched: false,
             parent_id: None,
+            pod_touched: false,
+            pod_id: None,
             updated_by_id: uid(2),
             now: pin_time(),
         };
@@ -5786,6 +5799,7 @@ mod tests {
                 parent_id: None,
                 state_id: Some(state),
                 pod_id: None,
+                runner_id: None,
             },
         )
         .await
@@ -5826,6 +5840,8 @@ mod tests {
                 state_id: None,
                 parent_touched: false,
                 parent_id: None,
+                pod_touched: true,
+                pod_id: Some(uid(9)),
                 updated_by_id: actor,
                 now: later,
             },
