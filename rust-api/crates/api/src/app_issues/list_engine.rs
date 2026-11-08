@@ -17,8 +17,11 @@
 //!   permission `EXISTS`;
 //! - rich (`filters`) and legacy (`issue_filters`) predicates;
 //! - the relation joins: INNER when a compiled rich leaf filters through
-//!   the relation or the m2m group needs it, LEFT otherwise. The decision
-//!   is structural (which declared relation leaf compiled to a predicate),
+//!   the relation, LEFT otherwise (an m2m group key only guards its
+//!   join's `deleted_at` in the WHERE, exactly like Django's LEFT OUTER
+//!   JOIN + `isnull` filter, so linkless rows survive with the NULL
+//!   group key that feeds the "None" bucket). The decision is
+//!   structural (which declared relation leaf compiled to a predicate),
 //!   not a text search. Legacy predicates never upgrade a join, exactly as
 //!   before (a positive predicate over a LEFT join keeps the same rows);
 //! - the annotation subqueries, order keys, group expressions, windows and
@@ -167,8 +170,25 @@ impl RelationTable {
     }
 }
 
-/// M2M group filters (`GROUP_FILTER_MAPPER`): grouping by this raw field
-/// forces an INNER join on the relation.
+/// M2M group filters (`GROUP_FILTER_MAPPER` in `utils/grouper.py`):
+/// an m2m group key (group or sub-group) filters its join's
+/// `deleted_at`, with the LEFT join Django emits (`LEFT OUTER JOIN`
+/// plus `alias.deleted_at IS NULL`): linkless issues survive with a
+/// NULL group key — the "None" bucket — while rows whose only links
+/// are soft-deleted drop out.
+fn m2m_group_deleted_at(group: &str) -> Option<Expr> {
+    Some(match group {
+        "assignees__id" => col("issue_assignee", issue_assignees::Column::DeletedAt),
+        "labels__id" => col("label_issue", issue_labels::Column::DeletedAt),
+        "issue_module__module_id" => col("issue_module", module_issues::Column::DeletedAt),
+        _ => return None,
+    })
+}
+
+/// Whether the raw group/sub-group names this relation alias. The inverse
+/// of `m2m_group_deleted_at`: used to know if the alias needs a join at
+/// all (NEWPIDASH-132 conditional joins). A grouped alias is joined LEFT
+/// (NEWPIDASH-131), never INNER on the group alone.
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -184,7 +204,7 @@ fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &
 #[derive(Debug, Clone)]
 pub struct IssueSet {
     base: SelectStatement,
-    /// The relation aliases a rich leaf or the m2m group joins INNER.
+    /// The relation aliases a rich leaf joins INNER.
     pub referenced: Vec<&'static str>,
 }
 
@@ -369,6 +389,14 @@ fn finish_set(
         } else {
             BTreeSet::new()
         };
+        // `GROUP_FILTER_MAPPER`: an m2m group key guards its join's
+        // `deleted_at` in the WHERE (LEFT join, so linkless rows keep
+        // the NULL group key that feeds the "None" bucket).
+        for group in [group_by, sub_group_by].into_iter().flatten() {
+            if let Some(deleted_at) = m2m_group_deleted_at(group) {
+                cond = cond.add(deleted_at.is_null());
+            }
+        }
         for (table, alias) in RELATION_JOINS {
             let grouped = group_join_alias(group_by, sub_group_by, alias);
             let rich = used.contains(alias);
@@ -384,7 +412,11 @@ fn finish_set(
             if !needs_join && !always_join {
                 continue;
             }
-            let inner = rich || grouped;
+            // NEWPIDASH-131: a grouped m2m alias is joined LEFT (Django's
+            // LEFT OUTER JOIN + `deleted_at IS NULL`); only a rich leaf
+            // upgrades to INNER. NEWPIDASH-132: unreferenced aliases are
+            // skipped entirely.
+            let inner = rich;
             if inner {
                 referenced.push(*alias);
             }
@@ -1900,10 +1932,10 @@ mod tests {
     }
 
     #[test]
-    fn joins_are_inner_for_rich_relation_leaves_and_m2m_groups() {
+    fn joins_are_inner_for_rich_relation_leaves_and_left_for_m2m_groups() {
         let rich = query(&[(
             "filters",
-            r#"{"or":[{"label_id":"00000000-0000-0000-0000-000000000001"},{"assignee_id":""}]}"#,
+            r#"{"or":[{"label_id":"00000000-0000-0000-0000-000000000001"}]}"#,
         )]);
         let set = issue_set(
             &gate(false),
@@ -1916,17 +1948,43 @@ mod tests {
             FilterLayers::FULL,
         )
         .expect("set");
-        // The label leaf filters (INNER); the empty assignee leaf is
-        // match-all but the assignee group forces INNER anyway.
-        assert_eq!(set.referenced, vec!["issue_assignee", "label_issue"]);
+        // The label leaf filters (INNER); the assignee group key only
+        // guards the LEFT join's `deleted_at` — linkless issues keep
+        // their NULL key.
+        assert_eq!(set.referenced, vec!["label_issue"]);
         let text = sql(&count_distinct(&set));
         assert!(text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#));
-        assert!(text.contains(r#"INNER JOIN "issue_assignees" AS "issue_assignee""#));
-        // Unreferenced relations are skipped (G01 conditional joins).
-        assert!(!text.contains(r#""issue_assignees" AS "issue_assignee" AND"#));
+        assert!(text.contains(r#"LEFT JOIN "issue_assignees" AS "issue_assignee""#));
+        assert!(text.contains(r#""issue_assignee"."deleted_at" IS NULL"#));
+        // Unreferenced relations are skipped (NEWPIDASH-132 conditional
+        // joins); only the rich leaf, the grouped alias and the cycle
+        // order-bridge join are present.
+        assert!(!text.contains(r#""module_issues" AS "issue_module""#));
+        assert!(!text.contains(r#""issue_subscribers" AS "issue_subscribers""#));
+        assert!(!text.contains(r#""issue_mentions" AS "issue_mention""#));
         // Cycle join is always present (LEFT) for the order bridge.
         assert!(text.contains(r#"LEFT JOIN "cycle_issues" AS "issue_cycle""#));
-        // Legacy predicates keep LEFT joins but only for the referenced alias.
+        // A bare m2m group (no leaves) still LEFTs the joins and guards
+        // them, group and sub-group alike.
+        let bare = issue_set(
+            &gate(false),
+            "w",
+            &query(&[]),
+            Some("labels__id"),
+            Some("issue_module__module_id"),
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(bare.referenced.is_empty());
+        let text = sql(&count_distinct(&bare));
+        assert!(text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#));
+        assert!(text.contains(r#"LEFT JOIN "module_issues" AS "issue_module""#));
+        assert!(text.contains(r#""label_issue"."deleted_at" IS NULL"#));
+        assert!(text.contains(r#""issue_module"."deleted_at" IS NULL"#));
+        // Legacy predicates never upgrade a join; only the referenced
+        // alias is joined (cycle stays: always-joined order bridge).
         let legacy = query(&[("labels", "00000000-0000-0000-0000-000000000001")]);
         let set = issue_set(
             &gate(false),

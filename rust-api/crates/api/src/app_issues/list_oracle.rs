@@ -50,8 +50,9 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// M2M group filters (`GROUP_FILTER_MAPPER`): grouped by this raw field
-/// forces an INNER join on that relation with the deleted guard.
+/// M2M group filters (`GROUP_FILTER_MAPPER` in `utils/grouper.py`):
+/// grouping by this raw field guards its join's `deleted_at` over the
+/// LEFT join (linkless issues keep the NULL group key).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -268,10 +269,25 @@ pub fn filtered_set(
     if let Some((fragment, binds)) = extra {
         fragments.push(binder.splice(&fragment, binds));
     }
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`.
+    // Over the LEFT join that keeps linkless issues (NULL group key,
+    // the "None" bucket) while rows whose only links are soft-deleted
+    // drop out, exactly like Django.
+    for key in [group_by, sub_group_by].into_iter().flatten() {
+        let alias = match key {
+            "labels__id" => "label_issue",
+            "assignees__id" => "issue_assignee",
+            "issue_module__module_id" => "issue_module",
+            _ => continue,
+        };
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
+    }
     let where_sql = fragments.join(" AND ");
-    // INNER when referenced by a positive condition or m2m-grouped
-    // (Django's `filter()` join); LEFT when every reference is an
-    // `IS [NOT] NULL` test (Django's `__isnull` join) or unreferenced.
+    // INNER when referenced by a positive condition (Django's
+    // `filter()` join); LEFT when every reference is an
+    // `IS [NOT] NULL` test (Django's `__isnull` join, the m2m group
+    // key included) or unreferenced.
     // Joined tables carry no soft-delete guard: `filter()` never applies a
     // related manager to a join, so `filter(labels__in=...)` matches
     // soft-deleted link rows and `labels__isnull=False` keeps issues whose
@@ -284,7 +300,7 @@ pub fn filtered_set(
             let mentioned = where_sql.contains(&marker);
             let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
             let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-            let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+            let inner = used && !nullable_only;
             if used {
                 referenced.push(*alias);
             }
@@ -548,6 +564,20 @@ fn archive_filtered_set(
     if !legacy_sql_text.is_empty() {
         fragments.push(legacy_sql_text);
     }
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`.
+    // Over the LEFT join that keeps linkless issues (NULL group key,
+    // the "None" bucket) while rows whose only links are soft-deleted
+    // drop out, exactly like Django.
+    for key in [group_by, sub_group_by].into_iter().flatten() {
+        let alias = match key {
+            "labels__id" => "label_issue",
+            "assignees__id" => "issue_assignee",
+            "issue_module__module_id" => "issue_module",
+            _ => continue,
+        };
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
+    }
     let where_sql = fragments.join(" AND ");
     let mut joins = String::new();
     let mut referenced = Vec::new();
@@ -556,7 +586,7 @@ fn archive_filtered_set(
         let mentioned = where_sql.contains(&marker);
         let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
         let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+        let inner = used && !nullable_only;
         if used {
             referenced.push(*alias);
         }
