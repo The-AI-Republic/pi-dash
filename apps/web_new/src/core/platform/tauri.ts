@@ -11,9 +11,11 @@ import { desktopShareUrl } from "./shareUrl.js";
 import { createPersistentStore } from "./storage.js";
 import { isWebAddress } from "./urls.js";
 import type {
-  AgentEngineProfile,
-  AgentHostCheck,
+  AgentAppIdentity,
   AgentRuntimeApi,
+  DaemonDiscovery,
+  DaemonEngineRunner,
+  DaemonLocalRunner,
   CliSetupApi,
   CliStatus,
   DeepLinkApi,
@@ -544,61 +546,26 @@ function invokeNative<T>(command: string, args?: Record<string, unknown>): Promi
   return native.core.invoke<T>(command, args);
 }
 
-interface NativeHostCheck {
-  runner_present?: unknown;
-  engine_present?: unknown;
-  host_label?: unknown;
-}
-
-function toHostCheck(raw: NativeHostCheck): AgentHostCheck {
-  return {
-    runnerPresent: raw.runner_present === true,
-    enginePresent: raw.engine_present === true,
-    hostLabel: typeof raw.host_label === "string" ? raw.host_label : "",
-  };
-}
-
-/** Grace period the daemon stop waits when the caller names none. */
-export const DAEMON_STOP_GRACE_SECONDS = 5;
-
 const desktopAgentRuntime: AgentRuntimeApi = {
-  isAvailable: async () => {
-    try {
-      const check = toHostCheck(await invokeNative<NativeHostCheck>("managed_doctor"));
-      return check.runnerPresent && check.enginePresent;
-    } catch {
-      return false;
-    }
-  },
-  checkHost: async () => toHostCheck(await invokeNative<NativeHostCheck>("managed_doctor")),
-  writeEngineConfig: (input: { account: string; profile: AgentEngineProfile }) =>
-    invokeNative("managed_write_engine_config", { account: input.account, profile: input.profile }),
-  writeModelToken: (token: string) => invokeNative("managed_write_model_token", { token }),
-  bootstrapMachine: (input: { cloudUrl: string; workspace: string; machineToken: string; devMachineId: string }) =>
-    invokeNative("managed_bootstrap", {
-      cloudUrl: input.cloudUrl,
-      workspace: input.workspace,
-      machineToken: input.machineToken,
-      devMachineId: input.devMachineId,
+  discover: (identity: AgentAppIdentity) =>
+    invokeNative<DaemonDiscovery>("daemon_discover", {
+      appIdentity: {
+        userId: identity.userId,
+        ...(identity.email ? { email: identity.email } : {}),
+        cloudUrl: identity.cloudUrl,
+      },
     }),
-  enrollProject: (input: { account: string; workspace: string; project: string; hostLabel: string }) =>
-    invokeNative("managed_enroll", {
-      account: input.account,
+  localRunners: async () => (await invokeNative<DaemonLocalRunner[] | null>("daemon_runners")) ?? [],
+  addEngineRunner: (input: { workspace: string; project: string; workingDir?: string | undefined }) =>
+    invokeNative<DaemonEngineRunner>("daemon_engine_runner_add", {
       workspace: input.workspace,
       project: input.project,
-      hostLabel: input.hostLabel,
+      workingDir: input.workingDir || null,
     }),
-  startDaemon: (input: { account: string; workspace: string }) =>
-    invokeNative("managed_start_daemon", { account: input.account, workspace: input.workspace }),
-  stopDaemon: (graceSeconds?: number | undefined) =>
-    invokeNative("managed_stop_daemon", { graceSeconds: graceSeconds ?? DAEMON_STOP_GRACE_SECONDS }),
-  signOutNative: (input?: { deleteChatHistoryAccount?: string | undefined } | undefined) =>
-    invokeNative(
-      "managed_sign_out",
-      input?.deleteChatHistoryAccount === undefined
-        ? undefined
-        : { clearChatHistory: { account: input.deleteChatHistoryAccount } }
-    ),
+  installService: () => invokeNative("daemon_install_service"),
+  ensureEngine: () => invokeNative("daemon_ensure_engine"),
+  engineLogin: (deviceCode: string) => invokeNative("pidash_cli_engine_login", { deviceCode }),
+  reloadCredentials: () => invokeNative("daemon_credentials_reload"),
   saveApprovalModes: (account: string, modes: Record<string, string>) =>
     invokeNative("chat_approval_modes_save", { account, modes }),
   loadApprovalModes: async (account: string) => {

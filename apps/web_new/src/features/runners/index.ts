@@ -26,10 +26,12 @@ export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes 
 export type { ApprovalModeCarryInput } from "./runtime/approvalModes.js";
 export { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
 export {
-  CREDENTIAL_RENEW_BEFORE_MS,
-  connectProject,
+  compatibleHello,
+  currentDiscovery,
+  discoveryProblem,
   disposeRuntimeForSignOut,
   EngineUnavailableError,
+  engineActionFor,
   ensureChatRuntime,
   getRuntimeAccount,
   HEARTBEAT_POLL_ATTEMPTS,
@@ -38,22 +40,17 @@ export {
   prepareAgentRun,
   refreshRuntime,
   resumeRuntime,
+  setUpDaemon,
+  turnOnEngineForProject,
 } from "./runtime/service.js";
-export type { AgentRunTarget, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
+export type { AgentRunTarget, DaemonSetUpStep, EngineAction, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
+export { registerSetUpPrompt, requestDaemonSetup } from "./runtime/setupPrompt.js";
+export type { SetUpReason, SetUpRequest } from "./runtime/setupPrompt.js";
 export { confirmRuntimeSignOut, registerSignOutPrompt } from "./runtime/signOutPrompt.js";
 export { RuntimeSignOutDialog } from "./runtime/SignOutDialog.js";
 export { registerRuntimeSignOutLifecycle, RuntimeSignOutLifecycle } from "./runtime/SignOutLifecycle.js";
-export {
-  AVAILABILITY_POLL_INTERVAL_MS,
-  matchProjectIdentifier,
-  RUNTIME_CONNECTED_TEXT,
-  RUNTIME_PREPARING_TEXT,
-  RUNTIME_REFRESH_INTERVAL_MS,
-  RUNTIME_WAITING_TEXT,
-  RuntimeSupervisor,
-  selectRuntimeNotice,
-} from "./runtime/Supervisor.js";
-export type { RuntimeNoticeInput, RuntimeSupervisorProps } from "./runtime/Supervisor.js";
+export { RUNTIME_REFRESH_INTERVAL_MS, RuntimeSupervisor } from "./runtime/Supervisor.js";
+export type { RuntimeSupervisorProps } from "./runtime/Supervisor.js";
 
 export { decideProjectRunnersAccess, decideWorkspaceRunnersAccess, type RunnersAccess } from "./access.js";
 export { buildRunnersAreaValue, RunnersAreaProvider, useRunnersArea, type RunnersAreaValue } from "./area.js";
