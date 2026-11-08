@@ -8,7 +8,7 @@
 //! github.com/The-AI-Republic/pi-dash produces per-platform binaries plus
 //! `pidash-installer.sh` (sh/dash, macOS+Linux) and `pidash-installer.ps1`
 //! (PowerShell, Windows) that download from that release into
-//! `$HOME/.local/bin` (or `%LOCALAPPDATA%\Programs\pidash\`) and add the
+//! `$HOME/.local/bin` (`%USERPROFILE%\.local\bin` on Windows) and add the
 //! directory to the user's PATH.
 //!
 //! The desktop wrapper consumes the runner over IPC for the local-runner
@@ -50,6 +50,7 @@
 //!     chronology across the two pipes — that would need a single combined
 //!     stream upstream.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -96,45 +97,82 @@ impl PidashStatus {
 /// those installs and the startup auto-install drops a *duplicate* copy over an
 /// existing one.
 fn known_install_paths() -> Vec<PathBuf> {
+    known_install_paths_with(
+        cfg!(windows),
+        dirs_home(),
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        std::env::var_os("ProgramFiles").map(PathBuf::from),
+    )
+}
+
+/// The install paths for one OS, in priority order. `windows`, `home`,
+/// `local_app_data` and `program_files` are parameters rather than `cfg!` /
+/// `std::env` so the Windows layout is covered by tests on every host.
+pub(crate) fn known_install_paths_with(
+    windows: bool,
+    home: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    program_files: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    #[cfg(unix)]
-    if let Some(home) = dirs_home() {
-        // OSS installer drops here on macOS + Linux. cargo-dist's default
-        // ``install-path`` from dist-workspace.toml in OSS pi-dash. Gated
-        // by cfg(unix) — Windows installer uses a different layout.
-        out.push(home.join(".local").join("bin").join("pidash"));
+    let exe = if windows { "pidash.exe" } else { "pidash" };
+    if let Some(home) = home {
+        // OSS installer drops here on every platform: cargo-dist's
+        // `install-path` from dist-workspace.toml in OSS pi-dash
+        // (`~/.local/bin`, i.e. `%USERPROFILE%\.local\bin` on Windows).
+        out.push(home.join(".local").join("bin").join(exe));
         // `cargo install pidash` — likely for a Rust CLI, and not on a
         // Finder-launched app's PATH.
-        out.push(home.join(".cargo").join("bin").join("pidash"));
+        out.push(home.join(".cargo").join("bin").join(exe));
     }
     // Homebrew / manual locations, absent from a GUI app's inherited PATH.
     #[cfg(target_os = "macos")]
-    {
+    if !windows {
         out.push(PathBuf::from("/opt/homebrew/bin/pidash")); // Apple Silicon brew
         out.push(PathBuf::from("/usr/local/bin/pidash")); // Intel brew / manual
     }
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
+    if !windows {
         out.push(PathBuf::from("/usr/local/bin/pidash")); // manual install
         out.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/pidash")); // linuxbrew
     }
-    #[cfg(target_os = "windows")]
-    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-        out.push(
-            PathBuf::from(local_appdata)
-                .join("Programs")
-                .join("pidash")
-                .join("pidash.exe"),
-        );
+    if windows {
+        // Legacy bundled installs — kept as a fallback so an existing copy
+        // is still found after the move to `.local\bin`.
+        if let Some(base) = local_app_data {
+            out.push(base.join("Programs").join("pidash").join("pidash.exe"));
+        }
+        // The per-machine MSI (runner/wix/main.wxs) installs here and adds
+        // it to the system PATH; probe it directly for GUI apps whose
+        // inherited PATH may lag.
+        if let Some(base) = program_files {
+            out.push(base.join("pidash").join("bin").join("pidash.exe"));
+        }
     }
     out
 }
 
 /// Tiny inline `dirs::home_dir` so we don't add the `dirs` crate just for
-/// this. Only the Unix install paths are home-relative.
-#[cfg(unix)]
+/// this. `USERPROFILE` on Windows (where `HOME` is normally unset), `HOME`
+/// elsewhere — the same rule the official installers end up using.
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    home_from_env(cfg!(windows), |key| std::env::var_os(key))
+}
+
+/// The home directory an environment names: `USERPROFILE` on Windows
+/// (falling back to `HOME` for Git Bash / MSYS2 sessions that set it),
+/// `HOME` elsewhere. Pure so the Windows layout is testable anywhere.
+pub(crate) fn home_from_env(
+    windows: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    if windows {
+        env("USERPROFILE")
+            .or_else(|| env("HOME"))
+            .map(PathBuf::from)
+    } else {
+        env("HOME").map(PathBuf::from)
+    }
 }
 
 /// On Unix, verify the executable bit is set. On Windows, file extension
@@ -222,11 +260,15 @@ fn kill_child(child: &mut Child) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Where the standalone CLI goes, matching the official installer's
-/// destination so the two never fight over different copies.
-pub(crate) fn cli_install_dir(home: &Path, local_app_data: Option<&Path>) -> PathBuf {
-    if let Some(base) = local_app_data.filter(|_| cfg!(windows)) {
-        return base.join("Programs").join("pidash");
-    }
+/// destination so the two never fight over different copies: `<home>/.local/bin`
+/// on every platform (`%USERPROFILE%\.local\bin` on Windows). The network
+/// installer uses the same directory since pidash-v0.1.29 (`install-path =
+/// "~/.local/bin"`); earlier releases also targeted the user profile, just
+/// spelled `$HOME` (PowerShell builtin) or `$env:HOME` (broken on Windows).
+/// The `local_app_data` parameter is kept for call-site compatibility and
+/// ignored: cargo-dist never installs to `%LOCALAPPDATA%`, only the MSI
+/// (under `%ProgramFiles%\pidash\bin`) writes there.
+pub(crate) fn cli_install_dir(home: &Path, _local_app_data: Option<&Path>) -> PathBuf {
     home.join(".local").join("bin")
 }
 
@@ -327,8 +369,8 @@ fn set_running_binary_aside(dest: &Path) -> Result<Option<PathBuf>, String> {
 ///
 /// Unix only, and deliberately conservative: it appends one guarded block to
 /// the profiles that exist, and never rewrites what is already there. Windows
-/// PATH lives in the registry and the official installer owns that; the
-/// bundled path falls back to the downloader there.
+/// PATH lives in the registry, which this leaves alone: the app finds the
+/// copy through [`known_install_paths`], and the user is told where it is.
 #[cfg(unix)]
 fn ensure_on_path(dir: &Path, home: &Path) -> Vec<String> {
     let mut notes = Vec::new();
@@ -376,21 +418,21 @@ fn ensure_on_path(dir: &Path, home: &Path) -> Vec<String> {
 }
 
 #[cfg(not(unix))]
-fn ensure_on_path(_dir: &Path, _home: &Path) -> Vec<String> {
-    Vec::new()
+fn ensure_on_path(dir: &Path, _home: &Path) -> Vec<String> {
+    vec![format!(
+        "{} is not on PATH; add it to your PATH to use `pidash` in a terminal",
+        dir.display()
+    )]
 }
 
 /// Install the CLI from the app's own bundle. `Ok(None)` means there was no
 /// bundled binary to install from and the caller should fall back to the
 /// network installer.
 fn install_from_bundle<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>, String> {
-    if cfg!(windows) {
-        return Ok(None);
-    }
     let Some(bundled) = bundled_cli(app) else {
         return Ok(None);
     };
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = dirs_home() else {
         return Ok(None);
     };
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
@@ -561,13 +603,13 @@ pub async fn detect_pidash_cli() -> PidashStatus {
 /// version bump that updates one URL and forgets the other fails the suite
 /// instead of shipping a mismatched pair.
 #[cfg(test)]
-const INSTALLER_RELEASE_TAG: &str = "pidash-v0.1.15";
-const INSTALLER_URL_SH: &str = "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.15/pidash-installer.sh";
-const INSTALLER_URL_PS1: &str = "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.15/pidash-installer.ps1";
+const INSTALLER_RELEASE_TAG: &str = "pidash-v0.1.29";
+const INSTALLER_URL_SH: &str = "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.29/pidash-installer.sh";
+const INSTALLER_URL_PS1: &str = "https://github.com/The-AI-Republic/pi-dash/releases/download/pidash-v0.1.29/pidash-installer.ps1";
 const INSTALLER_SHA256_SH: &str =
-    "c1303efd44d180675ceee445ef0091a71264f326447fb32dadda8ec02c39868e";
+    "1ab3ed6ff18aa8c36b91b03eaec1e1b3743c2ff2bac8c57bf19a0704e46b5dd1";
 const INSTALLER_SHA256_PS1: &str =
-    "8e7e7fe78672740c446ac4e7a9819ac1273c8ddeae05d7740dc9bbebc69cc4f4";
+    "159bb4b41aaecbace007d6073470dd107deb08d8be9644862075d148cd6d59d7";
 
 /// Module-level lock preventing concurrent install runs. Two rapid invokes
 /// (double-click, accidental retry), or a manual install colliding with the
@@ -649,8 +691,8 @@ pub async fn install_pidash_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     // The app already ships this exact program, so install from the bundle
     // rather than downloading a second copy. Offline, instant, and the bytes
     // are the ones this app was tested with. Falls through to the network
-    // installer when there is no bundle to copy from (a dev build), and always
-    // on Windows, whose PATH the official installer owns (design §4.5).
+    // installer when there is no bundle to copy from (a dev build)
+    // (design §4.5).
     let bundle_app = app.clone();
     match tauri::async_runtime::spawn_blocking(move || install_from_bundle(&bundle_app)).await {
         Ok(Ok(Some(_))) => return Ok(()),
@@ -1003,18 +1045,23 @@ mod bundle_install_tests {
     #[test]
     fn install_dir_matches_the_official_installer() {
         let home = PathBuf::from("/home/dev");
-        if cfg!(windows) {
-            let lad = PathBuf::from("C:\\Users\\dev\\AppData\\Local");
-            assert_eq!(
-                cli_install_dir(&home, Some(&lad)),
-                lad.join("Programs").join("pidash")
-            );
-        } else {
-            assert_eq!(
-                cli_install_dir(&home, None),
-                home.join(".local").join("bin")
-            );
-        }
+        assert_eq!(
+            cli_install_dir(&home, None),
+            home.join(".local").join("bin")
+        );
+        // LOCALAPPDATA must not divert the copy — cargo-dist never
+        // installs there, so the bundled copy and the network installer's
+        // copy stay the same file on every platform.
+        let lad = PathBuf::from("C:\\Users\\dev\\AppData\\Local");
+        assert_eq!(
+            cli_install_dir(&home, Some(&lad)),
+            home.join(".local").join("bin")
+        );
+        let win_home = PathBuf::from("C:\\Users\\dev");
+        assert_eq!(
+            cli_install_dir(&win_home, Some(&lad)),
+            win_home.join(".local").join("bin")
+        );
     }
 
     #[test]
@@ -1135,6 +1182,90 @@ mod tests {
         assert!(paths.first().is_some_and(|p| p.ends_with("pidash")));
         assert!(paths.contains(&PathBuf::from("/usr/local/bin/pidash")));
         assert!(paths.contains(&PathBuf::from("/home/linuxbrew/.linuxbrew/bin/pidash")));
+    }
+
+    fn env_of(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    /// A GUI process started from Explorer or the Start menu has
+    /// USERPROFILE and LOCALAPPDATA but no HOME; home resolution must
+    /// still find the profile directory (PIDESKAPP-28/44).
+    #[test]
+    fn home_resolution_on_windows_without_home() {
+        let env = env_of(&[
+            ("USERPROFILE", "C:\\Users\\dev"),
+            ("LOCALAPPDATA", "C:\\Users\\dev\\AppData\\Local"),
+        ]);
+        assert_eq!(
+            home_from_env(true, env),
+            Some(PathBuf::from("C:\\Users\\dev"))
+        );
+        // Git Bash / MSYS2 sessions set HOME instead of USERPROFILE.
+        assert_eq!(
+            home_from_env(true, env_of(&[("HOME", "C:\\Users\\dev")])),
+            Some(PathBuf::from("C:\\Users\\dev"))
+        );
+        // Unix ignores USERPROFILE.
+        assert_eq!(
+            home_from_env(false, env_of(&[("USERPROFILE", "/home/dev")])),
+            None
+        );
+        assert_eq!(
+            home_from_env(false, env_of(&[("HOME", "/home/dev")])),
+            Some(PathBuf::from("/home/dev"))
+        );
+    }
+
+    /// On Windows the official installer writes `%USERPROFILE%\.local\bin`
+    /// (PIDESKAPP-178); detection must probe it first so a network install
+    /// is found immediately, with legacy/MSI locations as fallbacks.
+    #[test]
+    fn known_install_paths_probe_windows_profile_first() {
+        let home = PathBuf::from("C:\\Users\\dev");
+        let lad = PathBuf::from("C:\\Users\\dev\\AppData\\Local");
+        let pf = PathBuf::from("C:\\Program Files");
+        let paths = known_install_paths_with(
+            true,
+            Some(home.clone()),
+            Some(lad.clone()),
+            Some(pf.clone()),
+        );
+        // Installer destination is probed first for priority.
+        assert_eq!(
+            paths.first(),
+            Some(&home.join(".local").join("bin").join("pidash.exe"))
+        );
+        assert!(paths.contains(&home.join(".cargo").join("bin").join("pidash.exe")));
+        // Legacy bundled location and per-machine MSI are fallbacks, not
+        // the primary — they must not precede the installer copy.
+        let legacy = lad.join("Programs").join("pidash").join("pidash.exe");
+        let msi = pf.join("pidash").join("bin").join("pidash.exe");
+        assert!(paths.contains(&legacy));
+        assert!(paths.contains(&msi));
+        assert!(
+            paths.iter().position(|p| p == &legacy).unwrap()
+                > paths
+                    .iter()
+                    .position(|p| p == &home.join(".local").join("bin").join("pidash.exe"))
+                    .unwrap(),
+            "installer copy must be probed before the legacy copy"
+        );
+    }
+
+    /// The pinned installer must keep the device-code login the desktop
+    /// passes (`--device-code-stdin`, first in 0.1.28) and the Windows
+    /// `$HOME` install (first in 0.1.29). Regression guard against
+    /// silently re-pinning to an older release (PIDESKAPP-44).
+    #[test]
+    fn installer_pin_is_at_least_0_1_29() {
+        assert_eq!(INSTALLER_RELEASE_TAG, "pidash-v0.1.29");
+        assert!(INSTALLER_URL_SH.contains(INSTALLER_RELEASE_TAG));
+        assert!(INSTALLER_URL_PS1.contains(INSTALLER_RELEASE_TAG));
     }
 
     #[cfg(unix)]
