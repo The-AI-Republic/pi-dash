@@ -25,7 +25,7 @@ export interface DetailHeaderActionsProps {
   projectIdentifier: string;
   /** Project member standing on a live project; guests read. */
   editable: boolean;
-  /** The header menu; null on surfaces without one (synced rows). */
+  /** The header menu; null on surfaces without one. */
   menu: QuickActionsState | null;
   /** After a landed subscription change (the detail re-reads). */
   onSubscriptionChanged?: (() => void) | undefined;
