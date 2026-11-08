@@ -540,7 +540,10 @@ fn mentioned_cond(param_present: bool) -> Condition {
 
 /// `subscribed` issue ids (list, `base.py:107-115`): the subscriber's
 /// issue ids minus issues they created or are assigned to (the inner
-/// soft-delete conjuncts preserved).
+/// soft-delete conjuncts preserved). The assigned leg keeps Django's
+/// `pk=OuterRef("issue_id")` correlation verbatim: an assignee row is
+/// found by its own `id`, not by `issue_id` (so assignment almost never
+/// excludes under Django either; do not "fix" to `issue_id`).
 async fn subscribed_issue_ids(
     pool: &PgPool,
     ws_ids: &[Uuid],
@@ -574,9 +577,9 @@ async fn subscribed_issue_ids(
     let assigned = issue_assignees::Entity::find()
         .filter(issue_assignees::Column::AssigneeId.eq(*user_id))
         .filter(issue_assignees::Column::DeletedAt.is_null())
-        .filter(issue_assignees::Column::IssueId.is_in(subs.iter().copied()))
+        .filter(issue_assignees::Column::Id.is_in(subs.iter().copied()))
         .select_only()
-        .columns([issue_assignees::Column::IssueId])
+        .columns([issue_assignees::Column::Id])
         .into_tuple::<Uuid>()
         .all(&db)
         .await
@@ -3324,6 +3327,31 @@ mod tests {
             sql.contains("\"issue_subscribers\".\"subscriber_id\"")
                 && sql.contains("\"issue_subscribers\".\"issue_id\""),
             "watching select: {sql}"
+        );
+    }
+
+    /// The `subscribed` assigned leg correlates Django's
+    /// `pk=OuterRef("issue_id")` (`base.py:110`): the assignee row's
+    /// own `id`, not its `issue_id`. Pinned at statement shape so the
+    /// "fix" to `issue_id` cannot re-land silently.
+    #[test]
+    fn subscribed_assigned_correlates_by_pk() {
+        use pidash_db::entity::issue_assignees;
+        use sea_orm::{
+            DbBackend, EntityTrait as _, QueryFilter as _, QuerySelect as _, QueryTrait as _,
+        };
+        let issue_id = Uuid::nil();
+        let sql = issue_assignees::Entity::find()
+            .filter(issue_assignees::Column::AssigneeId.eq(Uuid::nil()))
+            .filter(issue_assignees::Column::DeletedAt.is_null())
+            .filter(issue_assignees::Column::Id.is_in([issue_id]))
+            .select_only()
+            .columns([issue_assignees::Column::Id])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("\"issue_assignees\".\"id\" IN"),
+            "subscribed assigned leg must correlate by pk: {sql}"
         );
     }
 

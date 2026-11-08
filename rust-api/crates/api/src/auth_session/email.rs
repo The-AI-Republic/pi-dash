@@ -1259,14 +1259,31 @@ async fn issue_session(
                             .map_err(|_| sea_orm::DbErr::Custom("sign session".to_owned()))?;
                         use pidash_db::entity::sessions;
                         let db = pidash_db::pool::sea_orm_connection(pool);
-                        let model = sessions::ActiveModel {
-                            session_key: sea_orm::ActiveValue::Unchanged(old.to_owned()),
-                            session_data: sea_orm::Set(session_data),
-                            expire_date: sea_orm::Set(session_expire_of(expire_unix)),
-                            user_id: sea_orm::Set(Some(user_id.to_string())),
-                            device_info: sea_orm::Set(Some(device_info.clone())),
-                        };
-                        sea_orm::ActiveModelTrait::update(model, &db).await?;
+                        // `update_many` keeps the raw `UPDATE … WHERE
+                        // session_key` silent success when the row
+                        // vanished between the read above and here;
+                        // `ActiveModel::update` would `RecordNotUpdated`
+                        // (500) instead of the old always-Ok cookies.
+                        sessions::Entity::update_many()
+                            .col_expr(
+                                sessions::Column::SessionData,
+                                sea_orm::sea_query::Expr::value(session_data),
+                            )
+                            .col_expr(
+                                sessions::Column::ExpireDate,
+                                sea_orm::sea_query::Expr::value(session_expire_of(expire_unix)),
+                            )
+                            .col_expr(
+                                sessions::Column::UserId,
+                                sea_orm::sea_query::Expr::value(Some(user_id.to_string())),
+                            )
+                            .col_expr(
+                                sessions::Column::DeviceInfo,
+                                sea_orm::sea_query::Expr::value(Some(device_info.clone())),
+                            )
+                            .filter(sessions::Column::SessionKey.eq(old.to_owned()))
+                            .exec(&db)
+                            .await?;
                         return Ok(vec![
                             session_set_cookie(old, ctx, cookie_name, age_secs, now_unix),
                             csrf_rotate_cookie(&csrf_kernel::new_secret(), ctx),
