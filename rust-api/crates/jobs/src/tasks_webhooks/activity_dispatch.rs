@@ -1964,19 +1964,22 @@ async fn persist(
             .map_err(|error| DispatchError::Log(format!("record touches: {error}")))?;
     }
     for subscriber in &collected.subscribers {
-        // One statement per subscriber, any conflict ignored. Only the six
-        // Django-fillable columns are listed (id/created_at/updated_at stay
-        // unset, exactly as the old `INSERT` omitted them) — byte-identical
-        // shape, no Django behavior smuggled in.
+        // One statement per subscriber, any conflict ignored. Django's
+        // `bulk_create(ignore_conflicts=True)` fills `id` (uuid4 default)
+        // and `created_at`/`updated_at` (`auto_now_add`/`auto_now` in
+        // `db/mixins.py`) client-side, so set the same stamps here.
         let db = pidash_db::pool::sea_orm_connection(pool);
         issue_subscribers::Entity::insert_many(vec![issue_subscribers::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            deleted_at: Set(None),
             subscriber_id: Set(lookup_uuid(&subscriber.subscriber_id, "subscribers")?),
             issue_id: Set(lookup_uuid(&subscriber.issue_id, "subscribers")?),
             workspace_id: Set(lookup_uuid(&subscriber.workspace_id, "subscribers")?),
             project_id: Set(lookup_uuid(&subscriber.project_id, "subscribers")?),
             created_by_id: Set(Some(lookup_uuid(&subscriber.created_by_id, "subscribers")?)),
             updated_by_id: Set(Some(lookup_uuid(&subscriber.updated_by_id, "subscribers")?)),
-            ..Default::default()
         }])
         .on_conflict(
             sea_orm::sea_query::OnConflict::new()

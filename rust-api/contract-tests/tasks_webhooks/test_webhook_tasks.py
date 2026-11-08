@@ -1945,3 +1945,63 @@ def test_issue_activity_deleted_writes_row(db_conn, broker_url):
     assert row["project_id"] == str(project["id"])
     assert row["actor_id"] == str(owner["id"])
     assert row["epoch"] == epoch
+
+
+def test_issue_activity_assignee_subscribes_and_writes_row(db_conn, broker_url):
+    """Added assignee: one activity row + one subscriber row (NEWPIDASH-133).
+
+    ``update_issue_activity`` maps ``assignee_ids`` to ``track_assignees``
+    (``issue_activities_task.py:357-408``): the added assignee gets an
+    ``"added assignee "`` activity row and an ``IssueSubscriber`` row
+    bulk-created with ``ignore_conflicts``. The Rust port must write
+    both (the subscriber insert carries the model-default id and
+    ``auto_now*`` stamps); pre-fix it omits them, Postgres rejects the
+    insert, and neither row lands.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "assignee")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    assignee = seed_helpers.user(db_conn, "assignee-assignee")
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "issue_subscribers"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"assignee_ids": [str(assignee["id"])]}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="assignee issue_activities row",
+    )
+    assert row["field"] == "assignees"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "added assignee "
+    assert row["old_value"] == ""
+    assert row["new_value"] == assignee["display_name"]
+    assert row["new_identifier"] == str(assignee["id"])
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["workspace_id"] == str(chain["workspace"]["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+    (sub,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_subscribers", before) or None,
+        what="assignee issue_subscribers row",
+    )
+    assert sub["subscriber_id"] == str(assignee["id"])
+    assert sub["issue_id"] == str(issue["id"])
+    assert sub["project_id"] == str(project["id"])
+    assert sub["workspace_id"] == str(chain["workspace"]["id"])
+    assert sub["created_by_id"] == str(assignee["id"])
+    assert sub["updated_by_id"] == str(assignee["id"])
+    assert sub["deleted_at"] is None
+    assert sub["id"] is not None
+    assert sub["created_at"] is not None
+    assert sub["updated_at"] is not None
