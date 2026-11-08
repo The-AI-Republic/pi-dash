@@ -1,6 +1,6 @@
-# pidash-sdk public surface: one `pidash_sdk::module::Name` per line, sorted.
 # Seeded by OVL-02 (PIDASHCONV-1540); see crate docs for provenance.
 # The surface test (tests/surface.rs) fails when this file drifts from the
+# pidash-sdk public surface: one `pidash_sdk::module::Name` per line, sorted.
 # re-exports. Add/remove lines only together with the matching lib.rs +
 # surface.rs edits, so every change is a reviewed diff.
 pidash_sdk::assistant::AgentError
@@ -223,6 +223,7 @@ pidash_sdk::compat::csrf
 pidash_sdk::compat::datetime
 pidash_sdk::compat::db
 pidash_sdk::compat::dict_repr
+pidash_sdk::compat::dispatch_deps_for_ids
 pidash_sdk::compat::drain_lifecycle_effects
 pidash_sdk::compat::filter
 pidash_sdk::compat::gate_fn
@@ -404,10 +405,12 @@ pidash_sdk::jobs::TRACK_EVENT_TASK
 pidash_sdk::jobs::TaskMessage
 pidash_sdk::jobs::Verdict
 pidash_sdk::jobs::WorkerConfig
+pidash_sdk::jobs::bounce_issue_no_eligible_runner
 pidash_sdk::jobs::complete_project_move_handoff_live
 pidash_sdk::jobs::create_and_dispatch_run
 pidash_sdk::jobs::default_schedule
 pidash_sdk::jobs::dispatch_completion_comment
+pidash_sdk::jobs::dispatch_continuation_run
 pidash_sdk::jobs::dispatch_job
 pidash_sdk::jobs::django_dumps
 pidash_sdk::jobs::enqueue
