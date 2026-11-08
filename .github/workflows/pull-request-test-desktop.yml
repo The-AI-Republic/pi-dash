@@ -92,6 +92,16 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo test --all-targets --locked
 
+      # pidash-ipc's #[cfg(windows)] named-pipe transport (owner-only DACL,
+      # server-owner check: PIDESKAPP-152) only compiles on a Windows target,
+      # and the runner workflow tests on Linux only. Test it here, from the
+      # root workspace that owns pidash-ipc, with the desktop's pinned toolchain.
+      - name: Test pidash-ipc (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cargo +1.93 clippy -p pidash-ipc --all-targets --locked -- -D warnings
+          cargo +1.93 test -p pidash-ipc --all-targets --locked
+
       # The packaging helpers are OS-independent Python; one leg is enough.
       - name: Test release packaging helpers
         if: runner.os == 'Linux'
