@@ -22,7 +22,7 @@ DETAIL_KEYS = [
     "agent_test_default_interval_seconds", "agent_ticking_enabled", "anchor",
     "archive_in", "archived_at", "base_branch", "close_in", "cover_image",
     "cover_image_asset", "cover_image_url", "created_at", "created_by",
-    "cycle_view", "default_agent_executor", "default_assignee",
+    "cycle_view", "dedicated_runner_lost_action", "default_agent_executor", "default_assignee",
     "default_state", "deleted_at", "description", "description_html",
     "description_text", "emoji", "estimate", "external_id", "external_source",
     "guest_view_all_features", "icon_prop", "id", "identifier", "inbox_view",
