@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened-runtime entitlements for the direct (non-App-Store) build.
+         Audio input is required for chat dictation: without it the OS
+         refuses microphone capture even with a usage string. The direct
+         build is deliberately NOT sandboxed (the agent engine needs full
+         file access); the App Store build layers its own sandboxed
+         entitlements from the private repo instead. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>
