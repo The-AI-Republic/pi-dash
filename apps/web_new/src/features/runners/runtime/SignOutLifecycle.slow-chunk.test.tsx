@@ -16,7 +16,10 @@ const gate = vi.hoisted(() => {
 
 const prompts = vi.hoisted(() => ({
   ask: 0,
-  answer: { deleteChatHistory: true } as { deleteChatHistory: boolean } | null,
+  answer: { deleteChatHistory: true, signOutComputer: false } as {
+    deleteChatHistory: boolean;
+    signOutComputer: boolean;
+  } | null,
 }));
 
 vi.mock("../../../core/platform/index.js", async (importOriginal) => {
@@ -63,7 +66,7 @@ describe("RuntimeSignOutLifecycle while the dialog chunk is loading", () => {
     expect(prompts.ask).toBe(0);
     gate.release();
     expect(await screen.findByText("slow sign-out dialog")).toBeVisible();
-    await expect(pending).resolves.toEqual({ deleteChatHistory: true });
+    await expect(pending).resolves.toEqual({ deleteChatHistory: true, signOutComputer: false });
     expect(prompts.ask).toBe(1);
 
     prompts.answer = null;

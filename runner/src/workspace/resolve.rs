@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::util::fs::create_dir_all_private;
 use crate::workspace::git;
 
 #[derive(Debug, Error)]
@@ -35,12 +36,14 @@ pub async fn resolve(
     working_dir: &Path,
     repo_url: Option<&str>,
 ) -> Result<Resolution, ResolveError> {
-    if let Err(e) = std::fs::create_dir_all(working_dir) {
+    // Owner-only when the daemon creates it (it holds agent work products);
+    // an existing working dir's mode is never changed.
+    if let Err(e) = create_dir_all_private(working_dir) {
         return Err(ResolveError::Io(e));
     }
     let dir = working_dir.to_path_buf();
-    // `create_dir_all` succeeds on an existing directory whatever its mode, so
-    // it does not prove the directory is usable. Probe it: a working dir the
+    // `create_dir_all_private` succeeds on an existing directory whatever
+    // its mode, so it does not prove the directory is usable. Probe it: a working dir the
     // runner cannot read is the one thing that genuinely has no recovery — the
     // agent could not work there either.
     if let Err(e) = std::fs::read_dir(working_dir) {
@@ -385,6 +388,50 @@ mod tests {
         // Restore before asserting so the tempdir can always clean itself up.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(result, Err(ResolveError::Io(_))));
+    }
+
+    /// A working dir the daemon creates must be owner-only: it holds agent
+    /// work products (source checkouts, generated output, possibly secrets)
+    /// under a home dir other local users may be able to traverse.
+    /// `DirBuilderExt::mode(0o700)` is what guarantees this, so the check is
+    /// meaningful on a standard umask-0022 host without manipulating the
+    /// process umask (which is shared by every parallel test).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn creates_a_missing_working_dir_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("tasks/new");
+        let _ = resolve(&path, None).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "created working dir must be owner-only");
+        let parent_mode = std::fs::metadata(tmp.path().join("tasks"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            parent_mode, 0o700,
+            "created parent dirs must be owner-only too"
+        );
+    }
+
+    /// But a directory the operator already made keeps its mode: `resolve`
+    /// creates what is missing, never chmods what exists.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaves_an_existing_working_dir_mode_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("shared");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = resolve(&path, None).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "an existing working dir must not be chmodded by resolve"
+        );
     }
 
     #[test]

@@ -4976,6 +4976,12 @@ export class WebDriver implements ParityDriver {
     await this.page.getByRole("button", { name }).first().click({ timeout: WebDriver.OPEN_MS });
   }
 
+  async widgetActionDisabled(name: string): Promise<boolean> {
+    const button = this.page.getByRole("button", { name }).first();
+    await button.waitFor({ timeout: WebDriver.OPEN_MS });
+    return (await button.isDisabled()) as boolean;
+  }
+
   async typeComment(text: string): Promise<void> {
     const editor = this.page.locator("[contenteditable='true']").last();
     await editor.click({ timeout: WebDriver.OPEN_MS });

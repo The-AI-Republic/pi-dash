@@ -208,6 +208,7 @@ def seed_scheduler_binding(conn, tag: str):
             "phase_kind": "",
             "agent_metadata": {},
             "usage": {},
+            "pin_kind": "locality",
             "scheduler_binding_id": str(binding["id"]),
         },
     )

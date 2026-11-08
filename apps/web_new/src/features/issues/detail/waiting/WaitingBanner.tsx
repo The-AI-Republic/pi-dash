@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Waiting banner for the issue detail (hybrid assignment, design
-// §10.3): while the active run is queued for its runner, the banner
-// names the runner and the reason, and offers the three ways out —
-// release this run to the pod once, change the issue's runner, or
-// cancel the run. Renders nothing while nothing waits.
+// §10.3, §14.4): while the active run is queued for its runner, the banner
+// names the runner and the reason. For a locality pin it offers release
+// to the pod once; for a dedicated pin the release is never offered
+// (H-13, §12.2: 409 dedicated_pin_not_releasable, releasable always
+// false). Change runner and Cancel run remain for every pin.
+// Renders nothing while nothing waits.
 import { Button, Dialog } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
 import { Hourglass } from "lucide-react";
@@ -52,7 +54,8 @@ export function WaitingBanner({
 
   const podName = pods.data?.find((pod) => pod.id === issue.assigned_pod_id)?.name ?? null;
   const releaseLabel = podName === null ? "Run on any runner in the pod once" : `Run on any runner in ${podName} once`;
-  const busy = release.isReleasing || cancel.isCancelling || change.isSaving;
+  const isDedicated = waiting.wait.pin_kind === "dedicated";
+  const busy = (isDedicated ? false : release.isReleasing) || cancel.isCancelling || change.isSaving;
 
   async function handleChange(picked: ExecutionSelection): Promise<void> {
     try {
@@ -73,15 +76,17 @@ export function WaitingBanner({
         {waitingBannerText(waiting.runnerName, waiting.wait)}
       </p>
       <div className="flex flex-wrap items-center gap-(--space-2)">
-        <Button
-          variant="secondary"
-          size="small"
-          disabled={disabled || busy || !waiting.wait.releasable}
-          loading={release.isReleasing}
-          onClick={() => release.releaseWaitingRun(waiting.run.id)}
-        >
-          {releaseLabel}
-        </Button>
+        {!isDedicated && (
+          <Button
+            variant="secondary"
+            size="small"
+            disabled={disabled || busy || !waiting.wait.releasable}
+            loading={release.isReleasing}
+            onClick={() => release.releaseWaitingRun(waiting.run.id)}
+          >
+            {releaseLabel}
+          </Button>
+        )}
         <Dialog
           trigger={
             <Button variant="secondary" size="small" disabled={disabled || busy}>

@@ -153,12 +153,33 @@ CORS_ALLOW_CREDENTIALS = True
 cors_origins_raw = get_config("CORS_ALLOWED_ORIGINS", "")
 # filter out empty strings
 cors_allowed_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
+# Desktop bundle origins. The Windows webview reports http://tauri.localhost
+# as its origin (useHttpsScheme off) while macOS/Linux report tauri://localhost.
+# These are local webview asset origins, not plain-HTTP deployments, so they
+# must not downgrade SESSION_COOKIE_SECURE / CSRF_COOKIE_SECURE on an HTTPS site.
+DESKTOP_BUNDLE_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"})
+
+
+def compute_secure_origins(origins):
+    """True unless a non-desktop origin carries 'http:'.
+
+    ``origins`` is the parsed CORS allowlist (already stripped). Empty
+    yields False, matching the allow-all wildcard fallback below.
+    """
+    if not origins:
+        return False
+    return not any(
+        "http:" in origin and origin.rstrip("/").lower() not in DESKTOP_BUNDLE_ORIGINS
+        for origin in origins
+    )
+
+
 if cors_allowed_origins:
     CORS_ALLOWED_ORIGINS = cors_allowed_origins
-    secure_origins = False if [origin for origin in cors_allowed_origins if "http:" in origin] else True
+    secure_origins = compute_secure_origins(cors_allowed_origins)
 else:
     CORS_ALLOW_ALL_ORIGINS = True
-    secure_origins = False
+    secure_origins = compute_secure_origins(cors_allowed_origins)
 
 CORS_ALLOW_HEADERS = [*default_headers, "X-API-Key"]
 

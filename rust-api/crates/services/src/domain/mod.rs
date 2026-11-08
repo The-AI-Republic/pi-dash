@@ -59,6 +59,7 @@ pub mod engine_credential;
 pub mod engine_state;
 pub mod error;
 pub mod identity;
+pub mod issue_assignment;
 pub mod issues;
 pub mod issues_move;
 pub(crate) mod issues_move_creation;

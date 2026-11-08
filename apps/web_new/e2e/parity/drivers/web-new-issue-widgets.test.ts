@@ -705,6 +705,13 @@ describe("relations, links and run-ai widgets", () => {
     await expect(new WebNewDriver(page).widgetAddMenuNames("Code reviews")).rejects.toThrow("no add menu");
   });
 
+  it("reads the disabled state of the widget action button", async () => {
+    const disabled = pageOf({ locator: () => locator({ isDisabled: async () => true }) });
+    await expect(new WebNewDriver(disabled).widgetActionDisabled("Add sub-work item")).resolves.toBe(true);
+    const enabled = pageOf({ locator: () => locator({ isDisabled: async () => false }) });
+    await expect(new WebNewDriver(enabled).widgetActionDisabled("Attach")).resolves.toBe(false);
+  });
+
   it("adds a relation through type pick, search, option and submit", async () => {
     const picked: string[] = [];
     const rows = locator({

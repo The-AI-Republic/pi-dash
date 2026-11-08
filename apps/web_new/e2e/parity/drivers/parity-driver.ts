@@ -928,6 +928,8 @@ export interface ParityDriver {
   uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
   /** Click the widget action-row button (e.g. `Manually Run AI`); ends settled. */
   clickWidgetAction(name: string): Promise<void>;
+  /** True when the named widget action-row control is present and disabled (NEWPIDASH-141). */
+  widgetActionDisabled(name: string): Promise<boolean>;
   /** Post a comment through the composer; ends with the comment rendered. */
   postComment(text: string): Promise<void>;
   /** Type into the composer without submitting; the draft stays editable. */

@@ -256,7 +256,11 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
         Some(Value::String(s)) => s.clone(),
         _ => return Err(format!("{ISSUE_ACTIVITY_TASK}: 'type' must be a string")),
     };
-    // Raw JSON-string-or-None payloads (never parsed here).
+    // Raw JSON payloads (never parsed here). Producers send JSON strings,
+    // except the app destroy which sends current_instance={} as a dict
+    // (base.py:747); the Python delete handler ignores it, so the job
+    // succeeds there. Accept objects/arrays by dumping to JSON text; scalars
+    // still reject (Python json.loads would fail on them too).
     let raw_string = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
         match value {
             None | Some(Value::Null) => Ok(None),
@@ -266,8 +270,23 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
             )),
         }
     };
-    let requested_data = raw_string(raw(1, "requested_data")?, "requested_data")?;
-    let current_instance = raw_string(raw(2, "current_instance")?, "current_instance")?;
+    let raw_json = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(Value::Object(_)) | Some(Value::Array(_)) => value
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| {
+                    format!("{ISSUE_ACTIVITY_TASK}: '{name}' must be a string or null: {error}")
+                }),
+            Some(_) => Err(format!(
+                "{ISSUE_ACTIVITY_TASK}: '{name}' must be a string or null"
+            )),
+        }
+    };
+    let requested_data = raw_json(raw(1, "requested_data")?, "requested_data")?;
+    let current_instance = raw_json(raw(2, "current_instance")?, "current_instance")?;
     // Ids are stringified before the uuid guard (`str(project_id)`), so any
     // scalar binds here and fails the guard later; collections reject.
     let id_string = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
@@ -1945,19 +1964,22 @@ async fn persist(
             .map_err(|error| DispatchError::Log(format!("record touches: {error}")))?;
     }
     for subscriber in &collected.subscribers {
-        // One statement per subscriber, any conflict ignored. Only the six
-        // Django-fillable columns are listed (id/created_at/updated_at stay
-        // unset, exactly as the old `INSERT` omitted them) — byte-identical
-        // shape, no Django behavior smuggled in.
+        // One statement per subscriber, any conflict ignored. Django's
+        // `bulk_create(ignore_conflicts=True)` fills `id` (uuid4 default)
+        // and `created_at`/`updated_at` (`auto_now_add`/`auto_now` in
+        // `db/mixins.py`) client-side, so set the same stamps here.
         let db = pidash_db::pool::sea_orm_connection(pool);
         issue_subscribers::Entity::insert_many(vec![issue_subscribers::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            deleted_at: Set(None),
             subscriber_id: Set(lookup_uuid(&subscriber.subscriber_id, "subscribers")?),
             issue_id: Set(lookup_uuid(&subscriber.issue_id, "subscribers")?),
             workspace_id: Set(lookup_uuid(&subscriber.workspace_id, "subscribers")?),
             project_id: Set(lookup_uuid(&subscriber.project_id, "subscribers")?),
             created_by_id: Set(Some(lookup_uuid(&subscriber.created_by_id, "subscribers")?)),
             updated_by_id: Set(Some(lookup_uuid(&subscriber.updated_by_id, "subscribers")?)),
-            ..Default::default()
         }])
         .on_conflict(
             sea_orm::sea_query::OnConflict::new()
@@ -2298,6 +2320,36 @@ mod tests {
         assert!(
             bind_issue_activity(&json!(["t", null, null, null, null, null]), &json!({})).is_err()
         );
+    }
+
+    // NEWPIDASH-134 · the app destroy enqueues current_instance={} (a dict,
+    // base.py:747); the Python delete handler ignores it, so the job must
+    // bind and write the deleted row. Objects dump to JSON text.
+    #[test]
+    fn bind_accepts_deleted_empty_object() {
+        let kwargs = json!({
+            "type": "issue.activity.deleted",
+            "requested_data": "{\"issue_id\": \"11111111-1111-4111-8111-111111111111\"}",
+            "current_instance": {},
+            "issue_id": "11111111-1111-4111-8111-111111111111",
+            "actor_id": "22222222-2222-4222-8222-222222222222",
+            "project_id": "33333333-3333-4333-8333-333333333333",
+            "epoch": 1750000000.0,
+            "subscriber": false,
+            "notification": true,
+            "origin": "https://app.example",
+        });
+        let call = bind_issue_activity(&json!([]), &kwargs).expect("deleted binds");
+        assert_eq!(call.activity_type, "issue.activity.deleted");
+        assert_eq!(call.current_instance.as_deref(), Some("{}"));
+        // Scalars still reject (Python json.loads would fail on them too).
+        let bad = json!({
+            "type": "issue.activity.deleted",
+            "requested_data": "{\"issue_id\": \"x\"}",
+            "current_instance": 5,
+            "epoch": 1750000000.0,
+        });
+        assert!(bind_issue_activity(&json!([]), &bad).is_err());
     }
 
     // FX-ACT-03 · redis origin TTL.

@@ -12,3 +12,13 @@ export async function fetchBytes(url: string, fetchImpl: PlatformFetch): Promise
   if (!response.ok) throw new Error(`Could not load ${url}.`);
   return new Uint8Array(await response.arrayBuffer());
 }
+
+/**
+ * Read the address bytes through the page transport with credentials.
+ * Asset GETs answer with a redirect to presigned storage, which the
+ * native API transport refuses (off-origin redirect); the page transport
+ * follows it, as it already does for presigned uploads.
+ */
+export function fetchPageBytes(url: string): Promise<Uint8Array> {
+  return fetchBytes(url, (input) => globalThis.fetch(input, { credentials: "include" }));
+}

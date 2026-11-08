@@ -11,18 +11,23 @@ import { desktopShareUrl } from "./shareUrl.js";
 import { createPersistentStore } from "./storage.js";
 import { isWebAddress } from "./urls.js";
 import type {
-  AgentEngineProfile,
-  AgentHostCheck,
+  AgentAppIdentity,
   AgentRuntimeApi,
   CliSetupApi,
   CliStatus,
+  DaemonDiscovery,
+  DaemonEngineRunner,
+  DaemonLocalRunner,
   DeepLinkApi,
+  DesktopNotices,
   EventStream,
   FetchInit,
+  LegacyTree,
   LocalChatApi,
   LocalChatDecision,
   LocalChatFrame,
   LocalChatNewSession,
+  NoticesView,
   PendingUpdate,
   Platform,
   SessionTeardownApi,
@@ -496,20 +501,14 @@ function desktopStream(url: string, init: StreamInit = {}): EventStream {
 }
 
 /**
- * The shell draws macOS traffic lights over the page, so the title bar
- * must leave room for them. Read from the browser UA surface (no Tauri
- * dependency in this module): userAgentData first, legacy platform after.
+ * The shell keeps the standard native title bar (WebviewWindowBuilder sets
+ * only title/size/resizable, with no TitleBarStyle overlay), so the traffic
+ * lights live in the OS bar rather than over the page and the in-app header
+ * needs no inset. False on every platform; flip only if the shell moves to
+ * an overlay title bar.
  */
-function isMacOs(): boolean {
-  const nav = globalThis.navigator as (Navigator & { userAgentData?: { platform?: string } }) | undefined;
-  if (!nav) return false;
-  const hinted = nav.userAgentData?.platform;
-  if (typeof hinted === "string" && hinted.length > 0) return hinted.toLowerCase().startsWith("mac");
-  return (nav.platform ?? "").toLowerCase().startsWith("mac");
-}
-
 const desktopWindow: TitleBarApi = {
-  trafficLightInset: isMacOs(),
+  trafficLightInset: false,
   setTitle(title: string): void {
     if (typeof globalThis.document !== "undefined") {
       globalThis.document.title = title;
@@ -524,14 +523,23 @@ const desktopWindow: TitleBarApi = {
 
 function trackFocus(callback: (focused: boolean) => void): Unsubscribe {
   if (typeof globalThis.window === "undefined") return () => undefined;
-  const report = (): void => callback(!globalThis.document.hidden);
-  globalThis.window.addEventListener("focus", report);
-  globalThis.window.addEventListener("blur", report);
-  globalThis.document.addEventListener("visibilitychange", report);
+  let last: boolean | undefined;
+  const report = (focused: boolean): void => {
+    if (focused === last) return;
+    last = focused;
+    callback(focused);
+  };
+  const current = (): boolean => !globalThis.document.hidden && globalThis.document.hasFocus();
+  const onFocus = (): void => report(current());
+  const onBlur = (): void => report(false);
+  const onVisibilityChange = (): void => report(current());
+  globalThis.window.addEventListener("focus", onFocus);
+  globalThis.window.addEventListener("blur", onBlur);
+  globalThis.document.addEventListener("visibilitychange", onVisibilityChange);
   return () => {
-    globalThis.window.removeEventListener("focus", report);
-    globalThis.window.removeEventListener("blur", report);
-    globalThis.document.removeEventListener("visibilitychange", report);
+    globalThis.window.removeEventListener("focus", onFocus);
+    globalThis.window.removeEventListener("blur", onBlur);
+    globalThis.document.removeEventListener("visibilitychange", onVisibilityChange);
   };
 }
 
@@ -544,67 +552,43 @@ function invokeNative<T>(command: string, args?: Record<string, unknown>): Promi
   return native.core.invoke<T>(command, args);
 }
 
-interface NativeHostCheck {
-  runner_present?: unknown;
-  engine_present?: unknown;
-  host_label?: unknown;
-}
-
-function toHostCheck(raw: NativeHostCheck): AgentHostCheck {
-  return {
-    runnerPresent: raw.runner_present === true,
-    enginePresent: raw.engine_present === true,
-    hostLabel: typeof raw.host_label === "string" ? raw.host_label : "",
-  };
-}
-
-/** Grace period the daemon stop waits when the caller names none. */
-export const DAEMON_STOP_GRACE_SECONDS = 5;
-
 const desktopAgentRuntime: AgentRuntimeApi = {
-  isAvailable: async () => {
-    try {
-      const check = toHostCheck(await invokeNative<NativeHostCheck>("managed_doctor"));
-      return check.runnerPresent && check.enginePresent;
-    } catch {
-      return false;
-    }
-  },
-  checkHost: async () => toHostCheck(await invokeNative<NativeHostCheck>("managed_doctor")),
-  writeEngineConfig: (input: { account: string; profile: AgentEngineProfile }) =>
-    invokeNative("managed_write_engine_config", { account: input.account, profile: input.profile }),
-  writeModelToken: (token: string) => invokeNative("managed_write_model_token", { token }),
-  bootstrapMachine: (input: { cloudUrl: string; workspace: string; machineToken: string; devMachineId: string }) =>
-    invokeNative("managed_bootstrap", {
-      cloudUrl: input.cloudUrl,
-      workspace: input.workspace,
-      machineToken: input.machineToken,
-      devMachineId: input.devMachineId,
+  discover: (identity: AgentAppIdentity) =>
+    invokeNative<DaemonDiscovery>("daemon_discover", {
+      appIdentity: {
+        userId: identity.userId,
+        ...(identity.email ? { email: identity.email } : {}),
+        cloudUrl: identity.cloudUrl,
+      },
     }),
-  enrollProject: (input: { account: string; workspace: string; project: string; hostLabel: string }) =>
-    invokeNative("managed_enroll", {
-      account: input.account,
+  localRunners: async () => (await invokeNative<DaemonLocalRunner[] | null>("daemon_runners")) ?? [],
+  addEngineRunner: (input: { workspace: string; project: string; workingDir?: string | undefined }) =>
+    invokeNative<DaemonEngineRunner>("daemon_engine_runner_add", {
       workspace: input.workspace,
       project: input.project,
-      hostLabel: input.hostLabel,
+      workingDir: input.workingDir || null,
     }),
-  startDaemon: (input: { account: string; workspace: string }) =>
-    invokeNative("managed_start_daemon", { account: input.account, workspace: input.workspace }),
-  stopDaemon: (graceSeconds?: number | undefined) =>
-    invokeNative("managed_stop_daemon", { graceSeconds: graceSeconds ?? DAEMON_STOP_GRACE_SECONDS }),
-  signOutNative: (input?: { deleteChatHistoryAccount?: string | undefined } | undefined) =>
-    invokeNative(
-      "managed_sign_out",
-      input?.deleteChatHistoryAccount === undefined
-        ? undefined
-        : { clearChatHistory: { account: input.deleteChatHistoryAccount } }
-    ),
+  installService: () => invokeNative("daemon_install_service"),
+  ensureEngine: () => invokeNative("daemon_ensure_engine"),
+  engineLogin: (deviceCode: string) => invokeNative("pidash_cli_engine_login", { deviceCode }),
+  reloadCredentials: () => invokeNative("daemon_credentials_reload"),
   saveApprovalModes: (account: string, modes: Record<string, string>) =>
     invokeNative("chat_approval_modes_save", { account, modes }),
   loadApprovalModes: async (account: string) => {
     const modes = await invokeNative<Record<string, string> | null>("chat_approval_modes_load", { account });
     return modes ?? {};
   },
+  scanLegacyTrees: () => invokeNative<LegacyTree[]>("legacy_scan"),
+  finishLegacyTree: (input: { dir: string; account: string; daemonAccount: string | null }) =>
+    invokeNative("legacy_finish", { dir: input.dir, account: input.account, daemonAccount: input.daemonAccount }),
+  restoreLegacyFolder: (input: { runner: string; workingDir: string }) =>
+    invokeNative("legacy_restore_folder", { runner: input.runner, workingDir: input.workingDir }),
+  loadNotices: (account: string) => invokeNative<NoticesView>("desktop_notices_load", { account }),
+  recordNotices: (account: string, notices: DesktopNotices) =>
+    invokeNative<NoticesView>("desktop_notices_record", { account, notices }),
+  dismissNotices: (account: string, keys: string[]) =>
+    invokeNative<NoticesView>("desktop_notices_dismiss", { account, keys }),
+  signOutComputer: () => invokeNative("pidash_cli_logout", { engine: false }),
 };
 
 const desktopSessionTeardown: SessionTeardownApi = {
@@ -638,7 +622,9 @@ const desktopShellSignIn: ShellSignInApi = {
     }
     // Invoke-only: a failure rejects so the caller surfaces it instead of
     // falling back to an in-window navigation the desktop flow cannot use.
-    return core.invoke("plugin:opener|open_url", { url }).then(() => undefined);
+    // The native command needs no capability entry and refuses non-http(s)
+    // URLs on its own side.
+    return core.invoke("open_in_browser", { url }).then(() => undefined);
   },
 };
 
@@ -900,7 +886,7 @@ export const platform: Platform = {
     if (!core) {
       return Promise.reject(new Error("openExternal needs the native bridge"));
     }
-    return core.invoke("plugin:opener|open_url", { url }).then(
+    return core.invoke("open_in_browser", { url }).then(
       () => undefined,
       () => {
         globalThis.window.open(url, "_blank", "noopener");

@@ -759,11 +759,11 @@ describe("desktop shell sign-in", () => {
     expect(tauri.platform.shellSignIn?.bakedOrigin).toBeUndefined();
   });
 
-  it("opens the system browser through the opener with no fallback", async () => {
+  it("opens the system browser through the native command with no fallback", async () => {
     const invoke = vi.fn(async () => undefined);
     installBridge(invoke);
     await tauri.platform.shellSignIn!.openSystemBrowser("https://app.example.test/api/auth/sign-in/?return_to=%2F");
-    expect(invoke).toHaveBeenCalledWith("plugin:opener|open_url", {
+    expect(invoke).toHaveBeenCalledWith("open_in_browser", {
       url: "https://app.example.test/api/auth/sign-in/?return_to=%2F",
     });
   });

@@ -126,14 +126,24 @@ export function initialCreateForm(
 
 /**
  * The form after a successful create while Create more is on (ISS-119).
- * The project and the route's cycle/module context stay, so the next
- * item lands where the modal opened; everything else is a new item. The
- * old modal merges its route data into the same reset.
+ * The project and the opener's seed stay, so the next item lands where
+ * the modal opened and in the same section the first one did; name and
+ * description are a new item. `opener` is the listing prefill the dialog
+ * opened with (ISS-011/ISS-012), already merged with the route
+ * cycle/module context the dialog received. The old modal spreads its
+ * route data into the same reset.
  */
-export function resetForCreateMore(form: CreateFormState, descriptionDefault = ""): CreateFormState {
-  const state = emptyCreateForm(form.projectId, descriptionDefault);
-  state.cycleId = form.cycleId;
-  state.moduleIds = [...form.moduleIds];
+export function resetForCreateMore(
+  form: CreateFormState,
+  descriptionDefault = "",
+  opener: CreateFormInitialValues = {}
+): CreateFormState {
+  const state = initialCreateForm(form.projectId, opener, descriptionDefault);
+  // When the opener named no membership, keep the membership the just-
+  // filed item carried (the route context contextForm seeded). This
+  // preserves the header-open and cycle/module-page behaviour.
+  if (opener.cycleId === undefined) state.cycleId = form.cycleId;
+  if (opener.moduleIds === undefined) state.moduleIds = [...form.moduleIds];
   return state;
 }
 
@@ -292,38 +302,91 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
 
 /**
  * Whether the discard guard has anything worth keeping (ISS-120). The
- * project is context, not content, and so are the memberships a route
- * seeded: an untouched form opened from a cycle or module page differs
- * from its context in nothing (ISS-124/ISS-125), and neither does the
- * default pod the form preselected. Empty values and a description
- * without content do not count either.
+ * project is context, not content, and so is everything the opener
+ * seeded: the route cycle/module (ISS-124/ISS-125), a listing prefill
+ * (state, priority, assignees, labels, target date) and a copy/draft
+ * row's fields are context, an untouched form differs from its seed in
+ * nothing (NEWPIDASH-143), and neither does the default pod the form
+ * preselected. Empty values and a description without content do not
+ * count either. A field counts only when the form holds a value and it
+ * differs from the seed: clearing a prefilled value leaves nothing to
+ * save, like the old sanitized empty change. Cycle and module keep the
+ * pure difference, so removing a seeded membership still counts.
  */
 /** Whether two id lists match element for element, in order. */
 function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
-/** Nothing seeded from the route: a caller with no context. */
-const NO_MEMBERSHIP: CreateMembership = { cycleId: null, moduleIds: [] };
+/**
+ * What the opener handed the form at open (NEWPIDASH-143). Fields the
+ * opener left blank are absent and compare against the empty form.
+ */
+export interface CreateSeed {
+  name?: string | undefined;
+  descriptionHtml?: string | undefined;
+  stateId?: string | null | undefined;
+  priority?: string | undefined;
+  assigneeIds?: string[] | undefined;
+  labelIds?: string[] | undefined;
+  startDate?: string | null | undefined;
+  targetDate?: string | null | undefined;
+  cycleId?: string | null | undefined;
+  moduleIds?: string[] | undefined;
+  estimatePoint?: string | null | undefined;
+  parentId?: string | null | undefined;
+  gitWorkBranch?: string | undefined;
+}
+
+/** The opener seed a visit starts from. */
+export function seedForForm(form: CreateFormState): CreateSeed {
+  return {
+    name: form.name,
+    descriptionHtml: form.descriptionHtml,
+    stateId: form.stateId,
+    priority: form.priority,
+    assigneeIds: [...form.assigneeIds],
+    labelIds: [...form.labelIds],
+    startDate: form.startDate,
+    targetDate: form.targetDate,
+    cycleId: form.cycleId,
+    moduleIds: [...form.moduleIds],
+    estimatePoint: form.estimatePoint,
+    parentId: form.parentId,
+    gitWorkBranch: form.gitWorkBranch,
+  };
+}
+
+/** Nothing seeded from the opener: a caller with no context. */
+const NO_SEED: CreateSeed = { cycleId: null, moduleIds: [] };
 
 export function hasDraftWorthKeeping(
   form: CreateFormState,
-  context: CreateMembership = NO_MEMBERSHIP,
+  seed: CreateSeed = NO_SEED,
   seededExecution: ExecutionSelection | null = null
 ): boolean {
-  if (normalizeTitle(form.name) !== "") return true;
-  if (hasStoredDescriptionContent(form.descriptionHtml)) return true;
-  if (form.stateId !== null) return true;
-  if (form.priority !== "none") return true;
-  if (form.assigneeIds.length > 0) return true;
-  if (form.labelIds.length > 0) return true;
-  if (form.startDate !== null || form.targetDate !== null) return true;
-  if (form.cycleId !== context.cycleId) return true;
-  if (!sameIds(form.moduleIds, context.moduleIds)) return true;
-  if (form.estimatePoint !== null) return true;
+  const seedTitle = normalizeTitle(seed.name ?? "");
+  const title = normalizeTitle(form.name);
+  if (title !== "" && title !== seedTitle) return true;
+  const hasDescription = hasStoredDescriptionContent(form.descriptionHtml);
+  if (hasDescription) {
+    const seedDescription = seed.descriptionHtml ?? "";
+    if (!hasStoredDescriptionContent(seedDescription)) return true;
+    if (form.descriptionHtml !== seedDescription) return true;
+  }
+  if (form.stateId !== null && form.stateId !== (seed.stateId ?? null)) return true;
+  if (form.priority !== "none" && form.priority !== (seed.priority ?? "none")) return true;
+  if (form.assigneeIds.length > 0 && !sameIds(form.assigneeIds, seed.assigneeIds ?? [])) return true;
+  if (form.labelIds.length > 0 && !sameIds(form.labelIds, seed.labelIds ?? [])) return true;
+  if (form.startDate !== null && form.startDate !== (seed.startDate ?? null)) return true;
+  if (form.targetDate !== null && form.targetDate !== (seed.targetDate ?? null)) return true;
+  if (form.cycleId !== (seed.cycleId ?? null)) return true;
+  if (!sameIds(form.moduleIds, seed.moduleIds ?? [])) return true;
+  if (form.estimatePoint !== null && form.estimatePoint !== (seed.estimatePoint ?? null)) return true;
   // The preselected default pod is context too: the user did not pick it.
   if (executionSelectionId(form.execution) !== executionSelectionId(seededExecution)) return true;
-  if (form.parentId !== null) return true;
-  if (form.gitWorkBranch.trim() !== "") return true;
+  if (form.parentId !== null && form.parentId !== (seed.parentId ?? null)) return true;
+  const branch = form.gitWorkBranch.trim();
+  if (branch !== "" && branch !== (seed.gitWorkBranch ?? "").trim()) return true;
   return false;
 }

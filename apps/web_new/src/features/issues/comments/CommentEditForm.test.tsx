@@ -509,7 +509,7 @@ describe("CommentEditForm", () => {
     });
     await waitFor(() =>
       expect(document.querySelector("img")?.getAttribute("src")).toBe(
-        "/api/assets/v2/workspaces/acme/projects/p-1/asset-7/"
+        "https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-7/"
       )
     );
     expect(calls.some((call) => call.url.includes(`/projects/p-1/${comment().id}/bulk/`))).toBe(true);

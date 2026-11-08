@@ -111,12 +111,29 @@ function restorableQuery(entry: DehydratedState["queries"][number]): boolean {
 }
 
 /**
+ * The `dataUpdatedAt` a restored entry carries until a read of this
+ * process replaces it. A live read always stamps the current time, so the
+ * value doubles as the "restored, never confirmed" marker.
+ */
+const RESTORED_DATA_UPDATED_AT = 0;
+
+/**
  * One restored entry, aged and invalidated so the read counts as stale
  * even under `staleTime: Infinity`: the saved rows still paint, and the
  * first subscriber (or fetchQuery) fetches the live answer over them.
  */
 function stalePreview(entry: DehydratedState["queries"][number]): DehydratedState["queries"][number] {
-  return { ...entry, state: { ...entry.state, dataUpdatedAt: 0, isInvalidated: true } };
+  return { ...entry, state: { ...entry.state, dataUpdatedAt: RESTORED_DATA_UPDATED_AT, isInvalidated: true } };
+}
+
+/**
+ * True when the entry's data came from disk and no read of this process
+ * has answered it yet (a failed refetch keeps the marker). Such data may
+ * paint, but it is no answer for a decision such as a route gate: the
+ * session that wrote it may be long gone (PIDESKAPP-194).
+ */
+export function isRestoredPreview(state: { data: unknown; dataUpdatedAt: number } | undefined): boolean {
+  return state !== undefined && state.data !== undefined && state.dataUpdatedAt === RESTORED_DATA_UPDATED_AT;
 }
 
 export function createCachePersistor(

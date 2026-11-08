@@ -95,6 +95,22 @@ describe("waitingReasonText", () => {
     expect(waitingReasonText({ ...WAIT, reason: "dispatching" }, now)).toBe("dispatching");
   });
 
+  it("names paused runners by their pause reason", () => {
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: "dispatch_paused" }, now)).toBe(
+      "paused by its owner"
+    );
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: "owner_paused" }, now)).toBe(
+      "paused by its owner"
+    );
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: "wallet_empty" }, now)).toBe(
+      "the wallet is empty"
+    );
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: "engine_sign_in_required" }, now)).toBe(
+      "the engine's sign-in expired"
+    );
+    expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: null }, now)).toBe("paused");
+  });
+
   it("surfaces unknown reasons as-is", () => {
     expect(waitingReasonText({ ...WAIT, reason: "tomorrow_problem" }, now)).toBe("tomorrow_problem");
   });
@@ -106,11 +122,33 @@ describe("waitingBannerText", () => {
       "Waiting for runner gpu-box — offline, last seen 2 h ago."
     );
   });
+
+  it("counts down to the dedicated bound while the runner is unavailable", () => {
+    const wait = { ...WAIT, expires_at: "2026-10-22T16:00:00Z" };
+    expect(waitingBannerText("gpu-box", wait, Date.parse("2026-10-22T04:00:00Z"))).toBe(
+      "Waiting for runner gpu-box — offline, last seen 2 h ago. Fails at 12h if it does not reconnect."
+    );
+  });
+
+  it("counts down to the dedicated bound while the runner is busy", () => {
+    const wait = { ...WAIT, reason: "runner_busy", runs_ahead: 1, expires_at: "2026-10-22T06:00:00Z" };
+    expect(waitingBannerText("gpu-box", wait, Date.parse("2026-10-22T04:00:00Z"))).toBe(
+      "Waiting for runner gpu-box — busy, 1 run ahead. Fails in 2h."
+    );
+  });
+
+  it("adds no bound for a locality pin", () => {
+    const wait = { ...WAIT, pin_kind: "locality", expires_at: "2026-10-22T16:00:00Z" };
+    expect(waitingBannerText("gpu-box", wait, Date.parse("2026-10-22T04:00:00Z"))).toBe(
+      "Waiting for runner gpu-box — offline, last seen 2 h ago."
+    );
+  });
 });
 
 describe("waitingBadgeLabel", () => {
   it("compacts every reason", () => {
     expect(waitingBadgeLabel(WAIT)).toBe("Offline");
+    expect(waitingBadgeLabel({ ...WAIT, reason: "runner_paused" })).toBe("Paused");
     expect(waitingBadgeLabel({ ...WAIT, reason: "runner_busy", runs_ahead: 2 })).toBe("2 ahead");
     expect(waitingBadgeLabel({ ...WAIT, reason: "runner_busy", runs_ahead: 0 })).toBe("Busy");
     expect(waitingBadgeLabel({ ...WAIT, reason: "runner_not_permitted" })).toBe("Not permitted");

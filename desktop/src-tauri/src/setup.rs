@@ -9,7 +9,7 @@
 //! implementation, so the result is identical to a terminal install:
 //!
 //! 1. install the CLI the app carries into the official installer's location
-//!    (`pidash_cli::install_pidash_cli`; the network installer on Windows);
+//!    (`pidash_cli::install_pidash_cli`);
 //! 2. sign it in with a device grant the app approved
 //!    (`pidash_cli::pidash_cli_login`);
 //! 3. `pidash install` with the user's **login-shell** `PATH` — the service

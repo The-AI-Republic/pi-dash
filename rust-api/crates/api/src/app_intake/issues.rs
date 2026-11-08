@@ -138,6 +138,7 @@ pub struct IssueRow {
     pub deleted_at: Option<DateTime<Utc>>,
     pub git_work_branch: String,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
     pub complexity_score: i32,
@@ -178,6 +179,7 @@ impl IssueRow {
             deleted_at: row.try_get("deleted_at")?,
             git_work_branch: row.try_get("git_work_branch")?,
             assigned_pod_id: row.try_get("assigned_pod_id")?,
+            assigned_runner_id: row.try_get("assigned_runner_id")?,
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
             complexity_score: row.try_get("complexity_score")?,
@@ -222,6 +224,7 @@ impl IssueRow {
             workpad: self.workpad.clone(),
             created_via: self.created_via.clone(),
             assigned_pod_id: self.assigned_pod_id,
+            assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
         }
     }
@@ -317,6 +320,7 @@ fn issue_row_from(model: issue_entity::Model) -> IssueRow {
         deleted_at: model.deleted_at.map(|dt| dt.with_timezone(&Utc)),
         git_work_branch: model.git_work_branch,
         assigned_pod_id: model.assigned_pod_id,
+        assigned_runner_id: model.assigned_runner_id,
         created_via: model.created_via,
         agent_executor: model.agent_executor,
         complexity_score: model.complexity_score,
@@ -447,6 +451,7 @@ struct AnnotatedIssueRow {
     deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     git_work_branch: String,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     created_via: Option<String>,
     agent_executor: Option<String>,
     complexity_score: i32,
@@ -491,6 +496,7 @@ impl AnnotatedIssueRow {
                 deleted_at: self.deleted_at.map(|dt| dt.with_timezone(&Utc)),
                 git_work_branch: self.git_work_branch,
                 assigned_pod_id: self.assigned_pod_id,
+                assigned_runner_id: self.assigned_runner_id,
                 created_via: self.created_via,
                 agent_executor: self.agent_executor,
                 complexity_score: self.complexity_score,
@@ -543,6 +549,7 @@ pub async fn fetch_issue_annotated(
             issue_entity::Column::DeletedAt,
             issue_entity::Column::GitWorkBranch,
             issue_entity::Column::AssignedPodId,
+            issue_entity::Column::AssignedRunnerId,
             issue_entity::Column::CreatedVia,
             issue_entity::Column::AgentExecutor,
             issue_entity::Column::ComplexityScore,
@@ -624,6 +631,7 @@ struct DetailRow {
     i_deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     i_git_work_branch: String,
     i_assigned_pod_id: Option<Uuid>,
+    i_assigned_runner_id: Option<Uuid>,
     i_created_via: Option<String>,
     i_agent_executor: Option<String>,
     i_complexity_score: i32,
@@ -684,6 +692,7 @@ impl DetailRow {
             deleted_at: self.i_deleted_at.map(|dt| dt.with_timezone(&Utc)),
             git_work_branch: self.i_git_work_branch,
             assigned_pod_id: self.i_assigned_pod_id,
+            assigned_runner_id: self.i_assigned_runner_id,
             created_via: self.i_created_via,
             agent_executor: self.i_agent_executor,
             complexity_score: self.i_complexity_score,
@@ -750,6 +759,10 @@ pub async fn fetch_detail(
         .column_as(issue_entity::Column::DeletedAt, "i_deleted_at")
         .column_as(issue_entity::Column::GitWorkBranch, "i_git_work_branch")
         .column_as(issue_entity::Column::AssignedPodId, "i_assigned_pod_id")
+        .column_as(
+            issue_entity::Column::AssignedRunnerId,
+            "i_assigned_runner_id",
+        )
         .column_as(issue_entity::Column::CreatedVia, "i_created_via")
         .column_as(issue_entity::Column::AgentExecutor, "i_agent_executor")
         .column_as(issue_entity::Column::ComplexityScore, "i_complexity_score")
@@ -5273,6 +5286,7 @@ pub async fn collection_create(
         workpad: String::new(),
         created_via: validated.created_via.clone(),
         assigned_pod_id: validated.assigned_pod_id,
+        assigned_runner_id: None,
         agent_executor: validated.agent_executor.clone(),
     };
     // The m2m plan resolves pre-save (pure reads of validated input).

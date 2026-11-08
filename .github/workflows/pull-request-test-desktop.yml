@@ -16,8 +16,8 @@ on:
       # Path dependency of desktop/src-tauri (the daemon wire protocol);
       # editing it changes no lockfile under desktop/.
       - "pidash-ipc/**"
-      # Pinned agent-engine release that prepare-agent.sh stages.
-      - "runner/ENGINE_VERSION"
+      # Windows IPC server arm, checked on the Windows leg below.
+      - "runner/src/ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
   # Post-merge validation, same reasoning as the runner workflow: PR checks
   # don't re-run when the base moves.
@@ -30,8 +30,8 @@ on:
     paths:
       - "desktop/**"
       - "pidash-ipc/**"
-      # Pinned agent-engine release that prepare-agent.sh stages.
-      - "runner/ENGINE_VERSION"
+      # Windows IPC server arm, checked on the Windows leg below.
+      - "runner/src/ipc/**"
       - ".github/workflows/pull-request-test-desktop.yml"
 
 concurrency:
@@ -92,21 +92,23 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo test --all-targets --locked
 
+      # pidash-ipc's #[cfg(windows)] named-pipe transport (owner-only DACL,
+      # server-owner check: PIDESKAPP-152) only compiles on a Windows target,
+      # and the runner workflow tests on Linux only. Test it here, from the
+      # root workspace that owns pidash-ipc, with the desktop's pinned toolchain.
+      - name: Test pidash-ipc (Windows)
+        if: runner.os == 'Windows'
+        # bash runs with -e: a pwsh multi-line script would ignore a failing
+        # cargo command and report only the last one's exit code.
+        shell: bash
+        run: |
+          cargo +1.93 clippy -p pidash-ipc --all-targets --locked -- -D warnings
+          cargo +1.93 test -p pidash-ipc --all-targets --locked
+          # The runner's Windows IPC server arm uses the same helpers; it is
+          # otherwise first compiled by the release build.
+          cargo +1.93 check -p pidash --locked
+
       # The packaging helpers are OS-independent Python; one leg is enough.
       - name: Test release packaging helpers
         if: runner.os == 'Linux'
         run: python -m unittest discover -s desktop/tests -p 'test_*.py' -v
-
-      # The engine ships renamed to pidash-agent-engine; Codex re-execs helper
-      # copies of itself (arg0 / current_exe) to build its sandbox. If the
-      # rename broke that self-location the sandbox would silently not engage.
-      # This guard downloads the pinned upstream engine, runs it under its
-      # shipped name, and fails the build if an out-of-bounds write is not
-      # blocked — so a future CODEX_BUNDLE_VERSION bump can't ship a broken
-      # sandbox. Needs no model, session, or credential; only the download of
-      # the pinned release uses the network. See PDASHOSS01-162, design §24.8.
-      - name: Sandbox survives the engine rename (Linux)
-        if: runner.os == 'Linux'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python desktop/tests/sandbox_rename_smoke.py --stage

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   client: { baseUrl: "https://api.test" },
   agentRuntime: {},
-  confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false })),
+  confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false, signOutComputer: false })),
   disposeRuntimeForSignOut: vi.fn(async (..._args: Array<unknown>) => undefined),
   listen: vi.fn(async (_event: string, _handler: (event: { payload: unknown }) => void) => {
     harness.unlisten?.();
@@ -69,9 +69,9 @@ describe("root runtime sign-out lifecycle", () => {
     expect(hooks).not.toBeNull();
     await hooks?.confirmRuntimeSignOut();
     expect(harness.confirmRuntimeSignOut).toHaveBeenCalled();
-    await hooks?.disposeRuntimeForSignOut({ deleteChatHistory: true });
+    await hooks?.disposeRuntimeForSignOut({ deleteChatHistory: true, signOutComputer: false });
     expect(harness.disposeRuntimeForSignOut).toHaveBeenCalledWith({
-      choice: { deleteChatHistory: true },
+      choice: { deleteChatHistory: true, signOutComputer: false },
       client: harness.client,
       runtime: harness.agentRuntime,
     });
