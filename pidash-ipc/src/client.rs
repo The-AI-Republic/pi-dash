@@ -63,6 +63,9 @@ async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
 
 /// Every pipe instance busy (another client holds the free one) is
 /// transient: retry for a short while instead of reporting "no daemon".
+///
+/// The pipe namespace is machine-wide, so an opened pipe is only used once
+/// its owner is confirmed to be the current user (PIDESKAPP-152).
 #[cfg(windows)]
 async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
     const ERROR_PIPE_BUSY: i32 = 231;
@@ -74,7 +77,11 @@ async fn connect_stream(path: &Path) -> std::io::Result<IpcStream> {
                 attempts += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            other => return other,
+            Ok(pipe) => {
+                crate::windows_pipe::verify_pipe_owner(&pipe, &name)?;
+                return Ok(pipe);
+            }
+            Err(e) => return Err(e),
         }
     }
 }

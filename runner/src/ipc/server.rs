@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 #[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeServer as IpcStream, ServerOptions};
+use pidash_ipc::windows_pipe::create_owner_only_pipe;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::NamedPipeServer as IpcStream;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream as IpcStream};
 use uuid::Uuid;
@@ -79,9 +81,10 @@ impl IpcServer {
     #[cfg(windows)]
     pub async fn run(self) -> Result<()> {
         let pipe_name = crate::ipc::windows_pipe_name(&self.path);
-        let mut server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe_name)
+        // Owner-only DACL on every instance: the pipe namespace is
+        // machine-wide, so this is Windows' stand-in for the Unix 0700 dir
+        // + 0600 socket above (PIDESKAPP-152).
+        let mut server = create_owner_only_pipe(&pipe_name, true)
             .with_context(|| format!("creating named pipe {pipe_name}"))?;
 
         let me = Arc::new(self);
@@ -91,8 +94,7 @@ impl IpcServer {
                 .await
                 .with_context(|| format!("accepting named-pipe client at {pipe_name}"))?;
             let connected = server;
-            server = ServerOptions::new()
-                .create(&pipe_name)
+            server = create_owner_only_pipe(&pipe_name, false)
                 .with_context(|| format!("creating next named pipe {pipe_name}"))?;
             let server = me.clone();
             tokio::spawn(async move {
