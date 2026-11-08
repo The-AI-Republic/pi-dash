@@ -51,8 +51,9 @@ export interface TitleBarApi {
   setTitle(title: string): void;
   /**
    * True when the shell draws macOS traffic lights over the page, so the
-   * title bar must indent its leading content. False on other platforms;
-   * the web platform exposes no window capability at all.
+   * title bar must indent its leading content. The shell keeps the standard
+   * native title bar, so this is false on every platform today; the web
+   * platform exposes no window capability at all.
    */
   readonly trafficLightInset: boolean;
 }

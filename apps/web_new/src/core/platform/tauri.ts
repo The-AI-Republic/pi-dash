@@ -498,20 +498,14 @@ function desktopStream(url: string, init: StreamInit = {}): EventStream {
 }
 
 /**
- * The shell draws macOS traffic lights over the page, so the title bar
- * must leave room for them. Read from the browser UA surface (no Tauri
- * dependency in this module): userAgentData first, legacy platform after.
+ * The shell keeps the standard native title bar (WebviewWindowBuilder sets
+ * only title/size/resizable, with no TitleBarStyle overlay), so the traffic
+ * lights live in the OS bar rather than over the page and the in-app header
+ * needs no inset. False on every platform; flip only if the shell moves to
+ * an overlay title bar.
  */
-function isMacOs(): boolean {
-  const nav = globalThis.navigator as (Navigator & { userAgentData?: { platform?: string } }) | undefined;
-  if (!nav) return false;
-  const hinted = nav.userAgentData?.platform;
-  if (typeof hinted === "string" && hinted.length > 0) return hinted.toLowerCase().startsWith("mac");
-  return (nav.platform ?? "").toLowerCase().startsWith("mac");
-}
-
 const desktopWindow: TitleBarApi = {
-  trafficLightInset: isMacOs(),
+  trafficLightInset: false,
   setTitle(title: string): void {
     if (typeof globalThis.document !== "undefined") {
       globalThis.document.title = title;
