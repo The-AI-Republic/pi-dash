@@ -108,9 +108,9 @@ where
 
 // ---------------------------------------------------------------------------
 // Per-runner session registry. Sessions persist across requests (and across
-// connections) so a Codex thread survives between turns — the concrete Codex
-// bridge has no resume-by-id, so continuity depends on keeping the same live
-// bridge process for the session's lifetime.
+// connections) so a Codex thread survives between turns. When the in-memory
+// bridge is gone (restart, Close, failed turn), a fresh bridge resumes the
+// saved thread via `thread/resume`; unknown threads fall back to `thread/start`.
 // ---------------------------------------------------------------------------
 
 /// A single live chat session: its engine bridge plus an out-of-band cancel
@@ -344,7 +344,7 @@ impl<'a> ChatHost<'a> {
                 )
                 .await
             }
-            Lane::Engine { profile, .. } => profile.spawn(workspace, mode).await,
+            Lane::Engine { profile, .. } => profile.spawn(workspace, mode, resume_id).await,
         }
     }
 }
