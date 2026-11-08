@@ -2041,3 +2041,43 @@ def test_rust_crawl_link_resolves_idna_hostname(db_conn):
     assert all(titles), f"expected both IDNA titles non-empty: {titles!r}"
     assert titles[0] == titles[1], f"unicode/punycode titles differ: {titles!r}"
 
+
+def test_rust_issue_activity_deleted_writes_row(db_conn):
+    """Issue deleted, Rust side: one ``deleted the issue`` row (NEWPIDASH-134).
+
+    Mirrors ``test_issue_activity_deleted_writes_row`` (same payload, the
+    app destroy's ``current_instance={}`` dict). Settlement plus the row
+    diff is the proof. Pre-fix the binder rejects the dict with
+    ``'current_instance' must be a string or null`` and no row is written.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rrdeletedactivity")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.deleted",
+            "requested_data": json.dumps({"issue_id": str(issue["id"])}),
+            "current_instance": {},
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="deleted issue_activities row",
+    )
+    assert row["comment"] == "deleted the issue"
+    assert row["verb"] == "deleted"
+    assert row["field"] == "issue"
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
