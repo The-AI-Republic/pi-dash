@@ -877,6 +877,10 @@ mod tests {
             "javascript:alert(1)",
             "mailto:sales@example.com",
             "tauri://elsewhere/x",
+            // The web flows reserve `about:blank` / "" synchronously, then
+            // steer the tab after an await. The shell never creates a second
+            // window, so a blank reservation is always refused (PIDESKAPP-186).
+            "about:blank",
         ] {
             assert_eq!(new_window(u, "tauri://localhost"), None, "{u}");
         }
