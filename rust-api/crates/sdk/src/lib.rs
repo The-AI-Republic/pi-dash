@@ -490,6 +490,7 @@ pub mod compat {
     pub use pidash_api::space::sanitize::sanitize_html;
     pub use pidash_api::space::sanitize::strip_tags;
     pub use pidash_api::space::sanitize::Sanitize;
+    pub use pidash_api::v1_work_items::handlers_actions::dispatch_deps_for_ids;
     pub use pidash_api::v1_work_items::handlers_actions::gate_fn;
     pub use pidash_api::v1_work_items::handlers_actions::profile_fn;
     pub use pidash_api::v1_work_items::handlers_actions::LiveMatcher;
@@ -753,7 +754,9 @@ pub mod jobs {
     pub use pidash_jobs::integrations::github_sync::TASK_NAMES as GITHUB_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::license::tasks::TASK_NAME;
     pub use pidash_jobs::loop_scan::TASK_NAMES as LOOP_SCAN_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
+    pub use pidash_jobs::orchestration::bounce_issue_no_eligible_runner;
     pub use pidash_jobs::orchestration::create_and_dispatch_run;
+    pub use pidash_jobs::orchestration::dispatch_continuation_run;
     pub use pidash_jobs::orchestration::preflight_eligibility_or_bounce;
     pub use pidash_jobs::orchestration::runner_seams::complete_project_move_handoff_live;
     pub use pidash_jobs::orchestration::StoreDeps;
