@@ -31,12 +31,11 @@ use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_types::dispatch::AgentExecutorKind;
 
-use crate::assistant::seams as assistant_seams;
 use crate::dispatch::execution::{
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
     ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
-use crate::dispatch::{DeferredConsume, LlmProfile};
+use crate::dispatch::DeferredConsume;
 use crate::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use crate::orchestration::creation::{
     finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
@@ -190,16 +189,35 @@ impl CreationSeam for SeaHandoffStore<'_> {
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
         let row = query_one(&self.conn, &orm::runner_select(runner_id)).await?;
-        row.map(|row| {
-            Ok(RunnerView {
-                id: get(&row, "id")?,
-                pod_id: get(&row, "pod_id")?,
-                status: get(&row, "status")?,
-                last_heartbeat_at: get(&row, "last_heartbeat_at")?,
-                paused_at: get(&row, "paused_at")?,
-            })
-        })
-        .transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let machine_id: Option<Uuid> = get(&row, "dev_machine_id")?;
+        let engine_paused = match machine_id {
+            Some(machine_id) => {
+                let mrow = query_one(&self.conn, &orm::dev_machine_select(machine_id)).await?;
+                match mrow {
+                    Some(mrow) => {
+                        let engine_paused_by_owner: bool = get(&mrow, "engine_paused_by_owner")?;
+                        let engine_auto_pause_reason: String =
+                            get(&mrow, "engine_auto_pause_reason")?;
+                        engine_paused_by_owner || !engine_auto_pause_reason.is_empty()
+                    }
+                    None => false,
+                }
+            }
+            None => false,
+        };
+        Ok(Some(RunnerView {
+            id: get(&row, "id")?,
+            pod_id: get(&row, "pod_id")?,
+            status: get(&row, "status")?,
+            last_heartbeat_at: get(&row, "last_heartbeat_at")?,
+            paused_at: get(&row, "paused_at")?,
+            provisioning: get(&row, "provisioning")?,
+            pod_dispatch: get(&row, "pod_dispatch")?,
+            engine_paused,
+        }))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
@@ -317,13 +335,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
                 .map_err(|detail| ExecutionError::Store(CreationError::Db(detail)))?,
             None => false,
         };
-        let profile = {
-            let mapped = assistant_seams::agent_model_profile_for_user(has_key);
-            LlmProfile {
-                available: mapped.available,
-                reason_code: mapped.reason_code,
-            }
-        };
         // The driver short-circuits a missing actor before consulting
         // the closure, so only a present actor consults the seam (and a
         // missing one never pays for the overlay's reads). Clone the seam
@@ -360,7 +371,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
             ExecutionSeams {
                 has_usable_llm_config: move || has_llm,
                 toolsets: self.toolsets.clone(),
-                llm_profile: move || profile,
             },
         )
         .await;

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::explicit_auto_deref)]
 
 //! Beat-equivalent scheduler loop.
 //!
@@ -172,9 +173,9 @@ pub async fn run_scheduler(
                 }
             }
         }
-        // raw-sql: PostgreSQL session advisory lock returns its row by
+        // PostgreSQL session advisory lock returns its row by
         // function, not by a table `SELECT`; spelling the function needs
-        // Expr::cust, itself a raw marker. Fixed literal + fixed key.
+        // raw-sql: session advisory lock by function, not a table SELECT; builder needs Expr::cust, itself a raw marker.
         let locked: bool = match sqlx::query_scalar(try_lock_sql())
             .bind(BEAT_LOCK_KEY)
             .fetch_one(
@@ -246,9 +247,9 @@ pub async fn run_scheduler(
     // Release the lock on the session that holds it. If the session is
     // already gone, its end released the lock for us.
     if let Some(mut conn) = lock_conn {
-        // raw-sql: PostgreSQL session advisory unlock returns its row by
+        // PostgreSQL session advisory unlock returns its row by
         // function, not by a table `SELECT`; spelling the function needs
-        // Expr::cust, itself a raw marker. Fixed literal + fixed key.
+        // raw-sql: session advisory unlock by function, not a table SELECT; builder needs Expr::cust, itself a raw marker.
         match sqlx::query_scalar::<_, bool>(unlock_sql())
             .bind(BEAT_LOCK_KEY)
             .fetch_one(&mut *conn)

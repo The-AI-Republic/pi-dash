@@ -79,7 +79,6 @@ use pidash_db::tasks_ticker::IssueAgentTicker;
 use pidash_services::app_intake::permissions as guards;
 use pidash_services::app_intake::tasks as intake_tasks;
 use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
-
 use pidash_services::app_issues::serializers_detail::{
     agent_status_to_representation, agent_ticker_to_representation, AgentTickerView,
 };
@@ -89,6 +88,7 @@ use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
+use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::StateRef;
 
 use super::{
@@ -1339,6 +1339,25 @@ async fn default_state_fill(
     Ok((None, false))
 }
 
+/// `duplicate_to` is an *auto-generated* FK field
+/// (`serializers/intake.py:27-41` declares only `issue`), so DRF binds
+/// the model's `_default_manager` — `Issue.issue_objects`, which hides
+/// triage states, archived rows, drafts and archived projects
+/// (`db/models/issue.py:96-108`). A triage issue (every intake issue!)
+/// as `duplicate_to` answers `does_not_exist`, verified live.
+/// The normalized executor value this attempt wants stored, if any.
+pub struct ObjectExecutor {
+    /// `Some(stored)` = normalized value to write (`None` = explicit clear).
+    pub stored: Option<Option<String>>,
+}
+
+impl ObjectExecutor {
+    /// Whether this attempt pushed an `agent_executor` error.
+    pub fn has_error(errors: &FieldErrors, field: &str) -> bool {
+        errors.contains_key(field)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Issue field validation (`IssueCreateSerializer`, partial)
 // ---------------------------------------------------------------------------
@@ -1773,6 +1792,8 @@ pub struct IssueObjectValidation {
     pub assignee_ids: Option<Vec<Uuid>>,
     pub label_ids: Option<Vec<Uuid>>,
     pub description_html: Option<String>,
+    /// Normalized executor to store (#2903: deprecated → local_runner).
+    pub agent_executor: Option<Option<String>>,
 }
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
@@ -1874,6 +1895,7 @@ pub async fn validate_issue_object(
         assignee_ids: None,
         label_ids: None,
         description_html: None,
+        agent_executor: None,
     };
     // Read-only lock for actively-synced issues: only changed values
     // block (`serializers/issue.py:210-229`).
@@ -1929,9 +1951,16 @@ pub async fn validate_issue_object(
         }
     }
 
-    if let Some(_executor) = validated.agent_executor.as_ref() {
-        if validate_executor(pool, issue, &validated.agent_executor, errors).await? {
-            return Ok(empty());
+    let mut translated_executor: Option<Option<String>> = None;
+    if let Some(executor) = validated.agent_executor.as_ref() {
+        if let Some(translated) =
+            validate_executor(pool, issue, Some(executor.clone()), errors).await?
+        {
+            if ExecutorTranslation::has_error(errors, "agent_executor") {
+                return Ok(empty());
+            }
+            // Store the normalized value (`attrs["agent_executor"]`).
+            translated_executor = translated.stored;
         }
     }
 
@@ -2055,6 +2084,7 @@ pub async fn validate_issue_object(
         assignee_ids,
         label_ids,
         description_html: sanitized_html,
+        agent_executor: translated_executor,
     })
 }
 
@@ -2108,37 +2138,74 @@ async fn validate_pod(
     Ok(false)
 }
 
-/// Executor checks (`serializers/issue.py:275-321`): runner is the
-/// only executor (built_engine_as_runner §6). `normalize_issue_executor`
-/// translates deprecated `cloud_agent`/`managed_runner` writes to
-/// `local_runner` pod-level; the only remaining gate is the
-/// mid-flight rule (runs for explicit null too; `None == None` is
-/// unchanged like Django's `str(None) == str(None)`). The
-/// executor argument is the *normalized* value the caller already
-/// translated (see `validate_issue_object` caller).
+/// Executor checks (`issue_assignment.py:28-51`, #2903): unknown is a
+/// 400, deprecated writes translate to `local_runner` (the normalized
+/// value is stored — the caller writes `translated.stored`), and a
+/// translation CHANGED the value while the instance has an active run
+/// is the mid-flight 400. Returns whether an error was pushed.
+pub struct ExecutorTranslation {
+    /// `Some(v)` = stored value (`Some(None)` = explicit clear).
+    pub stored: Option<Option<String>>,
+}
+
+impl ExecutorTranslation {
+    /// Whether this attempt pushed an `agent_executor` error.
+    pub fn has_error(errors: &FieldErrors, field: &str) -> bool {
+        errors.contains_key(field)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn validate_executor(
     pool: &PgPool,
     issue: &IssueRow,
-    executor: &Option<Option<String>>,
+    executor: Option<Option<String>>,
     errors: &mut FieldErrors,
-) -> Result<bool, Denial> {
-    // The mid-flight rule runs for explicit null too (`None` clears
-    // the override); `None == None` is unchanged, like Django's
-    // `str(None) == str(None)`.
-    if let Some(normalized) = executor.as_ref() {
-        if normalized.as_deref() != issue.agent_executor.as_deref()
-            && has_active_run(pool, &issue.id).await?
-        {
+) -> Result<Option<ExecutorTranslation>, Denial> {
+    let Some(value) = executor else {
+        return Ok(None);
+    };
+    let Some(value) = value else {
+        // Explicit clear: `str(None)` vs the stored value.
+        if issue.agent_executor.is_some() && has_active_run(pool, &issue.id).await? {
             push_error(
                 errors,
                 "agent_executor",
                 "cannot change the execution target while the issue has an active run".to_owned(),
             );
-            return Ok(true);
         }
+        return Ok(Some(ExecutorTranslation { stored: None }));
+    };
+    // Field level (`AGENT_EXECUTORS`) already rejected unknown values
+    // with the `ChoiceField` message; the kernel still answers 400 for
+    // anything past it.
+    if AgentExecutorKind::from_value(&value).is_none() {
+        push_error(
+            errors,
+            "agent_executor",
+            "unknown agent executor".to_owned(),
+        );
+        return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    Ok(false)
+    let normalized = pidash_types::dispatch::normalize_executor_write(&value)
+        .expect("known value parses")
+        .value()
+        .to_owned();
+    // Django `normalize_issue_executor`: the normalized write is compared
+    // against the STORED value, not against the input.
+    if issue.agent_executor.as_deref() != Some(normalized.as_str())
+        && has_active_run(pool, &issue.id).await?
+    {
+        push_error(
+            errors,
+            "agent_executor",
+            "cannot change the execution target while the issue has an active run".to_owned(),
+        );
+        return Ok(Some(ExecutorTranslation { stored: None }));
+    }
+    Ok(Some(ExecutorTranslation {
+        stored: Some(Some(normalized)),
+    }))
 }
 
 /// `normalize_executor_write`: deprecated choices become
@@ -2267,10 +2334,10 @@ pub async fn apply_issue_update(
         .unwrap_or(issue.estimate_point_id);
     fields.type_id = validated.type_id.unwrap_or(issue.type_id);
     fields.assigned_pod_id = validated.assigned_pod_id.unwrap_or(issue.assigned_pod_id);
-    fields.agent_executor = validated
-        .agent_executor
-        .clone()
-        .unwrap_or_else(|| issue.agent_executor.clone());
+    fields.agent_executor = match validated.agent_executor.clone() {
+        Some(inner) => object.agent_executor.clone().unwrap_or(inner),
+        None => issue.agent_executor.clone(),
+    };
     fields.git_work_branch = validated
         .git_work_branch
         .clone()
@@ -5896,7 +5963,13 @@ async fn validate_issue_create(
         Some(serde_json::Value::String(executor))
             if ["local_runner", "cloud_agent", "managed_runner"].contains(&executor.as_str()) =>
         {
-            normalize_executor_write(Some(executor.clone()))
+            // #2903: deprecated writes translate to local_runner.
+            Some(
+                pidash_types::dispatch::normalize_executor_write(executor)
+                    .expect("choice passes")
+                    .value()
+                    .to_owned(),
+            )
         }
         Some(serde_json::Value::String(executor)) => {
             field_errors.insert(

@@ -388,6 +388,67 @@ def test_release_skips_managed_run(seeder, daemon_world, machine_flow, broker):
     )
 
 
+def test_release_unpins_from_pinned_only_engine(
+    seeder, daemon_world, machine_flow, broker
+):
+    """#2903 (tasks._pinned_runner_gone_q parity): an ONLINE engine with
+    ``pod_dispatch='pinned_only'`` loses its local pins — a local control
+    on the own-agent runner proves the sweep ran."""
+    control = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="queued",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id = %s, runner_id = NULL WHERE id = %s",
+        (machine_flow["runner_id"], control["id"]),
+    )
+    _set_run_times(seeder, control["id"], "now() - interval '10 minutes'")
+    _set_runner_status(seeder, machine_flow["runner_id"], "offline")
+    _set_heartbeat(seeder, machine_flow["runner_id"], "now() - interval '10 minutes'")
+
+    ws = daemon_world["workspace"]
+    pod = daemon_world["pod"]
+    machine = seeder.create_dev_machine(daemon_world["owner"]["id"])
+    engine = seeder.enroll_runner(
+        daemon_world["owner"]["id"], ws["id"], pod["id"],
+        f"apd_en_{seeder.tag}xpin",
+    )
+    seeder.db.execute(
+        """UPDATE runner SET provisioning='desktop_bundled',
+           pod_dispatch='pinned_only', dev_machine_id=%s WHERE id=%s""",
+        (machine["id"], engine["id"]),
+    )
+    seeder.db.execute(
+        "UPDATE runner SET status='online', last_heartbeat_at=now() WHERE id=%s",
+        (engine["id"],),
+    )
+    pinned = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        ws["id"],
+        pod["id"],
+        engine["id"],
+        status="queued",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET pinned_runner_id = %s, runner_id = NULL WHERE id = %s",
+        (engine["id"], pinned["id"]),
+    )
+    _set_run_times(seeder, pinned["id"], "now() - interval '10 minutes'")
+
+    _fire(RELEASE_TASK, broker)
+
+    def released():
+        row = _run_row(seeder, pinned["id"])
+        return row if row["pinned_runner_id"] is None else None
+
+    wait_for_condition(released, timeout=TIMEOUT, what="engine pin released")
+    crow = _run_row(seeder, control["id"])
+    assert crow["pinned_runner_id"] is None
+
+
 def test_release_waits_out_grace(seeder, daemon_world, machine_flow, broker):
     """120s of silence is under the 300s grace: the pin stays (Django's blip case)."""
     blip = seeder.create_daemon_run(

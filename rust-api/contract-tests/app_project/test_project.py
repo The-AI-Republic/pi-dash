@@ -148,6 +148,38 @@ def test_create_project_duplicate_identifier_400(world):
     assert resp.status_code == 400
 
 
+def test_executor_options_carry_deprecated(world, db):
+    # #2903: every agent_executor_options entry gains "deprecated",
+    # true for cloud_agent/managed_runner, false for local_runner.
+    client, _, ws, project = world.full_stack()
+    resp = client.get(f"/api/workspaces/{ws['slug']}/projects/{project['id']}/")
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["agent_executor_options"]
+    options = {row["kind"]: row for row in rows}
+    assert [row["kind"] for row in rows] == [
+        "cloud_agent", "local_runner", "managed_runner",
+    ]
+    assert options["local_runner"]["deprecated"] is False
+    assert options["cloud_agent"]["deprecated"] is True
+    assert options["managed_runner"]["deprecated"] is True
+
+
+def test_default_executor_write_translates(world, db):
+    # #2903: a deprecated default is normalized to local_runner on write.
+    client, _, ws, project = world.full_stack()
+    resp = client.patch(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/",
+        json={"default_agent_executor": "managed_runner"},
+    )
+    assert resp.status_code == 200, resp.text
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT default_agent_executor FROM projects WHERE id=%s",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["default_agent_executor"] == "local_runner"
+
+
 def test_partial_update_project(world):
     client, _, ws, project = world.full_stack()
     resp = client.patch(f"/api/workspaces/{ws['slug']}/projects/{project['id']}/",

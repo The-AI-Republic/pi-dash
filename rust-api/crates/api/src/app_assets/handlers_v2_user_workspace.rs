@@ -97,14 +97,19 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use uuid::Uuid;
 
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::scope::TenantScope;
+use pidash_db::entity::{file_assets, projects, users, workspace_members, workspaces};
 use pidash_services::app_assets::queries_v2_user_workspace as q;
 use pidash_services::ops::users as user_save;
 use pidash_types::WorkspaceId;
+use sea_orm::sea_query::{Expr, InsertStatement, Query};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, RelationTrait, Select, UpdateMany,
+};
 
 use super::guards;
 use super::quote_filename;
@@ -188,6 +193,13 @@ fn page_not_found() -> Response {
 
 fn pool(state: &AppState) -> Option<&sqlx::PgPool> {
     state.pools().map(|pools| pools.primary())
+}
+
+fn orm_connection(state: &AppState) -> Option<pidash_db::DatabaseConnection> {
+    state
+        .orm()
+        .cloned()
+        .or_else(|| pool(state).map(pidash_db::pool::sea_orm_connection))
 }
 
 /// `IsAuthenticated` (`app/views/base.py`, `BaseAPIView` default):
@@ -420,6 +432,10 @@ fn scheme_of(headers: &HeaderMap) -> String {
 // ---------------------------------------------------------------------------
 
 /// One `file_assets` row with every column the handlers read.
+/// `asset_key` decodes the `asset` column: every select aliases it with
+/// `column_as(.., "asset_key")`, so output names stay unique by
+/// construction.
+#[derive(FromQueryResult)]
 struct AssetRow {
     entity_type: Option<String>,
     is_uploaded: bool,
@@ -430,16 +446,56 @@ struct AssetRow {
     project_id: Option<Uuid>,
 }
 
-fn asset_row(row: &sqlx::postgres::PgRow) -> Result<AssetRow, sqlx::Error> {
-    Ok(AssetRow {
-        entity_type: row.try_get("entity_type")?,
-        is_uploaded: row.try_get("is_uploaded")?,
-        storage_metadata: row.try_get("storage_metadata")?,
-        attributes: row.try_get("attributes")?,
-        asset_key: row.try_get("asset")?,
-        workspace_id: row.try_get("workspace_id")?,
-        project_id: row.try_get("project_id")?,
-    })
+/// The ORM query shape the scoped reads in this file share: the seven
+/// [`AssetRow`] columns, the `asset` column aliased to `asset_key`.
+fn asset_row_select(select: Select<file_assets::Entity>) -> Select<file_assets::Entity> {
+    select
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::IsUploaded,
+            file_assets::Column::StorageMetadata,
+            file_assets::Column::Attributes,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+        ])
+        .column_as(file_assets::Column::Asset, "asset_key")
+        .limit(1u64)
+}
+
+/// User patch/delete: `FileAsset.objects.get(id=asset_id,
+/// user_id=request.user.id)` (`v2.py:172,192`) — scoped to the caller.
+/// Analogous to `user_asset_lookup_sql`'s predicate.
+fn user_asset_lookup(id: &Uuid, user_id: &Uuid) -> Select<file_assets::Entity> {
+    asset_row_select(
+        file_assets::Entity::find()
+            .filter(file_assets::Column::Id.eq(*id))
+            .filter(file_assets::Column::UserId.eq(*user_id))
+            .filter(file_assets::Column::DeletedAt.is_null()),
+    )
+}
+
+/// Workspace patch/delete/get: `FileAsset.objects.get(id=asset_id,
+/// workspace__slug=slug)` (`v2.py:381,401,411`) — slug-scoped only, no
+/// membership predicate. Analogous to `workspace_asset_lookup_sql`.
+fn workspace_asset_lookup(id: &Uuid, slug: &str) -> Select<file_assets::Entity> {
+    asset_row_select(
+        file_assets::Entity::find()
+            .join(JoinType::InnerJoin, file_assets::Relation::Workspaces.def())
+            .filter(file_assets::Column::Id.eq(*id))
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(file_assets::Column::DeletedAt.is_null()),
+    )
+}
+
+/// Static fetch: `FileAsset.objects.get(id)` — the default manager
+/// (soft-delete scoped), no tenant predicate.
+fn static_asset_lookup(id: &Uuid) -> Select<file_assets::Entity> {
+    asset_row_select(
+        file_assets::Entity::find()
+            .filter(file_assets::Column::Id.eq(*id))
+            .filter(file_assets::Column::DeletedAt.is_null()),
+    )
 }
 
 /// `FileAsset.asset_url` (`db/models/asset.py:80-98`) for the entity types
@@ -529,37 +585,249 @@ async fn publish_metadata(pool: &sqlx::PgPool, asset_id: &Uuid) {
 // Entity links
 // ---------------------------------------------------------------------------
 
+/// Patch confirm (`v2.py:188,397`): `save(update_fields=["is_uploaded",
+/// "attributes"])` — exactly these two columns, no `updated_at` bump.
+fn confirm_update(asset_id: Uuid, attributes: Value) -> UpdateMany<file_assets::Entity> {
+    file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsUploaded, Expr::value(true))
+        .col_expr(file_assets::Column::Attributes, Expr::value(attributes))
+        .filter(file_assets::Column::Id.eq(asset_id))
+}
+
+/// `asset_delete` / delete flips (`v2.py:38,197,244,406`):
+/// `save(update_fields=["is_deleted", "deleted_at"])` — both columns
+/// (unlike the v1 delete).
+fn delete_update(asset_id: Uuid, deleted_at: DateTime<Utc>) -> UpdateMany<file_assets::Entity> {
+    file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsDeleted, Expr::value(true))
+        .col_expr(
+            file_assets::Column::DeletedAt,
+            Expr::value(deleted_at.with_timezone(&Utc)),
+        )
+        .filter(file_assets::Column::Id.eq(asset_id))
+}
+
+/// `asset_delete` lookup: `FileAsset.objects.filter(id).first()`
+/// (`v2.py:33,237`) — the default manager, silent `None` when missing.
+fn asset_delete_lookup(asset_id: &Uuid) -> Select<file_assets::Entity> {
+    file_assets::Entity::find()
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .column(file_assets::Column::Id)
+        .limit(1u64)
+}
+
 /// `asset_delete`: `FileAsset.objects.filter(id).first()` + flip
 /// (`v2.py:32-39,:236-245`) — silent when missing, no 404.
-async fn asset_delete(pool: &sqlx::PgPool, asset_id: &Uuid) -> Result<(), sqlx::Error> {
-    let row: Option<(Uuid,)> = sqlx::query_as(&q::asset_delete_lookup_sql())
-        .bind(asset_id)
-        .fetch_optional(pool)
+async fn asset_delete(
+    db: &pidash_db::DatabaseConnection,
+    asset_id: &Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    let row: Option<Uuid> = asset_delete_lookup(asset_id)
+        .into_tuple::<Uuid>()
+        .one(db)
         .await?;
-    let Some(_) = row else { return Ok(()) };
-    sqlx::query(&q::delete_update_sql())
-        .bind(true)
-        .bind(Utc::now())
-        .bind(asset_id)
-        .execute(pool)
-        .await?;
+    if row.is_none() {
+        return Ok(());
+    }
+    delete_update(*asset_id, Utc::now()).exec(db).await?;
     Ok(())
 }
 
+/// User POST / workspace POST INSERT (`v2.py:147-154`, `:355-363`):
+/// the full column list both creates send, so omitted columns keep
+/// whatever the database does with them. The workspace variant fills
+/// the FK columns from the calling context.
+#[allow(clippy::too_many_arguments)]
+fn asset_insert_query(
+    asset_id: Uuid,
+    now: DateTime<Utc>,
+    attributes: Value,
+    asset_key: &str,
+    size: f64,
+    user_id: Option<Uuid>,
+    workspace_id: Option<Uuid>,
+    project_id: Option<Uuid>,
+    issue_id: Option<Uuid>,
+    comment_id: Option<Uuid>,
+    page_id: Option<Uuid>,
+    created_by_id: Uuid,
+    entity_type: &str,
+) -> InsertStatement {
+    let mut stmt = Query::insert();
+    stmt.into_table(file_assets::Entity);
+    stmt.columns([
+        file_assets::Column::Id,
+        file_assets::Column::CreatedAt,
+        file_assets::Column::UpdatedAt,
+        file_assets::Column::Attributes,
+        file_assets::Column::Asset,
+        file_assets::Column::Size,
+        file_assets::Column::UserId,
+        file_assets::Column::WorkspaceId,
+        file_assets::Column::ProjectId,
+        file_assets::Column::IssueId,
+        file_assets::Column::CommentId,
+        file_assets::Column::PageId,
+        file_assets::Column::CreatedById,
+        file_assets::Column::EntityType,
+        file_assets::Column::IsDeleted,
+        file_assets::Column::IsArchived,
+        file_assets::Column::IsUploaded,
+        file_assets::Column::StorageMetadata,
+    ]);
+    stmt.values_panic([
+        Expr::value(asset_id),
+        Expr::value(now),
+        Expr::value(now),
+        Expr::value(attributes),
+        Expr::value(asset_key.to_owned()),
+        Expr::value(size),
+        Expr::val(user_id).into(),
+        Expr::val(workspace_id).into(),
+        Expr::val(project_id).into(),
+        Expr::val(issue_id).into(),
+        Expr::val(comment_id).into(),
+        Expr::val(page_id).into(),
+        Expr::value(created_by_id),
+        Expr::value(entity_type.to_owned()),
+        Expr::value(false),
+        Expr::value(false),
+        Expr::value(false),
+        Expr::value(serde_json::json!({})),
+    ]);
+    stmt
+}
+
 /// `user_entity_save` user-row read: the previous link FK plus the
-/// `User.save()` input fields (`db/models/user.py:169-187`).
-type UserLinkRow = (
-    Option<Uuid>,
-    String,
-    String,
-    bool,
-    bool,
-    String,
-    Option<DateTime<Utc>>,
-);
+/// `User.save()` input fields (`db/models/user.py:169-187`). The link FK
+/// column differs per arm (avatar vs cover); both selects alias it to
+/// `prev_link_id` so one row struct decodes either.
+#[derive(FromQueryResult)]
+struct UserLinkRow {
+    prev_link_id: Option<Uuid>,
+    email: String,
+    display_name: String,
+    is_staff: bool,
+    is_superuser: bool,
+    token: String,
+    token_updated_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+}
 
 /// `user_entity_delete` user-row read: the `User.save()` input fields.
-type UserUnlinkRow = (String, String, bool, bool, String, Option<DateTime<Utc>>);
+#[derive(FromQueryResult)]
+struct UserUnlinkRow {
+    email: String,
+    display_name: String,
+    is_staff: bool,
+    is_superuser: bool,
+    token: String,
+    token_updated_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+}
+
+/// The avatar/cover link row read (`:41-44`): previous link FK plus the
+/// `User.save()` input fields, selected narrowly (the whole row was
+/// fetched only to read seven columns).
+fn user_link_lookup(owner_id: &Uuid, cover: bool) -> Select<users::Entity> {
+    let mut select = users::Entity::find()
+        .filter(users::Column::Id.eq(*owner_id))
+        .select_only();
+    select = if cover {
+        select.column_as(users::Column::CoverImageAssetId, "prev_link_id")
+    } else {
+        select.column_as(users::Column::AvatarAssetId, "prev_link_id")
+    };
+    select
+        .columns([
+            users::Column::Email,
+            users::Column::DisplayName,
+            users::Column::IsStaff,
+            users::Column::IsSuperuser,
+            users::Column::Token,
+            users::Column::TokenUpdatedAt,
+        ])
+        .limit(1u64)
+}
+
+/// Workspace logo previous link (`v2.py:247-284`): `.filter(id).first()`
+/// under the default manager — a miss is silent.
+fn workspace_logo_lookup(workspace_id: &Uuid) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspaces::Column::LogoAssetId)
+        .limit(1u64)
+}
+
+/// Workspace exists read (`v2.py:286-312`): `.get(id)` through the
+/// scoped manager — a miss raises (the `is None` check after it is dead
+/// code; BUG ported).
+fn workspace_exists_lookup(workspace_id: &Uuid) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Id.eq(*workspace_id))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspaces::Column::Id)
+        .limit(1u64)
+}
+
+/// Project cover previous link (the `SetCover` arm): same shape as the
+/// workspace logo read, on projects.
+fn project_cover_lookup(project_id: &Uuid) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .column(projects::Column::CoverImageAssetId)
+        .limit(1u64)
+}
+
+/// Restore gate probe (`app/permissions/base.py:45-51`): active,
+/// non-deleted memberships of the workspace named by its slug.
+fn restore_role_query(slug: &str, member_id: &Uuid) -> Select<workspace_members::Entity> {
+    workspace_members::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(*member_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .limit(1u64)
+}
+
+/// Restore lookup (`v2.py:473`): `all_objects` — deliberately no
+/// `deleted_at` filter, so soft-deleted rows still restore.
+fn restore_lookup(asset_id: &Uuid, slug: &str) -> Select<file_assets::Entity> {
+    file_assets::Entity::find()
+        .join(JoinType::InnerJoin, file_assets::Relation::Workspaces.def())
+        .filter(file_assets::Column::Id.eq(*asset_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .select_only()
+        .column(file_assets::Column::Id)
+        .limit(1u64)
+}
+
+/// The `User.save()` input fields read (`:82-93`, `:95-106`).
+fn user_unlink_lookup(owner_id: &Uuid) -> Select<users::Entity> {
+    users::Entity::find()
+        .filter(users::Column::Id.eq(*owner_id))
+        .select_only()
+        .columns([
+            users::Column::Email,
+            users::Column::DisplayName,
+            users::Column::IsStaff,
+            users::Column::IsSuperuser,
+            users::Column::Token,
+            users::Column::TokenUpdatedAt,
+        ])
+        .limit(1u64)
+}
 
 /// `UserAssetsV2Endpoint.entity_asset_save` (`v2.py:41-78`): the avatar /
 /// cover link plus the full `user.save()` column effects
@@ -568,6 +836,7 @@ type UserUnlinkRow = (String, String, bool, bool, String, Option<DateTime<Utc>>)
 /// `auto_now` `updated_at` (PIDASHCONV-1397).
 #[allow(clippy::result_large_err)]
 async fn user_entity_save(
+    db: &pidash_db::DatabaseConnection,
     pool: &sqlx::PgPool,
     asset_id: &Uuid,
     entity_type: &str,
@@ -577,20 +846,16 @@ async fn user_entity_save(
         q::UserSaveAction::SetAvatar => {
             // `User.objects.get(id=asset.user_id)` (miss raises → 404);
             // the row also feeds `user.save()` below.
-            let row: Option<UserLinkRow> = sqlx::query_as(
-                r#"SELECT "avatar_asset_id", "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
-            )
-            .bind(owner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some((prev, email, display_name, is_staff, is_superuser, token, token_updated_at)) =
-                row
-            else {
+            let row: Option<UserLinkRow> = user_link_lookup(owner_id, false)
+                .into_model()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
+            let Some(row) = row else {
                 return Err(does_not_exist());
             };
-            if let Some(prev_id) = prev {
-                asset_delete(pool, &prev_id)
+            if let Some(prev_id) = row.prev_link_id {
+                asset_delete(db, &prev_id)
                     .await
                     .map_err(|_| server_error())?;
             }
@@ -598,12 +863,12 @@ async fn user_entity_save(
             let now = Utc::now();
             let write = user_save::apply_user_save(
                 &user_save::UserSaveInput {
-                    email,
-                    display_name,
-                    is_staff,
-                    is_superuser,
-                    token,
-                    token_updated_at,
+                    email: row.email,
+                    display_name: row.display_name,
+                    is_staff: row.is_staff,
+                    is_superuser: row.is_superuser,
+                    token: row.token,
+                    token_updated_at: row.token_updated_at.map(|t| t.with_timezone(&Utc)),
                 },
                 &user_save::new_user_token(),
                 now,
@@ -620,20 +885,16 @@ async fn user_entity_save(
             Ok(())
         }
         q::UserSaveAction::SetCover => {
-            let row: Option<UserLinkRow> = sqlx::query_as(
-                r#"SELECT "cover_image_asset_id", "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
-            )
-            .bind(owner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some((prev, email, display_name, is_staff, is_superuser, token, token_updated_at)) =
-                row
-            else {
+            let row: Option<UserLinkRow> = user_link_lookup(owner_id, true)
+                .into_model()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
+            let Some(row) = row else {
                 return Err(does_not_exist());
             };
-            if let Some(prev_id) = prev {
-                asset_delete(pool, &prev_id)
+            if let Some(prev_id) = row.prev_link_id {
+                asset_delete(db, &prev_id)
                     .await
                     .map_err(|_| server_error())?;
             }
@@ -641,12 +902,12 @@ async fn user_entity_save(
             let now = Utc::now();
             let write = user_save::apply_user_save(
                 &user_save::UserSaveInput {
-                    email,
-                    display_name,
-                    is_staff,
-                    is_superuser,
-                    token,
-                    token_updated_at,
+                    email: row.email,
+                    display_name: row.display_name,
+                    is_staff: row.is_staff,
+                    is_superuser: row.is_superuser,
+                    token: row.token,
+                    token_updated_at: row.token_updated_at.map(|t| t.with_timezone(&Utc)),
                 },
                 &user_save::new_user_token(),
                 now,
@@ -672,32 +933,30 @@ async fn user_entity_save(
 /// (`db/models/user.py:169-187`) — see `user_entity_save` (PIDASHCONV-1397).
 #[allow(clippy::result_large_err)]
 async fn user_entity_delete(
+    db: &pidash_db::DatabaseConnection,
     pool: &sqlx::PgPool,
     entity_type: &str,
     owner_id: &Uuid,
 ) -> Result<(), Response> {
     match q::user_delete_action(entity_type) {
         q::UserDeleteAction::ClearAvatar => {
-            let row: Option<UserUnlinkRow> = sqlx::query_as(
-                r#"SELECT "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
-            )
-            .bind(owner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some((email, display_name, is_staff, is_superuser, token, token_updated_at)) = row
-            else {
+            let row: Option<UserUnlinkRow> = user_unlink_lookup(owner_id)
+                .into_model()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
+            let Some(row) = row else {
                 return Err(does_not_exist());
             };
             let now = Utc::now();
             let write = user_save::apply_user_save(
                 &user_save::UserSaveInput {
-                    email,
-                    display_name,
-                    is_staff,
-                    is_superuser,
-                    token,
-                    token_updated_at,
+                    email: row.email,
+                    display_name: row.display_name,
+                    is_staff: row.is_staff,
+                    is_superuser: row.is_superuser,
+                    token: row.token,
+                    token_updated_at: row.token_updated_at.map(|t| t.with_timezone(&Utc)),
                 },
                 &user_save::new_user_token(),
                 now,
@@ -713,26 +972,23 @@ async fn user_entity_delete(
             Ok(())
         }
         q::UserDeleteAction::ClearCover => {
-            let row: Option<UserUnlinkRow> = sqlx::query_as(
-                r#"SELECT "email", "display_name", "is_staff", "is_superuser", "token", "token_updated_at" FROM "users" WHERE "id" = $1"#,
-            )
-            .bind(owner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some((email, display_name, is_staff, is_superuser, token, token_updated_at)) = row
-            else {
+            let row: Option<UserUnlinkRow> = user_unlink_lookup(owner_id)
+                .into_model()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
+            let Some(row) = row else {
                 return Err(does_not_exist());
             };
             let now = Utc::now();
             let write = user_save::apply_user_save(
                 &user_save::UserSaveInput {
-                    email,
-                    display_name,
-                    is_staff,
-                    is_superuser,
-                    token,
-                    token_updated_at,
+                    email: row.email,
+                    display_name: row.display_name,
+                    is_staff: row.is_staff,
+                    is_superuser: row.is_superuser,
+                    token: row.token,
+                    token_updated_at: row.token_updated_at.map(|t| t.with_timezone(&Utc)),
                 },
                 &user_save::new_user_token(),
                 now,
@@ -758,6 +1014,7 @@ async fn user_entity_delete(
 /// request user) — hence the `now` / `actor_id` parameters.
 #[allow(clippy::result_large_err)]
 async fn workspace_entity_save(
+    db: &pidash_db::DatabaseConnection,
     pool: &sqlx::PgPool,
     asset_id: &Uuid,
     entity_type: &str,
@@ -772,16 +1029,14 @@ async fn workspace_entity_save(
                 return Ok(());
             };
             // `.filter(id).first()` — miss returns silently.
-            let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-                r#"SELECT "logo_asset_id" FROM "workspaces" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-            )
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some((prev,)) = row else { return Ok(()) };
+            let prev: Option<Option<Uuid>> = workspace_logo_lookup(&workspace_id)
+                .into_tuple::<Option<Uuid>>()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
+            let Some(prev) = prev else { return Ok(()) };
             if let Some(prev_id) = prev {
-                asset_delete(pool, &prev_id)
+                asset_delete(db, &prev_id)
                     .await
                     .map_err(|_| server_error())?;
             }
@@ -800,16 +1055,14 @@ async fn workspace_entity_save(
             let Some(project_id) = asset.project_id else {
                 return Ok(());
             };
-            let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-                r#"SELECT "cover_image_asset_id" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-            )
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-            let Some((prev,)) = row else { return Ok(()) };
+            let prev: Option<Option<Uuid>> = project_cover_lookup(&project_id)
+                .into_tuple::<Option<Uuid>>()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
+            let Some(prev) = prev else { return Ok(()) };
             if let Some(prev_id) = prev {
-                asset_delete(pool, &prev_id)
+                asset_delete(db, &prev_id)
                     .await
                     .map_err(|_| server_error())?;
             }
@@ -834,6 +1087,7 @@ async fn workspace_entity_save(
 /// `updated_at` / `updated_by` stamps ride along (`now` / `actor_id`).
 #[allow(clippy::result_large_err)]
 async fn workspace_entity_delete(
+    db: &pidash_db::DatabaseConnection,
     pool: &sqlx::PgPool,
     entity_type: &str,
     asset: &AssetRow,
@@ -850,13 +1104,11 @@ async fn workspace_entity_delete(
             // `if workspace is None` check after it is dead code; BUG
             // ported). The scope covers soft-deleted rows too, so a
             // deleted workspace answers 404 with the asset untouched.
-            let row: Option<(Uuid,)> = sqlx::query_as(
-                r#"SELECT "id" FROM "workspaces" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-            )
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+            let row: Option<Uuid> = workspace_exists_lookup(&workspace_id)
+                .into_tuple::<Uuid>()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
             row.ok_or_else(does_not_exist)?;
             pidash_services::domain::workspaces::clear_logo_asset(
                 &pidash_db::pool::sea_orm_connection(pool),
@@ -872,13 +1124,11 @@ async fn workspace_entity_delete(
             let Some(project_id) = asset.project_id else {
                 return Ok(());
             };
-            let row: Option<(Option<Uuid>,)> = sqlx::query_as(
-                r#"SELECT "cover_image_asset_id" FROM "projects" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-            )
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+            let row: Option<Option<Uuid>> = project_cover_lookup(&project_id)
+                .into_tuple::<Option<Uuid>>()
+                .one(db)
+                .await
+                .map_err(|_| server_error())?;
             let Some(_) = row else { return Ok(()) };
             pidash_services::domain::projects::clear_cover_image_asset(
                 &pidash_db::pool::sea_orm_connection(pool),
@@ -898,17 +1148,10 @@ async fn workspace_entity_delete(
 // INSERT (Django ORM emits the full column list)
 // ---------------------------------------------------------------------------
 
-/// POST INSERT mirroring `FileAsset.objects.create(...)`: every column the
-/// ORM sends, with Django's defaults for the untouched ones
-/// (`is_deleted/is_archived/is_uploaded=false`, `storage_metadata='{}'`).
-/// Binds: `$1` id, `$2` created_at, `$3` updated_at, `$4` attributes,
-/// `$5` asset key, `$6` size (float), `$7` user_id, `$8` workspace_id,
-/// `$9` project_id, `$10` issue_id, `$11` comment_id, `$12` page_id,
-/// `$13` created_by_id, `$14` entity_type.
-fn asset_insert_sql() -> String {
-    r#"INSERT INTO "file_assets" ("id", "created_at", "updated_at", "attributes", "asset", "size", "user_id", "workspace_id", "project_id", "issue_id", "comment_id", "page_id", "created_by_id", "entity_type", "is_deleted", "is_archived", "is_uploaded", "storage_metadata") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false, false, false, '{}')"#
-        .to_string()
-}
+// The POST INSERT mirrors `FileAsset.objects.create(...)`: every column
+// the ORM sends, with Django's defaults for the untouched ones
+// (`is_deleted/is_archived/is_uploaded=false`, `storage_metadata={}`) —
+// built by `asset_insert_query`.
 
 // ---------------------------------------------------------------------------
 // UserAssetsV2Endpoint
@@ -925,7 +1168,10 @@ async fn user_post(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
     let data = match parse_data(content_type(&headers).as_deref(), &body) {
@@ -965,22 +1211,22 @@ async fn user_post(
         "size": size_limit,
     });
     let now = Utc::now();
-    if sqlx::query(&asset_insert_sql())
-        .bind(asset_id)
-        .bind(now)
-        .bind(now)
-        .bind(sqlx::types::Json(attributes))
-        .bind(&asset_key)
-        .bind(size_limit as f64)
-        .bind(actor.id)
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(actor.id)
-        .bind(entity_type.as_str())
-        .execute(pool)
+    if db
+        .execute(DbBackend::Postgres.build(&asset_insert_query(
+            asset_id,
+            now,
+            attributes,
+            &asset_key,
+            size_limit as f64,
+            Some(actor.id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            actor.id,
+            &entity_type,
+        )))
         .await
         .is_err()
     {
@@ -1030,21 +1276,19 @@ async fn user_patch(
     let Some(pool) = pool(&state) else {
         return server_error();
     };
-    let row = match sqlx::query(&q::user_asset_lookup_sql())
-        .bind(asset_id)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let Some(db) = orm_connection(&state) else {
+        return server_error();
+    };
+    let asset = match user_asset_lookup(&asset_id, &actor.id)
+        .into_model::<AssetRow>()
+        .one(&db)
         .await
     {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return does_not_exist();
-    };
-    let asset = match asset_row(&row) {
         Ok(asset) => asset,
         Err(_) => return server_error(),
+    };
+    let Some(asset) = asset else {
+        return does_not_exist();
     };
     // `is_uploaded = True` is set before the metadata check
     // (`v2.py:174-177`).
@@ -1052,7 +1296,7 @@ async fn user_patch(
         publish_metadata(pool, &asset_id).await;
     }
     let entity_type = asset.entity_type.clone().unwrap_or_default();
-    if let Err(response) = user_entity_save(pool, &asset_id, &entity_type, &actor.id).await {
+    if let Err(response) = user_entity_save(&db, pool, &asset_id, &entity_type, &actor.id).await {
         return response;
     }
     let data = match parse_data(content_type(&headers).as_deref(), &body) {
@@ -1068,11 +1312,8 @@ async fn user_patch(
     if attributes.is_null() {
         return raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY);
     }
-    if sqlx::query(&q::confirm_update_sql())
-        .bind(true)
-        .bind(sqlx::types::Json(attributes))
-        .bind(asset_id)
-        .execute(pool)
+    if confirm_update(asset_id, attributes)
+        .exec(&db)
         .await
         .is_err()
     {
@@ -1098,34 +1339,25 @@ async fn user_delete(
     let Some(pool) = pool(&state) else {
         return server_error();
     };
-    let row = match sqlx::query(&q::user_asset_lookup_sql())
-        .bind(asset_id)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let Some(db) = orm_connection(&state) else {
+        return server_error();
+    };
+    let asset = match user_asset_lookup(&asset_id, &actor.id)
+        .into_model::<AssetRow>()
+        .one(&db)
         .await
     {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return does_not_exist();
-    };
-    let asset = match asset_row(&row) {
         Ok(asset) => asset,
         Err(_) => return server_error(),
     };
+    let Some(asset) = asset else {
+        return does_not_exist();
+    };
     let entity_type = asset.entity_type.clone().unwrap_or_default();
-    if let Err(response) = user_entity_delete(pool, &entity_type, &actor.id).await {
+    if let Err(response) = user_entity_delete(&db, pool, &entity_type, &actor.id).await {
         return response;
     }
-    if sqlx::query(&q::delete_update_sql())
-        .bind(true)
-        .bind(Utc::now())
-        .bind(asset_id)
-        .execute(pool)
-        .await
-        .is_err()
-    {
+    if delete_update(asset_id, Utc::now()).exec(&db).await.is_err() {
         return server_error();
     }
     no_content()
@@ -1135,18 +1367,30 @@ async fn user_delete(
 // WorkspaceFileAssetEndpoint
 // ---------------------------------------------------------------------------
 
+/// `Workspace.objects.get(slug=slug)` (`v2.py:349`): default manager,
+/// so a soft-deleted slug answers the `DoesNotExist` 404 envelope.
+fn workspace_lookup_query(slug: &str) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspaces::Column::Id)
+        .limit(1u64)
+}
+
 /// Resolve `slug` the way `Workspace.objects.get(slug=slug)` does
 /// (`v2.py:349`): miss raises → the 404 envelope.
 #[allow(clippy::result_large_err)]
-async fn workspace_id_for(pool: &sqlx::PgPool, slug: &str) -> Result<Uuid, Response> {
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| server_error())?;
-    row.map(|row| row.0).ok_or_else(does_not_exist)
+async fn workspace_id_for(
+    db: &pidash_db::DatabaseConnection,
+    slug: &str,
+) -> Result<Uuid, Response> {
+    let row: Option<Uuid> = workspace_lookup_query(slug)
+        .into_tuple::<Uuid>()
+        .one(db)
+        .await
+        .map_err(|_| server_error())?;
+    row.ok_or_else(does_not_exist)
 }
 
 /// The `**get_entity_id_field(...)` spread value (`v2.py:362`): the raw
@@ -1182,7 +1426,10 @@ async fn workspace_post(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
     let data = match parse_data(content_type(&headers).as_deref(), &body) {
@@ -1210,7 +1457,7 @@ async fn workspace_post(
         return json_status(StatusCode::BAD_REQUEST, q::invalid_file_type_body());
     }
     let size_limit = q::clamp_size(size, state.settings().file_size_limit);
-    let workspace_id = match workspace_id_for(pool, &slug).await {
+    let workspace_id = match workspace_id_for(&db, &slug).await {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -1270,22 +1517,22 @@ async fn workspace_post(
         None => Some(workspace_id),
     };
     let now = Utc::now();
-    if sqlx::query(&asset_insert_sql())
-        .bind(asset_id)
-        .bind(now)
-        .bind(now)
-        .bind(sqlx::types::Json(attributes))
-        .bind(&asset_key)
-        .bind(size_limit as f64)
-        .bind(user_fk.unwrap_or(None))
-        .bind(row_workspace_id)
-        .bind(project_fk.unwrap_or(None))
-        .bind(issue_fk.unwrap_or(None))
-        .bind(comment_fk.unwrap_or(None))
-        .bind(page_fk.unwrap_or(None))
-        .bind(actor.id)
-        .bind(entity_type.as_str())
-        .execute(pool)
+    if db
+        .execute(DbBackend::Postgres.build(&asset_insert_query(
+            asset_id,
+            now,
+            attributes,
+            &asset_key,
+            size_limit as f64,
+            user_fk.unwrap_or(None),
+            row_workspace_id,
+            project_fk.unwrap_or(None),
+            issue_fk.unwrap_or(None),
+            comment_fk.unwrap_or(None),
+            page_fk.unwrap_or(None),
+            actor.id,
+            &entity_type,
+        )))
         .await
         .is_err()
     {
@@ -1340,21 +1587,19 @@ async fn workspace_patch(
     let Some(pool) = pool(&state) else {
         return server_error();
     };
-    let row = match sqlx::query(&q::workspace_asset_lookup_sql())
-        .bind(asset_id)
-        .bind(&slug)
-        .fetch_optional(pool)
+    let Some(db) = orm_connection(&state) else {
+        return server_error();
+    };
+    let asset = match workspace_asset_lookup(&asset_id, &slug)
+        .into_model::<AssetRow>()
+        .one(&db)
         .await
     {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return does_not_exist();
-    };
-    let asset = match asset_row(&row) {
         Ok(asset) => asset,
         Err(_) => return server_error(),
+    };
+    let Some(asset) = asset else {
+        return does_not_exist();
     };
     if q::should_publish_metadata(asset.storage_metadata.as_ref()) {
         publish_metadata(pool, &asset_id).await;
@@ -1362,7 +1607,7 @@ async fn workspace_patch(
     let entity_type = asset.entity_type.clone().unwrap_or_default();
     let now = Utc::now();
     if let Err(response) =
-        workspace_entity_save(pool, &asset_id, &entity_type, &asset, now, &actor.id).await
+        workspace_entity_save(&db, pool, &asset_id, &entity_type, &asset, now, &actor.id).await
     {
         return response;
     }
@@ -1377,11 +1622,8 @@ async fn workspace_patch(
     if attributes.is_null() {
         return raw(StatusCode::BAD_REQUEST, PAYLOAD_NOT_VALID_BODY);
     }
-    if sqlx::query(&q::confirm_update_sql())
-        .bind(true)
-        .bind(sqlx::types::Json(attributes))
-        .bind(asset_id)
-        .execute(pool)
+    if confirm_update(asset_id, attributes)
+        .exec(&db)
         .await
         .is_err()
     {
@@ -1407,36 +1649,28 @@ async fn workspace_delete(
     let Some(pool) = pool(&state) else {
         return server_error();
     };
-    let row = match sqlx::query(&q::workspace_asset_lookup_sql())
-        .bind(asset_id)
-        .bind(&slug)
-        .fetch_optional(pool)
+    let Some(db) = orm_connection(&state) else {
+        return server_error();
+    };
+    let asset = match workspace_asset_lookup(&asset_id, &slug)
+        .into_model::<AssetRow>()
+        .one(&db)
         .await
     {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return does_not_exist();
-    };
-    let asset = match asset_row(&row) {
         Ok(asset) => asset,
         Err(_) => return server_error(),
     };
+    let Some(asset) = asset else {
+        return does_not_exist();
+    };
     let entity_type = asset.entity_type.clone().unwrap_or_default();
     let now = Utc::now();
-    if let Err(response) = workspace_entity_delete(pool, &entity_type, &asset, now, &actor.id).await
+    if let Err(response) =
+        workspace_entity_delete(&db, pool, &entity_type, &asset, now, &actor.id).await
     {
         return response;
     }
-    if sqlx::query(&q::delete_update_sql())
-        .bind(true)
-        .bind(Utc::now())
-        .bind(asset_id)
-        .execute(pool)
-        .await
-        .is_err()
-    {
+    if delete_update(asset_id, Utc::now()).exec(&db).await.is_err() {
         return server_error();
     }
     no_content()
@@ -1457,24 +1691,22 @@ async fn workspace_get(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
-    let row = match sqlx::query(&q::workspace_asset_lookup_sql())
-        .bind(asset_id)
-        .bind(&slug)
-        .fetch_optional(pool)
+    let asset = match workspace_asset_lookup(&asset_id, &slug)
+        .into_model::<AssetRow>()
+        .one(&db)
         .await
     {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return does_not_exist();
-    };
-    let asset = match asset_row(&row) {
         Ok(asset) => asset,
         Err(_) => return server_error(),
+    };
+    let Some(asset) = asset else {
+        return does_not_exist();
     };
     if !asset.is_uploaded {
         return json_status(StatusCode::NOT_FOUND, q::not_uploaded_body());
@@ -1541,27 +1773,24 @@ async fn static_get(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
     // `FileAsset.objects.get(id)` — the default manager (soft-delete
     // scoped), no tenant predicate at all.
-    let row = match sqlx::query(
-        r#"SELECT "entity_type", "is_uploaded", "storage_metadata", "attributes", "asset", "workspace_id", "project_id" FROM "file_assets" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
+    let asset = match static_asset_lookup(&asset_id)
+        .into_model::<AssetRow>()
+        .one(&db)
+        .await
     {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return does_not_exist();
-    };
-    let asset = match asset_row(&row) {
         Ok(asset) => asset,
         Err(_) => return server_error(),
+    };
+    let Some(asset) = asset else {
+        return does_not_exist();
     };
     if !asset.is_uploaded {
         return json_status(StatusCode::NOT_FOUND, q::not_uploaded_body());
@@ -1605,6 +1834,18 @@ async fn static_get(
 // AssetRestoreEndpoint
 // ---------------------------------------------------------------------------
 
+/// Restore flip (`v2.py:473`): `save(update_fields=["is_deleted",
+/// "deleted_at"])` — `is_deleted=false`, `deleted_at=None`.
+fn restore_update(asset_id: Uuid) -> UpdateMany<file_assets::Entity> {
+    file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsDeleted, Expr::value(false))
+        .col_expr(
+            file_assets::Column::DeletedAt,
+            Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+        )
+        .filter(file_assets::Column::Id.eq(asset_id))
+}
+
 /// `AssetRestoreEndpoint.post` (`v2.py:471-477`) behind
 /// `@allow_permission([ADMIN, MEMBER, GUEST], level="WORKSPACE")`.
 async fn restore_post(
@@ -1620,18 +1861,18 @@ async fn restore_post(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let Some(pool) = pool(&state) else {
+    if pool(&state).is_none() {
+        return server_error();
+    }
+    let Some(db) = orm_connection(&state) else {
         return server_error();
     };
     // The WORKSPACE gate (`app/permissions/base.py:45-51`): one EXISTS
     // probe over the soft-delete-scoped membership rows.
-    let role: Option<(i16,)> = match sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm JOIN workspaces w ON w.id = wm.workspace_id WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(&slug)
-    .bind(actor.id)
-    .fetch_optional(pool)
-    .await
+    let role: Option<i16> = match restore_role_query(&slug, &actor.id)
+        .into_tuple::<i16>()
+        .one(&db)
+        .await
     {
         Ok(role) => role,
         Err(_) => return server_error(),
@@ -1640,7 +1881,7 @@ async fn restore_post(
         workspace: WorkspaceId::from(slug.as_str()),
         authenticated: true,
         is_workspace_member: role.is_some(),
-        has_allowed_workspace_role: role.map(|(r,)| [20, 15, 5].contains(&r)).unwrap_or(false),
+        has_allowed_workspace_role: role.is_some_and(|r| [20, 15, 5].contains(&r)),
         is_creator: false,
         has_allowed_project_role: false,
         is_project_member: false,
@@ -1652,13 +1893,10 @@ async fn restore_post(
     }
     // `FileAsset.all_objects.get(id, workspace__slug)` (`v2.py:473`): the
     // unfiltered manager sees soft-deleted rows — no `deleted_at` conjunct.
-    let row: Option<(Uuid,)> = match sqlx::query_as(
-        r#"SELECT "file_assets"."id" FROM "file_assets" INNER JOIN "workspaces" U0 ON ("file_assets"."workspace_id" = U0."id") WHERE "file_assets"."id" = $1 AND U0."slug" = $2"#,
-    )
-    .bind(asset_id)
-    .bind(&slug)
-    .fetch_optional(pool)
-    .await
+    let row: Option<Uuid> = match restore_lookup(&asset_id, &slug)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
     {
         Ok(row) => row,
         Err(_) => return server_error(),
@@ -1666,14 +1904,7 @@ async fn restore_post(
     if row.is_none() {
         return does_not_exist();
     }
-    if sqlx::query(
-        r#"UPDATE "file_assets" SET "is_deleted" = false, "deleted_at" = NULL WHERE "id" = $1"#,
-    )
-    .bind(asset_id)
-    .execute(pool)
-    .await
-    .is_err()
-    {
+    if restore_update(asset_id).exec(&db).await.is_err() {
         return server_error();
     }
     no_content()
@@ -2595,5 +2826,164 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+    }
+
+    // -- SeaORM statement-shape pins (orm-migration.md §7) -------------------
+    // These pin the converted query shapes without a database: joins,
+    // soft-delete scope, ordering and column selection must match the
+    // previous sqlx text in meaning (unique output names by construction).
+
+    fn build_select<E: sea_orm::EntityTrait>(select: sea_orm::Select<E>) -> String {
+        use sea_orm::QueryTrait;
+        select.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn test_ids() -> (Uuid, Uuid) {
+        (
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            Uuid::parse_str("6a1a2b3c-4d5e-4f60-8172-446655440001").unwrap(),
+        )
+    }
+
+    #[test]
+    fn user_lookup_shape_pins_caller_scope() {
+        let (asset_id, user_id) = test_ids();
+        let sql = build_select(user_asset_lookup(&asset_id, &user_id));
+        assert!(sql.contains(r#""user_id" = "#), "caller scope: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains(r#"AS "asset_key""#), "alias: {sql}");
+        assert!(sql.contains("LIMIT 1"), "single row: {sql}");
+    }
+
+    #[test]
+    fn workspace_lookup_shape_pins_join_and_alias() {
+        let (asset_id, _) = test_ids();
+        let sql = build_select(workspace_asset_lookup(&asset_id, "my-slug"));
+        assert!(sql.contains("INNER JOIN"), "join: {sql}");
+        assert!(sql.contains(r#"AS "asset_key""#), "alias: {sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+    }
+
+    #[test]
+    fn static_lookup_shape_pins_no_tenant_predicate() {
+        let (asset_id, _) = test_ids();
+        let sql = build_select(static_asset_lookup(&asset_id));
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(!sql.contains("slug"), "no tenant predicate: {sql}");
+    }
+
+    #[test]
+    fn asset_delete_lookup_shape_pins_first_semantics() {
+        let (asset_id, _) = test_ids();
+        let sql = build_select(asset_delete_lookup(&asset_id));
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "scope: {sql}");
+        assert!(sql.contains("LIMIT 1"), "first: {sql}");
+    }
+
+    #[test]
+    fn user_link_lookup_shapes_pin_prev_alias() {
+        let (owner_id, _) = test_ids();
+        let avatar = build_select(user_link_lookup(&owner_id, false));
+        assert!(
+            avatar.contains(r#""avatar_asset_id" AS "prev_link_id""#),
+            "avatar arm: {avatar}"
+        );
+        let cover = build_select(user_link_lookup(&owner_id, true));
+        assert!(
+            cover.contains(r#""cover_image_asset_id" AS "prev_link_id""#),
+            "cover arm: {cover}"
+        );
+        assert!(cover.contains(r#""email""#), "save fields: {cover}");
+        assert!(
+            cover.contains(r#""token_updated_at""#),
+            "token stamp: {cover}"
+        );
+    }
+
+    #[test]
+    fn user_unlink_lookup_shape_pins_save_fields() {
+        let (owner_id, _) = test_ids();
+        let sql = build_select(user_unlink_lookup(&owner_id));
+        assert!(sql.contains(r#""display_name""#), "save fields: {sql}");
+        assert!(sql.contains(r#""is_staff""#), "staff: {sql}");
+        assert!(!sql.contains("prev_link_id"), "no link column: {sql}");
+    }
+
+    #[test]
+    fn logo_and_cover_lookups_pin_default_manager() {
+        let (workspace_id, project_id) = test_ids();
+        let logo = build_select(workspace_logo_lookup(&workspace_id));
+        assert!(logo.contains(r#""logo_asset_id""#), "logo column: {logo}");
+        assert!(logo.contains(r#""deleted_at" IS NULL"#), "scope: {logo}");
+        let cover = build_select(project_cover_lookup(&project_id));
+        assert!(
+            cover.contains(r#""cover_image_asset_id""#),
+            "cover column: {cover}"
+        );
+        let exists = build_select(workspace_exists_lookup(&workspace_id));
+        assert!(
+            exists.contains(r#""deleted_at" IS NULL"#),
+            "scope: {exists}"
+        );
+    }
+
+    #[test]
+    fn insert_shape_pins_full_column_list() {
+        let (asset_id, _) = test_ids();
+        let stmt = asset_insert_query(
+            asset_id,
+            Utc::now(),
+            serde_json::json!({}),
+            "key",
+            12.0,
+            Some(asset_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+            asset_id,
+            "USER_AVATAR",
+        );
+        let sql = sea_orm::DbBackend::Postgres.build(&stmt).to_string();
+        assert!(sql.contains(r#""user_id""#), "user fk: {sql}");
+        assert!(
+            sql.contains(r#""storage_metadata""#),
+            "trailing default: {sql}"
+        );
+        assert!(sql.contains(r#""created_by_id""#), "creator: {sql}");
+    }
+
+    #[test]
+    fn confirm_and_delete_shapes_pin_exact_columns() {
+        use sea_orm::QueryTrait;
+        let (asset_id, _) = test_ids();
+        let confirm = confirm_update(asset_id, serde_json::json!({}));
+        let sql = confirm.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""is_uploaded""#), "uploaded set: {sql}");
+        assert!(sql.contains(r#""attributes""#), "attributes set: {sql}");
+        assert!(!sql.contains("updated_at"), "no updated_at touch: {sql}");
+        let delete = delete_update(asset_id, Utc::now());
+        let sql = delete.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""is_deleted""#), "deleted set: {sql}");
+        assert!(sql.contains(r#""deleted_at""#), "timestamp set: {sql}");
+        assert!(!sql.contains("updated_at"), "no updated_at touch: {sql}");
+    }
+
+    #[test]
+    fn restore_shapes_pin_unfiltered_lookup_and_nulling_update() {
+        use sea_orm::QueryTrait;
+        let (asset_id, member_id) = test_ids();
+        let lookup = build_select(restore_lookup(&asset_id, "my-slug"));
+        assert!(lookup.contains("INNER JOIN"), "join: {lookup}");
+        // all_objects: deliberately no soft-delete filter.
+        assert!(!lookup.contains("deleted_at"), "unfiltered: {lookup}");
+        let role = build_select(restore_role_query("my-slug", &member_id));
+        assert!(role.contains(r#""is_active" = "#), "active: {role}");
+        assert!(role.contains(r#""deleted_at" IS NULL"#), "scope: {role}");
+        let flip = restore_update(asset_id);
+        let sql = flip.build(sea_orm::DbBackend::Postgres).to_string();
+        assert!(sql.contains(r#""is_deleted" = "#), "cleared: {sql}");
+        assert!(sql.contains(r#""deleted_at" = NULL"#), "nulled: {sql}");
     }
 }

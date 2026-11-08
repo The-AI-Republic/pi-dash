@@ -37,9 +37,9 @@
     },
     {
       "requested": "managed_runner",
-      "managed_enabled": false,
-      "raises": "ManagedRunnerUnavailable",
-      "code": "managed_runner_disabled"
+      "project_default": "local_runner",
+      "result": "local_runner",
+      "note": "#2903: legacy managed resolves to local; the kill switch no longer turns it away"
     },
     {
       "requested": "bogus",

@@ -45,12 +45,12 @@
 //!   existing [`cancel_barrier_update_sql`](super::session_service::cancel_barrier_update_sql).
 
 use chrono::{DateTime, Utc};
-use pidash_db::entity::{agent_run as run, runner};
+use pidash_db::entity::{agent_run as run, dev_machine, runner};
 use pidash_db::runner_runs::agent_run;
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use sea_orm::sea_query::extension::postgres::PgBinOper;
-use sea_orm::sea_query::{Alias, Condition, Expr, LockType};
+use sea_orm::sea_query::{Alias, Condition, Expr, LockType, Query};
 use sea_orm::{
     ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
     RelationTrait,
@@ -162,10 +162,35 @@ fn pinned_runner_rel() -> sea_orm::RelationDef {
 /// `_pinned_runner_gone_q`: silent past the cutoff, never heartbeated, or
 /// operator-paused.
 fn runner_gone(cutoff: DateTime<Utc>) -> Condition {
+    // `engine_paused_q` (`models.py`): `IN (subquery)`, never a join —
+    // callers add `FOR UPDATE`. The subquery's guard column is
+    // `engine_paused_by_owner OR engine_auto_pause_reason > ''`
+    // (Postgres `>` matches Django's `OR non-empty` for this text type).
+    let paused_machines = Query::select()
+        .column(dev_machine::Column::Id)
+        .from(dev_machine::Entity)
+        .cond_where(
+            Condition::any()
+                .add(dev_machine::Column::EnginePausedByOwner.eq(true))
+                .add(dev_machine::Column::EngineAutoPauseReason.gt("")),
+        )
+        .to_owned();
     Condition::any()
         .add(runner::Column::LastHeartbeatAt.lt(cutoff))
         .add(runner::Column::LastHeartbeatAt.is_null())
         .add(runner::Column::PausedAt.is_not_null())
+        .add(
+            Condition::all()
+                .add(runner::Column::DevMachineId.in_subquery(paused_machines))
+                .add(runner::Column::Provisioning.eq("desktop_bundled")),
+        )
+        // `pod_dispatch='pinned_only'` engine pins also release
+        // (`_pinned_runner_gone_q`, #2903).
+        .add(
+            Condition::all()
+                .add(runner::Column::PodDispatch.eq("pinned_only"))
+                .add(runner::Column::Provisioning.eq("desktop_bundled")),
+        )
 }
 
 /// Paused-runner candidate ids (`release_pins_for_paused_runner`,
@@ -446,7 +471,14 @@ mod tests {
             "\"agent_run\".\"pinned_runner_id\" IS NOT NULL",
             "\"agent_run\".\"status\" = 'queued'",
             "(\"runner\".\"last_heartbeat_at\" < '2026-01-02 03:04:05.000000 +00:00' OR \
-             \"runner\".\"last_heartbeat_at\" IS NULL OR \"runner\".\"paused_at\" IS NOT NULL)",
+             \"runner\".\"last_heartbeat_at\" IS NULL OR \
+             \"runner\".\"paused_at\" IS NOT NULL OR \
+             (\"runner\".\"dev_machine_id\" IN (SELECT \"id\" FROM \"dev_machine\" \
+             WHERE \"dev_machine\".\"engine_paused_by_owner\" = TRUE OR \
+             \"dev_machine\".\"engine_auto_pause_reason\" > '') AND \
+             \"runner\".\"provisioning\" = 'desktop_bundled') OR \
+             (\"runner\".\"pod_dispatch\" = 'pinned_only' AND \
+             \"runner\".\"provisioning\" = 'desktop_bundled'))",
         ] {
             assert!(sql.contains(part), "{part} missing: {sql}");
         }

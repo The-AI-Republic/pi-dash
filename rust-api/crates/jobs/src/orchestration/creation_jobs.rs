@@ -50,9 +50,10 @@ use uuid::Uuid;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
-    agent_run, agent_run_event, git_code_review_links, git_repositories, git_repository_bindings,
-    issue_agent_ticker, issue_assignees, issue_comments, issue_labels, issue_relations, issues,
-    labels, pod, projects, prompt_section_override, runner, states, users, workspaces,
+    agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
+    git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
+    issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
+    workspaces,
 };
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::{self, TxConn};
@@ -484,18 +485,9 @@ struct RunnerRow {
     status: String,
     last_heartbeat_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
     paused_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
-}
-
-impl From<RunnerRow> for RunnerView {
-    fn from(row: RunnerRow) -> Self {
-        Self {
-            id: row.id,
-            pod_id: row.pod_id,
-            status: row.status,
-            last_heartbeat_at: row.last_heartbeat_at.map(|at| at.with_timezone(&Utc)),
-            paused_at: row.paused_at.map(|at| at.with_timezone(&Utc)),
-        }
-    }
+    provisioning: String,
+    pod_dispatch: String,
+    dev_machine_id: Option<Uuid>,
 }
 
 /// The `users.is_active/is_bot` flags, decoded by name.
@@ -622,9 +614,9 @@ where
     }
 
     async fn runner(&mut self, runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        let row = {
+        let (row, engine_paused) = {
             let conn = TxConn::new(self.tx.inner());
-            runner::Entity::find()
+            let row = runner::Entity::find()
                 .select_only()
                 .columns([
                     runner::Column::Id,
@@ -632,14 +624,39 @@ where
                     runner::Column::Status,
                     runner::Column::LastHeartbeatAt,
                     runner::Column::PausedAt,
+                    runner::Column::Provisioning,
+                    runner::Column::PodDispatch,
+                    runner::Column::DevMachineId,
                 ])
                 .filter(runner::Column::Id.eq(runner_id))
                 .into_model::<RunnerRow>()
                 .one(&conn)
                 .await
-                .map_err(sea_db)?
+                .map_err(sea_db)?;
+            let engine_paused = match row.as_ref().and_then(|r| r.dev_machine_id) {
+                Some(machine_id) => {
+                    let machine = dev_machine::Entity::find_by_id(machine_id)
+                        .one(&conn)
+                        .await
+                        .map_err(sea_db)?;
+                    machine.is_some_and(|m| {
+                        m.engine_paused_by_owner || !m.engine_auto_pause_reason.is_empty()
+                    })
+                }
+                None => false,
+            };
+            (row, engine_paused)
         };
-        Ok(row.map(RunnerView::from))
+        Ok(row.map(|row| RunnerView {
+            id: row.id,
+            pod_id: row.pod_id,
+            status: row.status,
+            last_heartbeat_at: row.last_heartbeat_at.map(|at| at.with_timezone(&Utc)),
+            paused_at: row.paused_at.map(|at| at.with_timezone(&Utc)),
+            provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
+            engine_paused,
+        }))
     }
 
     async fn assigned_pod(&mut self, pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
@@ -891,7 +908,6 @@ where
             managed,
             has_usable_llm_config,
             toolsets,
-            llm_profile,
             now_unix_secs,
             deferred,
             ..
@@ -911,7 +927,6 @@ where
         };
         let has_llm = has_usable_llm_config.clone();
         let toolsets = toolsets.clone();
-        let profile = llm_profile.clone();
         let mut collect = |consume: DeferredConsume| deferred.push(consume);
         let fields = resolve_execution_fields(
             &mut short,
@@ -923,7 +938,6 @@ where
             ExecutionSeams {
                 has_usable_llm_config: move || actor_id.is_some_and(&has_llm),
                 toolsets,
-                llm_profile: move || profile(actor_id),
             },
         )
         .await;
@@ -2708,12 +2722,12 @@ mod tests {
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO runner (id, created_at, updated_at, owner_id, workspace_id, pod_id, \
-             name, host_label, provisioning, visibility, refresh_token_hash, \
+             name, host_label, provisioning, pod_dispatch, visibility, refresh_token_hash, \
              refresh_token_fingerprint, refresh_token_generation, \
              previous_refresh_token_hash, access_token_signing_key_version, \
              enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
              os, arch, runner_version, dev_metadata, protocol_version, revoked_reason) \
-             VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 0, '', '', 0, '', \
+             VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 'pinned_only', 0, '', '', 0, '', \
              1, '', '', '[]', $7, '', '', '', '{}', 1, '')",
         )
         .bind(id)

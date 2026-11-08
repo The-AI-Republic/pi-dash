@@ -75,7 +75,7 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
 };
 use pidash_db::tasks_ticker::{pool_size_or_default, TickerDisarmReason};
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
     auto_pauses_on_cap, is_ticking_state, ticking_state_names_by_group, MACHINE_TRIGGERS,
     RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER, RUN_AI_NO_POD, TRIGGER_RUN_AI,
@@ -96,19 +96,16 @@ use crate::dispatch::{effective_executor_for_issue, user_has_llm_config, LlmProf
 
 /// Default `_bounce_issue_no_eligible_runner` reason (`:1029`).
 pub const REASON_NO_ELIGIBLE_RUNNER: &str = "no-eligible-runner";
-/// Cloud `_bounce_issue_no_eligible_runner` reason (`:985`): the execution
+/// Cloud `_bounce_issue_no_eligible_runner` reason (`:967`): the execution
 /// principal holds no usable LLM config.
 pub const REASON_NO_LLM_CONFIG: &str = "no-llm-config";
-/// Managed `_bounce_issue_no_eligible_runner` reason (`:998`, `:1014`):
-/// no creator, or nobody enrolled.
-pub const REASON_NO_MANAGED_RUNNER: &str = "no-managed-runner";
 
 /// The `no-llm-config` bounce body (`:1064-1070`), byte-verbatim.
 /// `format_html` with no args is a plain literal.
 pub const BOUNCE_BODY_NO_LLM_CONFIG: &str = "<p><strong>Agent run skipped — no AI provider configured.</strong></p><p>This project uses the Pi Dash Cloud Agent, which runs against the triggering user's AI provider. Configure one in Pi Dash AI settings, or assign this issue to a member who has one configured.</p>";
 
-/// The default bounce body (`:1072-1077`), byte-verbatim: every reason
-/// except `no-llm-config` (including the managed reasons, B2b).
+/// The default bounce body (`:1002-1007`), byte-verbatim: every reason
+/// except `no-llm-config`.
 pub const BOUNCE_BODY_DEFAULT: &str = "<p><strong>Agent run skipped — no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>";
 
 /// Pick the bounce body (`:1064-1077`): only `no-llm-config` differs.
@@ -333,16 +330,6 @@ pub fn is_machine_trigger(triggered_by: &str) -> bool {
     MACHINE_TRIGGERS.contains(&triggered_by)
 }
 
-/// `profile.reason_code or ManagedRunnerReason.LLM_CONFIG_MISSING`
-/// (`:1010`): an empty reason falls back, mirroring Python's `or`.
-pub fn managed_profile_reason_code(profile: &LlmProfile) -> &str {
-    if profile.reason_code.is_empty() {
-        ManagedRunnerReason::LLM_CONFIG_MISSING
-    } else {
-        profile.reason_code.as_str()
-    }
-}
-
 /// The wait activity comment (`:849`): `Waited on a blocker ({waited}
 /// of {pool})` plus `; run {run_id}` when the calling run is known.
 pub fn wait_activity_comment(pool: i32, waited: i32, run_id: Option<&Uuid>) -> String {
@@ -545,18 +532,21 @@ pub enum DispatchError {
 // Seams
 // ---------------------------------------------------------------------------
 
-/// The one-method D-14 seam (`runner/services/matcher.py:375-412`):
+/// The one-method D-14 seam (`runner/services/matcher.py:436-490`):
 /// does a runner registered in `pod_id` accept a run on `issue_id`
-/// created by `creator_id`? D-14 (runner, downstream of D-12 — no edge,
-/// it would deadlock) implements this later; the D-10 `FireTickSeam`
-/// precedent. Boxed future, so the trait stays object-safe for the
-/// `&dyn` driver parameter.
+/// created by `creator_id`? `human` is `triggered_by in
+/// HUMAN_TRIGGERS` — the engine usage rule distinguishes a person's
+/// click from the clock (§8). D-14 (runner, downstream of D-12 — no
+/// edge, it would deadlock) implements this later; the D-10
+/// `FireTickSeam` precedent. Boxed future, so the trait stays
+/// object-safe for the `&dyn` driver parameter.
 pub trait PodRunnerMatcher: Send + Sync {
     fn pod_has_runner_for_issue_principal(
         &self,
         pod_id: Uuid,
         issue_id: Uuid,
         creator_id: Option<Uuid>,
+        human: bool,
     ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>>;
 }
 
@@ -676,14 +666,6 @@ pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
         workspace_slug: &str,
         project_id: Uuid,
     ) -> Result<RoleVerdict, DispatchError>;
-    /// `enrolled_managed_runners(project, user).exists()`
-    /// ([`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`][crate::dispatch::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL]).
-    async fn enrolled_managed_exists(
-        &mut self,
-        project_id: Uuid,
-        user_id: Uuid,
-        workspace_id: Uuid,
-    ) -> Result<bool, DispatchError>;
     /// The operator kill switch (`managed_runner_is_enabled`, L3).
     fn managed_runner_enabled(&self) -> bool;
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
@@ -886,7 +868,7 @@ async fn effective_executor<S: DispatchSeam>(
 }
 
 /// A current human execution principal; bots never own tool authority
-/// (`_resolve_creator_for_trigger`, `:887-952`).
+/// (`_resolve_creator_for_trigger`, `:891-946`).
 pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
     seam: &mut S,
     issue_id: Uuid,
@@ -897,7 +879,12 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
         .await
         .map_err(DispatchError::Store)?;
     let effective = effective_executor(seam, &issue).await?;
-    if effective == AgentExecutorKind::LocalRunner.value() {
+    // Every machine executor (including a stale `managed_runner`
+    // value, the legacy spelling of one) takes the machine branch.
+    if pidash_types::dispatch::MACHINE_EXECUTORS
+        .iter()
+        .any(|kind| kind.value() == effective)
+    {
         if let Some(actor) = actor {
             return Ok(Some(actor));
         }
@@ -915,7 +902,6 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
     let project = CreationSeam::project(seam, project_id)
         .await
         .map_err(DispatchError::Store)?;
-    let managed = effective == AgentExecutorKind::ManagedRunner.value();
     let mut candidates: Vec<CandidateUser> = Vec::new();
     if let Some(id) = actor.filter(|_| !is_machine_trigger(triggered_by)) {
         let flags = CreationSeam::user_flags(seam, id)
@@ -958,13 +944,6 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
             is_bot: candidate.is_bot,
         };
         if !user_has_llm_config(Some(&flags), || seam.has_usable_llm_config(candidate.id)) {
-            continue;
-        }
-        if managed
-            && !seam
-                .enrolled_managed_exists(project_id, candidate.id, project.workspace_id)
-                .await?
-        {
             continue;
         }
         let verdict = seam
@@ -1048,63 +1027,17 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
         });
     }
 
-    if effective == AgentExecutorKind::ManagedRunner.value() {
-        let reason = match run_creator {
-            None => Some(REASON_NO_MANAGED_RUNNER.to_owned()),
-            Some(_) if !seam.managed_runner_enabled() => {
-                Some(ManagedRunnerReason::DISABLED.to_owned())
-            }
-            Some(creator) => {
-                let profile = seam.llm_profile_for(creator);
-                if !profile.available {
-                    Some(managed_profile_reason_code(&profile).to_owned())
-                } else {
-                    let project_id = issue.project_id.ok_or_else(|| {
-                        DispatchError::Store(CreationError::MissingRow(
-                            "issue has no project".to_owned(),
-                        ))
-                    })?;
-                    let project = CreationSeam::project(seam, project_id)
-                        .await
-                        .map_err(DispatchError::Store)?;
-                    if !seam
-                        .enrolled_managed_exists(project_id, creator, project.workspace_id)
-                        .await?
-                    {
-                        Some(REASON_NO_MANAGED_RUNNER.to_owned())
-                    } else {
-                        None
-                    }
-                }
-            }
-        };
-        match reason {
-            None => {
-                return Ok(PreflightOutcome {
-                    proceed: true,
-                    logs: Vec::new(),
-                });
-            }
-            Some(reason) => {
-                let bounced = bounce_issue_no_eligible_runner(
-                    seam,
-                    issue_id,
-                    triggered_by,
-                    &reason,
-                    now,
-                    jitter_secs,
-                )
-                .await?;
-                return Ok(PreflightOutcome {
-                    proceed: false,
-                    logs: bounced.logs,
-                });
-            }
-        }
-    }
-
+    // Every other executor is a runner (built_engine_as_runner §6; a
+    // stale `managed_runner` value is the legacy spelling of one).
+    // "The runner is offline right now" is never a reason to bounce:
+    // the run waits in the pod.
     if matcher
-        .pod_has_runner_for_issue_principal(pod_id, issue_id, run_creator)
+        .pod_has_runner_for_issue_principal(
+            pod_id,
+            issue_id,
+            run_creator,
+            creation::is_human_triggered(triggered_by),
+        )
         .await?
     {
         return Ok(PreflightOutcome {
@@ -1247,8 +1180,8 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
 }
 
 /// The no-creator bounce shared by the continuation and Run AI paths
-/// (`:1173-1185`, `:1283-1290`): cloud / managed bounce loudly, local
-/// stays silent.
+/// (`:1173-1185`, `:1283-1290`): cloud bounces loudly, every runner
+/// value stays silent (the run waits in the pod).
 async fn bounce_no_creator<S: DispatchSeam>(
     seam: &mut S,
     issue: &IssueView,
@@ -1265,17 +1198,6 @@ async fn bounce_no_creator<S: DispatchSeam>(
             issue_id,
             triggered_by,
             REASON_NO_LLM_CONFIG,
-            now,
-            jitter_secs,
-        )
-        .await?;
-        logs.extend(bounced.logs);
-    } else if effective == AgentExecutorKind::ManagedRunner.value() {
-        let bounced = bounce_issue_no_eligible_runner(
-            seam,
-            issue_id,
-            triggered_by,
-            REASON_NO_MANAGED_RUNNER,
             now,
             jitter_secs,
         )
@@ -2209,7 +2131,6 @@ mod tests {
         roles: HashMap<Uuid, RoleVerdict>,
         llm: HashMap<Uuid, bool>,
         llm_calls: RefCell<Vec<Uuid>>,
-        enrolled: HashSet<Uuid>,
         managed_enabled: bool,
         profiles: HashMap<Uuid, LlmProfile>,
         lock_ticker_by_id: Option<Option<IssueAgentTicker>>,
@@ -2583,15 +2504,6 @@ mod tests {
             }))
         }
 
-        async fn enrolled_managed_exists(
-            &mut self,
-            _project_id: Uuid,
-            user_id: Uuid,
-            _workspace_id: Uuid,
-        ) -> Result<bool, DispatchError> {
-            Ok(self.enrolled.contains(&user_id))
-        }
-
         fn managed_runner_enabled(&self) -> bool {
             self.managed_enabled
         }
@@ -2619,6 +2531,7 @@ mod tests {
             _pod_id: Uuid,
             _issue_id: Uuid,
             _creator_id: Option<Uuid>,
+            _human: bool,
         ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
             let answer = self.answer;
             Box::pin(async move { Ok(answer) })
@@ -2761,34 +2674,6 @@ mod tests {
             line.message.ends_with(&format!("run={}", uid(0x71))),
             "{}",
             line.message
-        );
-    }
-
-    #[test]
-    fn managed_profile_reason_falls_back() {
-        let available = LlmProfile {
-            available: true,
-            reason_code: String::new(),
-        };
-        assert_eq!(
-            managed_profile_reason_code(&available),
-            ManagedRunnerReason::LLM_CONFIG_MISSING
-        );
-        let coded = LlmProfile {
-            available: false,
-            reason_code: "byok_not_supported_on_desktop".to_owned(),
-        };
-        assert_eq!(
-            managed_profile_reason_code(&coded),
-            "byok_not_supported_on_desktop"
-        );
-        let empty = LlmProfile {
-            available: false,
-            reason_code: String::new(),
-        };
-        assert_eq!(
-            managed_profile_reason_code(&empty),
-            ManagedRunnerReason::LLM_CONFIG_MISSING
         );
     }
 
@@ -3043,8 +2928,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preflight_f3_managed_chain() {
-        // F3a: no creator at all.
+    async fn preflight_f3_runner_chain() {
+        // A stale `managed_runner` value is the legacy spelling of
+        // the runner branch: the matcher alone decides, and no
+        // creator/kill-switch/profile/enrollment gate remains.
+        // F3a: no creator at all — no managed-specific bounce; the
+        // matcher answers false and the run bounces with the
+        // default body.
         let mut seam = stocked_as("8103");
         as_executor(&mut seam, "managed_runner");
         seam.backlog_target = Some(backlog_hi());
@@ -3063,14 +2953,16 @@ mod tests {
         .await
         .expect("preflight");
         assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3a_managed_no_creator"));
+        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3a_runner_no_creator"));
+        assert_eq!(seam.comments.len(), 1);
+        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_DEFAULT);
 
-        // F3b: the operator kill switch is off.
+        // F3b: a creator exists but the matcher answers false —
+        // same default bounce (no enrollment/profile/switch leg).
         let mut seam = stocked_as("8104");
         as_executor(&mut seam, "managed_runner");
         seam.backlog_target = Some(backlog_hi());
         seam.ticker = None;
-        seam.managed_enabled = false;
         let out = preflight_eligibility_or_bounce(
             &mut seam,
             fxid("8104"),
@@ -3084,77 +2976,15 @@ mod tests {
         .await
         .expect("preflight");
         assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3b_managed_disabled"));
+        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3b_runner_with_creator"));
+        assert_eq!(seam.comments.len(), 1);
+        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_DEFAULT);
 
-        // F3c: no usable desktop profile.
-        let mut seam = stocked_as("8105");
-        as_executor(&mut seam, "managed_runner");
-        seam.backlog_target = Some(backlog_hi());
-        seam.ticker = None;
-        seam.managed_enabled = true;
-        seam.profiles.insert(
-            uid(0x41),
-            LlmProfile {
-                available: false,
-                reason_code: "llm_config_missing".to_owned(),
-            },
-        );
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8105"),
-            Some(uid(0x41)),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3c_managed_no_profile"));
-
-        // F3d: nothing enrolled for this project.
-        let mut seam = stocked_as("8106");
-        as_executor(&mut seam, "managed_runner");
-        seam.backlog_target = Some(backlog_hi());
-        seam.ticker = None;
-        seam.managed_enabled = true;
-        seam.profiles.insert(
-            uid(0x41),
-            LlmProfile {
-                available: true,
-                reason_code: String::new(),
-            },
-        );
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8106"),
-            Some(uid(0x41)),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3d_managed_not_enrolled"));
-
-        // F3e: every structural gate passes — "your laptop is closed"
-        // is not one of them.
+        // F3c: the matcher answers true — proceeds with no creator
+        // gate and no comment.
         let mut seam = stocked_as("8107");
         as_executor(&mut seam, "managed_runner");
-        seam.managed_enabled = true;
-        seam.profiles.insert(
-            uid(0x41),
-            LlmProfile {
-                available: true,
-                reason_code: String::new(),
-            },
-        );
-        seam.enrolled.insert(uid(0x41));
+        let matcher = FakeMatcher { answer: true };
         let out = preflight_eligibility_or_bounce(
             &mut seam,
             fxid("8107"),
@@ -3274,7 +3104,10 @@ mod tests {
         assert_eq!(out.logs, fx_logs(BOUNCE, "B2_body_default"));
         assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_DEFAULT);
 
-        // B2b: a managed reason still takes the default body.
+        // B2b: a retired managed reason still takes the default body.
+        // #2903 removed the `no-managed-runner` bounce reason; the
+        // Django-captured case pins the renderer's default-body rule
+        // for any non-`no-llm-config` reason.
         let mut seam = bounce_case("8112");
         seam.ticker = None;
         seam.backlog_target = Some(backlog_hi());
@@ -3282,7 +3115,7 @@ mod tests {
             &mut seam,
             fxid("8112"),
             "tick",
-            REASON_NO_MANAGED_RUNNER,
+            "no-managed-runner",
             now(),
             JITTER,
         )
@@ -3626,18 +3459,28 @@ mod tests {
 
     #[tokio::test]
     async fn creator_managed_and_none() {
-        // C5: the managed enrollment leg skips the unenrolled.
+        // C5: a stale `managed_runner` value takes the machine
+        // branch like `local_runner` — no enrollment leg remains,
+        // the first LLM-capable candidate wins.
         let mut seam = FakeSeam::stocked();
         as_executor(&mut seam, "managed_runner");
-        for id in [uid(0x41), uid(0x42), uid(0x43)] {
+        let all = [uid(0x41), uid(0x42), uid(0x43)];
+        for id in all {
             seam.llm.insert(id, true);
             seam.roles.insert(id, member_roles());
         }
-        seam.enrolled.insert(uid(0x43));
+        seam.candidates = all
+            .into_iter()
+            .map(|id| CandidateUser {
+                id,
+                is_active: true,
+                is_bot: false,
+            })
+            .collect();
         let out = resolve_creator_for_trigger(&mut seam, uid(0x01), "run_ai", None)
             .await
             .expect("resolve");
-        assert_eq!(out, Some(uid(0x43)));
+        assert_eq!(out, Some(uid(0x41)));
 
         // C6: nobody qualifies.
         let mut seam = FakeSeam::stocked();

@@ -30,19 +30,18 @@ use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
-    agent_run, agent_run_event, assistant_user_llm_config, git_code_review_links, git_repositories,
-    git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
-    issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
-    workspaces,
+    agent_run, agent_run_event, assistant_user_llm_config, dev_machine, git_code_review_links,
+    git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
+    issue_labels, issue_relations, issues, labels, pod, projects, prompt_section_override, runner,
+    states, users, workspaces,
 };
 use pidash_db::orm_tx::TxConn;
 use pidash_db::pool::sea_orm_connection;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::admission::RedisAdmissionCache;
 use pidash_services::dispatch::{
-    consume_admission_token, DeferredConsume, LlmProfile, UserFlags as SvcUserFlags,
+    consume_admission_token, DeferredConsume, UserFlags as SvcUserFlags,
 };
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
@@ -561,6 +560,9 @@ impl CreationSeam for HandoffStore<'_, '_> {
             status: String,
             last_heartbeat_at: Option<Moment>,
             paused_at: Option<Moment>,
+            provisioning: String,
+            pod_dispatch: String,
+            dev_machine_id: Option<Uuid>,
         }
         let conn = TxConn::new(self.tx.inner());
         let row = runner::Entity::find_by_id(runner_id)
@@ -571,17 +573,35 @@ impl CreationSeam for HandoffStore<'_, '_> {
                 runner::Column::Status,
                 runner::Column::LastHeartbeatAt,
                 runner::Column::PausedAt,
+                runner::Column::Provisioning,
+                runner::Column::PodDispatch,
+                runner::Column::DevMachineId,
             ])
             .into_model::<RunnerRow>()
             .one(&conn)
             .await
             .map_err(Self::db)?;
+        let engine_paused = match row.as_ref().and_then(|r| r.dev_machine_id) {
+            Some(machine_id) => {
+                let machine = dev_machine::Entity::find_by_id(machine_id)
+                    .one(&conn)
+                    .await
+                    .map_err(Self::db)?;
+                machine.is_some_and(|m| {
+                    m.engine_paused_by_owner || !m.engine_auto_pause_reason.is_empty()
+                })
+            }
+            None => false,
+        };
         Ok(row.map(|row| RunnerView {
             id: row.id,
             pod_id: row.pod_id,
             status: row.status,
             last_heartbeat_at: row.last_heartbeat_at.map(|m| m.with_timezone(&Utc)),
             paused_at: row.paused_at.map(|m| m.with_timezone(&Utc)),
+            provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
+            engine_paused,
         }))
     }
 
@@ -838,13 +858,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
                 .map_err(|detail| ExecutionError::Store(CreationError::Db(detail)))?,
             None => false,
         };
-        let profile = {
-            let mapped = assistant_seams::agent_model_profile_for_user(has_key);
-            LlmProfile {
-                available: mapped.available,
-                reason_code: mapped.reason_code,
-            }
-        };
         // The driver short-circuits a missing actor before consulting
         // the closure, so only a present actor consults the seam (and a
         // missing one never pays for the overlay's reads). Clone the seam
@@ -889,7 +902,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
             ExecutionSeams {
                 has_usable_llm_config: move || has_llm,
                 toolsets: toolsets.clone(),
-                llm_profile: move || profile,
             },
         )
         .await;

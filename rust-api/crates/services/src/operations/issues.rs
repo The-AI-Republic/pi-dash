@@ -2807,6 +2807,47 @@ async fn run_write_validate(
         }
     }
 
+    // Executor translation (`normalize_issue_executor`,
+    // `issue_assignment.py:26-47`): unknown values already failed at
+    // field level; known values normalize to local_runner; the mid-flight
+    // refusal compares the normalized write against the stored value.
+    if let Some(executor) = &mut parsed.agent_executor {
+        match executor {
+            None => {
+                // Explicit clear: `str(None)` vs the stored value.
+                if let Some(current) = instance {
+                    if current.agent_executor.is_some()
+                        && issue_has_active_run(
+                            pool,
+                            &current.id.parse::<Uuid>().map_err(|_| Error::ServerError)?,
+                        )
+                        .await?
+                    {
+                        return Err(fail(ValidateError::ExecutorMidFlight));
+                    }
+                }
+            }
+            Some(value) => {
+                let Some(kind) = pidash_types::dispatch::normalize_executor_write(value) else {
+                    return Err(fail(ValidateError::ExecutorUnknown));
+                };
+                let normalized = kind.value().to_owned();
+                *value = normalized.clone();
+                if let Some(current) = instance {
+                    if current.agent_executor.as_deref() != Some(normalized.as_str())
+                        && issue_has_active_run(
+                            pool,
+                            &current.id.parse::<Uuid>().map_err(|_| Error::ServerError)?,
+                        )
+                        .await?
+                    {
+                        return Err(fail(ValidateError::ExecutorMidFlight));
+                    }
+                }
+            }
+        }
+    }
+
     // Assigned pod (`:193-216`).
     if let Some(pod) = parsed.assigned_pod {
         if let Some(pod_id) = pod {

@@ -4436,7 +4436,12 @@ async fn join_request_approve(
             )
             .await?;
         }
-        identity::set_last_workspace(&pidash_db::orm_tx::TxConn::new(&mut tx), requester_id, workspace_id).await?;
+        identity::set_last_workspace(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            requester_id,
+            workspace_id,
+        )
+        .await?;
         // The status `.save()` stamps `updated_by` with the approver
         // (`db/models/base.py:42`).
         {

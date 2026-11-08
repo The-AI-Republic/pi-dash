@@ -43,6 +43,12 @@ use serde_json::Map;
 
 use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
+use pidash_db::entity::{
+    cycle_issues, cycles, issues, module_issues, modules, pages, projects, users,
+    workspace_members, workspaces,
+};
+use pidash_db::pool::sea_orm_connection;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// Celery wire name, exactly as the beat schedule and `.delay()` call it.
 pub const TASK_NAME: &str = "pi_dash.license.bgtasks.tracer.instance_traces";
@@ -392,18 +398,90 @@ impl PgTraceDb {
     }
 
     /// `Model.objects.count()` over `table`, soft-delete-aware except for
-    /// `users` (no soft-delete manager there).
+    /// `users` (no soft-delete manager there: the `users` table has no
+    /// `deleted_at` column, so the flag is intentionally ignored there).
+    /// Unknown table names are an error, never a silent `0`.
     async fn count(
         pool: &sqlx::PgPool,
         table: &str,
         soft_deleted: bool,
     ) -> Result<i64, sqlx::Error> {
-        let sql = if soft_deleted {
-            format!("SELECT COUNT(*) FROM {table} WHERE deleted_at IS NULL")
-        } else {
-            format!("SELECT COUNT(*) FROM {table}")
+        let db = sea_orm_connection(pool);
+        let count = match table {
+            "workspaces" => {
+                let mut q = workspaces::Entity::find();
+                if soft_deleted {
+                    q = q.filter(workspaces::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "users" => users::Entity::find()
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "projects" => {
+                let mut q = projects::Entity::find();
+                if soft_deleted {
+                    q = q.filter(projects::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "issues" => {
+                let mut q = issues::Entity::find();
+                if soft_deleted {
+                    q = q.filter(issues::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "modules" => {
+                let mut q = modules::Entity::find();
+                if soft_deleted {
+                    q = q.filter(modules::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "cycles" => {
+                let mut q = cycles::Entity::find();
+                if soft_deleted {
+                    q = q.filter(cycles::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "cycle_issues" => {
+                let mut q = cycle_issues::Entity::find();
+                if soft_deleted {
+                    q = q.filter(cycle_issues::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "module_issues" => {
+                let mut q = module_issues::Entity::find();
+                if soft_deleted {
+                    q = q.filter(module_issues::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "pages" => {
+                let mut q = pages::Entity::find();
+                if soft_deleted {
+                    q = q.filter(pages::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            "workspace_members" => {
+                let mut q = workspace_members::Entity::find();
+                if soft_deleted {
+                    q = q.filter(workspace_members::Column::DeletedAt.is_null());
+                }
+                q.count(&db).await.map_err(pidash_db::orm_tx::into_sqlx)?
+            }
+            _ => {
+                return Err(sqlx::Error::Protocol(format!(
+                    "PgTraceDb::count: unknown table {table}"
+                )));
+            }
         };
-        sqlx::query_scalar(&sql).fetch_one(pool).await
+        Ok(count as i64)
     }
 
     /// `Model.objects.filter(workspace = …).count()`: every per-workspace
@@ -415,28 +493,103 @@ impl PgTraceDb {
         table: &'static str,
         workspace_id: uuid::Uuid,
     ) -> Result<i64, sqlx::Error> {
-        let sql =
-            format!("SELECT COUNT(*) FROM {table} WHERE workspace_id = $1 AND deleted_at IS NULL");
-        sqlx::query_scalar(&sql)
-            .bind(workspace_id)
-            .fetch_one(pool)
-            .await
+        let db = sea_orm_connection(pool);
+        let count = match table {
+            "projects" => projects::Entity::find()
+                .filter(projects::Column::DeletedAt.is_null())
+                .filter(projects::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "issues" => issues::Entity::find()
+                .filter(issues::Column::DeletedAt.is_null())
+                .filter(issues::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "modules" => modules::Entity::find()
+                .filter(modules::Column::DeletedAt.is_null())
+                .filter(modules::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "cycles" => cycles::Entity::find()
+                .filter(cycles::Column::DeletedAt.is_null())
+                .filter(cycles::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "cycle_issues" => cycle_issues::Entity::find()
+                .filter(cycle_issues::Column::DeletedAt.is_null())
+                .filter(cycle_issues::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "module_issues" => module_issues::Entity::find()
+                .filter(module_issues::Column::DeletedAt.is_null())
+                .filter(module_issues::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "pages" => pages::Entity::find()
+                .filter(pages::Column::DeletedAt.is_null())
+                .filter(pages::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            "workspace_members" => workspace_members::Entity::find()
+                .filter(workspace_members::Column::DeletedAt.is_null())
+                .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+                .count(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)?,
+            _ => {
+                return Err(sqlx::Error::Protocol(format!(
+                    "PgTraceDb::count_for_workspace: unknown table {table}"
+                )));
+            }
+        };
+        Ok(count as i64)
     }
 }
 
 impl TraceDb for PgTraceDb {
     async fn instance_first(&self) -> Result<Option<InstanceSnapshot>, String> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_db::license::queries::INSTANCE_FIRST_SQL)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| e.to_string())?;
-        row.map(|row| {
-            pidash_db::license::queries::map_instance_row(&row)
-                .map(InstanceSnapshot::from)
-                .map_err(|e| e.to_string())
-        })
-        .transpose()
+        let db = sea_orm_connection(&self.pool);
+        let m = pidash_db::entity::instances::Entity::find()
+            .filter(pidash_db::entity::instances::Column::DeletedAt.is_null())
+            .order_by_desc(pidash_db::entity::instances::Column::CreatedAt)
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(m.map(|m| {
+            let row = pidash_db::license::models::instance::Instance {
+                id: m.id,
+                created_at: m.created_at.with_timezone(&chrono::Utc),
+                updated_at: m.updated_at.with_timezone(&chrono::Utc),
+                created_by_id: m.created_by_id,
+                updated_by_id: m.updated_by_id,
+                deleted_at: m.deleted_at.map(|dt| dt.with_timezone(&chrono::Utc)),
+                instance_name: m.instance_name,
+                whitelist_emails: m.whitelist_emails,
+                instance_id: m.instance_id,
+                current_version: m.current_version,
+                latest_version: m.latest_version,
+                edition: m.edition,
+                domain: m.domain,
+                last_checked_at: m.last_checked_at.with_timezone(&chrono::Utc),
+                namespace: m.namespace,
+                is_telemetry_enabled: m.is_telemetry_enabled,
+                is_support_required: m.is_support_required,
+                is_setup_done: m.is_setup_done,
+                is_signup_screen_visited: m.is_signup_screen_visited,
+                is_verified: m.is_verified,
+                is_test: m.is_test,
+                is_current_version_deprecated: m.is_current_version_deprecated,
+            };
+            InstanceSnapshot::from(row)
+        }))
     }
 
     async fn global_counts(&self) -> Result<GlobalCounts, String> {
@@ -482,15 +635,16 @@ impl TraceDb for PgTraceDb {
     }
 
     async fn workspace_inputs(&self) -> Result<Vec<WorkspaceInput>, String> {
-        let rows: Vec<(uuid::Uuid, String)> =
-            // `Workspace.objects.all()`: default manager scope plus the
-            // `Meta.ordering = ("-created_at",)` span-emission order.
-            sqlx::query_as(
-                "SELECT id, slug FROM workspaces WHERE deleted_at IS NULL ORDER BY created_at DESC",
-            )
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let db = sea_orm_connection(&self.pool);
+        let rows: Vec<(uuid::Uuid, String)> = workspaces::Entity::find()
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_desc(workspaces::Column::CreatedAt)
+            .select_only()
+            .columns([workspaces::Column::Id, workspaces::Column::Slug])
+            .into_tuple::<(uuid::Uuid, String)>()
+            .all(&db)
+            .await
+            .map_err(|e| e.to_string())?;
         let mut inputs = Vec::with_capacity(rows.len());
         for (id, slug) in rows {
             inputs.push(WorkspaceInput {

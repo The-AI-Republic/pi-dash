@@ -1854,6 +1854,68 @@ mod tests {
     }
 
     #[test]
+    fn stall_candidate_fixture_parity_includes_pod_dispatch() {
+        let recorded = fixture()["reconcile_stalled_runs"]["candidate_sql"][0]
+            .as_str()
+            .expect("candidate_sql[0]")
+            .to_owned();
+        let select_list = recorded
+            .strip_prefix("SELECT ")
+            .and_then(|rest| rest.split_once(" FROM "))
+            .map(|(list, _)| list)
+            .expect("SELECT list");
+        let entries: Vec<&str> = select_list.split(", ").collect();
+        let agent_entries: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.starts_with("\"agent_run\""))
+            .copied()
+            .collect();
+        let runner_entries: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.starts_with("\"runner\""))
+            .copied()
+            .collect();
+        assert_eq!(agent_entries.len(), 39, "agent_run columns");
+        assert_eq!(
+            runner_entries.len(),
+            32,
+            "runner columns — pod_dispatch must be present"
+        );
+        let provisioning = runner_entries
+            .iter()
+            .position(|e| *e == "\"runner\".\"provisioning\"")
+            .expect("provisioning");
+        let pod_dispatch = runner_entries
+            .iter()
+            .position(|e| *e == "\"runner\".\"pod_dispatch\"")
+            .expect("pod_dispatch must be in fixture");
+        let visibility = runner_entries
+            .iter()
+            .position(|e| *e == "\"runner\".\"visibility\"")
+            .expect("visibility");
+        assert!(
+            provisioning < pod_dispatch && pod_dispatch < visibility,
+            "pod_dispatch between provisioning and visibility (Django field order #2903)"
+        );
+        let expected_runner: Vec<String> = pidash_db::runner_enroll::columns::runner::COLUMNS
+            .iter()
+            .map(|c| format!("\"runner\".\"{c}\""))
+            .collect();
+        assert_eq!(
+            runner_entries, expected_runner,
+            "runner column order must match Django field order"
+        );
+        let expected_agent: Vec<String> = pidash_db::runner_runs::agent_run::COLUMNS
+            .iter()
+            .map(|c| format!("\"agent_run\".\"{c}\""))
+            .collect();
+        assert_eq!(
+            agent_entries, expected_agent,
+            "agent_run column order must match Django field order"
+        );
+    }
+
+    #[test]
     fn reconcile_candidate_statement_shape() {
         let sql = pg_selector(reconcile_terminal_candidate_select());
         assert!(sql.starts_with(

@@ -2917,6 +2917,9 @@ mod tests {
                 status: "online".to_owned(),
                 last_heartbeat_at: Some(frozen_now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))

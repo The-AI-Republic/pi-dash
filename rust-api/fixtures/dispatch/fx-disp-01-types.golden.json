@@ -96,11 +96,7 @@
   },
   "cloud_agent_output": {
     "outcome_enum": {
-      "enum": [
-        "completed",
-        "blocked",
-        "noop"
-      ],
+      "enum": ["completed", "blocked", "noop"],
       "title": "Outcome",
       "type": "string"
     },
@@ -127,19 +123,12 @@
       "title": "Limitations",
       "type": "array"
     },
-    "required": [
-      "outcome",
-      "summary"
-    ],
+    "required": ["outcome", "summary"],
     "example_dump": {
       "outcome": "completed",
       "summary": "did it",
-      "evidence": [
-        "e1"
-      ],
-      "limitations": [
-        "l1"
-      ]
+      "evidence": ["e1"],
+      "limitations": ["l1"]
     },
     "constraint_probes": {
       "bad_outcome": "ValidationError",
@@ -165,24 +154,16 @@
     "code_attr": "managed_runner_disabled"
   },
   "agent_executor_kind": {
-    "values": [
-      "local_runner",
-      "cloud_agent",
-      "managed_runner"
-    ],
+    "values": ["local_runner", "cloud_agent", "managed_runner"],
     "labels": {
       "local_runner": "Local Runner",
       "cloud_agent": "Pi Dash Cloud Agent",
       "managed_runner": "Pi Dash Agent"
     },
-    "machine_executors": [
-      "local_runner",
-      "managed_runner"
-    ]
+    "machine_executors": ["local_runner", "managed_runner"]
   },
   "get_default_agent_executor": {
-    "valid_setting_passthrough": "local_runner",
-    "invalid_setting_falls_back_to_local_runner": "local_runner",
-    "cloud_setting_passthrough": "cloud_agent"
+    "result": "local_runner",
+    "note": "#2903: DEFAULT_AGENT_EXECUTOR ignored; always local_runner"
   }
 }

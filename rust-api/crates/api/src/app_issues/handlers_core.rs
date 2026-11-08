@@ -2766,11 +2766,11 @@ async fn run_validate(
     }
     // The executor mid-flight `has_active_run` probe: Django evaluates the
     // property per access, so pod-reassign + mid-flight issue the SAME
-    // query TWICE when both arms are reached.
-    let midflight_reached = !pod_returns
-        && agent_executor.is_some()
-        && instance.is_some_and(|row| Some(row.agent_executor.as_deref()) != agent_executor)
-        && !executor_returns;
+    // query TWICE when both arms are reached. #2903 compares the
+    // normalized write against the stored value, so the probe issues on
+    // any executor write against an instance (even on caller normalization).
+    let midflight_reached =
+        !pod_returns && agent_executor.is_some() && instance.is_some() && !executor_returns;
     let run_probe_two = if midflight_reached {
         Some(
             has_active_run(pool, &instance_id)
@@ -4016,7 +4016,8 @@ fn assemble_new_issue(
             Some(Validated::Pod(pod)) => Some(pod.id),
             _ => None,
         },
-        agent_executor: v_text(validated, "agent_executor").map(str::to_owned),
+        // The normalized write (#2903): deprecated choices land local.
+        agent_executor: filtered.agent_executor.clone().flatten(),
     };
     Ok((
         row,
@@ -4059,7 +4060,9 @@ fn apply_validated_to_existing(
         };
     }
     if validated.contains_key("agent_executor") {
-        row.agent_executor = v_text(validated, "agent_executor").map(str::to_owned);
+        // `attrs["agent_executor"]` holds the normalized write (#2903):
+        // deprecated values land as local_runner.
+        row.agent_executor = filtered.agent_executor.clone().flatten();
     }
     if let Some(priority) = v_text(validated, "priority") {
         row.priority = priority.to_owned();
@@ -5967,10 +5970,10 @@ mod tests {
                 "INSERT INTO pod (id, project_id, deleted_at) VALUES ('{the_pod}', '{project}', now())"
             ),
             format!(
-                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, provisioning, status, \
+                "INSERT INTO runner (id, owner_id, workspace_id, pod_id, provisioning, pod_dispatch, status, \
                  last_heartbeat_at, revoked_at, paused_at) VALUES \
-                 (gen_random_uuid(), '{member}', '{ws}', '{the_pod}', 'desktop_bundled', 'online', now(), NULL, NULL), \
-                 (gen_random_uuid(), '{admin}', '{ws}', '{the_pod}', 'desktop_bundled', 'online', now() - interval '1 hour', NULL, now())"
+                 (gen_random_uuid(), '{member}', '{ws}', '{the_pod}', 'desktop_bundled', 'pinned_only', 'online', now(), NULL, NULL), \
+                 (gen_random_uuid(), '{admin}', '{ws}', '{the_pod}', 'desktop_bundled', 'pinned_only', 'online', now() - interval '1 hour', NULL, now())"
             ),
             format!(
                 "INSERT INTO agent_run (id, work_item_id, status) VALUES \
