@@ -11,8 +11,8 @@
 //! daemon handler (`runner/src/ipc/chat.rs`), which drives the built-in engine
 //! and streams `Response::Chat*` frames back on the same connection.
 //!
-//! Two directions, matching the transport contract the `desktop-overlay/` seam
-//! (slice 4, [`ChatTransport`]) expects:
+//! Two directions, matching the local-chat transport contract the webview
+//! consumes (slice 4):
 //!
 //! * **UI → engine** — [`chat_warm`], [`chat_send`], [`chat_cancel`],
 //!   [`chat_close`], [`chat_decide`] are Tauri `invoke` commands. `warm`/`send`
@@ -23,7 +23,7 @@
 //!   webview as a Tauri event named [`CHAT_FRAME_EVENT`]. Transport failures the
 //!   webview can't otherwise see (daemon not running, connection dropped) surface
 //!   as [`CHAT_ERROR_EVENT`]. Frames self-identify by `chat_session_id`, so the
-//!   overlay routes them to the right session without a per-session channel.
+//!   webview routes them to the right session without a per-session channel.
 //!
 //! Scope note: this slice lands the *transport*. Local SQLite history
 //! (slice 3, `chat_history`) lives on its own branch and is wired in where the
@@ -46,7 +46,7 @@ pub const CHAT_FRAME_EVENT: &str = "chat://frame";
 
 /// Tauri event carrying a transport-level failure (daemon unreachable, dropped
 /// connection) that never produced an engine `ChatFailed` frame. Keyed by
-/// `chat_session_id` so the overlay can fail exactly that session.
+/// `chat_session_id` so the webview can fail exactly that session.
 pub const CHAT_ERROR_EVENT: &str = "chat://error";
 
 /// Payload for [`CHAT_ERROR_EVENT`].
