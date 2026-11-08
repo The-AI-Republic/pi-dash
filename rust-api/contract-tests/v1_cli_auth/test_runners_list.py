@@ -74,7 +74,12 @@ def test_list_assignable_for_adds_fields(api, seed, tenant_a, db):
     token = seed.api_token(tenant_a["user"]["id"], tenant_a["workspace"]["id"])
     runner, pod, project = _seed_runner(seed, tenant_a)
     # Issue created by the runner owner in the same project.
-    issue_id = str(seed.issue(tenant_a["user"]["id"], tenant_a["workspace"]["id"], project))
+    issue_id = str(seed.issue(tenant_a["workspace"]["id"], project))
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET created_by_id = %s WHERE id = %s",
+            (tenant_a["user"]["id"], issue_id),
+        )
     resp = _get(
         api,
         tenant_a["workspace"]["slug"],

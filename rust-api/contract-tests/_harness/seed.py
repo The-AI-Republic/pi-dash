@@ -120,6 +120,29 @@ class Seed:
                     "DELETE FROM engine_credential WHERE user_id = ANY(%s)",
                     (users,),
                 )
+                # Bound dev machines (runner.dev_machine_id) and live
+                # state (runner_live_state.runner_id) reference rows the
+                # tracked deletes below remove later; sweep every table
+                # keyed on runner (or on issues/runner joins) for owned
+                # runners first so neither the dev_machine nor the runner
+                # delete can hit foreign keys.
+                for table, col in (
+                    ("runner_live_state", "runner_id"),
+                    ("runner_session", "runner_id"),
+                    ("runner_force_refresh", "runner_id"),
+                    ("agent_run", "runner_id"),
+                    ("agent_run", "pinned_runner_id"),
+                    ("agent_chat_session", "runner_id"),
+                    ("issues", "assigned_runner_id"),
+                ):
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE {col} IN "
+                        "(SELECT id FROM runner WHERE owner_id = ANY(%s))",
+                        (users,),
+                    )
+                cur.execute(
+                    "DELETE FROM runner WHERE owner_id = ANY(%s)", (users,)
+                )
                 cur.execute(
                     "DELETE FROM dev_machine WHERE owner_id = ANY(%s)",
                     (users,),

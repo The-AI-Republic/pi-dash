@@ -433,15 +433,16 @@ const E8_BLOCKING_STATUSES: &[&str] = &[
 /// `deleted_at IS NULL` scope.
 async fn workspace_by_slug(pool: &PgPool, slug: &str) -> Result<Option<Uuid>, Response> {
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let row: Option<workspaces::Model> = workspaces::Entity::find()
+    let row: Option<Uuid> = workspaces::Entity::find()
         .select_only()
         .column(workspaces::Column::Id)
         .filter(workspaces::Column::Slug.eq(slug))
         .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
         .one(&db)
         .await
         .map_err(|_| server_error())?;
-    Ok(row.map(|m| m.id))
+    Ok(row)
 }
 
 /// `is_busy` (`issue_assignment.py:65-70`): any run the runner is serving
