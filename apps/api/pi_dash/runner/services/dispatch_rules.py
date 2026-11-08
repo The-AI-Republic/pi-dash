@@ -144,6 +144,7 @@ def release_locality_pins(runner_ids: Iterable) -> int:
             pinned_runner_id__in=runner_ids,
             status=AgentRunStatus.QUEUED,
             executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+            pin_kind="locality",
         )
     )
     pod_ids = set()
