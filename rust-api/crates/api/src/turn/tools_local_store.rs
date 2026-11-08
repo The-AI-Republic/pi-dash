@@ -620,8 +620,8 @@ impl PgToolStore {
         &self,
         tx: &mut pidash_db::tx::Transaction<'_>,
     ) -> Result<(), StoreError> {
-        // raw-sql: a named SAVEPOINT is the preview-rollback shape the
-        // fused drives keep (no nested-begin escape on `Transaction`).
+        // A named SAVEPOINT is the preview-rollback shape the
+        // raw-sql: named SAVEPOINT is the preview-rollback shape the fused drives keep; no nested-begin escape on Transaction.
         sqlx::query("SAVEPOINT turn_preflight_probe")
             .execute(&mut **tx.inner())
             .await?;
@@ -1870,7 +1870,7 @@ impl ToolStore for PgToolStore {
                 )
                 .to_owned();
             pidash_db::orm_tx::TxConn::new(&mut tx)
-                .execute_unprepared(&stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder))
+                .execute_unprepared(&stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder)) // raw-sql: pg_advisory_xact_lock is the D-37 repair-precedent advisory lock; not an entity query.
                 .await
                 .map_err(orm_err)?;
         }
