@@ -264,6 +264,57 @@ fn relation_alias(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Map a legacy `issue_filters` predicate name to the relation alias it
+/// references (for conditional JOIN promotion). Returns the alias if the
+/// predicate filters through that relation; `is_null` predicates are
+/// nullable references (LEFT join), `__in` predicates are positive
+/// references (LEFT in the current port, kept LEFT for parity with the
+/// legacy-never-upgrades rule, but still a join).
+fn legacy_alias_for_predicate(name: &str) -> Option<&'static str> {
+    if let Some(path) = name.strip_suffix("__isnull") {
+        return Some(match path {
+            "labels" | "label_issue__deleted_at" => "label_issue",
+            "assignees" | "issue_assignee__deleted_at" => "issue_assignee",
+            "issue_cycle__cycle_id" | "issue_cycle__deleted_at" => "issue_cycle",
+            "issue_module__module_id" | "issue_module__deleted_at" => "issue_module",
+            "issue_subscribers__deleted_at" => "issue_subscribers",
+            "issue_mention__mention__id" => "issue_mention",
+            _ => return None,
+        });
+    }
+    Some(match name {
+        "labels__in" => "label_issue",
+        "assignees__in" => "issue_assignee",
+        "issue_mention__mention__id__in" => "issue_mention",
+        "issue_cycle__cycle_id__in" => "issue_cycle",
+        "issue_module__module_id__in" => "issue_module",
+        "issue_subscribers__subscriber_id__in" => "issue_subscribers",
+        "issue_intake__status__in" => "issue_intake",
+        _ => return None,
+    })
+}
+
+/// Compute which relation aliases legacy predicates reference (for
+/// conditional joins). Uses the same `issue_filters_get` dispatcher the
+/// condition builder uses.
+fn legacy_referenced_aliases(query: &QueryMap) -> BTreeSet<&'static str> {
+    let flat: HashMap<String, String> = query
+        .keys()
+        .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
+        .collect();
+    let today = chrono::Utc::now().date_naive();
+    let Ok(legacy) = pidash_db::issue_filters::issue_filters_get(&flat, "", today) else {
+        return BTreeSet::new();
+    };
+    let mut out = BTreeSet::new();
+    for (name, _) in legacy.predicates() {
+        if let Some(alias) = legacy_alias_for_predicate(name) {
+            out.insert(alias);
+        }
+    }
+    out
+}
+
 /// The legacy `issue_filters(query_params, "GET")` predicates, ANDed in
 /// order. Relative dates resolve against the UTC date
 /// (`timezone.now().date()`); the `__date` truncations use `tz`.
@@ -313,9 +364,20 @@ fn finish_set(
     }
     let mut referenced = Vec::new();
     if layers.rich || layers.legacy {
+        let legacy_used = if layers.legacy {
+            legacy_referenced_aliases(query)
+        } else {
+            BTreeSet::new()
+        };
         for (table, alias) in RELATION_JOINS {
             let grouped = group_join_alias(group_by, sub_group_by, alias);
-            let inner = used.contains(alias) || grouped;
+            let rich = used.contains(alias);
+            let legacy_need = legacy_used.contains(alias);
+            let needs_join = rich || grouped || legacy_need;
+            if !needs_join {
+                continue;
+            }
+            let inner = rich || grouped;
             if inner {
                 referenced.push(*alias);
             }
@@ -1356,26 +1418,58 @@ pub fn grouped_page(
     offset: i64,
     stop: i64,
 ) -> Result<SelectStatement, Denial> {
-    let mut window = WindowStatement::new();
-    window.add_partition_by(group_expr(group_by)?);
-    if let Some(sub) = sub_group_by {
-        window.add_partition_by(group_expr(sub)?);
-    }
-    window
-        .order_by_expr_with_nulls(key.expr.clone(), key.order(), NullOrdering::Last)
-        .order_by((a("issue"), issues::Column::CreatedAt), Order::Desc);
+    // G01: DISTINCT before window. Fan-out rows from unconditional
+    // relation joins share identical output columns; dedup must happen
+    // before `ROW_NUMBER()` or the window assigns different numbers
+    // to duplicates and inflates `count`. We build a DISTINCT
+    // subselect (inner) with `__order_key`, then window over it so
+    // one row per issue per group bucket is numbered.
     let mut inner = set.select();
     key.joins.apply(&mut inner);
-    inner.distinct();
     annotate(&mut inner, ann);
     group_member(&mut inner, group_by);
-    inner
-        .expr_as(key.expr.clone(), a("__order_key"))
-        .expr_window_as(Func::cust(a("ROW_NUMBER")), window, a("__rn"));
+    if let Some(sub) = sub_group_by {
+        group_member(&mut inner, sub);
+    }
+    inner.expr_as(key.expr.clone(), a("__order_key")).distinct();
+    // Partition/order on the deduped output columns (`__dedup` alias):
+    // each group field's output column name equals the field name for
+    // every group_by the engine accepts (labels__id, assignees__id,
+    // issue_module__module_id, state_id, priority, cycle_id,
+    // project_id, state__group, target_date, start_date, created_by).
+    // `__order_key` and `created_at` carry the global order.
+    let mut window = WindowStatement::new();
+    if group_expr(group_by).is_err() {
+        return Err(Denial::ServerError);
+    }
+    if let Some(sub) = sub_group_by {
+        if group_expr(sub).is_err() {
+            return Err(Denial::ServerError);
+        }
+    }
+    window.add_partition_by(Expr::col((Alias::new("__dedup"), Alias::new(group_by))).into());
+    if let Some(sub) = sub_group_by {
+        window.add_partition_by(Expr::col((Alias::new("__dedup"), Alias::new(sub))).into());
+    }
+    window
+        .order_by_expr_with_nulls(
+            Expr::col((Alias::new("__dedup"), Alias::new("__order_key"))).into(),
+            key.order(),
+            NullOrdering::Last,
+        )
+        .order_by(
+            (Alias::new("__dedup"), Alias::new("created_at")),
+            Order::Desc,
+        );
+    let mut windowed = Query::select();
+    windowed
+        .column(Asterisk)
+        .expr_window_as(Func::cust(a("ROW_NUMBER")), window, a("__rn"))
+        .from_subquery(inner, a("__dedup"));
     let mut outer = Query::select();
     outer
         .column(Asterisk)
-        .from_subquery(inner, a("__w"))
+        .from_subquery(windowed, a("__w"))
         .and_where(col("__w", a("__rn")).gt(offset))
         .and_where(col("__w", a("__rn")).lte(stop))
         .order_by_with_nulls(
@@ -1437,6 +1531,7 @@ pub fn flat_list_rows(
     orig_param: &str,
 ) -> Result<SelectStatement, Denial> {
     let mut stmt = set.select();
+    stmt.distinct();
     let joins = flat_order(&mut stmt, out_param, orig_param)?;
     joins.apply(&mut stmt);
     annotate(
@@ -1455,6 +1550,7 @@ pub fn flat_list_rows(
 /// The flat `fields=`/`expand=` branch rows, `-created_at`.
 pub fn serializer_rows(set: &IssueSet) -> SelectStatement {
     let mut stmt = set.select();
+    stmt.distinct();
     serializer_columns(&mut stmt);
     stmt.order_by((a("issue"), issues::Column::CreatedAt), Order::Desc);
     stmt
@@ -1464,6 +1560,7 @@ pub fn serializer_rows(set: &IssueSet) -> SelectStatement {
 /// assignee filter, plus `description_html`, by `updated_at`.
 pub fn v2_rows(set: &IssueSet, limit: i64, offset: i64) -> Result<SelectStatement, Denial> {
     let mut stmt = set.select();
+    stmt.distinct();
     annotate(
         &mut stmt,
         Annotations {
@@ -1725,7 +1822,8 @@ mod tests {
         assert!(
             text.contains(r#""issue"."created_by_id" = '00000000-0000-0000-0000-000000000000'"#)
         );
-        // Every relation joins LEFT when no rich leaf filters through it.
+        // Conditional joins: with no rich/legacy filter and no group,
+        // no relation joins are rendered (intake stays for count_filter).
         for (table, alias) in [
             ("issue_assignees", "issue_assignee"),
             ("cycle_issues", "issue_cycle"),
@@ -1733,13 +1831,13 @@ mod tests {
             ("issue_mentions", "issue_mention"),
             ("issue_labels", "label_issue"),
             ("issue_subscribers", "issue_subscribers"),
-            ("intake_issues", "issue_intake"),
         ] {
             assert!(
-                text.contains(&format!(r#"LEFT JOIN "{table}" AS "{alias}""#)),
-                "{alias}"
+                !text.contains(&format!(r#""{table}" AS "{alias}""#)),
+                "unexpected join for {alias} in {text}"
             );
         }
+        assert!(text.contains(r#"LEFT JOIN "intake_issues" AS "issue_intake""#));
         assert!(set.referenced.is_empty());
         // Detail and NO_GUEST skip the guest scope; V2 renders no joins.
         let detail = issue_set(
@@ -1796,8 +1894,11 @@ mod tests {
         let text = sql(&count_distinct(&set));
         assert!(text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#));
         assert!(text.contains(r#"INNER JOIN "issue_assignees" AS "issue_assignee""#));
-        assert!(text.contains(r#"LEFT JOIN "cycle_issues" AS "issue_cycle""#));
-        // Legacy predicates never upgrade a join.
+        // Unreferenced relations are skipped (G01 conditional joins).
+        assert!(!text.contains(r#""issue_assignees" AS "issue_assignee" AND"#));
+        // Cycle join is skipped when not referenced; only intake stays.
+        assert!(!text.contains(r#""cycle_issues" AS "issue_cycle""#));
+        // Legacy predicates keep LEFT joins but only for the referenced alias.
         let legacy = query(&[("labels", "00000000-0000-0000-0000-000000000001")]);
         let set = issue_set(
             &gate(false),
@@ -1811,7 +1912,11 @@ mod tests {
         )
         .expect("set");
         assert!(set.referenced.is_empty());
-        assert!(sql(&count_distinct(&set)).contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#));
+        let legacy_text = sql(&count_distinct(&set));
+        assert!(legacy_text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#));
+        // Other relations are skipped for a labels-only legacy filter.
+        assert!(!legacy_text.contains(r#""issue_assignees" AS "issue_assignee""#));
+        assert!(!legacy_text.contains(r#""cycle_issues" AS "issue_cycle""#));
     }
 
     #[test]
@@ -1902,9 +2007,16 @@ mod tests {
         let page = sql(
             &grouped_page(&set, "labels__id", Some("priority"), ann, &key, 0, 3).expect("page"),
         );
-        assert!(page.contains(r#"ROW_NUMBER() OVER ( PARTITION BY "label_issue"."label_id", "issue"."priority" ORDER BY "issue"."created_at" DESC NULLS LAST, "issue"."created_at" DESC ) AS "__rn""#), "{page}");
+        // G01: window over deduped subquery, partitions on output columns.
+        assert!(
+            page.contains(
+                r#"ROW_NUMBER() OVER ( PARTITION BY "__dedup"."labels__id", "__dedup"."priority"#
+            ),
+            "{page}"
+        );
         assert!(page.contains(r#""label_issue"."label_id" AS "labels__id""#));
         assert!(page.contains(r#"WHERE "__w"."__rn" > 0 AND "__w"."__rn" <= 3"#));
+        assert!(page.contains("FROM (SELECT DISTINCT"), "{page}");
         let totals = sql(&sub_totals(&set, "labels__id", "priority").expect("totals"));
         assert!(totals.contains(r#"COUNT(DISTINCT (CASE WHEN"#), "{totals}");
         assert!(totals.ends_with(r#"GROUP BY "bucket", "sub""#));

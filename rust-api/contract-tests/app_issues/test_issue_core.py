@@ -463,3 +463,126 @@ def test_destroy_triage_state_issue(clients, seed, db_conn):
         with db_conn.cursor() as cur:
             cur.execute("DELETE FROM issues WHERE id = %s", (issue_id,))
             cur.execute("DELETE FROM states WHERE id = %s", (state_id,))
+
+def test_grouped_fanout_deduplicated(clients, seed, db_conn):
+    """G01: issues with multiple assignees/labels must not fan out.
+
+    Seeds an issue with two assignees and two labels (fan-out product 4)
+    and asserts the grouped/list counts are identical to Django's
+    distinct one-row-per-issue behaviour. Before the fix Rust's
+    unconditional LEFT JOINs fan out (count 7 vs 4) and issues/list/
+    returns 4 rows for the single id.
+    """
+    import uuid
+    from datetime import datetime, timezone
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    now = datetime.now(timezone.utc)
+    fanout_id = str(uuid.uuid4())
+    with db_conn.cursor() as cur:
+        # Use get_database_url? db_conn is autocommit already
+        cur.execute(
+            "INSERT INTO issues (created_at, updated_at, id, name,"
+            " description_json, priority, sequence_id, created_by_id,"
+            " project_id, state_id, workspace_id, description_html,"
+            " sort_order, point, completed_at, is_draft, git_work_branch,"
+            " workpad, complexity_score)"
+            " VALUES (%s,%s,%s,%s,'{}','high',999,%s,%s,%s,%s,'',0.0,NULL,"
+            " NULL,false,'','',0)",
+            (now, now, fanout_id, "Fanout probe", seed["admin"],
+             seed["project"], seed["state_backlog"], seed["ws"]),
+        )
+        # two assignees
+        for assignee_key in ("member", "guest"):
+            cur.execute(
+                "INSERT INTO issue_assignees (created_at, updated_at, id, assignee_id,"
+                " created_by_id, issue_id, project_id, updated_by_id, workspace_id)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (now, now, str(uuid.uuid4()), seed[assignee_key],
+                 seed["admin"], fanout_id, seed["project"], seed["admin"],
+                 seed["ws"]),
+            )
+        # two labels
+        for label_key in ("label1", "label2"):
+            cur.execute(
+                "INSERT INTO issue_labels (created_at, updated_at, id, created_by_id,"
+                " issue_id, label_id, project_id, updated_by_id, workspace_id)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (now, now, str(uuid.uuid4()), seed["admin"], fanout_id,
+                 seed[label_key], seed["project"], seed["admin"], seed["ws"]),
+            )
+        # two subscribers as well (also M2M fan-out source)
+        for sub_key in ("member", "guest"):
+            cur.execute(
+                "INSERT INTO issue_subscribers (created_at, updated_at, id,"
+                " created_by_id, issue_id, project_id, subscriber_id, updated_by_id,"
+                " workspace_id)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (now, now, str(uuid.uuid4()), seed["admin"], fanout_id,
+                 seed["project"], seed[sub_key], seed["admin"], seed["ws"]),
+            )
+    try:
+        # issues/list/ must return one row for the fanout id
+        resp = admin.get(f"{_base(ws, pid)}/issues/list/?issues={fanout_id}")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert isinstance(body, list), body
+        # Before fix: 2 assignees * 2 labels * 2 subscribers = 8 rows
+        # After fix: 1 row (distinct)
+        assert len(body) == 1, f"issues/list fan-out: got {len(body)} rows: {body}"
+        assert body[0]["id"] == fanout_id
+
+        # Grouped by state_id: seed list has 3 visible + fanout = 4
+        for group in ("state_id", "priority", "state__group"):
+            resp = admin.get(f"{_base(ws, pid)}/issues/?group_by={group}")
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+            # count is window length; total_results is total distinct count
+            assert data["count"] == 4, (
+                f"group_by={group} count inflated: {data['count']} vs 4"
+            )
+            assert data["total_results"] == 4, (
+                f"group_by={group} total_results {data['total_results']} vs 4"
+            )
+            assert data["total_count"] == 4
+            # results is a dict bucket -> list; flatten and check no dup ids
+            results = data["results"]
+            assert isinstance(results, dict), f"expected dict results for group_by={group}: {results}"
+            all_ids = []
+            for bucket, rows in results.items():
+                assert isinstance(rows, list), (group, bucket, rows)
+                for row in rows:
+                    all_ids.append(row["id"])
+            assert len(all_ids) == 4, (
+                f"group_by={group} fan-out rows {all_ids}"
+            )
+            assert len(set(all_ids)) == 4, (
+                f"group_by={group} duplicate ids {all_ids}"
+            )
+            assert fanout_id in all_ids
+
+        # Grouped by state_id + sub_group_by priority
+        resp = admin.get(
+            f"{_base(ws, pid)}/issues/?group_by=state_id&sub_group_by=priority"
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["count"] == 4, f"sub-grouped count {data['count']} vs 4"
+        assert data["total_results"] == 4
+        results = data["results"]
+        assert isinstance(results, dict)
+        all_ids = []
+        for bucket, subdict in results.items():
+            assert isinstance(subdict, dict), (bucket, subdict)
+            for subbucket, rows in subdict.items():
+                for row in rows:
+                    all_ids.append(row["id"])
+        assert len(all_ids) == 4, f"sub-grouped fan-out {all_ids}"
+        assert len(set(all_ids)) == 4
+        assert fanout_id in all_ids
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute("DELETE FROM issue_assignees WHERE issue_id = %s", (fanout_id,))
+            cur.execute("DELETE FROM issue_labels WHERE issue_id = %s", (fanout_id,))
+            cur.execute("DELETE FROM issue_subscribers WHERE issue_id = %s", (fanout_id,))
+            cur.execute("DELETE FROM issues WHERE id = %s", (fanout_id,))
