@@ -18,9 +18,33 @@ import { APIService } from "@/services/api.service";
  * Server-side wiring: see ``apps/api/pi_dash/runner/views/runs.py``
  * ``_post_run_ai`` (gated on ``triggered_by === "run_ai"``).
  */
+/** Run-creation refusal (§11.2, §23.3): 409 with reason + options. */
+export type TRunRefusal = {
+  error: string;
+  reason:
+    | "assigned_runner_offline"
+    | "assigned_runner_paused"
+    | "assigned_runner_not_owner"
+    | "pod_once_not_allowed"
+    | "pod_once_not_applicable"
+    | "no_eligible_runner_in_pod"
+    | "active_run_exists"
+    | "dedicated_pin_not_releasable"
+    | "dedicated_runner_unavailable"
+    | string;
+  pause_reason?: string | null;
+  runner?: string | null;
+  runner_name?: string | null;
+  pod?: string | null;
+  pod_name?: string | null;
+  options?: string[];
+};
+
 export type TRunAiPayload = {
   workspace: string;
   work_item: string;
+  /** Run this once on any runner in the issue's pod (§23.3). */
+  pin?: "pod_once";
 };
 
 /**
@@ -35,6 +59,7 @@ export type TRunAiPayload = {
 export type TCommentAndRunPayload = {
   workspace: string;
   work_item: string;
+  pin?: "pod_once";
 };
 
 export type TAgentRun = {
