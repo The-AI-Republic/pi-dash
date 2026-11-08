@@ -54,9 +54,9 @@ export function useLivePageDocument(
   storedHtml: string,
   scope: PageAssetScope
 ): LivePageDocument {
-  const { workspaceSlug, projectId } = scope;
+  const { workspaceSlug, projectId, apiBaseUrl } = scope;
   const [document, setDocument] = React.useState<PageDocument>(() =>
-    parsePageDocument(storedHtml, { workspaceSlug, projectId })
+    parsePageDocument(storedHtml, { workspaceSlug, projectId, apiBaseUrl })
   );
   // Once the body region has painted with content, the canvas is the only
   // source of truth: a later read without a body (a loader swap, a remount
@@ -71,22 +71,23 @@ export function useLivePageDocument(
   // A canvas whose body has not painted yet (cold load, no editor) leaves
   // the stored document in place instead of reporting empty.
   const read = React.useCallback((): void => {
+    const assetScope: PageAssetScope = { workspaceSlug, projectId, apiBaseUrl };
     const canvas = canvasRef.current;
     if (canvas === null) {
       if (bodyPaintedRef.current) return;
-      setDocument(parsePageDocument(storedHtml, { workspaceSlug, projectId }));
+      setDocument(parsePageDocument(storedHtml, assetScope));
       return;
     }
     const body = pageBodyElement(canvas);
     if (body === null || body.innerHTML.trim() === "") {
       if (bodyPaintedRef.current) return;
       const painted = body === null ? canvas.innerHTML : storedHtml;
-      setDocument(parsePageDocument(painted.trim() === "" ? storedHtml : painted, { workspaceSlug, projectId }));
+      setDocument(parsePageDocument(painted.trim() === "" ? storedHtml : painted, assetScope));
       return;
     }
     bodyPaintedRef.current = true;
-    setDocument(parsePageDocument(body.innerHTML, { workspaceSlug, projectId }));
-  }, [canvasRef, storedHtml, workspaceSlug, projectId]);
+    setDocument(parsePageDocument(body.innerHTML, assetScope));
+  }, [canvasRef, storedHtml, workspaceSlug, projectId, apiBaseUrl]);
 
   React.useEffect(() => {
     read();

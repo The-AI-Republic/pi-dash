@@ -51,8 +51,9 @@ export interface TitleBarApi {
   setTitle(title: string): void;
   /**
    * True when the shell draws macOS traffic lights over the page, so the
-   * title bar must indent its leading content. False on other platforms;
-   * the web platform exposes no window capability at all.
+   * title bar must indent its leading content. The shell keeps the standard
+   * native title bar, so this is false on every platform today; the web
+   * platform exposes no window capability at all.
    */
   readonly trafficLightInset: boolean;
 }
@@ -74,57 +75,172 @@ export interface DeepLinkApi {
   onOpenUrl(callback: (url: string) => void): Unsubscribe;
 }
 
-/** What the host self-check reports: which bundled pieces exist, and this machine's label. */
-export interface AgentHostCheck {
-  runnerPresent: boolean;
-  enginePresent: boolean;
-  hostLabel: string;
+/**
+ * The app's signed-in account, as the shell classifies the daemon for it
+ * (`daemon.rs` `AppIdentity`, camelCase on the wire).
+ */
+export interface AgentAppIdentity {
+  userId: string;
+  email?: string | undefined;
+  /** The cloud the app is signed in to (its API origin). */
+  cloudUrl: string;
+}
+
+/** The engine's state as the daemon reports it (`pidash-ipc`, snake_case). */
+export type DaemonEngineState = "available" | "signed_out" | "expiring" | "unavailable";
+
+/** The engine's sign-in state, mirrored from the server per machine. */
+export type DaemonEngineSignInState = "never" | "active" | "expiring" | "expired" | "signed_out" | "revoked";
+
+export interface DaemonEngineStatus {
+  state: DaemonEngineState;
+  reason_code?: string | undefined;
+  sign_in_state: DaemonEngineSignInState;
+  credential_expires_at?: string | undefined;
+  model?: string | undefined;
+}
+
+/** The daemon's `Hello`, as the shell relays it. */
+export interface DaemonHello {
+  daemon_version: string;
+  ipc_version: number;
+  cloud_url: string;
+  account?: { user_id?: string | undefined; email?: string | undefined; cloud_url: string } | undefined;
+  workspaces: Array<{ slug: string; signed_in: boolean; runners: number }>;
+  machine_id?: string | undefined;
+  engine: DaemonEngineState;
+  engine_detail?: DaemonEngineStatus | undefined;
+}
+
+/** The installed command-line tool, as discovery reports it. */
+export interface DaemonCliInfo {
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+  updatable: boolean;
+  update_hint?: string | undefined;
 }
 
 /**
- * Engine setup the host writes from the server profile. Keys match the
- * host schema exactly (the host deserializes them as-is); the runners
- * feature maps the profile contract onto this shape.
+ * What the shell found at the daemon's standard control socket, classified
+ * for the app's account (`daemon.rs` `Discovery`). Only `compatible` lets
+ * the app use the daemon; `no_daemon` and `signed_out` offer set-up.
  */
-export interface AgentEngineProfile {
-  available: boolean;
-  base_url: string;
-  model: string;
-  reason_code: string;
+export type DaemonDiscovery =
+  | { kind: "no_daemon"; cli: DaemonCliInfo }
+  | { kind: "too_old"; daemon_version?: string | undefined; ipc_version?: number | undefined; cli: DaemonCliInfo }
+  | { kind: "app_too_old"; daemon_version: string; ipc_version: number }
+  | { kind: "not_answering"; reason: string }
+  | { kind: "signed_out"; hello: DaemonHello }
+  | { kind: "account_mismatch"; daemon_account: string; daemon_cloud_url: string; hosts_runners: boolean }
+  | { kind: "compatible"; hello: DaemonHello };
+
+/** One `[[runner]]` block of the daemon, without anything secret. */
+export interface DaemonLocalRunner {
+  name: string;
+  runner_id: string;
+  workspace_slug: string | null;
+  project_slug: string | null;
+  working_dir: string;
+  /** `agent.kind` of the block: `engine` for the built-in engine. */
+  agent: string;
 }
 
-/** Bundled or managed agent runner controls (desktop only). */
+/** What `EngineRunnerAdd` answers: the engine runner now set up for a project. */
+export interface DaemonEngineRunner {
+  runner: string;
+  runner_id: string;
+  workspace: string;
+  project: string;
+  working_dir: string;
+}
+
+/** One engine runner block of a legacy per-workspace tree still on disk. */
+export interface LegacyEngineRunner {
+  name: string;
+  runner_id: string | null;
+  project: string;
+  working_dir: string;
+}
+
+/** A legacy private-daemon tree still to migrate (shell `LegacyTree`). */
+export interface LegacyTree {
+  workspace: string;
+  dir: string;
+  cloud_url: string | null;
+  dev_machine_id: string | null;
+  engine_runners: LegacyEngineRunner[];
+}
+
+/** A legacy task folder the migration left unused (design §13, "Collision"). */
+export interface LegacyFolderNotice {
+  workspace: string;
+  project: string;
+  path: string;
+}
+
+/** A project whose engine became a pod member on upgrade (PO-11). */
+export interface PodMemberNotice {
+  runner_id: string;
+  workspace: string;
+  project: string;
+}
+
+/** The one-time notices still to show (shell `Notices`). */
+export interface DesktopNotices {
+  legacy_folders: LegacyFolderNotice[];
+  pod_member_projects: PodMemberNotice[];
+}
+
+/** What the host reads: pending notices and dismissed keys (shell `NoticesView`). */
+export interface NoticesView {
+  notices: DesktopNotices;
+  dismissed: string[];
+}
+
+/**
+ * The app as a client of this computer's Pi Dash daemon (desktop only).
+ * The daemon is the command-line tool's, run as a user service: the app
+ * finds it, never starts, stops or re-roots it, and sets it up only on
+ * the user's say-so (`.ai_design/built_engine_as_runner/design.md` §4).
+ */
 export interface AgentRuntimeApi {
-  /** True when a runner is reachable from this build. */
-  isAvailable(): Promise<boolean>;
-  /** Self-check the bundled binaries and read this machine's label. */
-  checkHost(): Promise<AgentHostCheck>;
-  /** Write the account's engine setup from the server profile. */
-  writeEngineConfig(input: { account: string; profile: AgentEngineProfile }): Promise<void>;
-  /** Store the short-lived model credential for the engine. */
-  writeModelToken(token: string): Promise<void>;
-  /** Register this machine against a workspace (answers the daemon stdout; ignored). */
-  bootstrapMachine(input: {
-    cloudUrl: string;
+  /** Find the daemon and classify it for the app's account. */
+  discover(identity: AgentAppIdentity): Promise<DaemonDiscovery>;
+  /** The daemon's runners (engine and own-agent). */
+  localRunners(): Promise<DaemonLocalRunner[]>;
+  /** Turn the built-in engine on for a project on this computer (enrol on use). */
+  addEngineRunner(input: {
     workspace: string;
-    machineToken: string;
-    devMachineId: string;
-  }): Promise<void>;
-  /** Register one project runner on this machine. */
-  enrollProject(input: { account: string; workspace: string; project: string; hostLabel: string }): Promise<void>;
-  /** Start the bundled daemon (a no-op while it runs; restarts it if it died). */
-  startDaemon(input: { account: string; workspace: string }): Promise<void>;
-  /** Stop the daemon, waiting up to the grace period (5 seconds when omitted). */
-  stopDaemon(graceSeconds?: number | undefined): Promise<void>;
-  /**
-   * Native sign-out: stop the daemon and destroy every local credential.
-   * Pass the account to also delete its on-machine chat history.
-   */
-  signOutNative(input?: { deleteChatHistoryAccount?: string | undefined } | undefined): Promise<void>;
+    project: string;
+    workingDir?: string | undefined;
+  }): Promise<DaemonEngineRunner>;
+  /** Install and start the daemon's user service through the CLI (`pidash install` + `pidash start`). */
+  installService(): Promise<void>;
+  /** Install the built-in engine through the CLI when it is not there. */
+  ensureEngine(): Promise<void>;
+  /** Hand an engine-only device grant the app approved to the CLI (stdin, never argv). */
+  engineLogin(deviceCode: string): Promise<void>;
+  /** Have the daemon re-read its workspace tokens after a CLI sign-in. */
+  reloadCredentials(): Promise<void>;
   /** Hand approval modes to the host so they survive the webview wipe. */
   saveApprovalModes(account: string, modes: Record<string, string>): Promise<void>;
   /** Read back the modes stashed for an account (empty when there are none). */
   loadApprovalModes(account: string): Promise<Record<string, string>>;
+  /** Legacy trees still holding a config (design §13, step 1). */
+  scanLegacyTrees(): Promise<LegacyTree[]>;
+  /** Move one tree's engine home and delete its config (steps 4–5). */
+  finishLegacyTree(input: { dir: string; account: string; daemonAccount: string | null }): Promise<void>;
+  /** Point a re-added engine runner back at its legacy folder. */
+  restoreLegacyFolder(input: { runner: string; workingDir: string }): Promise<void>;
+  /** Pending one-time notices and dismissed keys for an account. */
+  loadNotices(account: string): Promise<NoticesView>;
+  /** Record new notices; pending or dismissed ones are dropped by the host. */
+  recordNotices(account: string, notices: DesktopNotices): Promise<NoticesView>;
+  /** Dismiss notices (or decline a replace prompt) for good. */
+  dismissNotices(account: string, keys: string[]): Promise<NoticesView>;
+  /** Sign the computer's Pi Dash daemon out (`pidash auth logout`). */
+  signOutComputer(): Promise<void>;
 }
 
 /**

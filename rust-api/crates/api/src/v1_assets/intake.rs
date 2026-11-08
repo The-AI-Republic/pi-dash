@@ -811,6 +811,7 @@ struct IssueRow {
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
     workpad: String,
 }
 
@@ -856,6 +857,7 @@ impl IssueRow {
             workpad: self.workpad.clone(),
             created_via: self.created_via.clone(),
             assigned_pod_id: self.assigned_pod_id,
+            assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
         }
     }
@@ -898,6 +900,7 @@ impl IssueRow {
             estimate_point_id: fields.estimate_point_id,
             type_id: fields.type_id,
             assigned_pod_id: fields.assigned_pod_id,
+            assigned_runner_id: fields.assigned_runner_id,
             workpad: fields.workpad,
         }
     }
@@ -4209,6 +4212,7 @@ async fn insert_issue(
         workpad: String::new(),
         created_via: None,
         assigned_pod_id: None,
+        assigned_runner_id: None,
         agent_executor: None,
     };
     let fire = fire_spec(&ctx.user_id, cycle_mod::micros_now());

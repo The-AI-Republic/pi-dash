@@ -1099,6 +1099,8 @@ mod tests {
             state: Some("97b22834-b823-4109-a527-b39aa310ceae"),
             estimate_point: None,
             assigned_pod: None,
+            assigned_runner: None,
+            assigned_runner_detail: None,
         }
     }
 

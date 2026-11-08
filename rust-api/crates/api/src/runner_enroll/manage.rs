@@ -100,6 +100,7 @@ use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
 use pidash_db::orm_tx::TxConn;
 use pidash_services::runner_enroll::queries::manage_reads::RunnerJoinRow;
+use sea_orm::EntityTrait;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -148,6 +149,20 @@ pub const POD_MISSING_BODY: &str = r#"{"error":"pod does not exist or has been d
 pub const POD_OTHER_WORKSPACE_BODY: &str = r#"{"error":"pod is in a different workspace"}"#;
 /// Runner busy guard — 409 (`runners.py:414-417`).
 pub const RUNNER_BUSY_BODY: &str = r#"{"error":"runner has an in-flight or queued run; wait for it to finish or cancel it first","code":"runner_busy"}"#;
+
+/// Cross-project pod move with dedicated issues — 409 (PDASHOSS01-297,
+/// §13.1): I1/E2 would break. The issue list (max 20) rides along.
+pub fn runner_has_assigned_issues_body(issues: &[(Uuid, String)]) -> String {
+    serde_json::json!({
+        "error": "runner has assigned issues; clear their dedicated runner first",
+        "code": "runner_has_assigned_issues",
+        "issues": issues.iter().map(|(id, name)| serde_json::json!({
+            "id": id.to_string(),
+            "name": name,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
 /// `pod_dispatch` validation — 400 (`runners.py` #2903).
 pub const POD_DISPATCH_INVALID_BODY: &str =
     r#"{"error":"pod_dispatch must be one of: pinned_only, pod_member"}"#;
@@ -1038,6 +1053,12 @@ struct RunnerRender {
     paused_by: Option<String>,
     created_at: String,
     updated_at: String,
+    /// `?assignable_for=` eligibility read (design §7.4): absent unless
+    /// the list was asked for it, mirroring the context-gated fields.
+    assignable: Option<bool>,
+    not_assignable_code: Option<&'static str>,
+    is_busy: Option<bool>,
+    queue_depth: Option<u64>,
 }
 
 /// Owned pod mini (`serializers.py:133-142`).
@@ -1133,9 +1154,22 @@ impl RunnerRender {
             paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
+            assignable: self.assignable,
+            not_assignable_code: self.not_assignable_code,
+            is_busy: self.is_busy,
+            queue_depth: self.queue_depth,
         };
         serde_json::to_string(&shapes::runner_to_representation(&row)).map_err(|_| server_error())
     }
+}
+
+/// `?assignable_for=` eligibility triple (design §7.4).
+#[derive(Clone, Copy, Default)]
+struct RunnerEligibility {
+    assignable: Option<bool>,
+    not_assignable_code: Option<&'static str>,
+    is_busy: Option<bool>,
+    queue_depth: Option<u64>,
 }
 
 /// Build the runner render buffer from decoded parts (pure — the
@@ -1146,6 +1180,7 @@ fn runner_render(
     pod_identifier: String,
     dev_machine_detail: Option<DevMachineMiniOwned>,
     live_state: Option<LiveStateOwned>,
+    eligibility: RunnerEligibility,
 ) -> RunnerRender {
     // `Runner.is_engine` / `engine_paused` / `machine_display_name`
     // (`models.py:740-755`): engine-ness from provisioning, pause from
@@ -1215,6 +1250,10 @@ fn runner_render(
             .as_ref()
             .map(crate::serializer::render_datetime),
         paused_by: runner.paused_by_id.map(|id| id.to_string()),
+        assignable: eligibility.assignable,
+        not_assignable_code: eligibility.not_assignable_code,
+        is_busy: eligibility.is_busy,
+        queue_depth: eligibility.queue_depth,
         created_at: crate::serializer::render_datetime(&runner.created_at),
         updated_at: crate::serializer::render_datetime(&runner.updated_at),
     }
@@ -1229,22 +1268,113 @@ async fn render_runner_parts(
     pod_identifier: String,
     dev_machine_detail: Option<DevMachineMiniOwned>,
 ) -> Result<String, Response> {
+    render_runner_parts_ctx(
+        pool,
+        runner,
+        pod,
+        pod_identifier,
+        dev_machine_detail,
+        None,
+        None,
+    )
+    .await
+}
+
+/// `#assignable_for` context, when the list was asked for it (§7.4).
+async fn render_runner_parts_ctx(
+    pool: &PgPool,
+    runner: &RunnerOwned,
+    pod: &PodOwned,
+    pod_identifier: String,
+    dev_machine_detail: Option<DevMachineMiniOwned>,
+    viewer_id: Option<Uuid>,
+    assignable_for: Option<Option<Uuid>>,
+) -> Result<String, Response> {
     let live_state = fetch_live_state(pool, runner.id).await?;
-    runner_render(runner, pod, pod_identifier, dev_machine_detail, live_state).to_json()
+    let eligibility = match assignable_for {
+        None => RunnerEligibility::default(),
+        Some(issue_id) => {
+            let orm = pidash_db::pool::sea_orm_connection(pool);
+            let Some(runner_row) = pidash_db::entity::runner::Entity::find_by_id(runner.id)
+                .one(&orm)
+                .await
+                .map_err(|_| server_error())?
+            else {
+                return Err(server_error());
+            };
+            let issue = match issue_id {
+                Some(id) => pidash_db::entity::issues::Entity::find_by_id(id)
+                    .one(&orm)
+                    .await
+                    .map_err(|_| server_error())?,
+                None => None,
+            };
+            let check = pidash_services::domain::issue_assignment::AssignmentCheck {
+                user_id: viewer_id,
+                issue_id,
+                pod_id: None,
+                project_id: None,
+                issue: issue.as_ref(),
+            };
+            let (assignable, code) =
+                pidash_services::domain::issue_assignment::assignable_for_runner(
+                    &orm,
+                    &runner_row,
+                    &check,
+                )
+                .await
+                .map_err(|_| server_error())?;
+            let busy = pidash_services::domain::issue_assignment::is_busy(&orm, runner.id)
+                .await
+                .map_err(|_| server_error())?;
+            let depth = pidash_services::domain::issue_assignment::queue_depth(&orm, runner.id)
+                .await
+                .map_err(|_| server_error())?;
+            RunnerEligibility {
+                assignable: Some(assignable),
+                not_assignable_code: Some(code),
+                is_busy: Some(busy),
+                queue_depth: Some(depth),
+            }
+        }
+    };
+    runner_render(
+        runner,
+        pod,
+        pod_identifier,
+        dev_machine_detail,
+        live_state,
+        eligibility,
+    )
+    .to_json()
 }
 
 /// Serialize one R1/R2 join row: the runner + dev-machine + pod blocks
 /// decode positionally; `projects.identifier` reads by name (the only
 /// `identifier` column across the four tables).
 async fn render_runner_row(pool: &PgPool, row: &RunnerJoinRow) -> Result<String, Response> {
+    render_runner_row_ctx(pool, row, None, None).await
+}
+
+/// `#assignable_for` context, when the list was asked for it (design
+/// §7.4): the viewer and the resolved issue (outer `None` = not
+/// requested, inner `None` = "new" / garbage).
+pub(crate) async fn render_runner_row_ctx(
+    pool: &PgPool,
+    row: &RunnerJoinRow,
+    viewer_id: Option<Uuid>,
+    assignable_for: Option<Option<Uuid>>,
+) -> Result<String, Response> {
     let runner = runner_of(row);
     let pod = pod_of(row);
-    render_runner_parts(
+    render_runner_parts_ctx(
         pool,
         &runner,
         &pod,
         row.project_identifier.clone(),
         machine_mini_of(row),
+        viewer_id,
+        assignable_for,
     )
     .await
 }
@@ -1614,6 +1744,24 @@ pub async fn runners_list(
     }
     // Engine runners are listed like any other runner (#2910);
     // `?include_bundled` is ignored.
+    // `?assignable_for=<issue-id | "new">` (design §7.4): the per-row
+    // eligibility read. A garbage id behaves as "new" (Django's
+    // `except (ValueError, TypeError)` arm).
+    let assignable_for: Option<Option<Uuid>> = match query_param(&params, "assignable_for") {
+        None => None,
+        Some(raw) if raw == "new" => Some(None),
+        Some(raw) => match raw.parse::<Uuid>() {
+            Ok(id) => {
+                let orm = pidash_db::pool::sea_orm_connection(&pool);
+                let found = pidash_db::entity::issues::Entity::find_by_id(id)
+                    .one(&orm)
+                    .await
+                    .unwrap_or(None);
+                Some(found.map(|issue| issue.id))
+            }
+            Err(_) => Some(None),
+        },
+    };
     let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
     let rows = match manage_reads::runner_list(
         &pidash_db::pool::sea_orm_connection(&pool),
@@ -1631,7 +1779,7 @@ pub async fn runners_list(
     };
     let mut bodies = Vec::with_capacity(rows.len());
     for row in &rows {
-        match render_runner_row(&pool, row).await {
+        match render_runner_row_ctx(&pool, row, Some(user_id), assignable_for).await {
             Ok(body) => bodies.push(body),
             Err(response) => return response,
         }
@@ -1838,6 +1986,34 @@ pub async fn runner_patch(
         if is_engine_runner(&runner) && target.project_id != hit.row.pod_project_id {
             return bad_request(ENGINE_PROJECT_FIXED_BODY);
         }
+        // Cross-project move (§13.1, §23.4): refused while any issue is
+        // dedicated to the runner — I1/E2 would break. Same-project
+        // moves follow the runner (§13.1): the assigned_pod update
+        // below tracks the move.
+        if manage_reads::is_real_move(&target.id, &runner.pod_id)
+            && target.project_id != hit.row.pod_project_id
+        {
+            use pidash_db::entity::issues;
+            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+            let conn = TxConn::new(&mut tx);
+            let dedicated: Vec<(Uuid, String)> = match issues::Entity::find()
+                .filter(issues::Column::AssignedRunnerId.eq(runner.id))
+                .select_only()
+                .column(issues::Column::Id)
+                .column(issues::Column::Name)
+                .order_by_asc(issues::Column::CreatedAt)
+                .limit(20u64)
+                .into_tuple()
+                .all(&conn)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => return server_error(),
+            };
+            if !dedicated.is_empty() {
+                return conflict(runner_has_assigned_issues_body(&dedicated).as_str());
+            }
+        }
         if manage_reads::is_real_move(&target.id, &runner.pod_id) {
             let busy = match manage_reads::runner_is_busy(&TxConn::new(&mut tx), runner.id).await {
                 Ok(busy) => busy,
@@ -1864,6 +2040,21 @@ pub async fn runner_patch(
         )
         .await
         .is_err()
+        {
+            return server_error();
+        }
+        // §13.1 follow: same-project moves pull the dedicated issues'
+        // assigned_pod to the new pod (the cross-project case is
+        // refused above).
+        if manage_reads::is_real_move(&target.id, &runner.pod_id)
+            && target.project_id == hit.row.pod_project_id
+            && pidash_services::domain::issue_assignment::follow_pod_move(
+                &TxConn::new(&mut tx),
+                runner.id,
+                target.id,
+            )
+            .await
+            .is_err()
         {
             return server_error();
         }
@@ -3066,9 +3257,16 @@ mod tests {
             agent_last_activity_at: Some("2026-10-02T01:02:01Z".to_owned()),
             updated_at: "2026-10-02T01:02:03Z".to_owned(),
         };
-        let body = runner_render(&runner, &fixed_pod(), "WEB".to_owned(), None, Some(live))
-            .to_json()
-            .unwrap();
+        let body = runner_render(
+            &runner,
+            &fixed_pod(),
+            "WEB".to_owned(),
+            None,
+            Some(live),
+            RunnerEligibility::default(),
+        )
+        .to_json()
+        .unwrap();
         assert_eq!(
             body,
             r#"{"id":"66666666-6666-6666-6666-666666666666","name":"r1","status":"offline","host_label":"h","is_engine":false,"engine_paused":false,"dispatch_paused":false,"machine_display_name":"h","provisioning":"manual","pod_dispatch":"pod_member","os":"","arch":"","runner_version":"","dev_metadata":{},"protocol_version":4,"capabilities":[],"last_heartbeat_at":null,"owner":"44444444-4444-4444-4444-444444444444","dev_machine":null,"dev_machine_detail":null,"visibility":0,"pod":"11111111-1111-1111-1111-111111111111","pod_detail":{"id":"11111111-1111-1111-1111-111111111111","name":"WEB_beefy","is_default":false,"project":"33333333-3333-3333-3333-333333333333","project_identifier":"WEB"},"live_state":{"observed_run_id":null,"last_event_at":"2026-10-02T01:02:03Z","last_event_kind":null,"last_event_summary":null,"agent_pid":null,"agent_subprocess_alive":true,"approvals_pending":null,"input_tokens":null,"output_tokens":null,"total_tokens":null,"usage":{},"llm_model":"m","turn_count":3,"agent_health":"healthy","agent_last_activity_at":"2026-10-02T01:02:01Z","updated_at":"2026-10-02T01:02:03Z"},"enrolled_at":null,"revoked_at":null,"revoked_reason":"","paused_at":null,"paused_by":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#

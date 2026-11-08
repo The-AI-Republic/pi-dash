@@ -85,10 +85,11 @@ djangorestframework 3.15.2, Django 4.2.30.
   `?format=json`) against Django with `ENABLE_DRF_SPECTACULAR=1` (routes
   `pi_dash/urls.py:31-44`); per-operation essentials (operationId, tags,
   summary, parameters, responses — verbatim) for every path × method in
-  the golden route map (128 paths, 200 operations); default content-type
+  the golden route map (135 paths, 209 operations; re-recorded by
+  NEWPIDASH-60); default content-type
   `application/vnd.oai.openapi; charset=utf-8` (YAML, no `+json`),
   `?format=json` content-type `application/vnd.oai.openapi+json`, parsed
-  doc-equality proof (`parsed_equal: true`, 128 paths each), route-map ==
+  doc-equality proof (`parsed_equal: true`, 135 paths each), route-map ==
   golden assertion, `ApiKeyAuthentication` securityScheme block verbatim
   (rendered from `utils/openapi/auth.py:15-34`
   `APIKeyAuthenticationExtension.get_security_definition`).
@@ -130,9 +131,9 @@ djangorestframework 3.15.2, Django 4.2.30.
 
 - `FX-OPENAPI-06.routes_golden.json` — byte copy of
   `rust-api/contract-tests/v1_openapi/routes_golden.json` from PIDASHCONV-81
-  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090 and NEWPIDASH-34):
-  128 paths, sha256
-  `cb329a9df2820fec062fbe961f61b2e56976ffee563ac35d932988707a51475f`.
+  (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090, NEWPIDASH-34 and
+  NEWPIDASH-60): 135 paths, sha256
+  `6de0073de566bf28e6c97805a2786cb7380a0481e67d47025b29acdfa6990dde`.
   Regen rule (from `test_routes_golden.py`, never blanket-update):
   `REGEN_GOLDEN=1 pytest v1_openapi/test_routes_golden.py` + reviewed
   diff. The live capture in FX-OPENAPI-04 asserted route-map equality

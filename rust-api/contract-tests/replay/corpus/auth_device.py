@@ -261,7 +261,15 @@ SESSIONS = (
         db_cell_refs=[
             ("cli_device_codes", "api_token_id", "api_tokens", ""),
         ],
-        payload_time_paths={},
+        # Same process_logs now() stamps as auth_device_lifecycle
+        # above: Django mints micros, Rust seconds, so each side
+        # blanks its own stamps (NEWPIDASH-58, run 42265262809 req7).
+        payload_time_paths={
+            "pi_dash.bgtasks.logger_task.process_logs": [
+                "kwargs/mongo_log/created_at",
+                "kwargs/mongo_log/updated_at",
+            ],
+        },
         requests=(
             # engine scope start with named machine
             Request(

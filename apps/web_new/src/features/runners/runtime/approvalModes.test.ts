@@ -38,17 +38,28 @@ afterEach(() => {
 
 function fakeRuntime(): AgentRuntimeApi {
   return {
-    isAvailable: vi.fn(async () => true),
-    checkHost: vi.fn(async () => ({ runnerPresent: true, enginePresent: true, hostLabel: "h" })),
-    writeEngineConfig: vi.fn(async () => undefined),
-    writeModelToken: vi.fn(async () => undefined),
-    bootstrapMachine: vi.fn(async () => undefined),
-    enrollProject: vi.fn(async () => undefined),
-    startDaemon: vi.fn(async () => undefined),
-    stopDaemon: vi.fn(async () => undefined),
-    signOutNative: vi.fn(async () => undefined),
+    discover: vi.fn(async () => ({ kind: "not_answering" as const, reason: "test" })),
+    localRunners: vi.fn(async () => []),
+    addEngineRunner: vi.fn(async () => ({
+      runner: "r",
+      runner_id: "id",
+      workspace: "ws",
+      project: "P",
+      working_dir: "/t",
+    })),
+    installService: vi.fn(async () => undefined),
+    ensureEngine: vi.fn(async () => undefined),
+    engineLogin: vi.fn(async () => undefined),
+    reloadCredentials: vi.fn(async () => undefined),
     saveApprovalModes: vi.fn(async () => undefined),
     loadApprovalModes: vi.fn(async () => ({})),
+    scanLegacyTrees: vi.fn(async () => []),
+    finishLegacyTree: vi.fn(async () => undefined),
+    restoreLegacyFolder: vi.fn(async () => undefined),
+    loadNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    recordNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    dismissNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    signOutComputer: vi.fn(async () => undefined),
   };
 }
 

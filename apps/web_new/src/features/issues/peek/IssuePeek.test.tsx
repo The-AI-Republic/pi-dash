@@ -1099,6 +1099,17 @@ describe("IssuePeek standing", () => {
     expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
   });
 
+  it("disables the sub-work-item and attachment entries on archived issues", async () => {
+    renderPeek({ details: {}, archivedIssue: true });
+    expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widgets).getByRole("button", { name: "Add sub-work item" })).toBeDisabled();
+    const actions = await within(widgets).findAllByRole("button", { name: "Attach" });
+    const attach = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
+    expect(attach).toBeDefined();
+    expect(attach as HTMLElement).toBeDisabled();
+  });
+
   it("shows an archived item's set estimate read-only (NEWFRONT-349 intended, EST-022)", async () => {
     renderPeek({ details: {}, archivedIssue: true, estimates: true, estimatePoint: ESTIMATE_POINT_TWO });
     await screen.findByTestId("issue-preview");
@@ -1136,10 +1147,10 @@ describe("IssuePeek standing", () => {
     expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
   });
 
-  it("hides the menu on synced issues", async () => {
+  it("shows the menu on synced issues", async () => {
     renderPeek({ details: {}, syncedIssue: true });
     expect(await screen.findByRole("button", { name: "Copy work item link" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Work item actions" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Work item actions" })).toBeInTheDocument();
   });
 
   it("renders an epic peek with its own widget title", async () => {

@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn default_schedule_is_the_full_beat_table() {
-        assert_eq!(default_schedule().len(), 29);
+        assert_eq!(default_schedule().len(), 31);
     }
 
     #[test]

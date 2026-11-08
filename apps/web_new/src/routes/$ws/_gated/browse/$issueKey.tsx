@@ -195,48 +195,44 @@ function BrowseIssueDetail({
     refresh: refreshDetail,
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });
-  const writable = editable && issue.archived_at === null && !issue.is_synced;
+  const writable = editable && issue.archived_at === null;
   const identifier = projectIdentifier(project, issueKey);
-  const menu = useQuickActions(
-    issue.is_synced
-      ? null
-      : {
-          workspaceSlug,
-          target: {
-            id: issue.id,
-            name: issue.name,
-            sequenceId: issue.sequence_id,
-            projectId,
-            projectIdentifier: identifier,
-            stateId: issue.state_id,
-            snapshot: issue,
-            createdBy: issue.created_by ?? null,
-            archived: issue.archived_at !== null,
-            isEpic: issue.is_epic ?? false,
-          },
-          context: "detail",
-          canWrite: editable,
-          onRestored: () => void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey } }),
-          onArchived: () =>
-            void navigate({
-              to: "/$ws/projects/$projectId/issues",
-              params: { ws: workspaceSlug, projectId },
-            }),
-          onDeleted: () => {
-            if (issue.archived_at !== null) {
-              void navigate({
-                to: "/$ws/projects/$projectId/archives/issues",
-                params: { ws: workspaceSlug, projectId },
-              });
-            } else {
-              void navigate({
-                to: "/$ws/projects/$projectId/issues",
-                params: { ws: workspaceSlug, projectId },
-              });
-            }
-          },
-        }
-  );
+  const menu = useQuickActions({
+    workspaceSlug,
+    target: {
+      id: issue.id,
+      name: issue.name,
+      sequenceId: issue.sequence_id,
+      projectId,
+      projectIdentifier: identifier,
+      stateId: issue.state_id,
+      snapshot: issue,
+      createdBy: issue.created_by ?? null,
+      archived: issue.archived_at !== null,
+      isEpic: issue.is_epic ?? false,
+    },
+    context: "detail",
+    canWrite: editable,
+    onRestored: () => void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey } }),
+    onArchived: () =>
+      void navigate({
+        to: "/$ws/projects/$projectId/issues",
+        params: { ws: workspaceSlug, projectId },
+      }),
+    onDeleted: () => {
+      if (issue.archived_at !== null) {
+        void navigate({
+          to: "/$ws/projects/$projectId/archives/issues",
+          params: { ws: workspaceSlug, projectId },
+        });
+      } else {
+        void navigate({
+          to: "/$ws/projects/$projectId/issues",
+          params: { ws: workspaceSlug, projectId },
+        });
+      }
+    },
+  });
   const attachmentsRef = React.useRef<AttachmentsWidgetHandle>(null);
   const widgetSections = [
     {
@@ -270,7 +266,7 @@ function BrowseIssueDetail({
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           issueId={issue.id}
-          editable={editable}
+          editable={writable}
         />
       ),
     },
@@ -281,9 +277,9 @@ function BrowseIssueDetail({
         workspaceSlug={workspaceSlug}
         issue={issue}
         project={project}
-        editable={editable}
+        editable={writable}
         projectIdentifier={projectIdentifier(project, issueKey)}
-        canWrite={editable}
+        canWrite={writable}
         onAttach={() => attachmentsRef.current?.openPicker()}
         runAIAction={
           <IssueRunAIAction

@@ -206,7 +206,7 @@ def test_web_runner_patch_engine_pinned_only_releases_pins(user_client, daemon_w
     pod = daemon_world["pod"]["id"]
     run_id = str(__import__("uuid").uuid4())
     seeder.db.execute(
-        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now())",
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, pin_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','locality',now())",
         (run_id, ws, owner, owner, pod, runner_id),
     )
     seeder.track("agent_run", "id", run_id)

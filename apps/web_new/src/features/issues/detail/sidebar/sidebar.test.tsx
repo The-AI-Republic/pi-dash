@@ -847,12 +847,8 @@ describe("SidebarProperties", () => {
     expect(screen.queryByText("Pod")).not.toBeInTheDocument();
   });
 
-  it("renders every control disabled for guests, archived and synced items", () => {
-    for (const state of [
-      { editable: false },
-      { editable: true, issue: { archived_at: "2024-03-04" } },
-      { editable: true, issue: { is_synced: true } },
-    ]) {
+  it("renders every control disabled for guests and archived items", () => {
+    for (const state of [{ editable: false }, { editable: true, issue: { archived_at: "2024-03-04" } }]) {
       const { queryClient } = harness();
       const { unmount } = wrap(
         <SidebarProperties
@@ -869,6 +865,23 @@ describe("SidebarProperties", () => {
         expect(control).toBeDisabled();
       }
       unmount();
+    }
+  });
+
+  it("keeps workflow rows editable on synced items", () => {
+    const { queryClient } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ is_synced: true })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    for (const label of ["State", "Assignees", "Runs on", "Priority"]) {
+      expect(within(row(label)).getByRole("button")).toBeEnabled();
     }
   });
 

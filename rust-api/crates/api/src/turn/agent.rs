@@ -19,7 +19,7 @@
 //! (the `Agent()` default, `runtime/agent.py:26-34`), `retries=2`,
 //! `end_strategy='early'`, no output *toolset*, no deferred / native /
 //! server tools, no model settings, tools cherry-picked per run
-//! (the 17 local tools registered on the shared agent, plus the
+//! (the 18 local tools registered on the shared agent, plus the
 //! per-run MCP toolsets).
 //!
 //! Rules ported here, each with its graph line, in the order one turn

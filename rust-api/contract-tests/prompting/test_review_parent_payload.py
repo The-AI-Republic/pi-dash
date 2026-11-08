@@ -41,10 +41,10 @@ def _seed_parent_run(seed, workspace_id, project_id, issue_id, user_id,
                 created_by_id, work_item_id, llm_model, trigger,
                 executor_kind, dispatch_attempts, cancel_reason,
                 tool_plan, phase_kind, agent_metadata, usage,
-                done_payload, created_at)
+                done_payload, pin_kind, created_at)
                VALUES (%s, 'completed', '', '{}', '{}', '', '{}', %s, %s,
                        %s, %s, '', 'tick', 'local_runner', 0, '',
-                       '{}', '', '{}', '{}', %s, %s)""",
+                       '{}', '', '{}', '{}', %s, 'locality', %s)""",
             (run_id, workspace_id, pod_id, user_id, issue_id,
              Json(payload), now),
         )

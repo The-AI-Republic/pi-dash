@@ -1821,6 +1821,10 @@ impl RunnerRender {
             paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         };
         serde_json::to_string(&shapes::runner_to_representation(&row)).map_err(|_| server_error())
     }
@@ -2044,6 +2048,7 @@ fn paused_runner_pin_ids_select(
         .filter(agent_run::Column::PinnedRunnerId.is_not_null())
         .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
         .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
         .order_by_desc(agent_run::Column::CreatedAt)
         .into_tuple()
 }
@@ -2086,6 +2091,7 @@ fn paused_runner_pin_lock_select(
         .filter(agent_run::Column::Id.eq(run_id))
         .filter(agent_run::Column::PinnedRunnerId.is_not_null())
         .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
         .filter(runner::Column::PausedAt.is_not_null())
         .order_by_desc(agent_run::Column::CreatedAt)
         .limit(1);
@@ -2722,6 +2728,71 @@ async fn fire_bundle(
                 );
             }
         },
+        // §13.1: the ticking-issue bounce for a lost runner (Django
+        // `_bounce_issue_no_eligible_runner` on the revoke commit).
+        // Actor nil: the bounce is system-driven (Django `actor=None`
+        // → `get_agent_system_user()`); presence gating is inert for
+        // runner reasons.
+        |issue_id, runner_name, reason, triggered_by| async move {
+            let name = runner_name.unwrap_or_else(|| "the dedicated runner".to_owned());
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                Uuid::nil(),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, _)) => {
+                    if let Err(error) = pidash_jobs::orchestration::bounce_issue_no_eligible_runner(
+                        pool,
+                        deps,
+                        now,
+                        0.0,
+                        issue_id,
+                        &triggered_by,
+                        &reason,
+                        &name,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner bounce failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner bounce: dispatch deps failed");
+                }
+            }
+        },
+        // §13.1 `fall_back` step 2: recreate the cancelled run in
+        // the default pod (Django `_create_and_dispatch_run`).
+        |issue_id, _pod_id, trigger, creator| async move {
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                creator.unwrap_or(Uuid::nil()),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, matcher)) => {
+                    if let Err(error) = pidash_jobs::orchestration::dispatch_continuation_run(
+                        pool, deps, &matcher, now, 0.0, issue_id, &trigger, creator, false, false,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner recreate failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner recreate: dispatch deps failed");
+                }
+            }
+        },
     )
     .await
     .map_err(|_| ())
@@ -3225,6 +3296,7 @@ mod tests {
         assert!(ids.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
         assert!(ids.contains("\"agent_run\".\"pinned_runner_id\" IS NOT NULL"));
         assert!(ids.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(ids.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
         assert!(ids.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"));
         assert!(!ids.contains("LIMIT"));
         let lock = pg_selector(paused_runner_pin_lock_select(Uuid::nil()));
@@ -3238,6 +3310,7 @@ mod tests {
             "{lock}"
         );
         assert!(lock.contains("\"runner\".\"paused_at\" IS NOT NULL"));
+        assert!(lock.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
         assert!(
             lock.ends_with(
                 "ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""

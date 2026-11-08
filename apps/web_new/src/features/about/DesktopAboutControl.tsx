@@ -22,14 +22,14 @@ export const ABOUT_CONTROL_LABEL = "About Pi Dash";
 export const ABOUT_RETRY_LABEL = "Try again";
 
 /**
- * The licensing summary above the texts. It states the engine's
- * modification (Apache-2.0 §4(b)) in words, beside the notice file itself.
+ * The licensing summary above the texts. The agent engine is not bundled
+ * (PIDESKAPP-226): the command-line tool installs it with its own licence
+ * and notice, so the dialog says where those live instead of showing them.
  */
 export const ABOUT_LICENSING_SUMMARY =
   "Pi Dash is free software under the GNU Affero General Public License, version 3 only. " +
-  "The app bundles an agent engine distributed under the Apache License 2.0. That engine is " +
-  "an upstream release we modified by renaming its executable to pidash-agent-engine. " +
-  "The full licence and notice texts follow.";
+  "The agent engine is not part of this app: the Pi Dash command-line tool installs it " +
+  "together with its own licence and notice. The full licence texts bundled with this app follow.";
 
 export function aboutVersionText(version: string): string {
   return version.length > 0 ? `Version ${version}` : "Version unknown";

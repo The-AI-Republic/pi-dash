@@ -624,6 +624,7 @@ mod tests {
             workpad: Set(String::new()),
             created_via: Set(None),
             assigned_pod_id: Set(None),
+            assigned_runner_id: Set(None),
             agent_executor: Set(None),
         }
     }

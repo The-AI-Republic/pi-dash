@@ -30,7 +30,7 @@ export type {
 } from "./client.js";
 export { InstanceConfig, deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
 export type { SignOutResult } from "./contracts/auth.js";
-export type { DeviceApproveOptions } from "./contracts/auth-entry.js";
+export type { DeviceApproveOptions, DeviceStartOptions } from "./contracts/auth-entry.js";
 export {
   CsrfTokenResponse,
   DeviceApproveResponse,
@@ -1266,10 +1266,14 @@ export {
   DevMachineMini,
   ENGINE_AUTO_PAUSE_REASONS,
   ENGINE_SIGN_IN_STATES,
+  MergeResult,
+  ReplaceCandidate,
+  ReplaceCandidates,
   createRunnerOnMachine,
   deleteDevMachine,
   getCreateRunnerStatus,
   listDevMachines,
+  listReplaceCandidates,
   mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,

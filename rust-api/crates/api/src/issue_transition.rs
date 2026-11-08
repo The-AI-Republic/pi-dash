@@ -192,9 +192,10 @@ pub(crate) mod test_support {
     use pidash_services::domain::identity::AgentUserCollisionError;
     use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use pidash_services::orchestration::creation::{
-        AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields,
-        ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView,
-        ProjectView, RenderBundle, RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
+        AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
+        ExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView, LockedIssue,
+        NewAgentRun, NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle,
+        RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
     };
     use pidash_services::orchestration::entries::{
         BindingView, EntriesSeam, NewSchedulerRun, PreflightSeam, ProjectRoleFacts, SchedulerView,
@@ -223,6 +224,30 @@ pub(crate) mod test_support {
             unreached()
         }
         async fn project(&mut self, _id: Uuid) -> Result<ProjectView, CreationError> {
+            unreached()
+        }
+        async fn pod_once_started_comment(
+            &mut self,
+            _issue_id: Uuid,
+            _pod_id: Uuid,
+            _actor_id: Uuid,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            unreached()
+        }
+        async fn dedicated_pin(
+            &mut self,
+            _args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            unreached()
+        }
+        async fn insert_system_comment(
+            &mut self,
+            _comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            unreached()
+        }
+        async fn clear_parent_thread(&mut self, _run_id: Uuid) -> Result<(), CreationError> {
             unreached()
         }
         async fn state(
@@ -432,6 +457,17 @@ pub(crate) mod test_support {
     pub(crate) struct UnreachedPreflight;
 
     impl PreflightSeam for UnreachedPreflight {
+        async fn pod_once_preflight(
+            &mut self,
+            _issue_id: Uuid,
+            _creator_id: Uuid,
+            _pod_id: Uuid,
+        ) -> Result<Option<String>, CreationError> {
+            Err(CreationError::Db(
+                "signal test: preflight is unreachable on this path".to_owned(),
+            ))
+        }
+
         async fn preflight_eligibility_or_bounce(
             &mut self,
             _issue_id: Uuid,

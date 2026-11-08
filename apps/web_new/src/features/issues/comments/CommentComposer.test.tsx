@@ -526,7 +526,7 @@ describe("CommentComposer", () => {
     fireEvent.change(input, { target: { files: [new File(["img"], "shot.png", { type: "image/png" })] } });
     await waitFor(() =>
       expect(document.querySelector("img")?.getAttribute("src")).toBe(
-        "/api/assets/v2/workspaces/acme/projects/p-1/asset-9/"
+        "https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-9/"
       )
     );
     await user.keyboard("{Enter}");
@@ -565,7 +565,7 @@ describe("CommentComposer", () => {
     });
     await waitFor(() =>
       expect(document.querySelector("img")?.getAttribute("src")).toBe(
-        "/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"
+        "https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"
       )
     );
     const submit = screen.getByRole("button", { name: "Comment" });
@@ -573,7 +573,7 @@ describe("CommentComposer", () => {
     fireEvent.click(submit);
     await waitFor(() =>
       expect(onCreate).toHaveBeenCalledWith({
-        html: '<p><img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"></p>',
+        html: '<p><img src="https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-1/"></p>',
         access: "INTERNAL",
         assetIds: ["asset-1"],
       })

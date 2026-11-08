@@ -72,6 +72,19 @@ jobs:
       - name: Test release engine staging
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
+      # The engine ships renamed to pidash-agent-engine; Codex re-execs helper
+      # copies of itself (arg0 / current_exe) to build its sandbox. If the
+      # rename broke that self-location the sandbox would silently not engage.
+      # This guard stages the pinned upstream engine through stage_engine.py,
+      # runs it under its shipped name, and fails the build if an out-of-bounds
+      # write is not blocked — so a future ENGINE_VERSION bump can't ship a
+      # broken sandbox. Needs no model, session, or credential; only the
+      # download of the pinned release uses the network. PDASHOSS01-162.
+      - name: Sandbox survives the engine rename (Linux)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/sandbox_rename_smoke.py --stage
+
   install-ps1:
     # install.ps1 is documented as `irm .../install.ps1 | iex`, which runs it
     # inside the user's own session: a bare `exit` there closes their window

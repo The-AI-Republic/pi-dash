@@ -237,7 +237,7 @@ fn component_schemas() -> Value {
 }
 
 /// Per-operation essentials: `{path: {method: {operationId, tags, summary,
-/// parameters, responses}}}` for all 200 golden operations, pretty JSON
+/// parameters, responses}}}` for all 209 golden operations, pretty JSON
 /// extracted from the `operations` key of
 /// `rust-api/fixtures/v1_openapi/FX-OPENAPI-04.doc_essentials.json`.
 ///
@@ -666,6 +666,54 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/": {
+    "get": {
+      "operationId": "runner_dev_machines_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    },
+    "patch": {
+      "operationId": "runner_dev_machines_partial_update",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/": {
     "post": {
       "operationId": "runner_dev_machines_commands_result_create",
@@ -686,6 +734,56 @@ const OPERATIONS_JSON: &str = r##"
         {
           "in": "path",
           "name": "request_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/": {
+    "post": {
+      "operationId": "runner_dev_machines_merge_into_create",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
+  "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/": {
+    "get": {
+      "operationId": "runner_dev_machines_replace_candidates_retrieve",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "dev_machine_id",
           "schema": {
             "type": "string",
             "format": "uuid"
@@ -914,6 +1012,29 @@ const OPERATIONS_JSON: &str = r##"
       ],
       "responses": {
         "204": {
+          "description": "No response body"
+        }
+      }
+    },
+    "post": {
+      "operationId": "runner_runners_create_2",
+      "tags": [
+        "runner"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "runner_id",
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
           "description": "No response body"
         }
       }
@@ -16333,6 +16454,30 @@ const OPERATIONS_JSON: &str = r##"
       }
     }
   },
+  "/api/v1/workspaces/{slug}/runners/": {
+    "get": {
+      "operationId": "workspaces_runners_retrieve",
+      "tags": [
+        "workspaces"
+      ],
+      "summary": null,
+      "parameters": [
+        {
+          "in": "path",
+          "name": "slug",
+          "schema": {
+            "type": "string"
+          },
+          "required": true
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "No response body"
+        }
+      }
+    }
+  },
   "/api/v1/workspaces/{slug}/schedulers/": {
     "get": {
       "operationId": "workspaces_schedulers_retrieve",
@@ -17117,7 +17262,7 @@ mod tests {
                 ops += 1;
             }
         }
-        assert_eq!(ops, 203);
+        assert_eq!(ops, 209);
     }
 
     #[test]
@@ -17349,7 +17494,7 @@ mod tests {
             }
         }
         assert_eq!(omitted_parameters, 19);
-        assert_eq!(omitted_summaries, 109);
+        assert_eq!(omitted_summaries, 115);
     }
 
     #[test]

@@ -118,12 +118,12 @@ pub use lifecycle::{
     pause_comment_html, pause_drain_reread_sql, pause_lock_passes, pause_reread_sql,
     pause_update_sql, payload_usage, plan_assign_rejected_busy, plan_failure_comment,
     plan_pause_comment, plan_pause_update, plan_requeue_from_locked, plan_terminal_finalize,
-    plan_terminal_updates, requeue_lock_passes, requeue_update_sql, runner_busy_update_sql,
-    terminal_extras, ticker_pending_entry_sql, usage_updates, AssignRejectedBusyPlan,
-    CommentInsert, CommentPlan, CommentSpeaker, LifecycleError, LiveStateUsageFacts,
-    PauseUpdatePlan, RequeuePlan, RequeueRunFacts, TerminalUpdateInputs, TerminalUpdates,
-    UsageUpdates, FIRE_TICK_TASK, INFRA_FAILURE_DETAIL_PREFIXES, LLM_MODEL_MAX_CHARS,
-    PROJECT_MOVE_HANDOFF_CONFIG_KEY, RUN_ERROR_MAX_CHARS,
+    plan_terminal_updates, requeue_lock_passes, requeue_update_keep_pin_sql, requeue_update_sql,
+    runner_busy_update_sql, terminal_extras, ticker_pending_entry_sql, usage_updates,
+    AssignRejectedBusyPlan, CommentInsert, CommentPlan, CommentSpeaker, LifecycleError,
+    LiveStateUsageFacts, PauseUpdatePlan, RequeuePlan, RequeueRunFacts, TerminalUpdateInputs,
+    TerminalUpdates, UsageUpdates, FIRE_TICK_TASK, INFRA_FAILURE_DETAIL_PREFIXES,
+    LLM_MODEL_MAX_CHARS, PROJECT_MOVE_HANDOFF_CONFIG_KEY, RUN_ERROR_MAX_CHARS,
 };
 pub use scheduler_hook::{
     plan_scheduler_hook, scheduler_binding_update_sql, BindingFacts, SchedulerHookPlan,

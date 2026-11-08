@@ -35,11 +35,11 @@ def _mkrun(org, issue_id, pod_id, status="running"):
             error_details, workspace_id, work_item_id, pod_id, created_by_id,
             llm_model, trigger, executor_kind, dispatch_attempts,
             cancel_reason, tool_plan, phase_kind, agent_metadata,
-            usage, created_at)
+            usage, pin_kind, created_at)
            VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','{}',
                    %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
                    '', '{}', 'work', '{}',
-                   '{"input": 0, "output": 0, "total": 0}', now())""",
+                   '{"input": 0, "output": 0, "total": 0}', 'locality', now())""",
         (rid, status, org.workspace["id"], issue_id, pod_id, org.admin["id"]),
     )
     return rid

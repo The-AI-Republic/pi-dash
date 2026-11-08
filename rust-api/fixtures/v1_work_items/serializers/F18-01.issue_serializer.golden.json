@@ -21,9 +21,7 @@
       "source": "serializers/issue.py:68-108",
       "goldens": {
         "neither_key": {
-          "in_keys": [
-            "name"
-          ],
+          "in_keys": ["name"],
           "out": {
             "name": "x"
           },
@@ -31,17 +29,12 @@
           "same_object": true
         },
         "markdown": {
-          "out_keys": [
-            "description_html",
-            "name"
-          ],
+          "out_keys": ["description_html", "name"],
           "description_html": "<h1>Hi</h1><ul><li><p>a</p></li><li><p>[ ] t</p></li></ul>",
           "from_markdown": true
         },
         "legacy_description": {
-          "out_keys": [
-            "description_html"
-          ],
+          "out_keys": ["description_html"],
           "description_html": "<p>legacy <em>body</em></p>",
           "from_markdown": true
         },
@@ -95,12 +88,7 @@
       "goldens": {
         "ok_minimal": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "labels",
-            "name",
-            "priority"
-          ],
+          "validated_keys": ["assignees", "labels", "name", "priority"],
           "validated": {
             "name": "Probe issue",
             "priority": "none",
@@ -144,12 +132,7 @@
         },
         "invalid_html": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "description_html",
-            "labels",
-            "name"
-          ],
+          "validated_keys": ["assignees", "description_html", "labels", "name"],
           "validated": {
             "name": "t",
             "description_html": "<p>unclosed</p>",
@@ -159,12 +142,7 @@
         },
         "invalid_html_garbage": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "description_html",
-            "labels",
-            "name"
-          ],
+          "validated_keys": ["assignees", "description_html", "labels", "name"],
           "validated": {
             "name": "t",
             "description_html": "<span>&lt;&lt;&gt;&gt;</span>",
@@ -174,12 +152,7 @@
         },
         "html_too_big": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "description_html",
-            "labels",
-            "name"
-          ],
+          "validated_keys": ["assignees", "description_html", "labels", "name"],
           "validated": {
             "name": "t",
             "description_html": "<p></p>",
@@ -189,11 +162,7 @@
         },
         "bad_binary": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "labels",
-            "name"
-          ],
+          "validated_keys": ["assignees", "labels", "name"],
           "validated": {
             "name": "t",
             "assignees": "None",
@@ -202,11 +171,7 @@
         },
         "assignee_filtering": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "labels",
-            "name"
-          ],
+          "validated_keys": ["assignees", "labels", "name"],
           "validated": {
             "assignees": "['79c81d76-5a93-4d3d-894d-5935576834b6']",
             "name": "t",
@@ -237,12 +202,7 @@
         },
         "parent_wrong_project": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "labels",
-            "name",
-            "parent"
-          ],
+          "validated_keys": ["assignees", "labels", "name", "parent"],
           "validated": {
             "name": "t",
             "parent": "<Issue:a7509d00-345f-47fb-bee3-6bcf7d3339e2>",
@@ -253,12 +213,7 @@
         },
         "parent_same_project_ok": {
           "valid": true,
-          "validated_keys": [
-            "assignees",
-            "labels",
-            "name",
-            "parent"
-          ],
+          "validated_keys": ["assignees", "labels", "name", "parent"],
           "validated": {
             "name": "t",
             "parent": "<Issue:a7509d00-345f-47fb-bee3-6bcf7d3339e2>",
@@ -427,6 +382,7 @@
         "type_id",
         "url",
         "description_markdown",
+        "assigned_runner_detail",
         "created_at",
         "updated_at",
         "deleted_at",
@@ -456,7 +412,8 @@
         "state",
         "estimate_point",
         "type",
-        "assigned_pod"
+        "assigned_pod",
+        "assigned_runner"
       ]
     },
     "create": {
@@ -484,18 +441,11 @@
             "project_id": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
             "type_id": "None"
           },
-          "assignee_rows": [
-            "79c81d76-5a93-4d3d-894d-5935576834b6"
-          ],
-          "label_rows": [
-            "c833c492-fa3d-49f5-85a4-0ef810642731",
-            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
-          ]
+          "assignee_rows": ["79c81d76-5a93-4d3d-894d-5935576834b6"],
+          "label_rows": ["c833c492-fa3d-49f5-85a4-0ef810642731", "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"]
         },
         "create_default_assignee": {
-          "assignee_rows": [
-            "79c81d76-5a93-4d3d-894d-5935576834b6"
-          ]
+          "assignee_rows": ["79c81d76-5a93-4d3d-894d-5935576834b6"]
         },
         "create_invalid_default_assignee": {
           "assignee_rows": []
@@ -513,15 +463,11 @@
           "name": "Renamed probe",
           "priority": "low",
           "assignee_rows": [],
-          "label_rows": [
-            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
-          ],
+          "label_rows": ["b4d98934-9159-4ac9-9e58-8a5b7b152ec3"],
           "updated_at_bumped": true
         },
         "update_scalars_only": {
-          "label_rows": [
-            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
-          ]
+          "label_rows": ["b4d98934-9159-4ac9-9e58-8a5b7b152ec3"]
         }
       },
       "notes": [
@@ -543,6 +489,7 @@
           "id",
           "type_id",
           "url",
+          "assigned_runner_detail",
           "created_at",
           "updated_at",
           "deleted_at",
@@ -573,6 +520,7 @@
           "estimate_point",
           "type",
           "assigned_pod",
+          "assigned_runner",
           "assignees",
           "labels",
           "relations_summary",
@@ -584,9 +532,7 @@
           "description_html": "<h1>Title</h1><p>body <em>text</em></p>",
           "url": "http://127.0.0.1:18359/ws-conv659-2/browse/CT00003-3",
           "assignees": [],
-          "labels": [
-            "b4d98934-9159-4ac9-9e58-8a5b7b152ec3"
-          ]
+          "labels": ["b4d98934-9159-4ac9-9e58-8a5b7b152ec3"]
         },
         "blocker_keys": {
           "relations_summary": {
@@ -597,10 +543,7 @@
         },
         "has_relations_without_viewer": false,
         "list_blocker_keys_present": [],
-        "list_vs_single_key_diff": [
-          "has_open_blockers",
-          "relations_summary"
-        ],
+        "list_vs_single_key_diff": ["has_open_blockers", "relations_summary"],
         "expand_assignees_labels": {
           "assignees": [],
           "labels": [
@@ -623,15 +566,8 @@
             }
           ]
         },
-        "fields_subset_keys": [
-          "id",
-          "name"
-        ],
-        "fields_with_blocker_key": [
-          "id",
-          "name",
-          "relations_summary"
-        ],
+        "fields_subset_keys": ["id", "name"],
+        "fields_with_blocker_key": ["id", "name", "relations_summary"],
         "relations_with_viewer": {
           "blocked_by": [],
           "blocking": [],
@@ -644,12 +580,7 @@
           "implemented_by": [],
           "implements": []
         },
-        "relations_tail_keys": [
-          "labels",
-          "relations_summary",
-          "has_open_blockers",
-          "relations"
-        ],
+        "relations_tail_keys": ["labels", "relations_summary", "has_open_blockers", "relations"],
         "url_omitted_when_unconfigured": true
       }
     }

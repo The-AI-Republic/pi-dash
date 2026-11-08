@@ -1280,6 +1280,83 @@ def test_encrypted_columns_decrypt_flagged_rows_only():
     )
 
 
+def test_process_logs_time_paths_blank_stamps_but_keep_null():
+    """process_logs mongo_log now() stamps blank; null/garbage still fail.
+
+    NEWPIDASH-58: both backends mint their own now (Django
+    microseconds, Rust seconds), so the corpus blanks the two stamps
+    via payload_time_paths. auth_engine_grant failed req7 without
+    the map even though auth_device_lifecycle carried it.
+    """
+    from datetime import datetime, timezone
+
+    from . import compare
+
+    start = datetime(2026, 11, 6, 18, 26, 15, tzinfo=timezone.utc)
+    paths = ["kwargs/mongo_log/created_at", "kwargs/mongo_log/updated_at"]
+    dj = {"kwargs": {"mongo_log": {
+        "created_at": "2026-11-06T18:26:15.356039+00:00",
+        "updated_at": "2026-11-06T18:26:15.356042+00:00",
+    }}}
+    rs = {"kwargs": {"mongo_log": {
+        "created_at": "2026-11-06T18:26:15+00:00",
+        "updated_at": "2026-11-06T18:26:15+00:00",
+    }}}
+    assert compare._blank_time_paths(dj, paths, start) == {
+        "kwargs": {"mongo_log": {
+            "created_at": effects.VOLATILE_PLACEHOLDER,
+            "updated_at": effects.VOLATILE_PLACEHOLDER,
+        }},
+    }
+    assert compare._blank_time_paths(rs, paths, start) == {
+        "kwargs": {"mongo_log": {
+            "created_at": effects.VOLATILE_PLACEHOLDER,
+            "updated_at": effects.VOLATILE_PLACEHOLDER,
+        }},
+    }
+    # A missing stamp (null vs stamped) is left in place and fails.
+    assert compare._blank_time_paths(
+        {"kwargs": {"mongo_log": {"created_at": None}}}, paths, start
+    ) == {"kwargs": {"mongo_log": {"created_at": None}}}
+    # Garbage timestamps are left in place and fail loudly.
+    assert compare._blank_time_paths(
+        {"kwargs": {"mongo_log": {"created_at": "1970-01-01T00:00:00+00:00"}}},
+        paths,
+        start,
+    ) == {"kwargs": {"mongo_log": {"created_at": "1970-01-01T00:00:00+00:00"}}}
+    # The engine-grant session carries the map (regression pin).
+    by_name = {sess.name: sess for sess in ALL_SESSIONS}
+    grant = by_name["auth_engine_grant"].payload_time_paths
+    assert grant.get("pi_dash.bgtasks.logger_task.process_logs") == [
+        "kwargs/mongo_log/created_at",
+        "kwargs/mongo_log/updated_at",
+    ]
+
+
+def test_runner_web_patch_deleted_runner_pins_404():
+    """PATCH on a deleted runner pins 404 (lookup precedes validation).
+
+    NEWPIDASH-58 (run 42446993323 req56): the owner-engine-controls
+    request PATCHes rdel_id with an invalid pod_dispatch and expected
+    400, but Django looks the runner up first and answers 404
+    {"error":"not found"} because the runner was deleted earlier in
+    the session (the DELETE request above). Rust does the same
+    (manage.rs runner_patch calls get_runner before reading the
+    body), so 404 is the only correct expectation.
+    """
+    by_name = {sess.name: sess for sess in ALL_SESSIONS}
+    sess = by_name["runner_web_lifecycle"]
+    matches = [
+        r
+        for r in sess.requests
+        if r.method == "PATCH"
+        and "rdel_id" in r.path
+        and r.json == {"pod_dispatch": "sometimes"}
+    ]
+    assert matches, "no pod_dispatch probe on rdel_id found"
+    assert all(r.expect_status == 404 for r in matches)
+
+
 def test_reasons_shape():
     seen = set()
     for bucket in ("MISSING_FIX", "EXCLUDED", "OWNED_UNCOVERED"):

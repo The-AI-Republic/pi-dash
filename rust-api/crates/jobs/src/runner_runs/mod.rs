@@ -22,7 +22,10 @@ pub mod sweeps_chat;
 pub mod sweeps_runs;
 
 pub use engine_pause::{register_engine_pause_tasks, PAUSE_ENGINES_TASK};
-pub use offline_recovery::{register_offline_recovery_tasks, FAIL_RUNS_TASK, RELEASE_PINS_TASK};
+pub use offline_recovery::{
+    register_offline_recovery_tasks, FAIL_DEDICATED_TASK, FAIL_RUNS_TASK, RELEASE_PINS_TASK,
+    SWEEP_STRANDED_TASK,
+};
 pub use sweeps_chat::{
     emit_terminal_effects, register_runner_runs_tasks, RECONCILE_STALLED_RUNS_TASK,
     RECONCILE_TERMINAL_EFFECTS_TASK, SWEEP_AGENT_CHAT_STATE_TASK, SWEEP_CHAT_MESSAGE_DEDUPE_TASK,
@@ -34,9 +37,9 @@ pub use sweeps_runs::{
 };
 
 /// Every Celery task name this domain owns (L6a + L6b + the `70d684af`
-/// offline-recovery pair + the engine-credential expiry sweep, in
-/// `tasks.py` order).
-pub const TASK_NAMES: [&str; 14] = [
+/// offline-recovery pair + the engine-credential expiry sweep + the
+/// dedicated-runner sweep pair, in `tasks.py` order).
+pub const TASK_NAMES: [&str; 16] = [
     EXPIRE_TASK,
     MARK_OFFLINE_TASK,
     PAUSE_ENGINES_TASK,
@@ -51,6 +54,8 @@ pub const TASK_NAMES: [&str; 14] = [
     RECONCILE_STALLED_RUNS_TASK,
     TERMINAL_EFFECTS_TASK,
     RECONCILE_TERMINAL_EFFECTS_TASK,
+    FAIL_DEDICATED_TASK,
+    SWEEP_STRANDED_TASK,
 ];
 
 /// True for the task names in [`TASK_NAMES`]. The worker forwards them to

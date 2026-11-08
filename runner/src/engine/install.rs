@@ -2,7 +2,9 @@
 //!
 //! Every CLI release archive (`pidash-<target>.tar.xz`, `.zip` on Windows)
 //! carries `engine/<version>/pidash-agent-engine[.exe]` with Codex's
-//! `LICENSE` and `NOTICE`. The cargo-dist 0.22 shell and PowerShell
+//! `LICENSE`, `NOTICE` and the sandbox helpers the engine looks for beside
+//! itself (`bwrap` on Linux, the two sandbox exes on Windows). The
+//! cargo-dist 0.22 shell and PowerShell
 //! installers only copy the package's executables into the install directory
 //! and drop everything else in the archive, so the engine directory is placed
 //! by `pidash` itself:
@@ -18,10 +20,12 @@
 //! The archive is fetched from the same GitHub release as `pidash` and
 //! checked against the release's `<archive>.sha256`, the same check the
 //! cargo-dist installers make. Only the archive's `engine/` tree is used.
-//! A version directory that already holds an engine is never touched, so a
-//! daemon running it is never given a swapped binary; a new version is moved
-//! into place with a single rename from a staging directory inside the engine
-//! root.
+//! A version directory that already holds a complete engine is never
+//! touched, so a daemon running it is never given a swapped binary; a
+//! binary-only directory (staged before the sandbox helpers shipped,
+//! PIDESKAPP-148/109) is topped up in place instead; a new version is moved
+//! into place with a single rename from a staging directory inside the
+//! engine root.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -110,7 +114,8 @@ pub fn install_root_for_current_exe() -> Result<PathBuf> {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct InstallOutcome {
-    /// Versions moved into place by this call.
+    /// Versions completed by this call: moved into place, or topped up
+    /// with missing sandbox helpers.
     pub installed: Vec<String>,
     /// Versions that were already installed and left untouched.
     pub already_present: Vec<String>,
@@ -123,11 +128,36 @@ fn env_or(var: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Whether `root/<version>/` already holds an engine binary.
-pub fn is_installed(root: &Path, version: &str, windows: bool) -> bool {
-    root.join(version)
-        .join(super::binary_name(windows))
-        .is_file()
+/// Sandbox helper file names that ship beside the engine binary, per OS.
+/// Tests pass the flags explicitly so every host covers every layout.
+/// macOS needs none (system seatbelt).
+pub(crate) fn helper_names(windows: bool, linux: bool) -> &'static [&'static str] {
+    if windows {
+        &[
+            "codex-command-runner.exe",
+            "codex-windows-sandbox-setup.exe",
+        ]
+    } else if linux {
+        &["bwrap"]
+    } else {
+        &[]
+    }
+}
+
+/// Whether `dir` holds a complete engine install: the binary plus every
+/// sandbox helper for the platform. A binary-only directory is a leftover
+/// from a release that staged only the engine (PIDESKAPP-148, PIDESKAPP-109);
+/// it is topped up on the next install, never reported as installed.
+pub(crate) fn version_dir_complete(dir: &Path, windows: bool, linux: bool) -> bool {
+    dir.join(super::binary_name(windows)).is_file()
+        && helper_names(windows, linux)
+            .iter()
+            .all(|helper| dir.join(helper).is_file())
+}
+
+/// Whether `root/<version>/` already holds a complete engine install.
+pub fn is_installed(root: &Path, version: &str, windows: bool, linux: bool) -> bool {
+    version_dir_complete(&root.join(version), windows, linux)
 }
 
 /// Download the release archive of `cli_version` for this build's target and
@@ -180,8 +210,9 @@ async fn install_release_from(
     root: &Path,
     windows: bool,
 ) -> Result<InstallOutcome> {
+    let linux = target.contains("linux");
     if let Some(version) = release_engine_version(source_base, cli_version).await
-        && is_installed(root, &version, windows)
+        && is_installed(root, &version, windows, linux)
     {
         return Ok(InstallOutcome {
             installed: Vec::new(),
@@ -213,7 +244,7 @@ async fn install_release_from(
         extract(&archive, &extracted).await?;
 
         let root = root.to_path_buf();
-        blocking(move || install_from_extracted(&extracted, &root, windows))
+        blocking(move || install_from_extracted(&extracted, &root, windows, linux))
             .await
             .with_context(|| format!("installing the engine from {url}"))
     }
@@ -241,6 +272,7 @@ pub fn install_from_extracted(
     extracted: &Path,
     root: &Path,
     windows: bool,
+    linux: bool,
 ) -> Result<InstallOutcome> {
     let engine_dir = find_engine_dir(extracted)?;
     let binary_name = super::binary_name(windows);
@@ -267,6 +299,17 @@ pub fn install_from_extracted(
                 "release archive's engine/{name}/ has no regular {binary_name}; refusing to install it"
             );
         }
+        for helper in helper_names(windows, linux) {
+            let helper_path = entry.path().join(helper);
+            let helper_is_file = std::fs::symlink_metadata(&helper_path)
+                .map(|m| m.file_type().is_file())
+                .unwrap_or(false);
+            if !helper_is_file {
+                bail!(
+                    "release archive's engine/{name}/ has no regular {helper}; refusing to install it"
+                );
+            }
+        }
         versions.push((name, entry.path()));
     }
     if versions.is_empty() {
@@ -284,7 +327,16 @@ pub fn install_from_extracted(
     for (name, src) in versions {
         let dest = root.join(&name);
         if dest.join(binary_name).is_file() {
-            outcome.already_present.push(name);
+            if version_dir_complete(&dest, windows, linux) {
+                outcome.already_present.push(name);
+                continue;
+            }
+            // A binary without its helpers is a leftover from a release
+            // that staged only the engine: copy the missing helpers in
+            // rather than replacing a binary a daemon may be running.
+            top_up_helpers(&src, &dest, windows, linux)
+                .with_context(|| format!("topping up engine {name} at {}", dest.display()))?;
+            outcome.installed.push(name);
             continue;
         }
         if dest.exists() {
@@ -296,10 +348,14 @@ pub fn install_from_extracted(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                src.join(binary_name),
-                std::fs::Permissions::from_mode(0o755),
-            )?;
+            for executable in
+                std::iter::once(binary_name).chain(helper_names(windows, linux).iter().copied())
+            {
+                std::fs::set_permissions(
+                    src.join(executable),
+                    std::fs::Permissions::from_mode(0o755),
+                )?;
+            }
         }
         if move_into_place(&src, &dest, binary_name)
             .with_context(|| format!("moving engine {name} into {}", dest.display()))?
@@ -310,6 +366,25 @@ pub fn install_from_extracted(
         }
     }
     Ok(outcome)
+}
+
+/// Copy any sandbox helpers missing from `dest` out of the archive's `src`.
+/// The engine binary itself is left alone: the daemon may be running it.
+fn top_up_helpers(src: &Path, dest: &Path, windows: bool, linux: bool) -> Result<()> {
+    for helper in helper_names(windows, linux) {
+        let helper_path = dest.join(helper);
+        if helper_path.is_file() {
+            continue;
+        }
+        std::fs::copy(src.join(helper), &helper_path)
+            .with_context(|| format!("copying {helper} into {}", dest.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    Ok(())
 }
 
 /// Name of the lock file in the engine root. A file, and not a version name,
@@ -496,10 +571,13 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn stage_archive_tree(top: &Path, version: &str, windows: bool) -> PathBuf {
+    fn stage_archive_tree(top: &Path, version: &str, windows: bool, linux: bool) -> PathBuf {
         let dir = top.join("engine").join(version);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(crate::engine::binary_name(windows)), b"new engine").unwrap();
+        for helper in super::helper_names(windows, linux) {
+            fs::write(dir.join(helper), b"helper").unwrap();
+        }
         fs::write(dir.join("LICENSE"), b"Apache-2.0").unwrap();
         fs::write(dir.join("NOTICE"), b"notice").unwrap();
         dir
@@ -539,6 +617,96 @@ mod tests {
     }
 
     #[test]
+    fn helper_names_cover_each_os() {
+        assert_eq!(
+            helper_names(true, false),
+            &[
+                "codex-command-runner.exe",
+                "codex-windows-sandbox-setup.exe"
+            ]
+        );
+        assert_eq!(helper_names(false, true), &["bwrap"]);
+        assert!(helper_names(false, false).is_empty());
+        // Windows wins when both flags are set: the engine shipped for a
+        // Windows CLI target is a Windows binary.
+        assert_eq!(
+            helper_names(true, true),
+            &[
+                "codex-command-runner.exe",
+                "codex-windows-sandbox-setup.exe"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_binary_only_install_is_not_installed_until_helpers_arrive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        let dir = root.join("0.153.4");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("pidash-agent-engine"), b"engine").unwrap();
+        // Linux and Windows both require helpers; macOS does not.
+        assert!(!is_installed(&root, "0.153.4", false, true));
+        assert!(is_installed(&root, "0.153.4", false, false));
+        fs::write(dir.join("bwrap"), b"helper").unwrap();
+        assert!(is_installed(&root, "0.153.4", false, true));
+
+        let windows_root = tmp.path().join("engine-windows");
+        let windows_dir = windows_root.join("0.153.4");
+        fs::create_dir_all(&windows_dir).unwrap();
+        fs::write(windows_dir.join("pidash-agent-engine.exe"), b"engine").unwrap();
+        assert!(!is_installed(&windows_root, "0.153.4", true, false));
+        fs::write(windows_dir.join("codex-command-runner.exe"), b"helper").unwrap();
+        assert!(!is_installed(&windows_root, "0.153.4", true, false));
+        fs::write(
+            windows_dir.join("codex-windows-sandbox-setup.exe"),
+            b"helper",
+        )
+        .unwrap();
+        assert!(is_installed(&windows_root, "0.153.4", true, false));
+    }
+
+    #[test]
+    fn an_archive_without_helpers_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let extracted = tmp.path().join("x");
+        let dir = extracted.join("engine").join("0.153.4");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("pidash-agent-engine"), b"engine").unwrap();
+        let root = tmp.path().join("engine-root");
+        let err = install_from_extracted(&extracted, &root, false, true).unwrap_err();
+        assert!(err.to_string().contains("no regular bwrap"), "{err}");
+    }
+
+    #[test]
+    fn a_binary_only_install_is_topped_up_without_replacing_the_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        let current = root.join("0.153.4");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(current.join("pidash-agent-engine"), b"running engine").unwrap();
+        let extracted = tmp.path().join("x");
+        stage_archive_tree(&extracted, "0.153.4", false, true);
+
+        let outcome = install_from_extracted(&extracted, &root, false, true).unwrap();
+        assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
+        assert_eq!(
+            fs::read(current.join("pidash-agent-engine")).unwrap(),
+            b"running engine"
+        );
+        assert_eq!(fs::read(current.join("bwrap")).unwrap(), b"helper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(current.join("bwrap"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111);
+        }
+    }
+
+    #[test]
     fn installs_from_a_tarball_layout_beside_the_old_version() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("lib/pidash/engine");
@@ -551,9 +719,10 @@ mod tests {
             &extracted.join("pidash-x86_64-unknown-linux-gnu"),
             "0.153.4",
             false,
+            false,
         );
 
-        let outcome = install_from_extracted(&extracted, &root, false).unwrap();
+        let outcome = install_from_extracted(&extracted, &root, false, false).unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
         let new = root.join("0.153.4");
         assert_eq!(
@@ -582,9 +751,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("bin/engine");
         let extracted = root.join(".staging-test/x");
-        stage_archive_tree(&extracted, "0.153.4", true);
+        stage_archive_tree(&extracted, "0.153.4", true, false);
 
-        let outcome = install_from_extracted(&extracted, &root, true).unwrap();
+        let outcome = install_from_extracted(&extracted, &root, true, false).unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
         assert!(root.join("0.153.4/pidash-agent-engine.exe").is_file());
     }
@@ -597,9 +766,9 @@ mod tests {
         fs::create_dir_all(&current).unwrap();
         fs::write(current.join("pidash-agent-engine"), b"running engine").unwrap();
         let extracted = tmp.path().join("x");
-        stage_archive_tree(&extracted, "0.153.4", false);
+        stage_archive_tree(&extracted, "0.153.4", false, false);
 
-        let outcome = install_from_extracted(&extracted, &root, false).unwrap();
+        let outcome = install_from_extracted(&extracted, &root, false, false).unwrap();
         assert_eq!(outcome.already_present, vec!["0.153.4".to_string()]);
         assert!(outcome.installed.is_empty());
         assert_eq!(
@@ -612,7 +781,7 @@ mod tests {
     fn losing_a_rename_race_to_a_complete_install_is_success() {
         let tmp = tempfile::tempdir().unwrap();
         let binary = crate::engine::binary_name(false);
-        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false, false);
         // Another installer's rename landed after our pre-check.
         let dest = tmp.path().join("root").join("0.153.4");
         fs::create_dir_all(&dest).unwrap();
@@ -626,7 +795,7 @@ mod tests {
     fn a_failed_rename_onto_an_incomplete_dir_is_still_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let binary = crate::engine::binary_name(false);
-        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false, false);
         let dest = tmp.path().join("root").join("0.153.4");
         fs::create_dir_all(&dest).unwrap();
         fs::write(dest.join("partial"), b"x").unwrap();
@@ -638,7 +807,7 @@ mod tests {
     fn a_rename_into_an_empty_slot_installs() {
         let tmp = tempfile::tempdir().unwrap();
         let binary = crate::engine::binary_name(false);
-        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false);
+        let src = stage_archive_tree(&tmp.path().join("x"), "0.153.4", false, false);
         let root = tmp.path().join("root");
         fs::create_dir_all(&root).unwrap();
         assert!(move_into_place(&src, &root.join("0.153.4"), binary).unwrap());
@@ -652,9 +821,9 @@ mod tests {
         fs::create_dir_all(root.join("0.153.4")).unwrap();
         fs::write(root.join("0.153.4/LICENSE"), b"partial").unwrap();
         let extracted = root.join(".staging-test/x");
-        stage_archive_tree(&extracted, "0.153.4", false);
+        stage_archive_tree(&extracted, "0.153.4", false, false);
 
-        let outcome = install_from_extracted(&extracted, &root, false).unwrap();
+        let outcome = install_from_extracted(&extracted, &root, false, false).unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
         assert!(root.join("0.153.4/pidash-agent-engine").is_file());
     }
@@ -666,13 +835,13 @@ mod tests {
         fs::create_dir_all(root.join("0.153.4")).unwrap();
         fs::write(root.join("0.153.4/LICENSE"), b"partial").unwrap();
         let extracted = root.join(".staging-a/x");
-        stage_archive_tree(&extracted, "0.153.4", false);
+        stage_archive_tree(&extracted, "0.153.4", false, false);
 
         // Another installer is mid-move: it holds the lock and is about to
         // complete 0.153.4.
         let held = lock_install_root(&root).unwrap();
         let (r, e) = (root.clone(), extracted.clone());
-        let waiter = std::thread::spawn(move || install_from_extracted(&e, &r, false));
+        let waiter = std::thread::spawn(move || install_from_extracted(&e, &r, false, false));
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert_eq!(
             fs::read(root.join("0.153.4/LICENSE")).unwrap(),
@@ -699,9 +868,9 @@ mod tests {
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let extracted = root.join(format!(".staging-{i}/x"));
-                stage_archive_tree(&extracted, "0.153.4", false);
+                stage_archive_tree(&extracted, "0.153.4", false, false);
                 let root = root.clone();
-                std::thread::spawn(move || install_from_extracted(&extracted, &root, false))
+                std::thread::spawn(move || install_from_extracted(&extracted, &root, false, false))
             })
             .collect();
         let mut installed = 0;
@@ -718,8 +887,13 @@ mod tests {
         let extracted = tmp.path().join("x/pidash-x86_64-unknown-linux-gnu");
         fs::create_dir_all(&extracted).unwrap();
         fs::write(extracted.join("pidash"), b"cli").unwrap();
-        let err = install_from_extracted(&tmp.path().join("x"), &tmp.path().join("engine"), false)
-            .unwrap_err();
+        let err = install_from_extracted(
+            &tmp.path().join("x"),
+            &tmp.path().join("engine"),
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("no engine/"), "{err}");
     }
 
@@ -730,7 +904,7 @@ mod tests {
         fs::create_dir_all(extracted.join("engine/0.153.4")).unwrap();
         fs::write(extracted.join("engine/0.153.4/LICENSE"), b"x").unwrap();
         let root = tmp.path().join("engine-root");
-        assert!(install_from_extracted(&extracted, &root, false).is_err());
+        assert!(install_from_extracted(&extracted, &root, false, false).is_err());
         assert!(!root.join("0.153.4").exists());
     }
 
@@ -738,10 +912,10 @@ mod tests {
     fn non_version_entries_in_the_archive_are_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let extracted = tmp.path().join("x");
-        stage_archive_tree(&extracted, "0.153.4", false);
+        stage_archive_tree(&extracted, "0.153.4", false, false);
         fs::create_dir_all(extracted.join("engine/not-a-version")).unwrap();
         let root = tmp.path().join("engine-root");
-        let outcome = install_from_extracted(&extracted, &root, false).unwrap();
+        let outcome = install_from_extracted(&extracted, &root, false, false).unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
         assert!(!root.join("not-a-version").exists());
     }
@@ -755,6 +929,7 @@ mod tests {
             &src.join("pidash-x86_64-unknown-linux-gnu"),
             "0.153.4",
             false,
+            true,
         );
         let archive = tmp.path().join("a.tar.gz");
         let status = std::process::Command::new("tar")
@@ -770,7 +945,8 @@ mod tests {
         let into = tmp.path().join("x");
         fs::create_dir_all(&into).unwrap();
         extract(&archive, &into).await.unwrap();
-        let outcome = install_from_extracted(&into, &tmp.path().join("engine"), false).unwrap();
+        let outcome =
+            install_from_extracted(&into, &tmp.path().join("engine"), false, true).unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
     }
 
@@ -813,7 +989,7 @@ mod tests {
     fn tarball(target: &str, version: &str) -> Vec<u8> {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
-        stage_archive_tree(&src.join(format!("pidash-{target}")), version, false);
+        stage_archive_tree(&src.join(format!("pidash-{target}")), version, false, true);
         let archive = tmp.path().join("a.tar.gz");
         let status = std::process::Command::new("tar")
             .arg("-czf")
@@ -850,6 +1026,7 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
         assert!(root.join("0.153.4/pidash-agent-engine").is_file());
+        assert!(root.join("0.153.4/bwrap").is_file());
         // Staging is cleaned up; only the version directory (and the
         // install lock file) remain.
         let mut names: Vec<_> = fs::read_dir(&root)
@@ -898,12 +1075,51 @@ mod tests {
         let root = tmp.path().join("engine");
         fs::create_dir_all(root.join("0.153.4")).unwrap();
         fs::write(root.join("0.153.4/pidash-agent-engine"), b"running").unwrap();
+        fs::write(root.join("0.153.4/bwrap"), b"helper").unwrap();
 
         let outcome = install_release_from(&base, &base, "0.1.31", target, &root, false)
             .await
             .unwrap();
         assert_eq!(outcome.already_present, vec!["0.153.4".to_string()]);
         assert!(outcome.installed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_release_redownloads_for_a_binary_only_install() {
+        // A binary without its helpers (staged before PIDESKAPP-148/109) is
+        // not a complete install: the archive is fetched and the helpers
+        // are copied in, without replacing the binary.
+        let target = "x86_64-unknown-linux-gnu";
+        let body = tarball(target, "0.153.4");
+        let digest = format!("{:x}", Sha256::digest(&body));
+        let asset = format!("/pidash-v0.1.31/{}", archive_name(target));
+        let base = serve(vec![
+            (
+                "/pidash-v0.1.31/runner/ENGINE_VERSION".to_string(),
+                b"rust-v0.153.4\n".to_vec(),
+            ),
+            (asset.clone(), body),
+            (
+                format!("{asset}.sha256"),
+                format!("{digest} *x\n").into_bytes(),
+            ),
+        ])
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("engine");
+        fs::create_dir_all(root.join("0.153.4")).unwrap();
+        fs::write(root.join("0.153.4/pidash-agent-engine"), b"running engine").unwrap();
+
+        let outcome = install_release_from(&base, &base, "0.1.31", target, &root, false)
+            .await
+            .unwrap();
+        assert_eq!(outcome.installed, vec!["0.153.4".to_string()]);
+        assert_eq!(
+            fs::read(root.join("0.153.4/pidash-agent-engine")).unwrap(),
+            b"running engine"
+        );
+        assert_eq!(fs::read(root.join("0.153.4/bwrap")).unwrap(), b"helper");
     }
 
     #[cfg(unix)]

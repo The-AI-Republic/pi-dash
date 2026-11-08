@@ -41,15 +41,10 @@ const INFO: AboutInfo = {
       file: "pidash-LICENSE.txt",
       component: "Pi Dash",
       license: "AGPL-3.0-only",
-      text: "GNU AFFERO GENERAL PUBLIC LICENSE",
+      text: "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3",
     },
-    {
-      file: "agent-engine-LICENSE.txt",
-      component: "Agent engine",
-      license: "Apache-2.0",
-      text: "Apache License\nVersion 2.0",
-    },
-    { file: "agent-engine-NOTICE.txt", component: "Agent engine notice", license: "Apache-2.0", text: null },
+    // A second staged file the build did not produce this time.
+    { file: "third-party-NOTICE.txt", component: "Third-party notice", license: "MIT", text: null },
   ],
 };
 
@@ -92,21 +87,21 @@ describe("DesktopAboutControlView", () => {
     const dialog = await screen.findByRole("dialog", { name: ABOUT_CONTROL_LABEL });
     expect(await within(dialog).findByText("Version 1.4.0")).toBeInTheDocument();
     expect(within(dialog).getByText(ABOUT_LICENSING_SUMMARY)).toBeInTheDocument();
-    expect(ABOUT_LICENSING_SUMMARY).toContain("pidash-agent-engine");
+    expect(ABOUT_LICENSING_SUMMARY).toContain("version 3 only");
+    // The engine is no longer bundled (PIDESKAPP-226); the summary must not claim it is.
+    expect(ABOUT_LICENSING_SUMMARY).not.toContain("Apache");
 
     const pidash = within(dialog).getByRole("region", { name: "Pi Dash — AGPL-3.0-only" });
-    expect(within(pidash).getByText("GNU AFFERO GENERAL PUBLIC LICENSE")).toBeInTheDocument();
-    const engine = within(dialog).getByRole("region", { name: "Agent engine — Apache-2.0" });
-    // Licence text keeps its line breaks.
-    expect(engine.querySelector("pre")?.textContent).toBe("Apache License\nVersion 2.0");
+    // Licence text is shown verbatim and keeps its line breaks.
+    expect(pidash.querySelector("pre")?.textContent).toBe("GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3");
   });
 
   it("lists a notice this build did not stage as missing", async () => {
     const user = userEvent.setup();
     render(<DesktopAboutControlView about={capability(async () => INFO)} />);
     await user.click(screen.getByRole("button", { name: ABOUT_CONTROL_LABEL }));
-    const notice = await screen.findByRole("region", { name: "Agent engine notice — Apache-2.0" });
-    expect(within(notice).getByText(noticeMissingText("agent-engine-NOTICE.txt"))).toBeInTheDocument();
+    const notice = await screen.findByRole("region", { name: "Third-party notice — MIT" });
+    expect(within(notice).getByText(noticeMissingText("third-party-NOTICE.txt"))).toBeInTheDocument();
   });
 
   it("reports a failed load in place and retries", async () => {

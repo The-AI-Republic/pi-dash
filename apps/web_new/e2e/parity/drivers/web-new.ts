@@ -5144,6 +5144,11 @@ export class WebNewDriver implements ParityDriver {
     }
     await this.page.locator(`[data-widget-action="${name}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+  async widgetActionDisabled(name: string): Promise<boolean> {
+    const button = this.page.locator(`[data-widget-action="${name}"]`).first();
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await button.isDisabled()) as boolean;
+  }
   async postComment(_text: string): Promise<void> {
     return todo("postComment");
   }

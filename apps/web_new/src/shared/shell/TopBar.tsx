@@ -10,8 +10,9 @@
 // account mounts are filled by their owning slices (NEWFRONT-287,
 // NEWFRONT-292); this slice owns the composition, the toggle, the
 // inbox dot rule and the star link. No edition badge mounts here.
-// On desktop (platform.window present) the header doubles as the
-// window drag region, like TitleBar.
+// On desktop the shell keeps a standard native title bar (which provides
+// dragging and the macOS traffic lights); this header mirrors the location
+// in the native window title, like TitleBar.
 import { IconButton } from "@pidash/kit";
 import { Inbox, PanelLeft, Star } from "lucide-react";
 import * as React from "react";
@@ -72,10 +73,9 @@ export function TopBar({
 
   return (
     <header
-      {...(desktop ? { "data-tauri-drag-region": true } : {})}
       className={`flex h-12 shrink-0 items-center gap-(--space-4) border-b border-(--border) bg-(--bg) px-(--space-4)${
-        desktop ? " select-none" : ""
-      }${desktop?.trafficLightInset ? " pl-20" : ""}`}
+        desktop?.trafficLightInset ? " pl-20" : ""
+      }`}
     >
       <div className="flex flex-1 items-center gap-(--space-2)">
         {workspaceMenu}

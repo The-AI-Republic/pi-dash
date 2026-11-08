@@ -694,6 +694,68 @@ describe("local transport", () => {
     expect(next.onEvent).not.toHaveBeenCalled();
   });
 
+  it("stores the reply even when the page unsubscribes mid-turn", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const stop = transport.subscribeChatEvents("s-1", 0, handlers());
+    h.fire({ result: "chat_message_started", data: { chat_session_id: "s-1", message_id: "m-1" } });
+    h.fire({
+      result: "chat_event",
+      data: { chat_session_id: "s-1", kind: "assistant_delta", payload: { params: { delta: "hel" } } },
+    });
+    h.fire({
+      result: "chat_event",
+      data: { chat_session_id: "s-1", kind: "assistant_delta", payload: { params: { text: "lo" } } },
+    });
+    stop();
+    h.fire({
+      result: "chat_message_completed",
+      data: { chat_session_id: "s-1", message_id: "m-1", status: "ok" },
+    });
+    await vi.waitFor(() =>
+      expect(h.api.appendEvent).toHaveBeenCalledWith("u-1", "s-1", {
+        role: "assistant",
+        content: "hello",
+      })
+    );
+  });
+
+  it("keeps the thread id even when the page unsubscribes before it arrives", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const stop = transport.subscribeChatEvents("s-1", 0, handlers());
+    stop();
+    h.fire(started());
+    await vi.waitFor(() => expect(h.api.setThreadId).toHaveBeenCalledWith("u-1", "s-1", "t-1"));
+  });
+
+  it("stores the full text when the page returns mid-turn", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const first = transport.subscribeChatEvents("s-1", 0, handlers());
+    h.fire({ result: "chat_message_started", data: { chat_session_id: "s-1", message_id: "m-1" } });
+    h.fire({
+      result: "chat_event",
+      data: { chat_session_id: "s-1", kind: "assistant_delta", payload: { params: { delta: "hel" } } },
+    });
+    first();
+    transport.subscribeChatEvents("s-1", 0, handlers());
+    h.fire({
+      result: "chat_event",
+      data: { chat_session_id: "s-1", kind: "assistant_delta", payload: { params: { text: "lo" } } },
+    });
+    h.fire({
+      result: "chat_message_completed",
+      data: { chat_session_id: "s-1", message_id: "m-1", status: "ok" },
+    });
+    await vi.waitFor(() =>
+      expect(h.api.appendEvent).toHaveBeenCalledWith("u-1", "s-1", {
+        role: "assistant",
+        content: "hello",
+      })
+    );
+  });
+
   it("holds a second turn back only until the turn's own completion", async () => {
     const h = harness();
     const transport = transportFor(h);
