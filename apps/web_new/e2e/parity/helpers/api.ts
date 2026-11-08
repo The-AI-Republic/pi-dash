@@ -5465,6 +5465,7 @@ export async function serverIssue(
   return {
     id: str("id"),
     name: str("name"),
+    is_synced: row["is_synced"] === true,
     state_id: str("state_id"),
     priority: strOrNull("priority"),
     assignee_ids: strArray("assignee_ids"),
@@ -5992,6 +5993,7 @@ export interface ParityServerIssue {
 export interface ParityServerIssueDetail {
   id: string;
   name: string;
+  is_synced: boolean;
   state_id: string;
   priority: string | null;
   assignee_ids: string[];

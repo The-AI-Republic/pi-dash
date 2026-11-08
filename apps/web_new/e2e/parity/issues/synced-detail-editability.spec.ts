@@ -45,7 +45,9 @@ test(
 
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.openIssueDetail(seed.workspaceSlug, projectId, issue.id);
-      await expect.poll(() => driver.issueDetailTitle(), { timeout: 60_000 }).toBe(`${tag} issue`);
+      // The title renders as static text on a synced item (no input), so
+      // settle on the issue key, which both apps render once loaded.
+      await expect.poll(() => driver.issueDetailIdentifier(), { timeout: 60_000 }).toMatch(/^[A-Z0-9]{2,}-\d+$/);
 
       await test.step("the state picker stays enabled on the synced item", async () => {
         expect(await driver.propertyPickerDisabled("State")).toBe(false);
