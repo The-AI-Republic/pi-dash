@@ -13,8 +13,18 @@ import type { Page } from "@playwright/test";
 
 /** Scenario knobs for the mocked native shell. All optional. */
 export interface DesktopMockConfig {
-  /** managed_doctor answer. Default: both binaries present, host "parity-host". */
-  doctor?: { runnerPresent: boolean; enginePresent: boolean; hostLabel: string };
+  /**
+   * What daemon_discover classifies this computer's Pi Dash daemon as.
+   * Default: "compatible" — a daemon signed in as the app's own account.
+   * "no_daemon" until daemon_install_service runs (the set-up path).
+   */
+  daemon?: "compatible" | "no_daemon" | "account_mismatch";
+  /** The engine sign-in state the daemon reports. Default: "active". */
+  engineSignIn?: "never" | "active" | "expiring" | "expired" | "signed_out" | "revoked";
+  /** Reason code when the engine is unavailable; absent = available. */
+  engineUnavailableReason?: string;
+  /** The daemon's runners at start (daemon_runners). Default: none. */
+  localRunners?: Array<Record<string, unknown>>;
   /** desktop_pending_update answer. Default: null (nothing waiting). */
   pendingUpdate?: { version: string; currentVersion: string; installing: boolean } | null;
   /** Make desktop_install_update reject. Default: false. */
@@ -60,7 +70,7 @@ declare global {
  * Install the mocked desktop bridge. Call before the first navigation:
  * the init script runs on every subsequent page load. The mock records
  * invokes, proxies API traffic through fetch, and serves the lifecycle,
- * chat, history, updater, CLI, opener and deep-link commands from memory.
+ * chat, history, updater, CLI, browser-open and deep-link commands from memory.
  */
 export async function installDesktopMock(page: Page, config: DesktopMockConfig = {}): Promise<void> {
   await page.addInitScript((seed: DesktopMockConfig) => {
@@ -103,7 +113,10 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       installInFlight: false,
       apiControllers: new Map<string, AbortController>(),
     };
-    store.config.doctor ??= { runnerPresent: true, enginePresent: true, hostLabel: "parity-host" };
+    store.config.daemon ??= "compatible";
+    store.config.engineSignIn ??= "active";
+    store.config.localRunners ??= [];
+    const localRunners: Array<Record<string, unknown>> = [...store.config.localRunners];
     store.config.pendingUpdate ??= null;
     store.config.installFails ??= false;
     store.config.cli ??= { installed: false, path: null, version: null };
@@ -292,41 +305,79 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           await apiStream(params, channel);
           return null;
         }
-        case "plugin:opener|open_url":
+        case "open_in_browser":
         case "plugin:window|set_title":
         case "desktop_clear_web_data":
           return null;
-        case "managed_doctor": {
-          const doctor = store.config.doctor;
+        case "daemon_discover": {
+          // The shell classifies the daemon for the app's account; the mock
+          // answers for whichever account the page names.
+          const identity = (params["appIdentity"] as Record<string, unknown> | undefined) ?? {};
+          const cloudUrl = String(identity["cloudUrl"] ?? "");
+          const cli = {
+            installed: store.config.cli.installed,
+            path: store.config.cli.path,
+            version: store.config.cli.version,
+            updatable: false,
+          };
+          if (store.config.daemon === "no_daemon") return { kind: "no_daemon", cli };
+          if (store.config.daemon === "account_mismatch") {
+            return {
+              kind: "account_mismatch",
+              daemon_account: "someone-else@parity.test",
+              daemon_cloud_url: cloudUrl,
+              hosts_runners: false,
+            };
+          }
+          const unavailable = store.config.engineUnavailableReason;
+          const engine = unavailable ? "unavailable" : "available";
           return {
-            runner_present: doctor.runnerPresent,
-            engine_present: doctor.enginePresent,
-            host_label: doctor.hostLabel,
+            kind: "compatible",
+            hello: {
+              daemon_version: "parity",
+              ipc_version: 1,
+              cloud_url: cloudUrl,
+              account: { user_id: String(identity["userId"] ?? ""), email: identity["email"], cloud_url: cloudUrl },
+              workspaces: [],
+              engine,
+              engine_detail: {
+                state: engine,
+                sign_in_state: store.config.engineSignIn,
+                ...(unavailable ? { reason_code: unavailable } : {}),
+              },
+            },
           };
         }
-        case "managed_write_engine_config":
-        case "managed_write_model_token":
-        case "managed_bootstrap":
-        case "managed_enroll":
-        case "managed_start_daemon":
-        case "managed_stop_daemon":
-          return null;
-        case "managed_sign_out": {
-          // The native side owns history deletion: the page only names the
-          // account, so the mock clears that account's on-machine store.
-          const clear = (params["clearChatHistory"] as Record<string, unknown> | undefined) ?? {};
-          const account = String(clear["account"] ?? "");
-          if (account !== "") {
-            for (const key of [...store.chatSessions.keys()]) {
-              if (key.startsWith(`${account}:`)) {
-                store.chatSessions.delete(key);
-                store.chatEvents.delete(key);
-              }
-            }
-            savePersisted();
-          }
-          return null;
+        case "daemon_runners":
+          return localRunners;
+        case "daemon_engine_runner_add": {
+          const workspace = String(params["workspace"] ?? "");
+          const project = String(params["project"] ?? "");
+          const runner = {
+            name: `engine-${workspace}-${project}`,
+            runner_id: `mock-runner-${localRunners.length + 1}`,
+            workspace_slug: workspace,
+            project_slug: project,
+            working_dir: String(params["workingDir"] ?? `/mock/tasks/${workspace}/${project}`),
+            agent: "engine",
+          };
+          localRunners.push(runner);
+          return {
+            runner: runner.name,
+            runner_id: runner.runner_id,
+            workspace,
+            project,
+            working_dir: runner.working_dir,
+          };
         }
+        case "daemon_install_service":
+          // Set-up installed and started the service: the daemon answers now.
+          store.config.daemon = "compatible";
+          return null;
+        case "daemon_ensure_engine":
+        case "daemon_credentials_reload":
+        case "pidash_cli_engine_login":
+          return null;
         case "chat_approval_modes_save": {
           const modesAccount = String(params["account"] ?? "");
           const modes = (params["modes"] as Record<string, string> | undefined) ?? {};

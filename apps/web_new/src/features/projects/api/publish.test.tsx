@@ -18,6 +18,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { platform } from "../../../core/platform/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import {
   boardFormDirty,
@@ -175,6 +176,15 @@ describe("publish form math", () => {
     vi.stubEnv("VITE_SPACE_BASE_PATH", "/public");
     expect(publishedBoardLink("abc")).toBe("https://space.test/public/issues/abc");
     vi.unstubAllEnvs();
+  });
+
+  it("falls back to the hosted origin when no spaces base is configured", () => {
+    vi.stubEnv("VITE_SPACE_BASE_URL", "");
+    vi.stubEnv("VITE_SPACE_BASE_PATH", "");
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
+    expect(publishedBoardLink("abc")).toBe("https://app.example.test/issues/abc");
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 });
 

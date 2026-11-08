@@ -20,6 +20,24 @@ vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
   return { ...original, notifySuccess, notifyInfo: vi.fn(), notifyError };
 });
 
+const platformHarness = vi.hoisted(() => ({
+  kind: "web" as "web" | "desktop",
+  opened: [] as string[],
+  failOpen: false as boolean,
+}));
+
+vi.mock("../../../core/platform/index.js", () => ({
+  get platform() {
+    return {
+      kind: platformHarness.kind,
+      openExternal: async (url: string): Promise<void> => {
+        if (platformHarness.failOpen) throw new Error("bridge missing");
+        platformHarness.opened.push(url);
+      },
+    };
+  },
+}));
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { cloudAssistantKeys } from "../api/keys.js";
 import { SIGN_IN_POLL_INTERVAL_MS, type PollClock, type PopupLike } from "../lib/signIn.js";
@@ -110,6 +128,9 @@ const STATUS = "/api/users/me/ai-assistant/openai-login/status/";
 afterEach(() => {
   resetAppClient();
   vi.clearAllMocks();
+  platformHarness.kind = "web";
+  platformHarness.opened = [];
+  platformHarness.failOpen = false;
 });
 
 describe("useProviderSignIn", () => {
@@ -292,5 +313,50 @@ describe("useProviderSignIn", () => {
       result.current.signIn();
     });
     expect(time.cleared.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("on desktop starts first and opens the authorize address in the system browser", async () => {
+    platformHarness.kind = "desktop";
+    // The shell denies the reserved blank tab (NewWindowResponse::Deny),
+    // so window.open returns null here exactly as in the live webview.
+    const { calls } = stubTransport({
+      [START]: { status: 200, body: { authorize_url: "https://auth.openai.com/desktop", state: "desk-1" } },
+      [STATUS]: { status: 200, body: { status: "ok" } },
+    });
+    const time = manualClock();
+    const { result } = setup({ open: () => null, clock: time.clock });
+    await act(async () => {
+      await result.current.signIn();
+    });
+    expect(platformHarness.opened).toEqual(["https://auth.openai.com/desktop"]);
+    expect(calls.some((call) => call.method === "POST" && call.url.endsWith(START))).toBe(true);
+    expect(notifyError).not.toHaveBeenCalled();
+    expect(result.current.pending).toBe(true);
+    await time.fire();
+    await waitFor(() =>
+      expect(notifySuccess).toHaveBeenCalledWith(
+        "OpenAI account ready",
+        "The OpenAI account is connected, and the assistant will draw on its ChatGPT plan allowance."
+      )
+    );
+  });
+
+  it("on desktop reports a browser-open failure without popup copy and without polling", async () => {
+    platformHarness.kind = "desktop";
+    platformHarness.failOpen = true;
+    stubTransport({
+      [START]: { status: 200, body: { authorize_url: "https://auth", state: "desk-2" } },
+      [STATUS]: { status: 200, body: { status: "ok" } },
+    });
+    const time = manualClock();
+    const { result } = setup({ open: () => null, clock: time.clock });
+    await act(async () => {
+      await result.current.signIn();
+    });
+    // A bridge failure is a rejected start, so the notice is the generic
+    // start-failed copy — never the web popup-blocked copy.
+    expect(notifyError).toHaveBeenCalledWith("ChatGPT sign-in could not open", "No detail returned");
+    expect(time.callbacks).toHaveLength(0);
+    expect(result.current.pending).toBe(false);
   });
 });

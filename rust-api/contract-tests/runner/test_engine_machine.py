@@ -528,14 +528,14 @@ def test_merge_held_runs_finalize_fully(settings, user_client, seeder, daemon_wo
     # reset + post-commit re-apply refreshed them).
     held_id = str(__import__("uuid").uuid4())
     seeder.db.execute(
-        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, terminal_hooks_applied_at, terminal_capacity_released_at, created_at) VALUES (%s,%s,%s,%s,%s,%s,'running','','direct','managed_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now() - interval '1 day', now() - interval '1 day', now())",
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, terminal_hooks_applied_at, terminal_capacity_released_at, pin_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'running','','direct','managed_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now() - interval '1 day', now() - interval '1 day','locality', now())",
         (held_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"], daemon_world["owner"]["id"], pod["id"], loser_id),
     )
     seeder._put("agent_run", held_id)
     # Queued managed run pinned to the loser in another pod.
     queued_id = str(__import__("uuid").uuid4())
     seeder.db.execute(
-        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','managed_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','',now())",
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, pin_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','managed_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','','locality',now())",
         (queued_id, daemon_world["workspace"]["id"], daemon_world["owner"]["id"], daemon_world["owner"]["id"], other_pod["id"], loser_id),
     )
     seeder._put("agent_run", queued_id)

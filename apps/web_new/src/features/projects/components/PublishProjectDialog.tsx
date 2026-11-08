@@ -41,6 +41,20 @@ export interface PublishProjectDialogProps {
 
 type LayoutKey = "list" | "kanban";
 
+/** The public link for a published board, or null when it cannot be built. */
+function publishedBoardLinkOrNull(published: boolean, stored: unknown): string | null {
+  if (!published || stored === undefined || typeof stored !== "object" || stored === null || !("anchor" in stored)) {
+    return null;
+  }
+  const anchor = (stored as { anchor: unknown }).anchor;
+  if (typeof anchor !== "string" || anchor === "") return null;
+  try {
+    return publishedBoardLink(anchor);
+  } catch {
+    return null;
+  }
+}
+
 const LAYOUTS: ReadonlyArray<{ key: LayoutKey; label: string }> = [
   { key: "list", label: "List" },
   { key: "kanban", label: "Kanban" },
@@ -143,10 +157,7 @@ export function PublishProjectDialog({
     }
   }
 
-  const link =
-    published && stored !== undefined && "anchor" in stored && stored.anchor !== null
-      ? publishedBoardLink(stored.anchor)
-      : null;
+  const link = publishedBoardLinkOrNull(published, stored);
   const loading = board.isPending;
   const unpublishing = unpublish.isPending;
   const boardId = published && stored !== undefined && "id" in stored ? stored.id : null;

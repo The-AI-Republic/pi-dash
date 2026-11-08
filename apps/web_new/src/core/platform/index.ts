@@ -7,12 +7,19 @@
 // branch on the target themselves.
 
 export type {
-  AgentEngineProfile,
-  AgentHostCheck,
+  AgentAppIdentity,
   AgentRuntimeApi,
   CliInstallProgress,
   CliSetupApi,
   CliStatus,
+  DaemonCliInfo,
+  DaemonDiscovery,
+  DaemonEngineRunner,
+  DaemonEngineSignInState,
+  DaemonEngineState,
+  DaemonEngineStatus,
+  DaemonHello,
+  DaemonLocalRunner,
   DeepLinkApi,
   EventStream,
   FetchInit,

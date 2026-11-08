@@ -9,10 +9,12 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { platform } from "../../../../core/platform/index.js";
 import { WorkspaceIdentityCard } from "./WorkspaceIdentityCard.js";
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 function renderCard(overrides: Partial<React.ComponentProps<typeof WorkspaceIdentityCard>> = {}) {
@@ -47,6 +49,13 @@ describe("WorkspaceIdentityCard", () => {
     renderCard();
     expect(screen.getByTestId("workspace-general-name")).toHaveTextContent("acme workspace");
     expect(screen.getByText(`${window.location.origin}/acme`)).toBeInTheDocument();
+  });
+
+  it("shows the hosted address when the window origin is the desktop bundle", () => {
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
+    renderCard();
+    expect(screen.getByText("https://app.example.test/acme")).toBeInTheDocument();
+    expect(screen.queryByText(`${window.location.origin}/acme`)).not.toBeInTheDocument();
   });
 
   it("calls the copy and logo handlers", async () => {
