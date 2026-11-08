@@ -5,9 +5,12 @@
 // issues render the detail sidebar with every picker disabled while values
 // stay visible. (The dedicated readonly/ components have no usages in the
 // old app; the archived sidebar is the live read-only surface.)
+// NEWPIDASH-141 extends the row: the sub-work-item and attachment action
+// entries stay disabled too, matching the old whole-widgets disable.
 // Rows: ISS-220 (read-only property components).
 import { test, expect } from "../fixtures";
 import {
+  issueBrowseKey,
   parityProjectIdentifier,
   serverArchiveIssue,
   serverCleanupIssueWithSession,
@@ -27,13 +30,14 @@ import { specTags, specTitle } from "../helpers/tags";
 test(
   specTitle(["ISS-220"], "archived issues render every sidebar picker disabled"),
   { tag: specTags(["ISS-220"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed, page }) => {
     const tag = `NF122 readonly ${Date.now()}`;
     const session = await signInSession(seed.email, seed.password);
+    const projectCode = parityProjectIdentifier("N122");
     const projectId = await serverCreateProjectWithFlags(
       seed.workspaceSlug,
       `${tag} project`,
-      parityProjectIdentifier("N122"),
+      projectCode,
       {},
       session
     );
@@ -73,6 +77,24 @@ test(
         // Values still render (read-only shows, never edits).
         await expect.poll(() => driver.propertyValueText("State"), { timeout: 15_000 }).toContain(doneStateName);
         expect(await driver.pickerOpen()).toBe(false);
+      });
+
+      // NEWPIDASH-141: the browse address (not the archives frame above,
+      // which mounts no widgets) is the widget surface — an archived issue
+      // keeps its add entries disabled there too.
+      await test.step("the sub-work-item and attachment entries stay disabled on the browse address", async () => {
+        const key = await issueBrowseKey(seed.workspaceSlug, projectId, projectCode, issue.id, session);
+        await driver.openBrowseWorkItem(seed.workspaceSlug, key);
+        expect(await driver.browseShowsWorkItemDetail()).toBe(true);
+        // The entries mount disabled while membership is still resolving
+        // and only enable once the project read lands, so a single read
+        // can land in that pending window. Read them repeatedly until the
+        // detail has settled; an enabled read at any point is NEWPIDASH-141.
+        for (let attempt = 0; attempt < 8; attempt++) {
+          expect(await driver.widgetActionDisabled("Add sub-work item")).toBe(true);
+          expect(await driver.widgetActionDisabled("Attach")).toBe(true);
+          if (attempt < 7) await page.waitForTimeout(1000);
+        }
       });
     } finally {
       await serverUnarchiveIssue(seed.workspaceSlug, projectId, issue.id, session);

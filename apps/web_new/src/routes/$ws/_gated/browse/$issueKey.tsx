@@ -270,7 +270,7 @@ function BrowseIssueDetail({
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           issueId={issue.id}
-          editable={editable}
+          editable={writable}
         />
       ),
     },
@@ -281,9 +281,9 @@ function BrowseIssueDetail({
         workspaceSlug={workspaceSlug}
         issue={issue}
         project={project}
-        editable={editable}
+        editable={writable}
         projectIdentifier={projectIdentifier(project, issueKey)}
-        canWrite={editable}
+        canWrite={writable}
         onAttach={() => attachmentsRef.current?.openPicker()}
         runAIAction={
           <IssueRunAIAction

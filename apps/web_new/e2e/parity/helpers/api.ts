@@ -928,6 +928,21 @@ export async function issueFacts(
   });
 }
 
+/** Browse key (`IDENT-seq`) for one issue by id; archived rows included (NEWPIDASH-141). */
+export async function issueBrowseKey(
+  workspaceSlug: string,
+  projectId: string,
+  projectIdentifier: string,
+  issueId: string,
+  sessionCookie: string,
+  apiBase: string = apiBaseFromEnv()
+): Promise<string> {
+  const row = await fetchIssue(workspaceSlug, projectId, issueId, sessionCookie, apiBase);
+  if (typeof row["sequence_id"] !== "number")
+    throw new Error(`[parity] issue ${issueId} carried no numeric sequence_id.`);
+  return `${projectIdentifier}-${row["sequence_id"]}`;
+}
+
 /** `IDENT-seq` (e.g. `PAR-1`) for the named issue; throws when absent. */
 export async function issueSeqForName(
   workspaceSlug: string,

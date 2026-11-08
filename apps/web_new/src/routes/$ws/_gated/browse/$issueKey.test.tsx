@@ -654,16 +654,38 @@ describe("browse route", () => {
 
   it("keeps the widget stack read-only on an archived issue", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    await findStrip();
+    // Membership has settled (the palette carries the read commands); the
+    // archived issue must still keep every write entry disabled. The
+    // sub-work-item and attachment entries read the same writable flag as
+    // relations and links (NEWPIDASH-141).
+    await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.copy-id`)).toBeDefined());
     const widget = await screen.findByTestId("issue-detail-widgets");
     expect(within(widget).getByRole("button", { name: "Add relation" })).toBeDisabled();
     expect(within(widget).getByRole("button", { name: "Add link" })).toBeDisabled();
+    expect(within(widget).getByRole("button", { name: "Add sub-work item" })).toBeDisabled();
+    const actions = await within(widget).findAllByRole("button", { name: "Attach" });
+    const attach = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
+    expect(attach).toBeDefined();
+    expect(attach as HTMLElement).toBeDisabled();
+    clearCommands();
+    clearPalettePages();
   });
 
   it("keeps the widget stack read-only on a synced issue", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, syncedIssue: true });
+    await findStrip();
+    await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.copy-id`)).toBeDefined());
     const widget = await screen.findByTestId("issue-detail-widgets");
     expect(within(widget).getByRole("button", { name: "Add relation" })).toBeDisabled();
     expect(within(widget).getByRole("button", { name: "Add link" })).toBeDisabled();
+    expect(within(widget).getByRole("button", { name: "Add sub-work item" })).toBeDisabled();
+    const actions = await within(widget).findAllByRole("button", { name: "Attach" });
+    const attach = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
+    expect(attach).toBeDefined();
+    expect(attach as HTMLElement).toBeDisabled();
+    clearCommands();
+    clearPalettePages();
   });
 
   it("renders unknown keys without the strip, linking home", async () => {
