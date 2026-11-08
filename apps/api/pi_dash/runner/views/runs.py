@@ -293,6 +293,77 @@ class AgentRunListEndpoint(APIView):
 
         from pi_dash.cloud_agent.creation import dispatch_after_commit, execution_fields
         from pi_dash.db.models.issue import Issue
+        from pi_dash.runner.services.issue_assignment import (
+            dedicated_refusal_body,
+            dedicated_run_refusal,
+            pod_once_auth_code,
+            resolve_run_pin,
+        )
+
+        # A direct run bound to a dedicated issue takes the dedicated
+        # pin (§9.2); a person's run is refused first when the dedicated
+        # runner is unavailable or usage-excluded (H-11, H-10). An explicit
+        # pin: "pod_once" (§23.3) is authorized separately and runs unpinned.
+        pod_once = (request.data.get("pin") or "").strip() == "pod_once"
+        direct_issue = (
+            Issue.objects.filter(pk=ctx.work_item_id).first()
+            if ctx.work_item_id is not None
+            else None
+        )
+        pinned_runner, pin_kind = (None, "locality")
+        if direct_issue is not None:
+            if pod_once:
+                auth = pod_once_auth_code(direct_issue, user=ctx.created_by)
+                if auth == "pod_once_not_applicable":
+                    return Response(
+                        {"error": "pod_once requires a dedicated runner on the issue", "code": auth},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if auth == "pod_once_not_allowed":
+                    return Response(
+                        {"error": "only the issue's creator and assignees may use pod_once", "code": auth},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                from pi_dash.runner.services.matcher import pod_has_runner_for_issue_principal
+
+                if not pod_has_runner_for_issue_principal(
+                    ctx.pod, direct_issue, getattr(ctx.created_by, "id", None), human=True, pod_once=True
+                ):
+                    return Response(
+                        {
+                            "error": f"no eligible runner in pod {ctx.pod.name}",
+                            "code": "no_eligible_runner_in_pod",
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                pinned_runner, pin_kind = resolve_run_pin(
+                    direct_issue,
+                    parent=None,
+                    pod=ctx.pod,
+                    fresh_session=False,
+                    creator=ctx.created_by,
+                    trigger="direct",
+                    pod_once=True,
+                )
+                if pinned_runner is not None:
+                    pinned_runner = None
+                pin_kind = "locality"
+            else:
+                refusal, _detail = dedicated_run_refusal(direct_issue, human=True, user=ctx.created_by, pod_once=False)
+                if refusal is not None:
+                    return Response(
+                        dedicated_refusal_body(direct_issue, code=refusal),
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                pinned_runner, pin_kind = resolve_run_pin(
+                    direct_issue,
+                    parent=None,
+                    pod=ctx.pod,
+                    fresh_session=False,
+                    creator=ctx.created_by,
+                    trigger="direct",
+                    pod_once=False,
+                )
 
         try:
             with transaction.atomic():
@@ -322,6 +393,8 @@ class AgentRunListEndpoint(APIView):
                     run_config=request.data.get("run_config") or {},
                     required_capabilities=request.data.get("required_capabilities") or [],
                     work_item_id=ctx.work_item_id,
+                    pinned_runner=pinned_runner,
+                    pin_kind=pin_kind,
                     **execution,
                     # Owner stays NULL until assignment (design §5.3).
                 )
@@ -341,6 +414,10 @@ class AgentRunListEndpoint(APIView):
                 ):
                     raise OverflowError("prompt_too_large")
                 run.save(update_fields=["prompt", "prompt_manifest"])
+                if pod_once and direct_issue is not None:
+                    from pi_dash.orchestration import scheduling as _scheduling
+
+                    _scheduling._post_pod_once_started_comment(direct_issue, pod=ctx.pod, actor=ctx.created_by)
                 dispatch_after_commit(run.id)
         except (ValueError, RuntimeError) as exc:
             code = getattr(exc, "code", str(exc))
@@ -403,15 +480,48 @@ class AgentRunListEndpoint(APIView):
         if not is_workspace_member(request.user, issue.workspace_id):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        pod_once = (request.data.get("pin") or "").strip() == "pod_once"
         with transaction.atomic():
-            queued = self._human_run_clock(issue, actor=request.user, trigger=scheduling.TRIGGER_RUN_AI)
+            queued = self._human_run_clock(
+                issue, actor=request.user, trigger=scheduling.TRIGGER_RUN_AI, pod_once=pod_once
+            )
             if queued is not None:
                 return queued
-            run = scheduling.dispatch_run_ai_run(issue, actor=request.user)
+            run, reason = scheduling.dispatch_run_ai_run_with_reason(issue, actor=request.user, pod_once=pod_once)
             if run is None:
+                # Build the refusal body before marking rollback: a query
+                # after set_rollback hits a broken transaction.
+                refusal_body = None
+                if reason in (
+                    scheduling.RUN_AI_DEDICATED_RUNNER_OFFLINE,
+                    scheduling.RUN_AI_DEDICATED_RUNNER_PAUSED,
+                    scheduling.RUN_AI_DEDICATED_NOT_OWNER,
+                ):
+                    from pi_dash.runner.services.issue_assignment import dedicated_refusal_body
+
+                    refusal_body = dedicated_refusal_body(issue, code=reason)
                 # Undo the clock re-time too: the human's click produced no
                 # run, so the ticker must look exactly as it did before.
                 transaction.set_rollback(True)
+                # Dedicated refusal (§11.2, §23.3): full body so the client
+                # shows the runner, pause reason, and pod_once/change options.
+                if refusal_body is not None:
+                    return Response(refusal_body, status=status.HTTP_409_CONFLICT)
+                if reason == scheduling.RUN_AI_POD_ONCE_NOT_ALLOWED:
+                    return Response(
+                        {"error": "only the issue's creator and assignees may use pod_once", "code": reason},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                if reason == scheduling.RUN_AI_POD_ONCE_NOT_APPLICABLE:
+                    return Response(
+                        {"error": "pod_once requires a dedicated runner on the issue", "code": reason},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if reason == scheduling.RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD:
+                    return Response(
+                        {"error": "no eligible runner in the pod", "code": reason},
+                        status=status.HTTP_409_CONFLICT,
+                    )
         if run is None:
             return Response(
                 {"error": ("could not dispatch — issue may already have an active run, or no pod is available")},
@@ -423,7 +533,7 @@ class AgentRunListEndpoint(APIView):
         )
 
     @staticmethod
-    def _human_run_clock(issue, *, actor, trigger):
+    def _human_run_clock(issue, *, actor, trigger, pod_once: bool = False):
         """Tell the issue's clock a human asked for a run (design §5.2 / §4.5).
 
         A human-started run is free and always fires. If a run is already
@@ -432,6 +542,10 @@ class AgentRunListEndpoint(APIView):
         the issue is free: return the 202 for that case. Otherwise ``None``
         and the caller dispatches now. Callers wrap this and the dispatch in
         one transaction so a failed dispatch rolls the clock back as well.
+
+        ``pod_once`` (§23.3) requires no active run instead of queueing, so
+        a queued verdict is suppressed here and the caller dispatches now
+        to surface ``active_run_exists``.
         """
         from pi_dash.orchestration import scheduling
         from pi_dash.orchestration.agent_phases import is_ticking_state
@@ -442,6 +556,8 @@ class AgentRunListEndpoint(APIView):
             issue, scheduling.TickerEvent.human_run_requested(actor=actor, trigger=trigger)
         )
         if decision.queued:
+            if pod_once:
+                return None
             return Response(
                 {
                     "queued": True,
@@ -475,17 +591,56 @@ class AgentRunListEndpoint(APIView):
         if not is_workspace_member(request.user, issue.workspace_id):
             return Response({"error": "issue not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        pod_once = (request.data.get("pin") or "").strip() == "pod_once"
         with transaction.atomic():
-            queued = self._human_run_clock(issue, actor=request.user, trigger=scheduling.TRIGGER_COMMENT_AND_RUN)
+            queued = self._human_run_clock(
+                issue, actor=request.user, trigger=scheduling.TRIGGER_COMMENT_AND_RUN, pod_once=pod_once
+            )
             if queued is not None:
                 return queued
             run = scheduling.dispatch_continuation_run(
                 issue,
                 triggered_by=scheduling.TRIGGER_COMMENT_AND_RUN,
                 actor=request.user,
+                pod_once=pod_once,
             )
             if run is None:
+                # Map before marking rollback (queries after set_rollback
+                # hit a broken transaction).
+                from pi_dash.runner.services.issue_assignment import (
+                    dedicated_refusal_body,
+                    dedicated_run_refusal,
+                    pod_once_auth_code,
+                )
+
+                refusal_response = None
+                if pod_once:
+                    auth = pod_once_auth_code(issue, user=request.user)
+                    if auth == "pod_once_not_allowed":
+                        refusal_response = Response(
+                            {"error": "only the issue's creator and assignees may use pod_once", "code": auth},
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
+                    elif auth == "pod_once_not_applicable":
+                        refusal_response = Response(
+                            {"error": "pod_once requires a dedicated runner on the issue", "code": auth},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    else:
+                        refusal_response = Response(
+                            {"error": "no eligible runner in the pod", "code": "no_eligible_runner_in_pod"},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                else:
+                    refusal, _detail = dedicated_run_refusal(issue, human=True, user=request.user)
+                    if refusal is not None:
+                        refusal_response = Response(
+                            dedicated_refusal_body(issue, code=refusal),
+                            status=status.HTTP_409_CONFLICT,
+                        )
                 transaction.set_rollback(True)
+                if refusal_response is not None:
+                    return refusal_response
         if run is None:
             return Response(
                 {
@@ -717,6 +872,26 @@ class AgentRunReleasePinEndpoint(APIView):
             if locked.pinned_runner_id is None:
                 return Response(
                     {"error": "run not pinned"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # H-13: a dedicated pin is owned by the issue, not the queue;
+            # only the assignment save or revoke can move it (§12.2). After
+            # the permission and still-QUEUED checks, before unpinning.
+            if locked.pin_kind == "dedicated":
+                # §12.2: the exact refusal names runner and pod so the
+                # person can act (change the runner, or cancel and use
+                # pod_once). The {"error", "code"} shape is kept.
+                runner_name = locked.pinned_runner.name if locked.pinned_runner_id else "the dedicated runner"
+                pod_name = locked.pod.name if locked.pod_id else "the pod"
+                return Response(
+                    {
+                        "error": (
+                            f"This run is dedicated to runner {runner_name} and cannot be released. "
+                            f"Change the issue's runner, or cancel the run and use Run on any "
+                            f"runner in {pod_name} once."
+                        ),
+                        "code": "dedicated_pin_not_releasable",
+                    },
                     status=status.HTTP_409_CONFLICT,
                 )
             locked.pinned_runner = None

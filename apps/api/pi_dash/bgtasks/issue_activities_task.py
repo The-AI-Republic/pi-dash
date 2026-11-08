@@ -524,6 +524,103 @@ def track_archive_at(
             )
 
 
+def _track_named_target(
+    requested_data,
+    current_instance,
+    issue_id,
+    project_id,
+    workspace_id,
+    actor_id,
+    issue_activities,
+    epoch,
+    *,
+    field,
+    comment,
+    pod=False,
+):
+    """Shared pod/runner activity tracker (design §14.7).
+
+    Old and new values are display names, identifiers the UUIDs.
+    """
+    from pi_dash.runner.models import Pod, Runner
+
+    if pod:
+        cur_id = current_instance.get("assigned_pod_id") or current_instance.get("assigned_pod")
+        req_id = requested_data.get("assigned_pod_id") or requested_data.get("assigned_pod")
+        model = Pod
+        field_name = "assigned_pod"
+    else:
+        cur_id = current_instance.get("assigned_runner_id") or current_instance.get("assigned_runner")
+        req_id = requested_data.get("assigned_runner_id") or requested_data.get("assigned_runner")
+        model = Runner
+        field_name = "assigned_runner"
+
+    if cur_id is not None and not is_valid_uuid(cur_id):
+        cur_id = None
+    if req_id is not None and not is_valid_uuid(req_id):
+        req_id = None
+
+    if str(cur_id) == str(req_id):
+        return
+
+    old_row = model.objects.filter(pk=cur_id).first() if cur_id is not None else None
+    new_row = model.objects.filter(pk=req_id).first() if req_id is not None else None
+    old_name = getattr(old_row, "name", "") if old_row else ""
+    new_name = getattr(new_row, "name", "") if new_row else ""
+    issue_activities.append(
+        IssueActivity(
+            issue_id=issue_id,
+            actor_id=actor_id,
+            verb="updated",
+            old_value=old_name,
+            new_value=new_name,
+            field=field_name,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            comment=comment,
+            old_identifier=cur_id,
+            new_identifier=req_id,
+            epoch=epoch,
+        )
+    )
+
+
+def track_assigned_pod(
+    requested_data,
+    current_instance,
+    issue_id,
+    project_id,
+    workspace_id,
+    actor_id,
+    issue_activities,
+    epoch,
+):
+    """Track ``assigned_pod`` changes with pod names (design §14.7 added scope)."""
+    _track_named_target(
+        requested_data, current_instance, issue_id, project_id, workspace_id,
+        actor_id, issue_activities, epoch,
+        field="assigned_pod", comment="updated the execution pod to", pod=True,
+    )
+
+
+def track_assigned_runner(
+    requested_data,
+    current_instance,
+    issue_id,
+    project_id,
+    workspace_id,
+    actor_id,
+    issue_activities,
+    epoch,
+):
+    """Track ``assigned_runner`` changes with runner names (design §14.7)."""
+    _track_named_target(
+        requested_data, current_instance, issue_id, project_id, workspace_id,
+        actor_id, issue_activities, epoch,
+        field="assigned_runner", comment="updated the dedicated runner to", pod=False,
+    )
+
+
 def track_closed_to(
     requested_data,
     current_instance,
@@ -614,6 +711,10 @@ def update_issue_activity(
         "estimate_point": track_estimate_points,
         "archived_at": track_archive_at,
         "closed_to": track_closed_to,
+        "assigned_pod": track_assigned_pod,
+        "assigned_pod_id": track_assigned_pod,
+        "assigned_runner": track_assigned_runner,
+        "assigned_runner_id": track_assigned_runner,
         # External endpoint keys
         "parent": track_parent,
         "state": track_state,

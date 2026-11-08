@@ -345,6 +345,10 @@ class RunnerListEndpoint(APIView):
     optional ``?project=<uuid>`` narrows to every pod owned by that project
     (a project may own several pods), which is how the project-scoped AI
     Workers panel filters this list.
+
+    Optional ``?assignable_for=<issue-id | "new">`` (design §7.4) adds the
+    per-row eligibility read: ``assignable``, ``not_assignable_code``,
+    ``is_busy`` and ``queue_depth``.
     """
 
     authentication_classes = [BaseSessionAuthentication]
@@ -375,7 +379,19 @@ class RunnerListEndpoint(APIView):
         project_id = request.query_params.get("project")
         if project_id:
             qs = qs.filter(pod__project_id=project_id)
-        return Response(RunnerSerializer(qs, many=True).data)
+        context = {"request": request}
+        assignable_for = request.query_params.get("assignable_for")
+        if assignable_for is not None:
+            from pi_dash.db.models.issue import Issue
+
+            try:
+                issue = None if assignable_for == "new" else Issue.objects.filter(pk=assignable_for).first()
+            except (ValueError, TypeError):
+                issue = None
+                assignable_for = "new"
+            context["assignable_issue"] = issue
+            context["user"] = request.user
+        return Response(RunnerSerializer(qs, many=True, context=context).data)
 
 
 class RunnerDetailEndpoint(APIView):
@@ -463,6 +479,27 @@ class RunnerDetailEndpoint(APIView):
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
+                is_real_move = new_pod.id != runner.pod_id
+                # Cross-project move (§13.1, §23.4): refused while any issue
+                # is dedicated to the runner — I1/E2 would break. Same-project
+                # moves follow the runner (§13.1): assigned_pod tracks it below.
+                if is_real_move:
+                    old_project_id = runner.pod.project_id if runner.pod is not None else None
+                    if new_pod.project_id != old_project_id:
+                        from pi_dash.db.models.issue import Issue
+
+                        dedicated_issues = list(
+                            Issue.objects.filter(assigned_runner=runner).values_list("id", "name")[:20]
+                        )
+                        if dedicated_issues:
+                            return Response(
+                                {
+                                    "error": "runner has assigned issues; clear their dedicated runner first",
+                                    "code": "runner_has_assigned_issues",
+                                    "issues": [{"id": str(i), "name": n} for i, n in dedicated_issues],
+                                },
+                                status=status.HTTP_409_CONFLICT,
+                            )
                 # Refuse to move a runner that has a non-terminal run *bound*
                 # to it — either one it is actively serving (``runner=``) or
                 # one reserved for it (``pinned_runner=``, e.g. a queued or
@@ -489,6 +526,11 @@ class RunnerDetailEndpoint(APIView):
                 runner.pod = new_pod
                 updates.append("pod")
                 runner.save(update_fields=list(set(updates + ["updated_at"])))
+                # §13.1 follow: dedicated issues move with the runner.
+                if is_real_move:
+                    from pi_dash.db.models.issue import Issue
+
+                    Issue.objects.filter(assigned_runner=runner).update(assigned_pod=new_pod)
                 if pod_dispatch_changed:
                     self._apply_pod_dispatch_change(runner)
         elif updates:
