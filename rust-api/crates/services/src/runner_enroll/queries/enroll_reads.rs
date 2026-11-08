@@ -834,11 +834,27 @@ pub async fn default_pod_for_project(
         .await
 }
 
-/// `_next_auto_runner_name` (`enrollment.py:790-796`): every runner in
-/// the pod, revoked included.
+/// `_next_auto_runner_name` (`enrollment.py:846`): every runner on the
+/// dev machine, revoked included — the daemon requires names unique per
+/// computer. Falls back to per-pod when there is no machine identity.
 pub async fn count_pod_runners(db: &impl ConnectionTrait, pod_id: Uuid) -> Result<u64, DbErr> {
     runner::Entity::find()
         .filter(runner::Column::PodId.eq(pod_id))
+        .count(db)
+        .await
+}
+
+/// `#221` fix: auto names must be unique per dev machine, not per pod.
+/// This query counts every runner whose `dev_machine_id` matches,
+/// revoked included. The caller picks pod vs machine counting based on
+/// whether a machine identity exists, mirroring Django's
+/// `_next_auto_runner_name(pod, dev_machine)` fallback.
+pub async fn count_machine_runners(
+    db: &impl ConnectionTrait,
+    dev_machine_id: Uuid,
+) -> Result<u64, DbErr> {
+    runner::Entity::find()
+        .filter(runner::Column::DevMachineId.eq(dev_machine_id))
         .count(db)
         .await
 }
