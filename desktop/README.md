@@ -61,9 +61,9 @@ is here.
 desktop/
   src-tauri/          the Rust app (window, deep links, updater, daemon client)
   scripts/            dev-prep.sh (bundle the SPA), prepare-agent.sh (stage the
-                      runner + engine locally), bundle_agents.py (release staging),
+                      bundled CLI locally), bundle_agents.py (release staging),
                       merge-web-tree.sh, test-overlay.sh
-  tests/              packaging and engine smoke tests
+  tests/              packaging tests
 desktop-overlay/      web files that replace apps/web files in the desktop bundle
 apps/web/ce/components/desktop/
                       edition seams the desktop bundle reads (sign-in card,
@@ -95,7 +95,7 @@ overrides — see `desktop-overlay/README.md`.
 **Bundled (default)** — `cargo tauri dev` runs the same code path as
 release: `WebviewUrl::App` loading from `dist/`. The `beforeDevCommand`
 hook automatically runs `scripts/dev-prep.sh`, which stages the bundled
-runner and agent engine (`prepare-agent.sh`), merges the web tree, runs
+CLI (`prepare-agent.sh`), merges the web tree, runs
 `pnpm install` + `turbo run build --filter=web`, and copies the output into
 `dist/`. First run is ~3–5 min cold (pnpm install); subsequent runs are
 ~10–30 s warm. Catches bundle-only bugs (`tauri://localhost` scheme quirks,
@@ -147,17 +147,17 @@ PIDASH_SKIP_DEV_PREP=1 \
 
 ### Environment variables
 
-| Var                                              | What it controls                                                                                                                                                             | Default (if unset)                                                               |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `PI_DASH_URL`                                    | Server origin `main.rs` uses for the sign-in hand-off (`/api/auth/desktop-exchange/`) and for bouncing server-hosted pages back into the bundle. `env!`-enforced in release. | `http://localhost:3000` (hot-reload) / `http://localhost:8000` (bundled-dev)     |
-| `VITE_API_BASE_URL`                              | API origin baked into the SPA bundle at build time. SPA `axios` calls go here.                                                                                               | `http://localhost:8000` (bundled-dev)                                            |
-| `PIDASH_DESKTOP_HOT_RELOAD`                      | `=1` flips main.rs to `WebviewUrl::External(PI_DASH_URL)`, skips dev-prep.sh.                                                                                                | unset                                                                            |
-| `PIDASH_SKIP_DEV_PREP`                           | `=1` makes dev-prep.sh reuse whatever `dist/` already contains (CI that pre-populates dist/, or a hand-managed dist/).                                                       | unset                                                                            |
-| `PIDASH_DESKTOP_EXTRA_OVERLAYS`                  | Colon-separated directories applied after the workspace and before `desktop-overlay/`.                                                                                       | unset                                                                            |
-| `PIDASH_DESKTOP_DEV_TREE`                        | Where the merged web tree is built (dev-prep.sh, test-overlay.sh).                                                                                                           | `desktop/.dev-tree`                                                              |
-| `PIDASH_DESKTOP_VERIFY_HOOK`                     | Script dev-prep.sh runs with the built client directory after its own checks.                                                                                                | unset                                                                            |
-| `PIDASH_DESKTOP_EXTERNAL_SIGNIN`                 | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`open_in_browser`).                                               | unset                                                                            |
-| `PIDASH_RUNNER_PROFILE` / `CODEX_BUNDLE_VERSION` | Cargo profile for the locally built runner / pinned agent-engine release staged by prepare-agent.sh.                                                                         | `release` in a release `cargo tauri build`, else `dev` / `runner/ENGINE_VERSION` |
+| Var                              | What it controls                                                                                                                                                             | Default (if unset)                                                           |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `PI_DASH_URL`                    | Server origin `main.rs` uses for the sign-in hand-off (`/api/auth/desktop-exchange/`) and for bouncing server-hosted pages back into the bundle. `env!`-enforced in release. | `http://localhost:3000` (hot-reload) / `http://localhost:8000` (bundled-dev) |
+| `VITE_API_BASE_URL`              | API origin baked into the SPA bundle at build time. SPA `axios` calls go here.                                                                                               | `http://localhost:8000` (bundled-dev)                                        |
+| `PIDASH_DESKTOP_HOT_RELOAD`      | `=1` flips main.rs to `WebviewUrl::External(PI_DASH_URL)`, skips dev-prep.sh.                                                                                                | unset                                                                        |
+| `PIDASH_SKIP_DEV_PREP`           | `=1` makes dev-prep.sh reuse whatever `dist/` already contains (CI that pre-populates dist/, or a hand-managed dist/).                                                       | unset                                                                        |
+| `PIDASH_DESKTOP_EXTRA_OVERLAYS`  | Colon-separated directories applied after the workspace and before `desktop-overlay/`.                                                                                       | unset                                                                        |
+| `PIDASH_DESKTOP_DEV_TREE`        | Where the merged web tree is built (dev-prep.sh, test-overlay.sh).                                                                                                           | `desktop/.dev-tree`                                                          |
+| `PIDASH_DESKTOP_VERIFY_HOOK`     | Script dev-prep.sh runs with the built client directory after its own checks.                                                                                                | unset                                                                        |
+| `PIDASH_DESKTOP_EXTERNAL_SIGNIN` | `=1` makes the release `build.rs` require that the bundled sign-in screen hands off to the system browser (`open_in_browser`).                                               | unset                                                                        |
+| `PIDASH_RUNNER_PROFILE`          | Cargo profile for the locally built runner staged by prepare-agent.sh.                                                                                                       | `release` in a release `cargo tauri build`, else `dev`                       |
 
 Set both together for non-default targets. A release build with
 `VITE_API_BASE_URL` unset does not silently fall back to a default — `build.rs`
@@ -315,8 +315,7 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
 ```
 
 Rust toolchain (rustup; `src-tauri/rust-toolchain.toml` pins the version),
-`cargo-tauri` (`cargo install tauri-cli --version '^2'`), and the GitHub CLI
-(`gh`, used by prepare-agent.sh to fetch the pinned agent engine).
+`cargo-tauri` (`cargo install tauri-cli --version '^2'`).
 
 ## Regenerating icons
 

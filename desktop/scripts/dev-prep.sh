@@ -154,7 +154,7 @@ if [[ "${PIDASH_DESKTOP_WEB:-}" == "web_new" ]]; then
     echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
     echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → baked into SPA)"
     echo "[dev-prep] Frontend:    web_new (PIDASH_DESKTOP_WEB=web_new, PIDASH_TARGET=desktop)"
-    echo "[dev-prep] Preparing bundled runner and agent engine"
+    echo "[dev-prep] Preparing bundled CLI"
     bash "$SCRIPT_DIR/prepare-agent.sh"
     echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
 
@@ -267,7 +267,7 @@ echo "[dev-prep] Build tree:  $DEV_TREE"
 echo "[dev-prep] Dist target: $DIST"
 echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
 echo "[dev-prep] Web base:    $WEB_BASE  (VITE_WEB_BASE_URL → sign-in card + shareable links)"
-echo "[dev-prep] Preparing bundled runner and agent engine"
+echo "[dev-prep] Preparing bundled CLI"
 bash "$SCRIPT_DIR/prepare-agent.sh"
 echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
 
