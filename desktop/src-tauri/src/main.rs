@@ -400,7 +400,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // panics in release profile (rust-analyzer would crash otherwise);
     // without this warning, the window would just hang on the 118-byte
     // placeholder with no signal. PIDASH_DIST_VALID is emitted by build.rs
-    // from the same size/assets check dev-prep.sh and the release guard use.
+    // from dist_guard::check_dist_bundle, the check the release guard uses.
     if !hot_reload && option_env!("PIDASH_DIST_VALID") == Some("0") {
         eprintln!(
             "Pi Dash: WARNING dist/ looks like the 118-byte placeholder — the window will \
