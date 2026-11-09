@@ -49,6 +49,56 @@ def test_projects_inserts_supply_dedicated_runner_lost_action():
     assert not offenders, f"projects INSERTs missing column: {offenders}"
 
 
+def _split_sql_list(body):
+    """Split a SQL list on top-level commas, respecting single-quoted literals."""
+    parts = []
+    current = []
+    in_quote = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "'":
+            if in_quote and i + 1 < len(body) and body[i + 1] == "'":
+                current.append("''")
+                i += 2
+                continue
+            in_quote = not in_quote
+            current.append(ch)
+        elif ch == "," and not in_quote:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    parts.append("".join(current).strip())
+    return [p for p in parts if p]
+
+
+def test_dispatch_agent_run_insert_arity():
+    # NEWPIDASH-163: the pin_kind column was added without its value,
+    # so the INSERT carried 36 target columns for 35 expressions and
+    # every dispatch seed died with "INSERT has more target columns
+    # than expressions". agent_metadata/usage are JSONField columns
+    # (Django default dict) and must stay '{}', not ''.
+    import re
+
+    text = (_ROOT / "dispatch" / "conftest.py").read_text()
+    m = re.search(
+        r"INSERT INTO agent_run\s*\((.*?)\)\s*VALUES\s*\((.*?)\)", text, re.S
+    )
+    assert m, "agent_run INSERT not found in dispatch/conftest.py"
+    cols = [c.strip() for c in m.group(1).split(",")]
+    vals = _split_sql_list(m.group(2))
+    assert len(cols) == len(vals), (
+        f"agent_run INSERT arity: {len(cols)} columns vs {len(vals)} expressions"
+    )
+    by_col = dict(zip(cols, vals))
+    assert by_col["pin_kind"] == "'locality'"
+    assert by_col["agent_metadata"] == "'{}'"
+    assert by_col["usage"] == "'{}'"
+    assert by_col["phase_kind"] == "''"
+
+
 def test_agent_run_inserts_supply_pin_kind():
     offenders = []
     for path, text in _texts().items():
