@@ -380,9 +380,23 @@ pub fn plan_update_issue(
         if !mapped {
             continue;
         }
-        let current = current.as_ref().ok_or(BuildError::NullInput {
-            part: "current_instance",
-        })?;
+        let is_list_key = matches!(
+            key.as_str(),
+            "label_ids" | "labels" | "assignee_ids" | "assignees"
+        );
+        // `extract_ids` on `None` returns an empty set (`issue_activities_task.py:41-46`),
+        // so label/assignee helpers must not error on a `None` current the
+        // way the direct-`.get` helpers do. Treat `None` as an empty object
+        // for those two list keys only; other mapped keys keep the
+        // `AttributeError` on `None.get`.
+        let empty = Value::Object(Default::default());
+        let current = if is_list_key && current.is_none() {
+            &empty
+        } else {
+            current.as_ref().ok_or(BuildError::NullInput {
+                part: "current_instance",
+            })?
+        };
         match key.as_str() {
             "name" => {
                 if let Some(row) = plan_track_name(&requested, current, frame) {
@@ -805,6 +819,7 @@ mod tests {
 
     /// Version-4 UUIDs (valid per `is_valid_uuid`).
     const USER_ADA: &str = "44444444-4444-4444-8444-444444444444";
+    const LABEL_BUG: &str = "55555555-5555-4555-8555-555555555555";
     const CYCLE_OLD: &str = "77777777-7777-4777-8777-777777777777";
     const CYCLE_NEW: &str = "88888888-8888-4888-8888-888888888888";
     const MODULE_M: &str = "99999999-9999-4999-8999-999999999999";
@@ -955,6 +970,60 @@ mod tests {
                 part: "requested_data"
             }
         );
+    }
+
+    #[test]
+    fn update_issue_list_keys_allow_none_current() {
+        // The assignee/label list helpers use `extract_ids(None) == set()`
+        // (`issue_activities_task.py:41-46`), so a `None` current is
+        // an empty set — not an error. The direct-`.get` helpers still
+        // raise on `None` (the test above pins `name`).
+        let f = frame();
+        let user = |id: &str| {
+            (id == USER_ADA).then(|| UserRef {
+                id: USER_ADA.to_owned(),
+                display_name: "Ada".to_owned(),
+            })
+        };
+        let parent = |_: &str| None;
+        let state = |_: &str| None;
+        let label = |id: &str| {
+            (id == LABEL_BUG).then(|| LabelRef {
+                id: LABEL_BUG.to_owned(),
+                name: "Bug".to_owned(),
+            })
+        };
+        let estimate = |_: &str| None;
+        let r = UpdateResolvers {
+            parent: &parent,
+            state: &state,
+            label: &label,
+            user: &user,
+            estimate: &estimate,
+            description_latest: None,
+        };
+        // Assignee with a `None` current: the added assignee diffs
+        // against an empty set, like Django.
+        let outcome = plan_update_issue(
+            Some(&format!(r#"{{"assignee_ids": ["{USER_ADA}"]}}"#)),
+            None,
+            &f,
+            &r,
+        )
+        .unwrap();
+        assert_eq!(outcome.rows.len(), 1);
+        assert_eq!(outcome.rows[0].field, "assignees");
+        assert_eq!(outcome.subscribers.len(), 1);
+        // Labels with a `None` current: same empty-set treatment.
+        let outcome = plan_update_issue(
+            Some(&format!(r#"{{"label_ids": ["{LABEL_BUG}"]}}"#)),
+            None,
+            &f,
+            &r,
+        )
+        .unwrap();
+        assert_eq!(outcome.rows.len(), 1);
+        assert_eq!(outcome.rows[0].field, "labels");
     }
 
     #[test]
