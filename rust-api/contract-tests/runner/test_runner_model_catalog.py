@@ -22,10 +22,13 @@ absolute assertions.
 
 from __future__ import annotations
 
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from _harness.auth import login_session
-from _harness.http import api_client
+from _harness import signing
 
 pytestmark = pytest.mark.contract
 
@@ -59,6 +62,38 @@ def _fetch_id(db, agent, model):
     return str(row[0] if isinstance(row, (list, tuple)) else row["id"])
 
 
+def _mint_session(db, user_id, secret):
+    """Forge a sessions row (mirrors the license suite's mint_admin_session)."""
+    row = db.fetchone("SELECT password FROM users WHERE id = %s", (user_id,))
+    assert row is not None, f"user {user_id} missing"
+    password_hash = row["password"] if isinstance(row, dict) else row[0]
+    payload = signing.session_payload(user_id, password_hash, secret)
+    data = signing.encode_session(payload, secret)
+    key = signing.new_session_key()
+    expires = datetime.now(timezone.utc) + timedelta(seconds=3600)
+    db.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+    db.execute(
+        "INSERT INTO sessions (session_key, session_data, expire_date, user_id, device_info) "
+        "VALUES (%s, %s, %s, %s, %s::jsonb)",
+        (key, data, expires, user_id, json.dumps(payload["device_info"])),
+    )
+    return key
+
+
+def _make_instance_admin(db, seeder, *, email):
+    """Create a user granted instance-admin on the suite instance."""
+    seeder.ensure_instance()
+    user = seeder.create_user(email=email)
+    instance_id = db.fetchval("SELECT id FROM instances ORDER BY created_at LIMIT 1")
+    db.execute(
+        "INSERT INTO instance_admins "
+        "(id, created_at, updated_at, role, is_verified, instance_id, user_id) "
+        "VALUES (%s, now(), now(), 20, true, %s, %s)",
+        (str(uuid.uuid4()), instance_id, user["id"]),
+    )
+    return user
+
+
 def test_public_catalog_requires_auth(anon_client):
     res = anon_client.get(WEB_CATALOG)
     assert res.status_code == 401
@@ -66,81 +101,86 @@ def test_public_catalog_requires_auth(anon_client):
 
 
 def test_public_catalog_grouped_enabled_only(settings, seeder, db, user_client):
-    # Seed one enabled + one disabled row; only enabled appears.
-    _seed_row(db, agent="codex", model="gpt-5.5", label="GPT-5.5", efforts=["low"], sort_order=0)
-    _seed_row(db, agent="codex", model="gpt-5.4", label="GPT-5.4", efforts=[], sort_order=1, enabled=False)
-    _seed_row(db, agent="claude-code", model="claude-opus-4-8", label="Opus 4.8", preselected=True)
+    # Seed one enabled + one disabled row under muse-code (no migration
+    # seed rows there); only the enabled one appears. Slugs are probe-unique
+    # so the test runs against a migrated DB that already holds the seed.
+    _seed_row(db, agent="muse-code", model="zz-364-enabled", label="Probe Enabled", efforts=[], sort_order=0, preselected=True)
+    _seed_row(db, agent="muse-code", model="zz-364-disabled", label="Probe Disabled", efforts=[], sort_order=1, enabled=False)
     try:
         res = user_client.get(WEB_CATALOG)
         assert res.status_code == 200, res.text
         agents = res.json()["agents"]
         assert set(agents.keys()) == AGENTS
-        assert [r["model"] for r in agents["codex"]] == ["gpt-5.5"]
-        assert agents["grok"] == []
-        for row in agents["codex"] + agents["claude-code"]:
-            assert ROW_KEYS <= set(row)
-            assert row["is_enabled"] is True
-        claude = agents["claude-code"][0]
-        assert claude["is_preselected"] is True
+        assert [r["model"] for r in agents["muse-code"]] == ["zz-364-enabled"]
+        for rows in agents.values():
+            for row in rows:
+                assert row["is_enabled"] is True
+        probe = agents["muse-code"][0]
+        assert ROW_KEYS <= set(probe)
+        assert probe["is_preselected"] is True
     finally:
-        db.execute("DELETE FROM runner_model_catalog WHERE agent IN ('codex', 'claude-code')")
+        db.execute(
+            "DELETE FROM runner_model_catalog WHERE model IN ('zz-364-enabled', 'zz-364-disabled')"
+        )
 
 
 def test_admin_crud_preselect_clearing(settings, seeder, db):
     # Admin session via the instance-admin login (admin cookie).
-    instance = db.make_instance()
-    admin = db.make_user("catalog-admin@example.com")
-    db.make_admin(instance["id"], admin["id"])
-    secret = seeder.settings.secret_key if hasattr(seeder, "settings") else None
-    # Mint an admin session directly through the DB helper used by the
-    # license suite; the runner suite boots with the same `db` fixture.
-    from _harness.settings import secret_key
-
-    admin_key = db.mint_admin_session(admin, secret_key())
     from _harness.http import admin_client
 
-    with admin_client(admin_key) as client:
-        # Plain user cannot list.
-        plain = db.make_user("plain@example.com")
-        plain_key = db.mint_admin_session(plain, secret_key())
-        with admin_client(plain_key) as plain_client:
-            assert plain_client.get(ADMIN_LIST).status_code == 403
+    admin = _make_instance_admin(db, seeder, email="catalog-admin@example.com")
+    admin_key = _mint_session(db, admin["id"], settings.secret_key)
+    try:
+        with admin_client(admin_key) as client:
+            # Plain user cannot list.
+            plain = seeder.create_user(email="catalog-plain@example.com")
+            plain_key = _mint_session(db, plain["id"], settings.secret_key)
+            try:
+                with admin_client(plain_key) as plain_client:
+                    assert plain_client.get(ADMIN_LIST).status_code == 403
+            finally:
+                db.execute("DELETE FROM sessions WHERE user_id = %s", (plain["id"],))
 
-        r1 = client.post(ADMIN_LIST, json={"agent": "codex", "model": "gpt-5.5", "label": "GPT-5.5", "reasoning_efforts": ["low"]})
-        assert r1.status_code == 201, r1.text
-        id1 = r1.json()["id"]
-        assert r1.json()["reasoning_efforts"] == ["low"]
+            r1 = client.post(ADMIN_LIST, json={"agent": "codex", "model": "zz-364-gpt-9", "label": "GPT-9", "reasoning_efforts": ["low"]})
+            assert r1.status_code == 201, r1.text
+            id1 = r1.json()["id"]
+            assert r1.json()["reasoning_efforts"] == ["low"]
 
-        r2 = client.post(ADMIN_LIST, json={"agent": "codex", "model": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "is_preselected": True, "sort_order": 1})
-        assert r2.status_code == 201, r2.text
-        id2 = r2.json()["id"]
+            r2 = client.post(ADMIN_LIST, json={"agent": "codex", "model": "zz-364-gpt-9b", "label": "GPT-9b", "is_preselected": True, "sort_order": 1})
+            assert r2.status_code == 201, r2.text
+            id2 = r2.json()["id"]
 
-        patched = client.patch(f"{ADMIN_LIST}{id1}/", json={"is_preselected": True})
-        assert patched.status_code == 200, patched.text
-        assert patched.json()["is_preselected"] is True
-        listed = client.get(ADMIN_LIST)
-        assert listed.status_code == 200, listed.text
-        preselected = [r for r in listed.json() if r["is_preselected"]]
-        assert len(preselected) == 1
-        assert preselected[0]["id"] == id1
+            patched = client.patch(f"{ADMIN_LIST}{id1}/", json={"is_preselected": True})
+            assert patched.status_code == 200, patched.text
+            assert patched.json()["is_preselected"] is True
+            listed = client.get(ADMIN_LIST)
+            assert listed.status_code == 200, listed.text
+            # Only one preselected codex row (seed rows for other agents may
+            # carry their own preselected flags, so scope to this agent).
+            preselected = [r for r in listed.json() if r["agent"] == "codex" and r["is_preselected"]]
+            assert len(preselected) == 1
+            assert preselected[0]["id"] == id1
 
-        # Validation: unknown agent → 400 agent, bad effort → 400, duplicate → 400.
-        bad_agent = client.post(ADMIN_LIST, json={"agent": "nope", "model": "m", "label": "L"})
-        assert bad_agent.status_code == 400
-        assert "agent" in bad_agent.json()
-        bad_effort = client.post(ADMIN_LIST, json={"agent": "codex", "model": "m2", "label": "L", "reasoning_efforts": ["ultra"]})
-        assert bad_effort.status_code == 400
-        assert "reasoning_efforts" in bad_effort.json()
-        dup = client.post(ADMIN_LIST, json={"agent": "codex", "model": "gpt-5.5", "label": "Dup"})
-        assert dup.status_code == 400
+            # Validation: unknown agent → 400 agent, bad effort → 400, duplicate → 400.
+            bad_agent = client.post(ADMIN_LIST, json={"agent": "nope", "model": "m", "label": "L"})
+            assert bad_agent.status_code == 400
+            assert "agent" in bad_agent.json()
+            bad_effort = client.post(ADMIN_LIST, json={"agent": "codex", "model": "m2", "label": "L", "reasoning_efforts": ["ultra"]})
+            assert bad_effort.status_code == 400
+            assert "reasoning_efforts" in bad_effort.json()
+            dup = client.post(ADMIN_LIST, json={"agent": "codex", "model": "zz-364-gpt-9", "label": "Dup"})
+            assert dup.status_code == 400
 
-        deleted = client.delete(f"{ADMIN_LIST}{id2}/")
-        assert deleted.status_code == 204, deleted.text
-        missing = client.delete(f"{ADMIN_LIST}{id2}/")
-        assert missing.status_code == 404
-        assert missing.json() == {"error": "not found"}
-    # Cleanup (the per-test reset wipes the world, but remove ours eagerly).
-    db.execute("DELETE FROM runner_model_catalog WHERE agent = 'codex' AND model IN ('gpt-5.5', 'gpt-5.6-sol')")
+            deleted = client.delete(f"{ADMIN_LIST}{id2}/")
+            assert deleted.status_code == 204, deleted.text
+            missing = client.delete(f"{ADMIN_LIST}{id2}/")
+            assert missing.status_code == 404
+            assert missing.json() == {"error": "not found"}
+    finally:
+        # Remove only probe rows; never touch the migration seed.
+        db.execute("DELETE FROM runner_model_catalog WHERE model IN ('zz-364-gpt-9', 'zz-364-gpt-9b')")
+        db.execute("DELETE FROM instance_admins WHERE user_id = %s", (admin["id"],))
+        db.execute("DELETE FROM sessions WHERE user_id = %s", (admin["id"],))
 
 
 def test_admin_anonymous_401(anon_client):
