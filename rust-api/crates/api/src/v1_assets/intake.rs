@@ -539,10 +539,11 @@ async fn is_active_workspace_member(
     Ok(hit.is_some())
 }
 
-/// `validate_machine_token` (`api_authentication.py:45-63`): match on
-/// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
+/// `validate_machine_token` (`api_authentication.py:45-63`, via
+/// `resolve_machine_token`): match on `token_hash`, unrevoked, inside the
+/// 60-day idle expiry, dev-machine unrevoked, workspace member (a
 /// non-member's token is revoked, then rejected) — then stamp
-/// `last_used_at`.
+/// `last_used_at` (renewing the idle expiry).
 async fn authenticate_machine(
     pool: &sqlx::PgPool,
     secret_key: &[u8],
@@ -566,6 +567,14 @@ async fn authenticate_machine(
     let dev_machine_id = row.dev_machine_id;
     if revoked_at.is_some() {
         return Err(Denial::InvalidToken);
+    }
+    // 60-day idle expiry (`resolve_machine_token`:
+    // `token.is_expired()` — `expires_at <= now`), checked after the
+    // revoked gate and before the dev-machine/membership/touch steps.
+    if let Some(expires) = row.expires_at {
+        if expires.with_timezone(&Utc) <= now {
+            return Err(Denial::InvalidToken);
+        }
     }
     if let Some(machine_id) = dev_machine_id {
         let dev = dev_machine::Entity::find_by_id(machine_id)
