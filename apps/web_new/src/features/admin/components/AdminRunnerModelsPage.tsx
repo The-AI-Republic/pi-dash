@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Runner model catalog page (NEWPIDASH-169, DIFF-8): one section per
+// Runner model catalog page (NEWPIDASH-169, DIFF-9): one section per
 // agent, each a table of models. Admins add, edit, delete, reorder,
 // enable/disable, and preselect models; the add-runner picker reads
 // the catalog this page manages (the runner itself accepts any slug,

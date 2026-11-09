@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Public catalog read: `GET /api/runners/model-catalog/` (NEWPIDASH-169, DIFF-8).
+"""Public catalog read: `GET /api/runners/model-catalog/` (NEWPIDASH-169, DIFF-9).
 
 New-system-only feature: Django has no such path (resolver 404), Rust
-serves the contract below. Statuses pin both arms with the DIFF-8
+serves the contract below. Statuses pin both arms with the DIFF-9
 marker; bodies are Rust-only (Django's 404 page is not a contract).
 """
 
@@ -17,14 +17,14 @@ ADMIN_PATH = "/api/instances/runner-models/"
 
 def test_anon_catalog_is_401(anon_api):
     res = anon_api.get(CATALOG_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=401)
+    assert res.status_code == expect("DIFF-9", django=404, rust=401)
     if is_rust():
         assert res.json() == {"detail": "Authentication credentials were not provided."}
 
 
 def test_member_catalog_returns_grouped_seed(member_api):
     res = member_api.get(CATALOG_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=200)
+    assert res.status_code == expect("DIFF-9", django=404, rust=200)
     if not is_rust():
         return
     agents = res.json()["agents"]
@@ -41,7 +41,7 @@ def test_member_catalog_returns_grouped_seed(member_api):
 
 def test_member_catalog_preselect_is_opus(member_api):
     res = member_api.get(CATALOG_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=200)
+    assert res.status_code == expect("DIFF-9", django=404, rust=200)
     if not is_rust():
         return
     rows = res.json()["agents"]["claude-code"]
@@ -53,7 +53,7 @@ def test_member_catalog_preselect_is_opus(member_api):
 
 def test_member_catalog_rows_in_sort_order(member_api):
     res = member_api.get(CATALOG_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=200)
+    assert res.status_code == expect("DIFF-9", django=404, rust=200)
     if not is_rust():
         return
     agents = res.json()["agents"]
@@ -74,7 +74,7 @@ def test_disabled_row_hidden_from_public(admin_api, member_api):
         ADMIN_PATH,
         json={"agent": "grok", "model": "grok-new-1", "label": "Grok New 1"},
     )
-    assert created.status_code == expect("DIFF-8", django=404, rust=201)
+    assert created.status_code == expect("DIFF-9", django=404, rust=201)
     if not is_rust():
         return
     row_id = created.json()["id"]
@@ -102,4 +102,4 @@ def test_app_cookie_is_anonymous_on_admin_paths(world):
 
     with user_client(world["member_key"]) as client:
         res = client.get(ADMIN_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=401)
+    assert res.status_code == expect("DIFF-9", django=404, rust=401)

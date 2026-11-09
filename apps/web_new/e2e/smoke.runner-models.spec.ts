@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Smoke: god-mode runner models page (NEWPIDASH-169, DIFF-8). Runs
+// Smoke: god-mode runner models page (NEWPIDASH-169, DIFF-9). Runs
 // against the Rust server (with Django upstream for the sign-in POST)
 // seeded with the api-client contract seed admin, so the instance admin
 // and the 27-row catalog always exist: sign in as an instance admin,

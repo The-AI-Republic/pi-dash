@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Instance-admin CRUD: `/api/instances/runner-models/` (NEWPIDASH-169, DIFF-8).
+"""Instance-admin CRUD: `/api/instances/runner-models/` (NEWPIDASH-169, DIFF-9).
 
 Instance admins only: anonymous is 401, a signed-in non-admin is 403.
 Validation (known agent, non-empty model/label, no duplicate model per
@@ -20,14 +20,14 @@ ADMIN_PATH = "/api/instances/runner-models/"
 
 def test_anon_admin_list_is_401(anon_api):
     res = anon_api.get(ADMIN_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=401)
+    assert res.status_code == expect("DIFF-9", django=404, rust=401)
     if is_rust():
         assert res.json() == {"detail": "Authentication credentials were not provided."}
 
 
 def test_member_admin_list_is_403(member_admin_api):
     res = member_admin_api.get(ADMIN_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=403)
+    assert res.status_code == expect("DIFF-9", django=404, rust=403)
     if is_rust():
         assert res.json() == {"detail": "You do not have permission to perform this action."}
 
@@ -37,12 +37,12 @@ def test_member_admin_create_is_403(member_admin_api):
         ADMIN_PATH,
         json={"agent": "grok", "model": "grok-x", "label": "Grok X"},
     )
-    assert res.status_code == expect("DIFF-8", django=404, rust=403)
+    assert res.status_code == expect("DIFF-9", django=404, rust=403)
 
 
 def test_admin_list_returns_all_rows(admin_api):
     res = admin_api.get(ADMIN_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=200)
+    assert res.status_code == expect("DIFF-9", django=404, rust=200)
     if not is_rust():
         return
     agents = res.json()["agents"]
@@ -61,7 +61,7 @@ def test_create_then_read_back(admin_api):
             "sort_order": 99,
         },
     )
-    assert res.status_code == expect("DIFF-8", django=404, rust=201)
+    assert res.status_code == expect("DIFF-9", django=404, rust=201)
     if not is_rust():
         return
     created = res.json()
@@ -80,7 +80,7 @@ def test_create_validation(admin_api):
     res = admin_api.post(
         ADMIN_PATH, json={"agent": "nope", "model": "m", "label": "M"}
     )
-    assert res.status_code == expect("DIFF-8", django=404, rust=400)
+    assert res.status_code == expect("DIFF-9", django=404, rust=400)
     if not is_rust():
         return
     assert res.json() == {"error": "unknown_agent"}
@@ -122,7 +122,7 @@ def test_patch_reorder_and_rename(admin_api):
         ADMIN_PATH,
         json={"agent": "grok", "model": "grok-p", "label": "Grok P"},
     )
-    assert created.status_code == expect("DIFF-8", django=404, rust=201)
+    assert created.status_code == expect("DIFF-9", django=404, rust=201)
     if not is_rust():
         return
     row_id = created.json()["id"]
@@ -155,7 +155,7 @@ def test_patch_unknown_id_is_404(admin_api):
 def test_preselect_clears_others(admin_api):
     # Cursor starts with no preselected row.
     res = admin_api.get(ADMIN_PATH)
-    assert res.status_code == expect("DIFF-8", django=404, rust=200)
+    assert res.status_code == expect("DIFF-9", django=404, rust=200)
     if not is_rust():
         return
     cursor = res.json()["agents"]["cursor-agent"]
@@ -186,7 +186,7 @@ def test_delete_removes_row(admin_api):
         ADMIN_PATH,
         json={"agent": "grok", "model": "grok-d", "label": "Grok D"},
     )
-    assert created.status_code == expect("DIFF-8", django=404, rust=201)
+    assert created.status_code == expect("DIFF-9", django=404, rust=201)
     if not is_rust():
         return
     row_id = created.json()["id"]

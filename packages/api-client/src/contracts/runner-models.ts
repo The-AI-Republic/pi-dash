@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Runner LLM model catalog contracts (NEWPIDASH-169, DIFF-8): the
+// Runner LLM model catalog contracts (NEWPIDASH-169, DIFF-9): the
 // signed-in picker read plus the instance-admin CRUD the god-mode page
 // drives. The server groups rows by agent; every agent key is present,
 // empty when it has no rows in the filtered set.
