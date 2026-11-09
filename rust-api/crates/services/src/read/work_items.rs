@@ -732,7 +732,6 @@ pub async fn fetch_grouped_rows(
     // is cleared (`.order_by()`) — the Rust sort below applies.
     let mut others: HashMap<Uuid, OwnedRelationItem> = HashMap::new();
     if !wanted.is_empty() {
-        use sea_orm::sea_query::{Expr, Query as SeaQuery};
         #[derive(Debug, Clone, FromQueryResult)]
         struct GroupedPoolRow {
             id: Uuid,
@@ -742,42 +741,7 @@ pub async fn fetch_grouped_rows(
             state_group: Option<String>,
             project_identifier: String,
         }
-        let member_exists = SeaQuery::select()
-            .column(project_members::Column::Id)
-            .from(project_members::Entity)
-            .expr(
-                Expr::col(project_members::Column::ProjectId)
-                    .eq(Expr::col(issues::Column::ProjectId)),
-            )
-            .expr(Expr::col(project_members::Column::MemberId).eq(*viewer_id))
-            .expr(Expr::col(project_members::Column::IsActive).eq(true))
-            .expr(Expr::col(project_members::Column::DeletedAt).is_null())
-            .limit(1)
-            .to_owned();
-        let rows: Vec<GroupedPoolRow> = issues::Entity::find()
-            .filter(issues::Column::Id.is_in(wanted.clone()))
-            .filter(issues::Column::WorkspaceId.eq(*workspace_id))
-            .filter(issues::Column::DeletedAt.is_null())
-            .filter(issues::Column::ArchivedAt.is_null())
-            .filter(issues::Column::IsDraft.eq(false))
-            .filter(
-                Expr::col(states::Column::Group)
-                    .is_null()
-                    .or(Expr::col(states::Column::Group).ne("triage")),
-            )
-            .filter(Expr::col(projects::Column::ArchivedAt).is_null())
-            .filter(Expr::exists(member_exists))
-            .join(JoinType::LeftJoin, issues::Relation::States.def())
-            .join(JoinType::InnerJoin, issues::Relation::Projects.def())
-            .select_only()
-            .columns([
-                issues::Column::Id,
-                issues::Column::Name,
-                issues::Column::SequenceId,
-            ])
-            .column_as(states::Column::Name, "state")
-            .column_as(states::Column::Group, "state_group")
-            .column_as(projects::Column::Identifier, "project_identifier")
+        let rows: Vec<GroupedPoolRow> = relations_pool_select(&wanted, workspace_id, viewer_id)
             .into_model::<GroupedPoolRow>()
             .all(&db)
             .await
@@ -1809,6 +1773,59 @@ fn workspace_id_subquery(slug: &str) -> SimpleExpr {
     )
 }
 
+/// The member-project pool behind [`fetch_grouped_rows`]: live, non-draft,
+/// non-triage issues among `wanted`, in unarchived projects the viewer is an
+/// active member of.
+fn relations_pool_select(
+    wanted: &[Uuid],
+    workspace_id: &Uuid,
+    viewer_id: &Uuid,
+) -> sea_orm::Select<issues::Entity> {
+    use sea_orm::sea_query::Query as SeaQuery;
+    // Every column is table-qualified: the outer query joins issues,
+    // states and projects, which share `deleted_at`/`archived_at`/`id`,
+    // so a bare column is 42702 ambiguous on Postgres. The membership
+    // conditions go in WHERE (`and_where`), correlated to the outer
+    // `issues.project_id`; as SELECT expressions they did not filter.
+    let pm = || sea_orm::sea_query::Alias::new("pm");
+    let member_exists = SeaQuery::select()
+        .expr(Expr::val(1))
+        .from_as(project_members::Entity, pm())
+        .and_where(
+            Expr::col((pm(), project_members::Column::ProjectId))
+                .equals((issues::Entity, issues::Column::ProjectId)),
+        )
+        .and_where(Expr::col((pm(), project_members::Column::MemberId)).eq(*viewer_id))
+        .and_where(Expr::col((pm(), project_members::Column::IsActive)).eq(true))
+        .and_where(Expr::col((pm(), project_members::Column::DeletedAt)).is_null())
+        .limit(1)
+        .to_owned();
+    issues::Entity::find()
+        .filter(issues::Column::Id.is_in(wanted.to_vec()))
+        .filter(issues::Column::WorkspaceId.eq(*workspace_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(
+            Expr::col((states::Entity, states::Column::Group))
+                .is_null()
+                .or(Expr::col((states::Entity, states::Column::Group)).ne("triage")),
+        )
+        .filter(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
+        .filter(Expr::exists(member_exists))
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::Name,
+            issues::Column::SequenceId,
+        ])
+        .column_as(states::Column::Name, "state")
+        .column_as(states::Column::Group, "state_group")
+        .column_as(projects::Column::Identifier, "project_identifier")
+}
+
 /// `EXISTS (SELECT 1 FROM "project_members" pm WHERE pm."project_id" =
 /// <project_col> AND pm."member_id" = $user AND pm."is_active")`: the
 /// caller's active membership on the row's project, no `deleted_at`
@@ -2076,6 +2093,26 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn relations_pool_qualifies_columns_and_filters_membership_in_where() {
+        let viewer = Uuid::from_u128(7);
+        let sql = relations_pool_select(&[Uuid::nil()], &Uuid::nil(), &viewer)
+            .build(DbBackend::Postgres)
+            .to_string();
+        // issues, states and projects are all joined: every shared column
+        // must carry its table, or Postgres answers 42702 ambiguous.
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
+        assert!(!sql.contains(r#"AND "archived_at""#), "{sql}");
+        assert!(sql.contains(r#""states"."group" IS NULL"#), "{sql}");
+        // The membership check is a correlated WHERE, not SELECT expressions.
+        assert!(
+            sql.contains(&format!(
+                r#"EXISTS(SELECT 1 FROM "project_members" AS "pm" WHERE "pm"."project_id" = "issues"."project_id" AND "pm"."member_id" = '{viewer}' AND "pm"."is_active" = TRUE AND "pm"."deleted_at" IS NULL LIMIT 1)"#
+            )),
+            "{sql}"
+        );
+    }
 
     #[test]
     fn comment_statements_keep_scope_and_annotations() {
