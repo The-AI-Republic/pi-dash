@@ -40,7 +40,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::entity::{api_activity_logs, email_notification_logs, webhook_logs};
+use crate::entity::{email_notification_logs, webhook_logs};
 use crate::orm_tx::into_sqlx;
 use pidash_types::tasks_cleanup::cleanup_dto::{
     self, ApiLogRow, BlobValue, EmailLogRow, IssueDescriptionVersionRow, PageVersionRow, ScalarKey,
@@ -799,31 +799,6 @@ impl<'a, A: BatchArchiver + Sync, D: BatchDeleter + Sync> FlushDriver<'a, A, D> 
     }
 }
 
-fn api_log_doc(model: &api_activity_logs::Model) -> (Document, Uuid) {
-    let record = ApiLogRow {
-        id: ScalarKey::Uuid(model.id),
-        created_at: Some(model.created_at.with_timezone(&Utc)),
-        token_identifier: model.token_identifier.clone(),
-        path: model.path.clone(),
-        method: model.method.clone(),
-        query_params: model.query_params.clone().map(Value::String),
-        headers: model.headers.clone().map(Value::String),
-        body: model.body.clone().map(Value::String),
-        response_code: model.response_code,
-        response_body: model.response_body.clone().map(Value::String),
-        ip_address: model.ip_address.clone(),
-        user_agent: model.user_agent.clone(),
-        created_by_id: model.created_by_id.map(ScalarKey::Uuid),
-    };
-    let doc = json_to_bson(&Value::Object(cleanup_dto::doc_map(
-        &cleanup_dto::transform_api_log(&record),
-    )))
-    .as_document()
-    .expect("docs are objects")
-    .clone();
-    (doc, model.id)
-}
-
 fn email_log_doc(model: &email_notification_logs::Model) -> (Document, Uuid) {
     let record = EmailLogRow {
         id: ScalarKey::Uuid(model.id),
@@ -897,10 +872,11 @@ pub async fn run_cleanup(
     let table = task.table();
     let deleter = PgDeleter::new(pool);
 
-    // The three log tasks stream through SeaORM entity queries (the same
-    // predicates and order as the fixture-pinned SQL text); the two
-    // version tasks keep the fixture-pinned window statements (see the
-    // `// raw-sql:` note below).
+    // The email and webhook log tasks stream through SeaORM entity queries (the same
+    // predicates and order as the fixture-pinned SQL text); the api-log and the two
+    // version tasks keep the fixture-pinned statements (see the
+    // `// raw-sql:` note below) — ApiLogs needs `abbrev()` for inet `ip_address`
+    // (Entity `CAST AS text` would append `/32`), window tasks need `ROW_NUMBER()`.
     let mut driver = FlushDriver {
         archiver: mongo,
         mongo_available,
@@ -913,22 +889,10 @@ pub async fn run_cleanup(
     };
 
     match task {
-        CleanupTask::ApiLogs | CleanupTask::EmailLogs | CleanupTask::WebhookLogs => {
+        CleanupTask::EmailLogs | CleanupTask::WebhookLogs => {
             let conn = crate::pool::sea_orm_connection(pool);
             let bound = parse_cutoff(cutoff)?;
             match task {
-                CleanupTask::ApiLogs => {
-                    let mut stream = api_activity_logs::Entity::find()
-                        .filter(api_activity_logs::Column::CreatedAt.lte(bound))
-                        .order_by_desc(api_activity_logs::Column::CreatedAt)
-                        .stream(&conn)
-                        .await
-                        .map_err(into_sqlx)?;
-                    while let Some(row) = stream.next().await {
-                        let row = row.map_err(into_sqlx)?;
-                        driver.push(api_log_doc(&row)).await?;
-                    }
-                }
                 CleanupTask::EmailLogs => {
                     let mut stream = email_notification_logs::Entity::find()
                         .filter(email_notification_logs::Column::SentAt.lte(bound))
@@ -956,9 +920,13 @@ pub async fn run_cleanup(
                 _ => unreachable!(),
             }
         }
-        CleanupTask::PageVersions | CleanupTask::IssueDescriptionVersions => {
+        CleanupTask::ApiLogs
+        | CleanupTask::PageVersions
+        | CleanupTask::IssueDescriptionVersions => {
             let sql = task.select_sql_for_exec(cutoff);
-            // raw-sql: window function `ROW_NUMBER()` (newest-20 retention cut) is not expressible with sea-query 0.32 (`Func` has no `row_number` constructor; only `Expr::cust`), so the fixture-pinned Django text runs through sqlx for these two tasks.
+            // raw-sql: ApiLogs projects `inet` `ip_address` via `abbrev()` (Entity
+            // `CAST AS text` appends `/32`/`/128`); window tasks need `ROW_NUMBER()`
+            // inexpressible in sea-query 0.32 (`Func` has no `row_number`). The fixture-pinned Django text runs through sqlx for these three.
             let mut stream = sqlx::query(&sql).fetch(pool);
             while let Some(row) = stream.try_next().await? {
                 driver.push(decode_row(task, &row)?).await?;
@@ -1014,21 +982,13 @@ mod tests {
 
     #[test]
     fn orm_paths_pin_statement_shapes() {
-        // TASK-CLEANUP-1: the ORM execution paths keep the Django
-        // predicates and order (the same ones the fixture-pinned SQL
-        // text spells out).
+        // TASK-CLEANUP-1: the ORM execution paths (email, webhook) keep the
+        // Django predicates and order (the same ones the fixture-pinned
+        // SQL text spells out). ApiLogs now uses the raw-sqlx `abbrev()` path
+        // (see `select_sql_for_exec` + `run_cleanup`), so it is pinned by
+        // `executed_cutoff_is_a_quoted_literal` instead.
         use sea_orm::{DbBackend, QueryTrait};
         let bound = parse_cutoff(FROZEN_CUTOFF).unwrap();
-        let api_sql = api_activity_logs::Entity::find()
-            .filter(api_activity_logs::Column::CreatedAt.lte(bound))
-            .order_by_desc(api_activity_logs::Column::CreatedAt)
-            .build(DbBackend::Postgres)
-            .to_string();
-        assert!(api_sql.contains("\"api_activity_logs\""), "{api_sql}");
-        assert!(
-            api_sql.contains("ORDER BY \"api_activity_logs\".\"created_at\" DESC"),
-            "{api_sql}"
-        );
         let email_sql = email_notification_logs::Entity::find()
             .filter(email_notification_logs::Column::SentAt.lte(bound))
             .order_by_desc(email_notification_logs::Column::CreatedAt)
