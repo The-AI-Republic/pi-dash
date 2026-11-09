@@ -111,7 +111,9 @@ export const AgentRun = z.object({
   owner: nullableUuid(),
   created_at: dateTime(),
   assigned_at: nullableDateTime(),
-  queue_position: z.nullable(z.number()),
+  // Dropped with the worktree-pool columns (PDASHOSS01-156): current
+  // servers omit it, older ones still send it.
+  queue_position: z.optional(z.nullable(z.number())),
   started_at: nullableDateTime(),
   ended_at: nullableDateTime(),
   done_payload: z.nullable(z.record(z.string(), z.unknown())),
