@@ -875,9 +875,13 @@ SESSIONS = (
             # the same way. The seed's expires_at (+14d, static) and
             # token_hash/fingerprint (deterministic) compare as-is.
             "engine_credential": ["last_used_at", "revoked_at"],
-            # Evidence: mt_ auth stamps last_used_at on the
-            # credential-revoke call.
-            "machine_token": ["last_used_at"],
+            # Evidence: mt_ auth stamps last_used_at AND renews the
+            # 60-day idle expiry (expires_at = now + 60d) on every
+            # authenticated use, per backend (runner/authentication.py
+            # touch_machine_token; Rust domain/tokens.rs mirrors it).
+            # The revoke call's mt_ auth sees the two instants ms apart
+            # (NEWPIDASH-168), same evidence as runner_daemon_lifecycle.
+            "machine_token": ["last_used_at", "expires_at"],
         },
         db_cell_refs=[
             ("engine_credential", "dev_machine_id", "dev_machine", ""),

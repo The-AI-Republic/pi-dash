@@ -2309,7 +2309,8 @@ async fn load_children(
     }
     let db = orm(pool);
     // JOIN projects (inner) + LEFT JOIN states, with triage filter dropping NULL state rows
-    // Use sea_query Expr for the 3-valued logic: s.group != 'triage' as Col NE
+    // (Django `issue_objects`: `exclude(state__group='triage')` drops triage and
+    // NULL-state children alike) — `"states"."group" <> 'triage'`.
     let q = issues::Entity::find()
         .select_only()
         .column_as(issues::Column::Id, "id")
@@ -2321,20 +2322,13 @@ async fn load_children(
             sea_orm::JoinType::InnerJoin,
             issues::Relation::Projects.def(),
         )
-        .join_as(
+        .join(
             sea_orm::JoinType::LeftJoin,
-            states::Relation::Issues.def(),
-            "s",
+            issues::Relation::States.def(),
         )
         .filter(issues::Column::ParentId.eq(*issue_id))
         .filter(issues::Column::DeletedAt.is_null())
-        .filter(
-            sea_orm::sea_query::Expr::col((
-                sea_orm::sea_query::Alias::new("s"),
-                sea_orm::sea_query::Alias::new("group"),
-            ))
-            .ne("triage"),
-        )
+        .filter(states::Column::Group.ne("triage".to_owned()))
         .filter(issues::Column::ArchivedAt.is_null())
         .filter(projects::Column::ArchivedAt.is_null())
         .filter(issues::Column::IsDraft.eq(false))
@@ -2424,10 +2418,9 @@ async fn load_relations(
                 sea_orm::JoinType::InnerJoin,
                 issues::Relation::Projects.def(),
             )
-            .join_as(
+            .join(
                 sea_orm::JoinType::LeftJoin,
-                states::Relation::Issues.def(),
-                "s2",
+                issues::Relation::States.def(),
             )
             .filter(issues::Column::Id.is_in(other_ids))
             .filter(issues::Column::DeletedAt.is_null());
