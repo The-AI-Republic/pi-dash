@@ -2344,7 +2344,7 @@ mod live {
             .expect("labels");
         let sql = relations_pool_select(&[issue], &world.workspace_id, &world.user_id)
             .build(sea_orm::DbBackend::Postgres);
-        sqlx::query(&format!("EXPLAIN {}", sql.to_string()))
+        sqlx::query(&format!("EXPLAIN {sql}"))
             .execute(&db)
             .await
             .expect("relations pool plans");
