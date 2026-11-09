@@ -656,8 +656,11 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// M2M group filters force an INNER join on that relation with the deleted
-/// guard (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`).
+/// M2M group keys LEFT-join their bridge with an
+/// `alias."deleted_at" IS NULL` guard (`GROUP_FILTER_MAPPER` in
+/// `utils/grouper.py:41-49` is Django's LEFT OUTER JOIN + `isnull`
+/// filter, so linkless rows keep the NULL group key that feeds the
+/// "None" bucket — NEWPIDASH-151).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -780,9 +783,12 @@ fn module_filtered_set(
         let holder = binder.bind_uuid(creator);
         fragments.push(format!("issue.created_by_id = {holder}"));
     }
-    // M2M group filters scope their relation to live bridges
-    // (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`, applied by
-    // `issue_queryset_grouper` for the grouped paths).
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`. The
+    // predicate sits in WHERE over the LEFT join, so issues whose links
+    // are all soft-deleted drop out while linkless issues stay NULL (the
+    // short aliases carry no guard). Quoted so the nullable scan below
+    // sees the `IS NULL` test (cycle-handler precedent).
     for group in [group_by, sub_group_by].into_iter().flatten() {
         let alias = match group {
             "assignees__id" => "issue_assignee",
@@ -790,7 +796,7 @@ fn module_filtered_set(
             "issue_module__module_id" => "issue_module",
             _ => continue,
         };
-        fragments.push(format!("{alias}.deleted_at IS NULL"));
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
     }
     let where_sql = fragments.join(" AND ");
     // The scope bridge always joins (one live row per issue in scope: the
@@ -811,7 +817,7 @@ fn module_filtered_set(
             continue;
         }
         referenced.push(*alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+        let inner = used && !nullable_only;
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
