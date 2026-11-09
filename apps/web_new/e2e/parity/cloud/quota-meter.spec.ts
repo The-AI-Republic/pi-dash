@@ -17,7 +17,7 @@
 // tab stays usable either way.
 import { test, expect } from "../fixtures";
 import { cloudBrowserCookies } from "../helpers/api";
-import { cloudOnboardedUser } from "./cloud-user-setup";
+import { cloudWorkspaceUser } from "./cloud-user-setup";
 
 const QUOTA_PATH = "**/api/openhub/usage/quota/";
 
@@ -32,8 +32,8 @@ const QUOTA_BODY = {
   resetsAt: "2026-11-10T00:00:00+00:00",
 };
 
-test("the new frontend shows the free-token meter; the oracle renders none (DIFF-8)", async ({ driver }) => {
-  const session = await cloudOnboardedUser("parity-149-quota", "Quota Meter");
+test("the new frontend shows the free-token meter; the oracle renders none (DIFF-8)", async ({ driver, seed }) => {
+  const session = await cloudWorkspaceUser(seed, "parity-149-quota", 15, "Quota Meter");
   await driver.page.route(QUOTA_PATH, async (route) => {
     await route.fulfill({
       status: 200,
@@ -56,8 +56,8 @@ test("the new frontend shows the free-token meter; the oracle renders none (DIFF
   }
 });
 
-test("a failed quota read hides the meter and leaves the tab usable", async ({ driver }) => {
-  const session = await cloudOnboardedUser("parity-149-quota-hide", "Quota Hidden");
+test("a failed quota read hides the meter and leaves the tab usable", async ({ driver, seed }) => {
+  const session = await cloudWorkspaceUser(seed, "parity-149-quota-hide", 15, "Quota Hidden");
   await driver.page.route(QUOTA_PATH, async (route) => {
     await route.fulfill({
       status: 503,
