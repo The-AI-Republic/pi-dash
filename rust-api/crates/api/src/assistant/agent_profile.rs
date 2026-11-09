@@ -338,15 +338,18 @@ pub fn is_desktop_from_extension(
 async fn fetch_llm_has_key(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<bool, Denial> {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let row = pidash_db::entity::assistant_user_llm_config::Entity::find()
+    // `into_tuple`: with `select_only` the row holds one column, so decoding
+    // it as the full Model fails on every user who has a config row.
+    let key: Option<Option<Vec<u8>>> = pidash_db::entity::assistant_user_llm_config::Entity::find()
         .filter(pidash_db::entity::assistant_user_llm_config::Column::UserId.eq(*user_id))
         .select_only()
         .column(pidash_db::entity::assistant_user_llm_config::Column::ApiKeyEncrypted)
+        .into_tuple()
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row
-        .map(|row| pidash_db::assistant::models::has_secret(&row.api_key_encrypted))
+    Ok(key
+        .map(|key| pidash_db::assistant::models::has_secret(&key))
         .unwrap_or(false))
 }
 
@@ -838,5 +841,38 @@ mod live_tests {
             body.get("detail").is_none(),
             "classified arm carries no detail key: {body}"
         );
+    }
+
+    /// A user with an `assistant_user_llm_config` row: the one-column
+    /// select decodes (it used to be decoded as the full Model and 500).
+    #[tokio::test]
+    async fn has_key_reads_a_users_config_row() {
+        let Some((state, _secret)) = live_state(None).await else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = state.pools().expect("pools").primary().clone();
+        let without_row = seed_user(&pool).await;
+        assert_eq!(
+            fetch_llm_has_key(&pool, &without_row).await.ok(),
+            Some(false)
+        );
+        for (key, expected) in [(Some(b"sealed".to_vec()), true), (None, false)] {
+            let user_id = seed_user(&pool).await;
+            sqlx::query(
+                "INSERT INTO assistant_user_llm_config (provider_kind, base_url,
+                    model_name, api_key_encrypted, created_at, updated_at, user_id)
+                 VALUES ('openai', '', 'gpt', $1, now(), now(), $2)",
+            )
+            .bind(key)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("seed llm config");
+            assert_eq!(
+                fetch_llm_has_key(&pool, &user_id).await.ok(),
+                Some(expected)
+            );
+        }
     }
 }
