@@ -183,7 +183,7 @@ export function buildOptionsFromCatalog(
   };
   (Object.keys(pick) as TRunnerAgent[]).forEach((agent) => {
     const rows = catalog[agent] ?? [];
-    const sorted = [...rows].toSorted((a, b) => a.sort_order - b.sort_order || a.label.localeCompare(b.label));
+    const sorted = [...rows].sort((a, b) => a.sort_order - b.sort_order || a.label.localeCompare(b.label));
     for (const row of sorted) {
       const efforts = row.reasoning_efforts ?? [];
       if (efforts.length === 0) {
