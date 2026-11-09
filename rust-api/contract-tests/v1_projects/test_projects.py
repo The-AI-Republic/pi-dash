@@ -737,3 +737,175 @@ def test_detail_renders_stored_network_and_description_json(seed, conn):
     assert body["network"] == 2
     assert body["description_text"] == {"ops": "text"}
     assert body["description_html"] == {"a": 1}
+
+
+def _seed_custom_order_projects(conn, seed, tag):
+    """Three projects created CCC, AAA, BBB with sort_order 65535.
+
+    Returns dict ident -> (pid, identifier). Creation times are fixed so
+    -created_at order is BBB, AAA, CCC — distinct from identifier order.
+    """
+    ws_id = seed["ws_a"]["id"]
+    owner_id = seed["owner"]["id"]
+    suffix = tag.upper()[:4]  # 4 hex chars, keeps identifiers <=12
+    ccc_ident = f"CCC{suffix}"
+    aaa_ident = f"AAA{suffix}"
+    bbb_ident = f"BBB{suffix}"
+    # Creation order CCC -> AAA -> BBB (identifiers out of lexical order)
+    ccc = db.create_project(
+        conn, ws_id, tag + "c", name=f"CT CCC {tag}", identifier=ccc_ident,
+        created_by_id=owner_id,
+    )
+    aaa = db.create_project(
+        conn, ws_id, tag + "a", name=f"CT AAA {tag}", identifier=aaa_ident,
+        created_by_id=owner_id,
+    )
+    bbb = db.create_project(
+        conn, ws_id, tag + "b", name=f"CT BBB {tag}", identifier=bbb_ident,
+        created_by_id=owner_id,
+    )
+    for proj in (ccc, aaa, bbb):
+        db.add_project_member(conn, ws_id, proj["id"], owner_id, db.ADMIN)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE project_members SET sort_order = 65535"
+                " WHERE project_id = %s AND member_id = %s",
+                (proj["id"], owner_id),
+            )
+        conn.commit()
+    # Pin created_at so -created_at is BBB(03) > AAA(02) > CCC(01)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET created_at = '2024-01-01 00:00:00+00' WHERE id = %s",
+            (ccc["id"],),
+        )
+        cur.execute(
+            "UPDATE projects SET created_at = '2024-01-02 00:00:00+00' WHERE id = %s",
+            (aaa["id"],),
+        )
+        cur.execute(
+            "UPDATE projects SET created_at = '2024-01-03 00:00:00+00' WHERE id = %s",
+            (bbb["id"],),
+        )
+    conn.commit()
+    return {ccc_ident: ccc["id"], aaa_ident: aaa["id"], bbb_ident: bbb["id"]}
+
+
+def _filtered_ordered(rows, wanted_ids):
+    """Order of `rows` filtered to wanted_ids, as their identifiers."""
+    wanted = set(wanted_ids)
+    out = [r for r in rows if r["id"] in wanted]
+    # The endpoint paginates in order; results preserve that order.
+    return [(r["identifier"], r) for r in out]
+
+
+def test_list_custom_order_by_identifier_and_sort_order(seed, conn):
+    """Custom order_by=identifier sorts by identifier, sort_order non-null.
+
+    PIDASHCONV-1720: Django always annotates sort_order and replaces the
+    default -created_at ordering. Rust built project_list (ORDER BY
+    p.created_at DESC, no sort_order) and appended the key, so results
+    arrived in -created_at order with sort_order null. This seeds three
+    projects created out of identifier order and asserts identifier order
+    plus a non-null 65535.0 sort_order.
+    """
+    tag = db.new_tag()
+    mapping = _seed_custom_order_projects(conn, seed, tag)
+    suffix = tag.upper()[:4]
+    # Expected lexical order: AAA < BBB < CCC
+    aaa_ident = f"AAA{suffix}"
+    bbb_ident = f"BBB{suffix}"
+    ccc_ident = f"CCC{suffix}"
+    expected_asc = [aaa_ident, bbb_ident, ccc_ident]
+    expected_desc = [ccc_ident, bbb_ident, aaa_ident]
+
+    key = seed["keys"][KEY]
+    # Ascending identifier
+    body = http.get(key, base(seed) + "/", params={"order_by": "identifier"}).json()
+    ordered = _filtered_ordered(body["results"], mapping.values())
+    idents = [ident for ident, _ in ordered]
+    assert idents == expected_asc, f"identifier asc: {idents} != {expected_asc}"
+    for ident, row in ordered:
+        assert row["sort_order"] is not None, f"sort_order null for {ident}"
+        assert row["sort_order"] == 65535.0, f"sort_order {row['sort_order']} != 65535.0"
+
+    # Descending identifier
+    body = http.get(key, base(seed) + "/", params={"order_by": "-identifier"}).json()
+    ordered = _filtered_ordered(body["results"], mapping.values())
+    idents = [ident for ident, _ in ordered]
+    assert idents == expected_desc, f"identifier desc: {idents} != {expected_desc}"
+    for ident, row in ordered:
+        assert row["sort_order"] is not None, f"sort_order null for -identifier {ident}"
+        assert row["sort_order"] == 65535.0
+
+    # Regression: eight known keys still serve sort_order and succeed
+    for known in [
+        "sort_order", "-sort_order", "created_at", "-created_at",
+        "updated_at", "-updated_at", "name", "-name",
+    ]:
+        body = http.get(key, base(seed) + "/", params={"order_by": known}).json()
+        rows = [r for r in body["results"] if r["id"] in mapping.values()]
+        # Each row must carry the list-GET sort_order (non-null where the
+        # caller is a member); the seed caller is an active member.
+        for r in rows:
+            assert r["sort_order"] is not None, f"{known} gave null sort_order"
+            assert r["sort_order"] == 65535.0
+
+
+def test_list_custom_order_by_total_members(seed, conn):
+    """Custom order_by=-total_members orders by member count (PIDASHCONV-1720)."""
+    tag = db.new_tag()
+    ws_id = seed["ws_a"]["id"]
+    owner_id = seed["owner"]["id"]
+    member_id = seed["member"]["id"]
+    guest_id = seed["guest"]["id"]
+    suffix = tag.upper()[:4]
+
+    # Three projects with distinct member counts: small=1, med=2, large=3
+    small_ident = f"SML{suffix}"
+    med_ident = f"MED{suffix}"
+    large_ident = f"LRG{suffix}"
+    small = db.create_project(conn, ws_id, tag + "s", name=f"CT SML {tag}",
+                                identifier=small_ident, created_by_id=owner_id)
+    med = db.create_project(conn, ws_id, tag + "m", name=f"CT MED {tag}",
+                              identifier=med_ident, created_by_id=owner_id)
+    large = db.create_project(conn, ws_id, tag + "l", name=f"CT LRG {tag}",
+                                identifier=large_ident, created_by_id=owner_id)
+    # small: just owner
+    db.add_project_member(conn, ws_id, small["id"], owner_id, db.ADMIN)
+    # med: owner + member
+    db.add_project_member(conn, ws_id, med["id"], owner_id, db.ADMIN)
+    db.add_project_member(conn, ws_id, med["id"], member_id, db.MEMBER)
+    # large: owner + member + guest
+    db.add_project_member(conn, ws_id, large["id"], owner_id, db.ADMIN)
+    db.add_project_member(conn, ws_id, large["id"], member_id, db.MEMBER)
+    db.add_project_member(conn, ws_id, large["id"], guest_id, db.MEMBER)
+    with conn.cursor() as cur:
+        for proj in (small, med, large):
+            cur.execute(
+                "UPDATE project_members SET sort_order = 65535"
+                " WHERE project_id = %s AND member_id = %s",
+                (proj["id"], owner_id),
+            )
+    conn.commit()
+
+    wanted = {small["id"], med["id"], large["id"]}
+    key = seed["keys"][KEY]
+    body = http.get(key, base(seed) + "/", params={"order_by": "-total_members"}).json()
+    rows = [r for r in body["results"] if r["id"] in wanted]
+    idents = [r["identifier"] for r in rows]
+    # Most members first: large(3), med(2), small(1)
+    assert idents == [large_ident, med_ident, small_ident], (
+        f"-total_members: {idents} != expected {[large_ident, med_ident, small_ident]}"
+    )
+    for r in rows:
+        assert r["sort_order"] == 65535.0, f"sort_order for {r['identifier']} must be 65535.0"
+        assert r["total_members"] in (1, 2, 3)
+
+    # Ascending flips it
+    body = http.get(key, base(seed) + "/", params={"order_by": "total_members"}).json()
+    rows = [r for r in body["results"] if r["id"] in wanted]
+    idents = [r["identifier"] for r in rows]
+    assert idents == [small_ident, med_ident, large_ident], (
+        f"total_members asc: {idents}"
+    )
