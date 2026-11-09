@@ -551,11 +551,19 @@ pub fn offset_window(
     if offset < 0 {
         return Err(PageError::NegativeOffset);
     }
+    if limit < 0 {
+        // `results[:limit]` with a negative limit raises Django's
+        // `ValueError` for *every* `limit < 0` (`utils/paginator.py:169`),
+        // even when `stop >= offset` (the crafted `per_page=-3`,
+        // `cursor=-3:-2:0` case: offset 6, stop 4). Error here, before
+        // any handler casts `stop - offset` or slices `rows[start..stop]`.
+        return Err(PageError::NegativeSlice);
+    }
     let stop = saturate_offset(offset as i128 + limit as i128 + 1);
     if stop < 0 {
         // `queryset[offset:stop]` with a negative `stop`: Django raises
-        // `ValueError` on the lazy queryset (only reachable with `limit < 0`,
-        // since `offset >= 0` here).
+        // `ValueError` on the lazy queryset. Unreachable since the guard
+        // above holds `limit >= 0` and `offset >= 0`; kept as defense.
         return Err(PageError::NegativeSlice);
     }
     if !cursor_value.equals_limit(limit) && is_prev {
@@ -1527,6 +1535,20 @@ mod tests {
         // with a negative bound: Django `ValueError`, not rows.
         assert_eq!(
             offset_window(-5, 0, CursorValue::Int(-5), false, None),
+            Err(PageError::NegativeSlice)
+        );
+        // PIDASHCONV-1718: crafted negative per_page + negative cursor page
+        // (`per_page=-3`, `cursor=-3:-2:0` => limit -3, page -2, offset 6,
+        // stop 4). `queryset[6:4]` is an empty slice in Django but
+        // `results[:limit]` with a negative limit always raises
+        // `ValueError`, so every `limit < 0` is a 500. The window must error
+        // before handlers cast `stop - offset` or slice `rows[start..stop]`.
+        assert_eq!(
+            offset_window(-3, -2, CursorValue::Int(-3), false, None),
+            Err(PageError::NegativeSlice)
+        );
+        assert_eq!(
+            offset_window(-1, 0, CursorValue::Int(-1), false, None),
             Err(PageError::NegativeSlice)
         );
         assert_eq!(max_hits(95, 50), Ok(2));
