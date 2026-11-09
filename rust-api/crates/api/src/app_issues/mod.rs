@@ -354,6 +354,11 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
+/// Resolver 404 for a `<uuid:...>` segment that misses the converter
+/// (global `handler404`, `pi_dash/urls.py:15` → `custom_404_view`):
+/// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space after
+/// the colon (PIDASHCONV-1713).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
@@ -384,6 +389,8 @@ pub enum Denial {
     NotFound,
     /// 404, `{"detail":"Project not found"}` (project-kwarg rewrite miss).
     ProjectNotFound,
+    /// 404, the URL resolver (`<uuid:...>` converter miss → `handler404`).
+    PageNotFound,
     /// 400, `{"detail": ...}` (`ParseError`, filter validation).
     BadDetail(String),
     /// 415, unsupported media type (DRF `UnsupportedMediaType`); the body
@@ -409,6 +416,7 @@ impl Denial {
             ),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::PageNotFound => (StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
@@ -3017,6 +3025,17 @@ mod tests {
             filter_denial(E::EmptyRangeBounds("x".to_owned())),
             Denial::ServerError
         ));
+    }
+
+    #[test]
+    fn page_not_found_pins_the_resolver_404_bytes() {
+        // `custom_404_view` (`app/views/error_404.py`) returns
+        // `JsonResponse({"error": "Page not found."})`: `json.dumps`
+        // defaults, i.e. the space after the colon (PIDASHCONV-1713).
+        let (status, body) = Denial::PageNotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"error": "Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
     }
 }
 

@@ -287,9 +287,17 @@ fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
 /// detail"}`.
 const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
 
-fn parse_uuid_or_invalid(raw: &str) -> Result<Uuid, Denial> {
-    raw.parse::<Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+/// Parse a `<uuid:pk>` path segment the way Django's converter routes it:
+/// only the canonical lowercase hyphenated spelling reaches the view;
+/// anything else is the resolver 404 before auth (`UUIDConverter`
+/// matches `[0-9a-f]{8}-…` lowercase-only, PIDASHCONV-1713).
+fn parse_uuid_path(raw: &str) -> Result<Uuid, Denial> {
+    match crate::uuid_path::classify_uuid_segment(raw) {
+        crate::uuid_path::UuidSegment::Canonical(id) => Ok(id),
+        crate::uuid_path::UuidSegment::NonCanonical | crate::uuid_path::UuidSegment::Garbage => {
+            Err(Denial::PageNotFound)
+        }
+    }
 }
 
 /// A SeaORM connection over the request pool (no I/O, `list_engine`
@@ -2169,9 +2177,10 @@ async fn quick_link_partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("PATCH", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
@@ -2304,9 +2313,10 @@ async fn quick_link_retrieve(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("GET", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
@@ -2334,9 +2344,10 @@ async fn quick_link_destroy(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("DELETE", "workspaces/<slug>/quick-links/<pk>/");
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), false).await?;
     check_gate(&gate, &slug, &facts)?;
@@ -3066,10 +3077,11 @@ async fn sticky_retrieve(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     // No decorator on this action: any signed-in user reaches the body.
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     // Zone activation precedes the view body (`TimezoneMixin.initial`).
     let timezone = actor_timezone(&pool, &user_id).await?;
     let row = stickies::Entity::find()
@@ -3118,9 +3130,10 @@ async fn sticky_partial_update(
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     body: Bytes,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("PATCH", "workspaces/<slug>/stickies/<pk>/");
     let is_creator = sticky_creator_fact(&pool, &pk, &user_id).await?;
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), is_creator).await?;
@@ -3231,9 +3244,10 @@ async fn sticky_destroy(
     Path((slug, pk_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:pk>` converter runs at URL resolution, before auth.
+    let pk = parse_uuid_path(&pk_raw)?;
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
-    let pk = parse_uuid_or_invalid(&pk_raw)?;
     let gate = gate_for("DELETE", "workspaces/<slug>/stickies/<pk>/");
     let is_creator = sticky_creator_fact(&pool, &pk, &user_id).await?;
     let facts = fetch_allow_facts(&pool, &slug, &user_id, gate_roles(&gate), is_creator).await?;
@@ -5383,10 +5397,21 @@ mod tests {
             Denial::BadDetail(_)
         ));
         assert!(matches!(page_denial(E::ZeroLimit), Denial::ServerError));
+        // PIDASHCONV-1713: garbage and non-canonical `<uuid:pk>` segments
+        // 404 at resolution, before auth — never the 400 validation body.
+        assert!(matches!(parse_uuid_path("xyz"), Err(Denial::PageNotFound)));
         assert!(matches!(
-            parse_uuid_or_invalid("xyz"),
-            Err(Denial::BadError(_))
+            parse_uuid_path("12345678-1234-1234-1234-1234567890AB"),
+            Err(Denial::PageNotFound)
         ));
+        assert!(matches!(
+            parse_uuid_path("123456781234123412341234567890ab"),
+            Err(Denial::PageNotFound)
+        ));
+        assert_eq!(
+            parse_uuid_path("12345678-1234-1234-1234-1234567890ab").unwrap(),
+            Uuid::parse_str("12345678-1234-1234-1234-1234567890ab").unwrap()
+        );
     }
 
     #[test]
