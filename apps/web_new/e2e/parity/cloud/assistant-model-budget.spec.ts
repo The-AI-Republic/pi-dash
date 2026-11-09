@@ -5,28 +5,17 @@
 // model picker badges the usage-meter-free models as Free and blocks paid
 // models for free-plan users. Row CLOUD-041 (new-system-only). The old app
 // provably lacks the free-quota picker, so every leg skips the oracle
-// driver. Both legs stub the free-quota proxy at the browser boundary —
+// driver. All legs stub the free-quota proxy at the browser boundary —
 // the backend proxy (PRIVATEPI1-137) is still landing, and the stub pins
 // the picker's behavior to the contract shape, not to live data.
 import { test, expect } from "../fixtures";
 import { cloudAssistantConnectionsRaw, cloudBrowserCookies } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import { cloudOnboardedUser } from "./cloud-user-setup";
+import { cloudWorkspaceUser } from "./cloud-user-setup";
 
 const CONNECTIONS_PATH = "**/api/users/me/ai-assistant/connections/";
 const QUOTA_PATH = "**/api/openhub/usage/quota/";
-
-type ConnectionRow = {
-  id: string;
-  kind: string;
-  model_name: string;
-  is_selected: boolean;
-  connected?: boolean;
-};
-
-function rowsOf(payload: Record<string, unknown>): ConnectionRow[] {
-  return (payload["connections"] as ConnectionRow[]) ?? [];
-}
+const HOSTED_ID = "00000000-0000-4000-8000-0000000000aa";
 
 function hostedPayload(base: Record<string, unknown>, over: Record<string, unknown>) {
   return {
@@ -34,7 +23,7 @@ function hostedPayload(base: Record<string, unknown>, over: Record<string, unkno
     connections: [
       ...((base["connections"] as Record<string, unknown>[]) ?? []),
       {
-        id: "00000000-0000-4000-8000-0000000000aa",
+        id: HOSTED_ID,
         kind: "openhub",
         provider_kind: "openhub",
         base_url: "",
@@ -48,6 +37,7 @@ function hostedPayload(base: Record<string, unknown>, over: Record<string, unkno
       },
     ],
     openhub_model_options: ["deepseek/deepseek-v4-flash", "moonshotai/kimi-k3"],
+    openhub_available: true,
     openhub_wallet_url: "https://hub.example.com/account/credits",
     ...over,
   };
@@ -76,26 +66,54 @@ async function stubConnections(driver: { page: import("@playwright/test").Page }
   const live = await cloudAssistantConnectionsRaw(cookie);
   expect(live.status).toBe(200);
   const base = live.payload as Record<string, unknown>;
+  // Stateful stub: the hosted row exists only here, so the PATCH the
+  // picker's commit issues must land here too. GET refetches after the
+  // write see the picked model, which is how the UI observes the switch.
+  let currentModel = "deepseek/deepseek-v4-flash";
   await driver.page.route(CONNECTIONS_PATH, async (route) => {
     const request = route.request();
-    if (request.method() !== "GET" || new URL(request.url()).pathname !== "/api/users/me/ai-assistant/connections/") {
-      await route.fallback();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/api/users/me/ai-assistant/connections/") {
+      const payload = hostedPayload(base, {});
+      const hosted = (payload["connections"] as Record<string, unknown>[]).find((row) => row["kind"] === "openhub");
+      if (hosted !== undefined) hosted["model_name"] = currentModel;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(payload),
+      });
       return;
     }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(hostedPayload(base, {})),
-    });
+    if (request.method() === "PATCH" && pathname === `/api/users/me/ai-assistant/connections/${HOSTED_ID}/`) {
+      const body = (request.postDataJSON() ?? {}) as { model_name?: unknown };
+      if (typeof body.model_name === "string" && body.model_name !== "") currentModel = body.model_name;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: HOSTED_ID,
+          kind: "openhub",
+          provider_kind: "openhub",
+          base_url: "",
+          model_name: currentModel,
+          has_api_key: false,
+          is_selected: true,
+          last_verified_at: null,
+          created_at: new Date().toISOString(),
+        }),
+      });
+      return;
+    }
+    await route.fallback();
   });
 }
 
 test(
   specTitle(["CLOUD-041"], "free-plan users see Free vs Needs-credit and cannot pick a paid model"),
   { tag: specTags(["CLOUD-041"]) },
-  async ({ driver }, testInfo) => {
+  async ({ driver, seed }, testInfo) => {
     test.skip(testInfo.project.name !== "new", "the model budget pins the web_new cloud build only");
-    const session = await cloudOnboardedUser("parity-150-budget", "Free Budget");
+    const session = await cloudWorkspaceUser(seed, "parity-150-budget", 15, "Free Budget");
     await stubQuota(driver as never, "free");
     await stubConnections(driver as never, session.cookie);
     await driver.openAuthenticated("/settings/profile/ai-assistant", cloudBrowserCookies(session.cookie));
@@ -113,11 +131,6 @@ test(
     expect(paidOption?.disabled).toBe(true);
     expect(budget.notice).toBeNull();
     expect(budget.topUpHref).toBe("https://hub.example.com/account/credits");
-
-    // Server state still shows the free model active; the blocked pick
-    // never becomes the stored model.
-    const list = await cloudAssistantConnectionsRaw(session.cookie);
-    expect(rowsOf(list.payload).find((row) => row.kind === "openhub")?.model_name).toBe("deepseek/deepseek-v4-flash");
     await driver.page.unroute(QUOTA_PATH);
     await driver.page.unroute(CONNECTIONS_PATH);
   }
@@ -126,9 +139,9 @@ test(
 test(
   specTitle(["CLOUD-041"], "paid-plan users can pick every model with Free vs Uses-credit hints"),
   { tag: specTags(["CLOUD-041"]) },
-  async ({ driver }, testInfo) => {
+  async ({ driver, seed }, testInfo) => {
     test.skip(testInfo.project.name !== "new", "the model budget pins the web_new cloud build only");
-    const session = await cloudOnboardedUser("parity-150-budget", "Paid Budget");
+    const session = await cloudWorkspaceUser(seed, "parity-150-budget", 15, "Paid Budget");
     await stubQuota(driver as never, "payg");
     await stubConnections(driver as never, session.cookie);
     await driver.openAuthenticated("/settings/profile/ai-assistant", cloudBrowserCookies(session.cookie));
@@ -150,10 +163,6 @@ test(
     budget = await driver.cloudAssistantModelBudget("OpenHub");
     expect(budget.value).toBe("moonshotai/kimi-k3");
     expect(budget.notice).toBeNull();
-
-    // Server state flipped to the paid model.
-    const list = await cloudAssistantConnectionsRaw(session.cookie);
-    expect(rowsOf(list.payload).find((row) => row.kind === "openhub")?.model_name).toBe("moonshotai/kimi-k3");
     await driver.page.unroute(QUOTA_PATH);
     await driver.page.unroute(CONNECTIONS_PATH);
   }
@@ -162,9 +171,9 @@ test(
 test(
   specTitle(["CLOUD-041"], "a free user already on a paid model is warned with a top-up link"),
   { tag: specTags(["CLOUD-041"]) },
-  async ({ driver }, testInfo) => {
+  async ({ driver, seed }, testInfo) => {
     test.skip(testInfo.project.name !== "new", "the model budget pins the web_new cloud build only");
-    const session = await cloudOnboardedUser("parity-150-budget", "Stranded Budget");
+    const session = await cloudWorkspaceUser(seed, "parity-150-budget", 15, "Stranded Budget");
     await stubQuota(driver as never, "free");
     const live = await cloudAssistantConnectionsRaw(session.cookie);
     const base = live.payload as Record<string, unknown>;
