@@ -73,7 +73,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
 use chrono_tz::Tz;
@@ -94,6 +94,7 @@ use pidash_services::app_modules::{queries, shape, tasks};
 use super::gates;
 use crate::app_issues::Denial;
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 pub(crate) use pidash_compat::response::{empty_response, json_response};
 use pidash_compat::validate::push_pairs_error as push_error;
 
@@ -538,6 +539,39 @@ pub(crate) const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
 pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
     raw.parse::<uuid::Uuid>()
         .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+}
+
+/// Whether a `<uuid:...>` segment parses but is not the canonical
+/// lowercase hyphenated spelling Django routes (uppercase, simple,
+/// braced, `urn:uuid:`). Such routes proxy to Django for its resolver
+/// 404 before auth (PIDASHCONV-1180 app_cycles precedent).
+pub(crate) fn is_noncanonical_uuid(raw: &str) -> bool {
+    matches!(classify_uuid_segment(raw), UuidSegment::NonCanonical)
+}
+
+/// Rebuild the incoming request (method, uri and headers only, empty
+/// body) and proxy it to Django. The resolver 404 reads no body; the
+/// `Content-Length`/`Transfer-Encoding` of the original request would
+/// describe bytes that never arrive, so they are skipped.
+pub(crate) async fn proxy_segment(
+    state: AppState,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
+    let mut builder = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers.iter() {
+        if name == axum::http::header::CONTENT_LENGTH
+            || name == axum::http::header::TRANSFER_ENCODING
+        {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    let req = builder
+        .body(axum::body::Body::empty())
+        .expect("proxy request");
+    crate::edge::proxy(axum::extract::State(state), req).await
 }
 
 /// The role list one allow-gate checks (`allow_facts_for` in `gates.rs`
@@ -2934,7 +2968,15 @@ async fn module_retrieve(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth): any
+    // parseable non-canonical spelling proxies to Django.
+    if is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
@@ -3432,8 +3474,15 @@ async fn module_update(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth).
+    if is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
@@ -3511,8 +3560,15 @@ async fn module_partial_update(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth).
+    if is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id, timezone) = module_context(
         &state,
         &slug,
@@ -3632,7 +3688,14 @@ async fn module_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth).
+    if is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
