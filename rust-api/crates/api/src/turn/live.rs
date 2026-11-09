@@ -4,7 +4,7 @@
 //! from the modules the split issues shipped: the agent loop
 //! ([`super::agent`], 863 phase 6), the `ModelMessage` codec
 //! ([`super::history`], 1110), provider streaming ([`super::streaming`],
-//! 1111), the MCP client ([`super::mcp_client`], 1112) and the 17 local
+//! 1111), the MCP client ([`super::mcp_client`], 1112) and the 18 local
 //! tools ([`super::tools_local`], 1113), plus the D-11 model runtime in the
 //! jobs crate (`Lane`, `ProviderTable`, `WireTool`) and the ported decision
 //! surfaces in `pidash_services` (BYOK gates, key cache, MCP planning,
@@ -337,7 +337,7 @@ impl McpLeg {
     }
 }
 
-/// One turn's tool boundary: the 17 local function tools (1113's schemas
+/// One turn's tool boundary: the 18 local function tools (1113's schemas
 /// and executors) followed by the user's enabled MCP toolsets (1112's
 /// resilient sessions), in the registration order the captures pin
 /// (`tool_local`/`tool_mcp`: local functions in `@assistant.tool` import
