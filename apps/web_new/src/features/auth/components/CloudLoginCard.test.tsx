@@ -13,8 +13,15 @@ const location = vi.hoisted(() => ({
   replace: vi.fn(),
 }));
 
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+  return { ...original, notifyError: vi.fn() };
+});
+
+import { notifyError } from "../../../shared/shell/index.js";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { EXPLICIT_LOGOUT_KEY } from "../cloudLogin.js";
+import { CHAT_HISTORY_DELETE_FAILED_KEY, EXPLICIT_LOGOUT_KEY } from "../cloudLogin.js";
+import { CHAT_HISTORY_DELETE_FAILED_MESSAGE, CHAT_HISTORY_DELETE_FAILED_TITLE } from "../signOut.js";
 import { CloudLoginCard } from "./CloudLoginCard.js";
 
 /** The URL handed to a navigation stub on its first call. */
@@ -37,6 +44,7 @@ function memoryStorage(initial: Record<string, string> = {}) {
 let storage: ReturnType<typeof memoryStorage>;
 
 beforeEach(() => {
+  vi.mocked(notifyError).mockClear();
   location.search = "";
   location.assign.mockClear();
   location.replace.mockClear();
@@ -206,6 +214,24 @@ describe("CloudLoginCard", () => {
     await waitFor(() => expect(location.replace).toHaveBeenCalledTimes(1));
     const url = navigatedUrl(location.replace);
     expect(url.searchParams.get("return_to")).toBe("/docs");
+  });
+
+  it("warns once when the sign-out could not delete chat history, then clears the flag", () => {
+    storage.entries.set(CHAT_HISTORY_DELETE_FAILED_KEY, "1");
+    const { unmount } = render(<CloudLoginCard />);
+
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifyError).toHaveBeenCalledWith(CHAT_HISTORY_DELETE_FAILED_TITLE, CHAT_HISTORY_DELETE_FAILED_MESSAGE);
+    expect(storage.entries.has(CHAT_HISTORY_DELETE_FAILED_KEY)).toBe(false);
+
+    unmount();
+    render(<CloudLoginCard />);
+    expect(notifyError).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays quiet without the chat-history flag", () => {
+    render(<CloudLoginCard />);
+    expect(notifyError).not.toHaveBeenCalled();
   });
 
   it("survives missing session storage", () => {

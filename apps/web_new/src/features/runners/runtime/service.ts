@@ -544,24 +544,17 @@ export async function disposeRuntimeForSignOut(
   if (choice.deleteChatHistory && account && chat) {
     try {
       await chat.clearHistory(account);
-      chatHistoryDeleted = true;
     } catch {
       // First attempt failed. Retry once — local files may be busy (open
-      // files on Windows, read-only caches) and a second attempt after a
-      // brief delay gives the host more time to release them. Still never
-      // rejects; the sign-out itself must not be trapped by a delete.
+      // files on Windows, read-only caches) and a second attempt gives the
+      // host more time to release them. Still never rejects; the sign-out
+      // itself must not be trapped by a delete.
       try {
         await chat.clearHistory(account);
-        chatHistoryDeleted = true;
       } catch {
         chatHistoryDeleted = false;
       }
     }
-  } else if (!choice.deleteChatHistory) {
-    chatHistoryDeleted = true;
-  } else {
-    // Delete requested but no account/chat to clear; nothing to delete.
-    chatHistoryDeleted = true;
   }
   if (choice.signOutComputer) {
     try {

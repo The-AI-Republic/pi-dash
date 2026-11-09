@@ -192,6 +192,8 @@ export type { SingleInvitationProps } from "./components/SingleInvitation.js";
 export { CloudLoginCard } from "./components/CloudLoginCard.js";
 export type { CloudLoginCardProps } from "./components/CloudLoginCard.js";
 export {
+  CHAT_HISTORY_DELETE_FAILED_KEY,
+  clearChatHistoryDeleteFailed,
   clearExplicitLogout,
   cloudHandoffTarget,
   cloudSignInUrl,
@@ -201,8 +203,10 @@ export {
   DESKTOP_ORIGIN_MISSING,
   DESKTOP_ORIGIN_UNUSABLE,
   EXPLICIT_LOGOUT_KEY,
+  markChatHistoryDeleteFailed,
   markExplicitLogout,
   parseCloudLoginSearch,
+  readChatHistoryDeleteFailed,
   readExplicitLogout,
   resolveCloudReturnTarget,
   shouldAttemptSilentSignIn,
