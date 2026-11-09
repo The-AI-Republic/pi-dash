@@ -2073,6 +2073,7 @@ async fn user_exists(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<bool, Denia
     users::Entity::find_by_id(*id)
         .select_only()
         .column(users::Column::Id)
+        .into_tuple::<uuid::Uuid>()
         .one(&db)
         .await
         .map(|row| row.is_some())

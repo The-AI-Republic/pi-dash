@@ -732,7 +732,6 @@ pub async fn fetch_grouped_rows(
     // is cleared (`.order_by()`) — the Rust sort below applies.
     let mut others: HashMap<Uuid, OwnedRelationItem> = HashMap::new();
     if !wanted.is_empty() {
-        use sea_orm::sea_query::{Expr, Query as SeaQuery};
         #[derive(Debug, Clone, FromQueryResult)]
         struct GroupedPoolRow {
             id: Uuid,
@@ -742,42 +741,7 @@ pub async fn fetch_grouped_rows(
             state_group: Option<String>,
             project_identifier: String,
         }
-        let member_exists = SeaQuery::select()
-            .column(project_members::Column::Id)
-            .from(project_members::Entity)
-            .expr(
-                Expr::col(project_members::Column::ProjectId)
-                    .eq(Expr::col(issues::Column::ProjectId)),
-            )
-            .expr(Expr::col(project_members::Column::MemberId).eq(*viewer_id))
-            .expr(Expr::col(project_members::Column::IsActive).eq(true))
-            .expr(Expr::col(project_members::Column::DeletedAt).is_null())
-            .limit(1)
-            .to_owned();
-        let rows: Vec<GroupedPoolRow> = issues::Entity::find()
-            .filter(issues::Column::Id.is_in(wanted.clone()))
-            .filter(issues::Column::WorkspaceId.eq(*workspace_id))
-            .filter(issues::Column::DeletedAt.is_null())
-            .filter(issues::Column::ArchivedAt.is_null())
-            .filter(issues::Column::IsDraft.eq(false))
-            .filter(
-                Expr::col(states::Column::Group)
-                    .is_null()
-                    .or(Expr::col(states::Column::Group).ne("triage")),
-            )
-            .filter(Expr::col(projects::Column::ArchivedAt).is_null())
-            .filter(Expr::exists(member_exists))
-            .join(JoinType::LeftJoin, issues::Relation::States.def())
-            .join(JoinType::InnerJoin, issues::Relation::Projects.def())
-            .select_only()
-            .columns([
-                issues::Column::Id,
-                issues::Column::Name,
-                issues::Column::SequenceId,
-            ])
-            .column_as(states::Column::Name, "state")
-            .column_as(states::Column::Group, "state_group")
-            .column_as(projects::Column::Identifier, "project_identifier")
+        let rows: Vec<GroupedPoolRow> = relations_pool_select(&wanted, workspace_id, viewer_id)
             .into_model::<GroupedPoolRow>()
             .all(&db)
             .await
@@ -1094,8 +1058,8 @@ pub async fn fetch_assignee_rows(
     let id_sub = SeaQuery::select()
         .column(issue_assignees::Column::AssigneeId)
         .from(issue_assignees::Entity)
-        .expr(Expr::col(issue_assignees::Column::IssueId).eq(*issue_id))
-        .expr(Expr::col(issue_assignees::Column::DeletedAt).is_null())
+        .and_where(Expr::col(issue_assignees::Column::IssueId).eq(*issue_id))
+        .and_where(Expr::col(issue_assignees::Column::DeletedAt).is_null())
         .to_owned();
     let models = users::Entity::find()
         .filter(Expr::col(users::Column::Id).in_subquery(id_sub))
@@ -1153,7 +1117,8 @@ pub async fn fetch_assignee_rows(
 /// `expand=labels`: `LabelSerializer(Label.objects.filter(pk__in=...),
 /// many=True)` (`serializers/issue.py:459-466`) — the full label read
 /// shape per row, nested construction (no `fields=`, no `expand=`).
-/// Unscoped, `-created_at` order (`db/models/label.py:44`).
+/// `Label.objects` is the soft-deletion manager (`deleted_at IS NULL`),
+/// `-created_at` order (`db/models/label.py:44`).
 pub async fn fetch_expanded_labels(
     pool: &PgPool,
     issue_id: &Uuid,
@@ -1165,11 +1130,12 @@ pub async fn fetch_expanded_labels(
     let id_sub = SeaQuery::select()
         .column(issue_labels::Column::LabelId)
         .from(issue_labels::Entity)
-        .expr(Expr::col(issue_labels::Column::IssueId).eq(*issue_id))
-        .expr(Expr::col(issue_labels::Column::DeletedAt).is_null())
+        .and_where(Expr::col(issue_labels::Column::IssueId).eq(*issue_id))
+        .and_where(Expr::col(issue_labels::Column::DeletedAt).is_null())
         .to_owned();
     let models = pidash_db::entity::labels::Entity::find()
         .filter(Expr::col(pidash_db::entity::labels::Column::Id).in_subquery(id_sub))
+        .filter(pidash_db::entity::labels::Column::DeletedAt.is_null())
         .order_by_desc(pidash_db::entity::labels::Column::CreatedAt)
         .all(&db)
         .await
@@ -1809,6 +1775,47 @@ fn workspace_id_subquery(slug: &str) -> SimpleExpr {
     )
 }
 
+/// The member-project pool behind [`fetch_grouped_rows`]: live, non-draft,
+/// non-triage issues among `wanted`, in unarchived projects the viewer is an
+/// active member of.
+fn relations_pool_select(
+    wanted: &[Uuid],
+    workspace_id: &Uuid,
+    viewer_id: &Uuid,
+) -> sea_orm::Select<issues::Entity> {
+    // Every column is table-qualified: issues, states and projects are
+    // joined and share `deleted_at`/`archived_at`/`id`, so a bare column is
+    // 42702 ambiguous on Postgres. Membership is the shared correlated
+    // `member_exists` (Django's join span: no `deleted_at` scope).
+    issues::Entity::find()
+        .filter(issues::Column::Id.is_in(wanted.to_vec()))
+        .filter(issues::Column::WorkspaceId.eq(*workspace_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(
+            Expr::col((states::Entity, states::Column::Group))
+                .is_null()
+                .or(Expr::col((states::Entity, states::Column::Group)).ne("triage")),
+        )
+        .filter(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
+        .filter(member_exists(
+            (issues::Entity, issues::Column::ProjectId),
+            viewer_id,
+        ))
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::Name,
+            issues::Column::SequenceId,
+        ])
+        .column_as(states::Column::Name, "state")
+        .column_as(states::Column::Group, "state_group")
+        .column_as(projects::Column::Identifier, "project_identifier")
+}
+
 /// `EXISTS (SELECT 1 FROM "project_members" pm WHERE pm."project_id" =
 /// <project_col> AND pm."member_id" = $user AND pm."is_active")`: the
 /// caller's active membership on the row's project, no `deleted_at`
@@ -2078,6 +2085,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn relations_pool_qualifies_columns_and_filters_membership_in_where() {
+        let viewer = Uuid::from_u128(7);
+        let sql = relations_pool_select(&[Uuid::nil()], &Uuid::nil(), &viewer)
+            .build(DbBackend::Postgres)
+            .to_string();
+        // issues, states and projects are all joined: every shared column
+        // must carry its table, or Postgres answers 42702 ambiguous.
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
+        assert!(!sql.contains(r#"AND "archived_at""#), "{sql}");
+        assert!(sql.contains(r#""states"."group" IS NULL"#), "{sql}");
+        // Membership is a correlated WHERE on the viewer, not SELECT
+        // expressions (behaviour is pinned by the live test).
+        assert!(
+            sql.contains(r#""pm"."project_id" = "issues"."project_id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!(r#""pm"."member_id" = '{viewer}'"#)),
+            "{sql}"
+        );
+        assert!(!sql.contains(r#""pm"."deleted_at""#), "{sql}");
+    }
+
+    #[test]
     fn comment_statements_keep_scope_and_annotations() {
         // Direct lookup: no DISTINCT, NULL annotation, array JSON.
         let sql = comment_direct_select("acme", &Uuid::nil(), &Uuid::nil(), &Uuid::nil())
@@ -2278,6 +2309,158 @@ mod live {
 
     use super::*;
     use crate::read::test_support::{pool, seed_world};
+
+    /// The converted expansion and relations-pool queries run on Postgres
+    /// (their bugs were planner errors that SQL-text tests cannot see).
+    #[tokio::test]
+    async fn expansion_and_relation_queries_plan_on_postgres() {
+        use sea_orm::QueryTrait;
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let issue = world.issue_id;
+        sqlx::query(
+            "INSERT INTO issue_assignees (id, created_at, updated_at, assignee_id, issue_id,
+                project_id, workspace_id)
+             VALUES ($1, now(), now(), $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(world.user_id)
+        .bind(issue)
+        .bind(world.project_id)
+        .bind(world.workspace_id)
+        .execute(&db)
+        .await
+        .expect("seed assignee");
+        let assignees = fetch_assignee_rows(&db, &issue).await.expect("assignees");
+        assert_eq!(assignees.len(), 1);
+        // One live and one soft-deleted label, both still linked: only the
+        // live one renders (`Label.objects` is the soft-deletion manager).
+        let (live_label, deleted_label) = (Uuid::new_v4(), Uuid::new_v4());
+        for (label, deleted) in [(live_label, false), (deleted_label, true)] {
+            sqlx::query(
+                "INSERT INTO labels (id, created_at, updated_at, name, description, workspace_id,
+                    color, sort_order, project_id, deleted_at)
+                 VALUES ($1, now(), now(), $2, '', $3, '#000000', 65535, $4,
+                    CASE WHEN $5 THEN now() END)",
+            )
+            .bind(label)
+            .bind(format!("label-{}", label.simple()))
+            .bind(world.workspace_id)
+            .bind(world.project_id)
+            .bind(deleted)
+            .execute(&db)
+            .await
+            .expect("seed label");
+            sqlx::query(
+                "INSERT INTO issue_labels (id, created_at, updated_at, issue_id, label_id,
+                    project_id, workspace_id)
+                 VALUES ($1, now(), now(), $2, $3, $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(issue)
+            .bind(label)
+            .bind(world.project_id)
+            .bind(world.workspace_id)
+            .execute(&db)
+            .await
+            .expect("seed issue label");
+        }
+        let labels = fetch_expanded_labels(&db, &issue, &chrono_tz::UTC)
+            .await
+            .expect("labels");
+        let ids: Vec<&str> = labels.iter().filter_map(|l| l["id"].as_str()).collect();
+        assert_eq!(ids, vec![live_label.to_string().as_str()]);
+        let sql = relations_pool_select(&[issue], &world.workspace_id, &world.user_id)
+            .build(sea_orm::DbBackend::Postgres);
+        sqlx::query(&format!("EXPLAIN {sql}"))
+            .execute(&db)
+            .await
+            .expect("relations pool plans");
+    }
+
+    /// The relations pool is narrowed to the viewer's active project
+    /// memberships: a member sees the related issue, a non-member does not,
+    /// and a soft-deleted but active membership still counts (Django's join
+    /// span has no `deleted_at` scope).
+    #[tokio::test]
+    async fn grouped_relations_follow_project_membership() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let related = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO issues (id, created_at, updated_at, name, description_json, priority,
+                sequence_id, project_id, state_id, workspace_id, description_html, sort_order,
+                is_draft, git_work_branch, workpad, complexity_score)
+             VALUES ($1, now(), now(), 'Related issue', '{}', 'high', 102, $2, $3, $4, '',
+                65535, false, '', '', 0)",
+        )
+        .bind(related)
+        .bind(world.project_id)
+        .bind(world.state_id)
+        .bind(world.workspace_id)
+        .execute(&db)
+        .await
+        .expect("seed related issue");
+        sqlx::query(
+            "INSERT INTO issue_relations (id, created_at, updated_at, relation_type, issue_id,
+                project_id, related_issue_id, workspace_id)
+             VALUES ($1, now(), now(), 'relates_to', $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(world.issue_id)
+        .bind(world.project_id)
+        .bind(related)
+        .bind(world.workspace_id)
+        .execute(&db)
+        .await
+        .expect("seed relation");
+        let seen = |groups: Vec<(String, Vec<OwnedRelationItem>)>| -> Vec<String> {
+            groups
+                .into_iter()
+                .flat_map(|(_, items)| items.into_iter().map(|item| item.id))
+                .collect()
+        };
+        let fetch = |viewer: Uuid| {
+            let db = db.clone();
+            async move {
+                fetch_grouped_rows(&db, &world.issue_id, &world.workspace_id, &viewer)
+                    .await
+                    .expect("grouped rows")
+            }
+        };
+        // No membership row yet: the viewer sees nothing.
+        assert!(seen(fetch(world.user_id).await).is_empty());
+        let membership = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO project_members (id, created_at, updated_at, role, project_id,
+                workspace_id, view_props, default_props, sort_order, preferences, is_active,
+                member_id)
+             VALUES ($1, now(), now(), 20, $2, $3, '{}', '{}', 65535, '{}', true, $4)",
+        )
+        .bind(membership)
+        .bind(world.project_id)
+        .bind(world.workspace_id)
+        .bind(world.user_id)
+        .execute(&db)
+        .await
+        .expect("seed membership");
+        assert_eq!(seen(fetch(world.user_id).await), vec![related.to_string()]);
+        // Another user is not a member of the project.
+        assert!(seen(fetch(Uuid::new_v4()).await).is_empty());
+        // Soft-deleted but active still counts; inactive does not.
+        sqlx::query("UPDATE project_members SET deleted_at = now() WHERE id = $1")
+            .bind(membership)
+            .execute(&db)
+            .await
+            .expect("soft-delete membership");
+        assert_eq!(seen(fetch(world.user_id).await), vec![related.to_string()]);
+        sqlx::query("UPDATE project_members SET is_active = false WHERE id = $1")
+            .bind(membership)
+            .execute(&db)
+            .await
+            .expect("deactivate membership");
+        assert!(seen(fetch(world.user_id).await).is_empty());
+    }
 
     #[tokio::test]
     async fn decode_and_write_render_roundtrip() {
