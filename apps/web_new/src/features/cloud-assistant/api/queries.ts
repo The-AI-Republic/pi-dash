@@ -7,12 +7,16 @@
 // Both answers are user-level; absence reads back as the endpoint's own
 // blank default rather than an error.
 
-import { getLlmConfig, listAssistantConnections, type ApiClient } from "@pidash/api-client";
+import { getLlmConfig, getUsageQuota, listAssistantConnections, type ApiClient } from "@pidash/api-client";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { cloudAssistantKeys } from "./keys.js";
+
+/** Freshness for the free-lane quota: it moves daily, so a short window
+ * keeps the meter honest without polling while the user is mid-turn. */
+export const USAGE_QUOTA_STALE_TIME_MS = 45_000;
 
 /** The saved connections plus the server's managed-model and lane flags. */
 export function cloudConnectionsQueryOptions(client: ApiClient) {
@@ -42,4 +46,21 @@ export function cloudAssistantConfigQueryOptions(client: ApiClient) {
 
 export function useCloudAssistantConfig() {
   return useQuery(cloudAssistantConfigQueryOptions(getAppClient()));
+}
+
+/**
+ * The free-lane usage quota behind the meter. The full payload (plan
+ * plus the LLM allowance with freeModels) is the picker's source too,
+ * so the one read backs both surfaces without a second request shape.
+ */
+export function usageQuotaQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: cloudAssistantKeys.usageQuota(),
+    queryFn: () => getUsageQuota(client),
+    staleTime: USAGE_QUOTA_STALE_TIME_MS,
+  });
+}
+
+export function useFreeTokenUsage() {
+  return useQuery(usageQuotaQueryOptions(getAppClient()));
 }
