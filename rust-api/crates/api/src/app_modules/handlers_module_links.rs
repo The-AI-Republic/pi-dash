@@ -54,7 +54,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Router;
 use sea_orm::sea_query::{Expr, Query as SeaQuery};
@@ -76,8 +76,8 @@ use pidash_types::{ProjectId, WorkspaceId};
 use super::gates;
 use super::handlers_modules::{
     actor_user_id, check_gate, empty_response, enqueue_soft_delete, fetch_allow_facts, gate_roles,
-    json_response, json_string, parse_uuid_or_invalid, pool_of, resolve_project_id, shape_link,
-    shift_datetime, HandlerResult,
+    is_noncanonical_uuid, json_response, json_string, parse_uuid_or_invalid, pool_of,
+    proxy_segment, resolve_project_id, shape_link, shift_datetime, HandlerResult,
 };
 use crate::app_issues::Denial;
 use crate::state::AppState;
@@ -1566,7 +1566,14 @@ async fn link_list(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = match actor_or_401(extension) {
         Ok(id) => id,
@@ -1677,8 +1684,15 @@ async fn link_create(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = match actor_or_401(extension) {
         Ok(id) => id,
@@ -1803,7 +1817,14 @@ async fn link_retrieve(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, pk_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:pk>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = match actor_or_401(extension) {
         Ok(id) => id,
@@ -2020,8 +2041,15 @@ async fn link_update(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, pk_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:pk>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     link_write(
         &state,
         &slug,
@@ -2039,8 +2067,15 @@ async fn link_partial_update(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, pk_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:pk>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     link_write(
         &state,
         &slug,
@@ -2062,7 +2097,14 @@ async fn link_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, pk_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:pk>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = match actor_or_401(extension) {
         Ok(id) => id,
@@ -2300,7 +2342,14 @@ async fn favorite_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let pool = pool_of(&state)?;
     let user_id = match actor_or_401(extension) {
         Ok(id) => id,
@@ -2614,7 +2663,14 @@ async fn user_props_get(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match user_props_context(
         &state,
         &slug,
@@ -2717,8 +2773,15 @@ async fn user_props_patch(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match user_props_context(
         &state,
         &slug,

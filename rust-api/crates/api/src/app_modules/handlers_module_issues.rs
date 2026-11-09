@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -100,6 +100,7 @@ use sea_orm::{
     ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
 };
 
+use super::handlers_modules::{is_noncanonical_uuid, proxy_segment};
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 pub(crate) use pidash_compat::response::{empty_response, json_response};
@@ -855,7 +856,14 @@ async fn module_issue_list(
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_list(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
@@ -1537,8 +1545,15 @@ async fn create_module_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1615,8 +1630,15 @@ async fn create_issue_modules(
     State(state): State<AppState>,
     Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:issue_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1922,7 +1944,14 @@ async fn module_issue_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, issue_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:issue_id>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
