@@ -25,13 +25,14 @@ pub fn is_gateway_refusal_status(status: u64) -> bool {
     matches!(status, 401 | 402)
 }
 
-/// Recognise the engine's "I will retry" notice for a gateway answer that no
-/// retry can change, as `(http status, gateway text)`.
-///
-/// The engine reports the HTTP status under `codexErrorInfo` (for example
-/// `{"responseStreamDisconnected": {"httpStatusCode": 402}}`) and the body in
-/// `additionalDetails`; `message` is only `Reconnecting... 1/5`.
-pub fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(u64, String)> {
+/// Recognise the engine's "I will retry" notice for any gateway status, as
+/// `(http status, gateway text)`. Callers that also classify the body (the
+/// free-quota classifier) start from here; [`gateway_refusal`] is the 401/402
+/// subset whose answer no retry can change.
+pub fn gateway_will_retry_notice(
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<(u64, String)> {
     if method != "error" || params.get("willRetry").and_then(|v| v.as_bool()) != Some(true) {
         return None;
     }
@@ -41,15 +42,26 @@ pub fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(u64,
         .as_object()?
         .values()
         .find_map(|info| info.get("httpStatusCode")?.as_u64())?;
-    if !is_gateway_refusal_status(status) {
-        return None;
-    }
     let text = error
         .get("additionalDetails")
         .and_then(|v| v.as_str())
         .and_then(gateway_status_text)
         .map(|(_, text)| text)
         .unwrap_or_default();
+    Some((status, text))
+}
+
+/// Recognise the engine's "I will retry" notice for a gateway answer that no
+/// retry can change, as `(http status, gateway text)`.
+///
+/// The engine reports the HTTP status under `codexErrorInfo` (for example
+/// `{"responseStreamDisconnected": {"httpStatusCode": 402}}`) and the body in
+/// `additionalDetails`; `message` is only `Reconnecting... 1/5`.
+pub fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(u64, String)> {
+    let (status, text) = gateway_will_retry_notice(method, params)?;
+    if !is_gateway_refusal_status(status) {
+        return None;
+    }
     Some((status, text))
 }
 
@@ -81,6 +93,20 @@ mod tests {
         );
         assert_eq!(gateway_refusal("error", &notice(503, true)), None);
         assert_eq!(gateway_refusal("error", &notice(429, true)), None);
+        // The any-status extractor sees the retryable statuses the refusal
+        // filter drops, so the free-quota classifier can grade them.
+        assert_eq!(
+            gateway_will_retry_notice("error", &notice(503, true)),
+            Some((503, "body text".to_string()))
+        );
+        assert_eq!(
+            gateway_will_retry_notice("error", &notice(429, true)),
+            Some((429, "body text".to_string()))
+        );
+        assert_eq!(
+            gateway_will_retry_notice("error", &notice(402, false)),
+            None
+        );
         assert_eq!(gateway_refusal("error", &notice(402, false)), None);
         assert_eq!(gateway_refusal("warning", &notice(402, true)), None);
         let dropped = json!({
