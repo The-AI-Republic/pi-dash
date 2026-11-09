@@ -268,6 +268,8 @@ interface PeekExtras {
   onNestedChange?: (selection: { issueId: string; projectId: string; nestingLevel: number }) => void;
   /** Mount the resolving peek behind a host that writes peek params (ISS-167). */
   resolve?: boolean;
+  /** Seed one code-review link so the Code reviews section mounts. */
+  withCodeReview?: boolean;
 }
 
 interface PeekHarness {
@@ -395,7 +397,39 @@ function renderPeek(extras: PeekExtras = {}): PeekHarness {
         })
       );
     }
-    if (url.includes("/issue-links/") || url.includes("/attachments/") || url.includes("/code-reviews/")) {
+    if (url.includes("/issue-links/") || url.includes("/attachments/")) {
+      return answer(200, "[]");
+    }
+    if (url.includes("/code-reviews/")) {
+      if (extras.withCodeReview === true) {
+        return answer(
+          200,
+          JSON.stringify([
+            {
+              id: "423e4567-e89b-12d3-a456-426614174003",
+              issue: ISSUE,
+              provider: "github",
+              host_url: "https://github.com",
+              namespace: "octocat",
+              repo_name: "hello",
+              repo_external_id: "1",
+              external_id: "2",
+              external_iid: "1",
+              url: "https://github.com/octocat/hello/pull/1",
+              title: "octocat/hello#1",
+              state: "open",
+              merged: false,
+              draft: false,
+              remote_updated_at: null,
+              metadata: {},
+              created_at: "2026-10-18T00:00:00Z",
+              updated_at: "2026-10-18T00:00:00Z",
+              created_by: null,
+              created_by_detail: null,
+            },
+          ])
+        );
+      }
       return answer(200, "[]");
     }
     if (url.includes("/history/") || url.includes("/reactions/")) {
@@ -1108,6 +1142,23 @@ describe("IssuePeek standing", () => {
     const attach = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
     expect(attach).toBeDefined();
     expect(attach as HTMLElement).toBeDisabled();
+  });
+
+  it("keeps Code reviews read-only on an archived issue in the peek", async () => {
+    renderPeek({ details: {}, archivedIssue: true, withCodeReview: true });
+    expect(await screen.findByText("Code reviews")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "octocat/hello#1" })).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Paste a pull request or merge request URL")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Detach/ })).not.toBeInTheDocument();
+    const section = document.querySelector('[data-widget-root="Code reviews"]');
+    expect(section).not.toBeNull();
+    expect(within(section as HTMLElement).queryByRole("button", { name: "Attach" })).not.toBeInTheDocument();
+  });
+
+  it("keeps Code reviews writable on an open issue in the peek", async () => {
+    renderPeek({ details: {}, withCodeReview: true });
+    expect(await screen.findByPlaceholderText("Paste a pull request or merge request URL")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Detach octocat\/hello#1/ })).toBeInTheDocument();
   });
 
   it("shows an archived item's set estimate read-only (NEWFRONT-349 intended, EST-022)", async () => {

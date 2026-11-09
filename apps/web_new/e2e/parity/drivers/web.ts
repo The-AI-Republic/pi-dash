@@ -7642,6 +7642,29 @@ export class WebDriver implements ParityDriver {
     await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, { timeout: 30_000 });
   }
 
+  async codeReviewAttachVisible(): Promise<boolean> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    const count = await input.count();
+    if (count === 0) return false;
+    return await input.isVisible().catch(() => true);
+  }
+
+  async codeReviewDetachVisible(): Promise<boolean> {
+    // Old app rows carry the detach as the row's button (TrashIcon inside a tooltip).
+    // Scope to the code-reviews container discovered via the heading, as codeReviewLinks does.
+    return this.page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll("*")).find(
+        (el) => el.children.length === 0 && el.textContent?.trim() === "Code reviews"
+      );
+      if (!heading) return false;
+      let container: Element | null = heading.parentElement;
+      while (container && container.querySelectorAll('a[target="_blank"]').length === 0)
+        container = container.parentElement;
+      if (!container) return false;
+      return container.querySelector("button") !== null;
+    });
+  }
+
   async worklogCreateVisible(): Promise<boolean> {
     const texts = await this.activityHeaderRow().getByRole("button").allInnerTexts();
     return texts.some((text) => /log/i.test(text));

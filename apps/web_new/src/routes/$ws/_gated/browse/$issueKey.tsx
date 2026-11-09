@@ -347,7 +347,7 @@ function BrowseIssueDetail({
               workspaceSlug={workspaceSlug}
               projectId={projectId}
               issueId={issue.id}
-              editable={editable}
+              editable={writable}
             />
             <CommentThread
               workspaceSlug={workspaceSlug}
