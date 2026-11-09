@@ -40,6 +40,7 @@ import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/in
 import { AddConnectionView } from "./AddConnectionView.js";
 import { AppsPointer } from "./AppsPointer.js";
 import { ConnectionsList } from "./ConnectionsList.js";
+import { FreeTokenMeter } from "./FreeTokenMeter.js";
 import { ToolServersSection } from "../../profile-assistant/index.js";
 import { useProviderSignIn } from "./useProviderSignIn.js";
 
@@ -165,6 +166,8 @@ export function CloudAssistantTab(): React.ReactElement {
           </Button>
         )}
       </header>
+
+      {view === "list" ? <FreeTokenMeter /> : null}
 
       {view === "add" ? (
         <AddConnectionView saving={saving} error={addError} onSave={saveConnection} />

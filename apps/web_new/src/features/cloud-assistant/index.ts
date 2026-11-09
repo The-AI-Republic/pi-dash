@@ -8,13 +8,17 @@ export { cloudAssistantKeys } from "./api/keys.js";
 export { actionFailureDetail, cloudAssistantActions, useCloudAssistantActions } from "./api/mutations.js";
 export type { CloudAssistantActions } from "./api/mutations.js";
 export {
+  USAGE_QUOTA_STALE_TIME_MS,
   cloudAssistantConfigQueryOptions,
   cloudConnectionsQueryOptions,
+  usageQuotaQueryOptions,
   useCloudAssistantConfig,
   useCloudConnections,
+  useFreeTokenUsage,
 } from "./api/queries.js";
 export { AppsPointer } from "./components/AppsPointer.js";
 export { CloudAssistantTab } from "./components/CloudAssistantTab.js";
+export { FreeTokenMeter } from "./components/FreeTokenMeter.js";
 export { useProviderSignIn } from "./components/useProviderSignIn.js";
 export type { ProviderSignIn, ProviderSignInOptions } from "./components/useProviderSignIn.js";
 export {
@@ -46,4 +50,5 @@ export {
 export type { PollClock, PollOutcome, SignInFinish, SignInStartFailure, SignInStartResult } from "./lib/signIn.js";
 export { finishNotice, startFailureNotice } from "./lib/report.js";
 export type { Notice } from "./lib/report.js";
+export { formatResetTime, formatTokenCount, freeTokenMeterText } from "./lib/quota.js";
 export { registerCloudAssistantSettings } from "./register.js";
