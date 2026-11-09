@@ -1446,6 +1446,10 @@ fn render_app_detail(
     map.insert("type".to_string(), opt_uuid(&issue.type_id));
     map.insert("assigned_pod".to_string(), opt_uuid(&issue.assigned_pod_id));
     map.insert(
+        "assigned_runner".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
+    );
+    map.insert(
         "assignees".to_string(),
         detail.assignee_ids.iter().map(uuid_string).collect(),
     );
@@ -1471,13 +1475,17 @@ fn render_app_issue_create(
     if issue.description_binary.is_some() {
         return Err(Denial::ServerError.into_response());
     }
-    let mut map = serde_json::Map::with_capacity(48);
+    let mut map = serde_json::Map::with_capacity(49);
     map.insert("id".to_string(), uuid_string(&issue.id));
     map.insert("state_id".to_string(), opt_uuid(&issue.state_id));
     map.insert("parent_id".to_string(), opt_uuid(&issue.parent_id));
     map.insert(
         "assigned_pod_id".to_string(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert("project_id".to_string(), uuid_string(&issue.project_id));
     map.insert("workspace_id".to_string(), uuid_string(&issue.workspace_id));
@@ -1623,7 +1631,7 @@ fn render_issue_snapshot(
     is_epic: bool,
 ) -> serde_json::Value {
     let issue = &detail.issue;
-    let mut map = serde_json::Map::with_capacity(24);
+    let mut map = serde_json::Map::with_capacity(25);
     map.insert("id".to_string(), uuid_string(&issue.id));
     map.insert(
         "name".to_string(),
@@ -1677,6 +1685,10 @@ fn render_issue_snapshot(
     map.insert(
         "assigned_pod_id".to_string(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert(
         "agent_executor".to_string(),

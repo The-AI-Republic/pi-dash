@@ -1074,7 +1074,7 @@ async fn render_issue_expand(
 ) -> Result<Value, Denial> {
     let labels = issue_label_ids(pool, &issue.id).await?;
     let assignees = issue_assignee_ids(pool, &issue.id).await?;
-    let mut map = Map::with_capacity(36);
+    let mut map = Map::with_capacity(37);
     map.insert("id".to_owned(), Value::String(issue.id.to_string()));
     map.insert(
         "labels".to_owned(),
@@ -1190,6 +1190,10 @@ async fn render_issue_expand(
     );
     map.insert("type".to_owned(), opt_uuid(&issue.type_id));
     map.insert("assigned_pod".to_owned(), opt_uuid(&issue.assigned_pod_id));
+    map.insert(
+        "assigned_runner".to_owned(),
+        opt_uuid(&issue.assigned_runner_id),
+    );
     Ok(Value::Object(map))
 }
 
@@ -1251,6 +1255,45 @@ async fn render_issue_full(
             "has_open_blockers".to_owned(),
             Value::Bool(summary.has_open_blockers),
         );
+        // The base-serializer keys the cycle shape lacks (`IssueSerializer`
+        // `FIELDS_IN_ORDER`, design §14.1/§14.3): the `assigned_runner` FK,
+        // its detail object, and the `dispatch_wait` object. The dumps and
+        // the `expand=issue` arm render this full shape, so all three ride
+        // here; cycle endpoints keep the cycle shape (different serializer).
+        map.insert(
+            "assigned_runner".to_owned(),
+            opt_uuid(&issue.assigned_runner_id),
+        );
+        let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+            &pidash_db::pool::sea_orm_connection(pool),
+            issue.assigned_runner_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+        map.insert(
+            "assigned_runner_detail".to_owned(),
+            assigned_runner_detail.unwrap_or(Value::Null),
+        );
+        // `get_dispatch_wait`: single-item, latest QUEUED pinned run, no
+        // request in context on the dump path (viewer `None`).
+        let dispatch_wait =
+            match pidash_services::domain::issue_assignment::fetch_active_dispatch_run(
+                &pidash_db::pool::sea_orm_connection(pool),
+                issue.id,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?
+            {
+                Some(run) => pidash_services::domain::issue_assignment::build_dispatch_wait(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    &run,
+                    None,
+                )
+                .await
+                .map_err(|_| Denial::ServerError)?,
+                None => Value::Null,
+            };
+        map.insert("dispatch_wait".to_owned(), dispatch_wait);
     }
     Ok(rendered)
 }
