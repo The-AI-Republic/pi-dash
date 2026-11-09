@@ -613,9 +613,9 @@ pub async fn resolve_runner_ref(
 /// Resolve an `assigned_pod` input (UUID or name) in `project_id`.
 ///
 /// Accepts the full `<PROJ>_<name>` or the bare `<name>` (suffix after the
-/// first `_`). Pods have no visibility filter; all pods in the project are
-/// candidates, ordered by `name`. Exact match is case-sensitive; the suffix
-/// fallback is also case-sensitive.
+/// first `_`). Pods have no visibility filter; all live pods in the project
+/// are candidates, ordered by `name` (`Pod.objects` excludes soft-deleted).
+/// Exact match is case-sensitive; the suffix fallback is also case-sensitive.
 pub async fn resolve_pod_ref(
     db: &impl ConnectionTrait,
     project_id: Uuid,
@@ -630,6 +630,7 @@ pub async fn resolve_pod_ref(
     if is_uuid_token(lookup) {
         let id = parse_uuid_token(lookup);
         let found = pod::Entity::find_by_id(id)
+            .filter(pod::Column::DeletedAt.is_null())
             .filter(pod::Column::ProjectId.eq(project_id))
             .one(db)
             .await?;
@@ -641,6 +642,7 @@ pub async fn resolve_pod_ref(
         };
     }
     let rows = pod::Entity::find()
+        .filter(pod::Column::DeletedAt.is_null())
         .filter(pod::Column::ProjectId.eq(project_id))
         .order_by_asc(pod::Column::Name)
         .all(db)
@@ -817,9 +819,9 @@ pub async fn list_project_runners(
 
 /// Render one `RunnerListRow` to the `RunnerSerializer` JSON value (wire
 /// order via `runner_to_representation`). Datetimes render through the
-/// DRF kernel (`render_datetime`); `live_state` stays null here (the R1
-/// N+1 is not prefetched — the API render fetches it per row, the SDK
-/// list returns the core fields and the eligibility triple).
+/// DRF kernel (`render_datetime`); `live_state` renders from the prefetched
+/// row (`null` only when the reverse one-to-one is missing), matching the
+/// API render and `RunnerLiveStateSerializer`.
 pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
     use crate::runner_enroll::serializers::shapes::{
         self, DevMachineMiniRow, LiveStateRow, PodMiniRow, RunnerRow,
@@ -889,11 +891,21 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         .as_ref()
         .map(|j| j.dm_engine_auto_pause_reason.clone().unwrap_or_default())
         .unwrap_or_default();
-    let dm_sign_in = row
+    let dm_stored_sign_in = row
         .dev_machine
         .as_ref()
         .map(|j| j.dm_engine_sign_in_state.clone().unwrap_or_default())
         .unwrap_or_default();
+    let dm_expires_at = row
+        .dev_machine
+        .as_ref()
+        .and_then(|j| j.dm_engine_credential_expires_at);
+    let dm_sign_in = crate::domain::engine_credential::current_engine_sign_in_state(
+        &dm_stored_sign_in,
+        dm_expires_at,
+        Utc::now(),
+    );
+    let dm_expires = dm_expires_at.map(|d| pidash_compat::datetime::render_datetime(&d));
     let dm_engine_paused_by_owner = row
         .dev_machine
         .as_ref()
@@ -913,7 +925,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         engine_auto_pause_reason: dm_pause_reason.as_str(),
         engine_team_runs: dm_engine_team_runs,
         engine_sign_in_state: dm_sign_in.as_str(),
-        engine_credential_expires_at: None,
+        engine_credential_expires_at: dm_expires.as_deref(),
     });
     let id_str = row.runner.id.to_string();
     let owner_str = row.runner.owner_id.to_string();
@@ -939,7 +951,39 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         pidash_compat::datetime::render_datetime(&row.runner.created_at.with_timezone(&Utc));
     let updated =
         pidash_compat::datetime::render_datetime(&row.runner.updated_at.with_timezone(&Utc));
-    let live_none: Option<LiveStateRow> = None;
+    let live_observed = row
+        .live_state
+        .as_ref()
+        .and_then(|m| m.observed_run_id.map(|id| id.to_string()));
+    let live_last_event_at = row.live_state.as_ref().and_then(|m| {
+        m.last_event_at
+            .as_ref()
+            .map(|d| pidash_compat::datetime::render_datetime(&d.with_timezone(&Utc)))
+    });
+    let live_agent_activity = row.live_state.as_ref().and_then(|m| {
+        m.agent_last_activity_at
+            .as_ref()
+            .map(|d| pidash_compat::datetime::render_datetime(&d.with_timezone(&Utc)))
+    });
+    let live_updated = row
+        .live_state
+        .as_ref()
+        .map(|m| pidash_compat::datetime::render_datetime(&m.updated_at.with_timezone(&Utc)));
+    let live_row: Option<LiveStateRow> = row.live_state.as_ref().map(|m| LiveStateRow {
+        observed_run_id: live_observed.as_deref(),
+        last_event_at: live_last_event_at.as_deref(),
+        last_event_kind: m.last_event_kind.as_deref(),
+        last_event_summary: m.last_event_summary.as_deref(),
+        agent_pid: m.agent_pid.map(i64::from),
+        agent_subprocess_alive: m.agent_subprocess_alive,
+        approvals_pending: m.approvals_pending.map(i64::from),
+        usage: &m.usage,
+        llm_model: m.llm_model.as_deref(),
+        turn_count: m.turn_count.map(i64::from),
+        agent_health: m.agent_health.as_deref(),
+        agent_last_activity_at: live_agent_activity.as_deref(),
+        updated_at: live_updated.as_deref().unwrap_or_default(),
+    });
     let paused_by = row.runner.paused_by_id.map(|id| id.to_string());
     let runner_row = RunnerRow {
         id: &id_str,
@@ -965,7 +1009,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         visibility: i64::from(row.runner.visibility),
         pod: &pod_str,
         pod_detail: pod_mini,
-        live_state: live_none,
+        live_state: live_row,
         enrolled_at: enrolled.as_deref(),
         revoked_at: revoked.as_deref(),
         revoked_reason: &row.runner.revoked_reason,
@@ -3254,5 +3298,96 @@ mod tests {
         assert_eq!(v2["not_assignable_code"], "");
         assert_eq!(v2["is_busy"], false);
         assert_eq!(v2["queue_depth"], 2);
+    }
+
+    #[test]
+    fn list_row_value_renders_live_state_and_derived_sign_in() {
+        let mut runner = runner_fixture();
+        runner.name = "mini".to_owned();
+        let dm_id = Uuid::new_v4();
+        runner.dev_machine_id = Some(dm_id);
+        // active + already-expired: Python derives `expired` and renders the expiry.
+        let expires = Utc::now() - chrono::Duration::hours(1);
+        let join = crate::runner_enroll::queries::manage_reads::RunnerJoinRow {
+            id: runner.id,
+            owner_id: runner.owner_id,
+            workspace_id: runner.workspace_id,
+            dev_machine_id: runner.dev_machine_id,
+            pod_id: runner.pod_id,
+            name: runner.name.clone(),
+            host_label: runner.host_label.clone(),
+            provisioning: runner.provisioning.clone(),
+            pod_dispatch: runner.pod_dispatch.clone(),
+            visibility: runner.visibility,
+            enrolled_at: runner.enrolled_at.map(|d| d.with_timezone(&Utc)),
+            capabilities: runner.capabilities.clone(),
+            status: runner.status.clone(),
+            os: runner.os.clone(),
+            arch: runner.arch.clone(),
+            runner_version: runner.runner_version.clone(),
+            dev_metadata: runner.dev_metadata.clone(),
+            protocol_version: runner.protocol_version,
+            last_heartbeat_at: runner.last_heartbeat_at.map(|d| d.with_timezone(&Utc)),
+            created_at: runner.created_at.with_timezone(&Utc),
+            updated_at: runner.updated_at.with_timezone(&Utc),
+            revoked_at: runner.revoked_at.map(|d| d.with_timezone(&Utc)),
+            revoked_reason: runner.revoked_reason.clone(),
+            paused_at: runner.paused_at.map(|d| d.with_timezone(&Utc)),
+            paused_by_id: runner.paused_by_id,
+            dm_id: Some(dm_id),
+            dm_host_label: Some("host".to_owned()),
+            dm_label: Some("mac".to_owned()),
+            dm_engine_paused_by_owner: Some(false),
+            dm_engine_auto_pause_reason: Some(String::new()),
+            dm_engine_team_runs: Some(false),
+            dm_engine_sign_in_state: Some("active".to_owned()),
+            dm_engine_credential_expires_at: Some(expires),
+            pod_workspace_id: runner.workspace_id,
+            pod_project_id: Uuid::new_v4(),
+            pod_name: "WEB_pod".to_owned(),
+            pod_description: String::new(),
+            pod_created_by_id: None,
+            pod_is_default: true,
+            pod_created_at: Utc::now(),
+            pod_updated_at: Utc::now(),
+            project_identifier: "WEB".to_owned(),
+        };
+        let live = pidash_db::entity::runner_live_state::Model {
+            runner_id: runner.id,
+            observed_run_id: Some(Uuid::new_v4()),
+            last_event_at: Some(Utc::now().into()),
+            last_event_kind: Some("turn".to_owned()),
+            last_event_summary: Some("hi".to_owned()),
+            agent_pid: Some(12),
+            agent_subprocess_alive: Some(true),
+            approvals_pending: Some(0),
+            turn_count: Some(3),
+            updated_at: Utc::now().into(),
+            llm_model: Some("m".to_owned()),
+            usage: serde_json::json!({"input_tokens": 3}),
+            agent_health: Some("healthy".to_owned()),
+            agent_last_activity_at: Some(Utc::now().into()),
+        };
+        let row = super::RunnerListRow {
+            runner: runner.clone(),
+            pod_name: join.pod_name.clone(),
+            pod_id: join.pod_id,
+            pod_is_default: join.pod_is_default,
+            pod_project_id: join.pod_project_id,
+            project_identifier: join.project_identifier.clone(),
+            dev_machine: Some(join),
+            live_state: Some(live),
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
+        };
+        let v = super::runner_list_row_to_value(&row);
+        assert_eq!(v["live_state"]["last_event_kind"], "turn");
+        assert_eq!(v["live_state"]["llm_model"], "m");
+        assert_eq!(v["dev_machine_detail"]["engine_sign_in_state"], "expired");
+        assert!(v["dev_machine_detail"]["engine_credential_expires_at"]
+            .as_str()
+            .is_some());
     }
 }
