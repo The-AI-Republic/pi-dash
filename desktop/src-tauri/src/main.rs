@@ -35,6 +35,22 @@ const ZOOM_STEP: f64 = 0.1;
 const ZOOM_MIN: f64 = 0.3;
 const ZOOM_MAX: f64 = 3.0;
 
+/// Linux (WebKitGTK) undo/redo for plain text fields (PIDESKAPP-52).
+/// WebKitGTK leaves undo/redo to the embedder — Ctrl+Z / Ctrl+Shift+Z /
+/// Ctrl+Y reach the page but do nothing in an `<input>`/`<textarea>`,
+/// while cut/copy/paste/select-all, which WebKit implements itself, work.
+/// Tauri neither supplies the editing commands nor an Edit menu on any
+/// platform, so the script drives the browser's own edit commands for
+/// those fields. A `keydown` handler (never native menu accelerators) so
+/// Tiptap editors — which keep their own ProseMirror history and Mod+Z
+/// keymap — are never intercepted; Windows/macOS handle undo natively in
+/// their webviews and never load it.
+///
+/// Present in test builds on every platform so its tests below run on any
+/// CI leg; the binary only loads it on Linux.
+#[cfg(any(test, target_os = "linux"))]
+const LINUX_EDIT_FIX: &str = include_str!("linux_edit_fix.js");
+
 struct ZoomState(Mutex<f64>);
 
 /// Ctrl+NumpadPlus zoom-in on Linux and Windows (PIDESKAPP-51). The
@@ -637,6 +653,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // key arrives. See the const.
                 window = window.initialization_script(ZOOM_FIX);
             }
+            #[cfg(target_os = "linux")]
+            {
+                // PIDESKAPP-52: WebKitGTK leaves undo/redo to the embedder;
+                // the script drives them for plain fields. See the const.
+                window = window.initialization_script(LINUX_EDIT_FIX);
+            }
             let open_app = app.handle().clone();
             window = window.on_new_window(move |url, _features| {
                 let config = open_app.state::<AppConfig>();
@@ -1122,6 +1144,43 @@ mod tests {
         assert!(
             !script.contains("NumpadSubtract"),
             "zoom-out stays out of scope"
+        );
+    }
+
+    #[test]
+    fn linux_edit_fix_drives_undo_redo_for_plain_fields_only() {
+        // PIDESKAPP-52: the script runs on every UI navigation, drives
+        // the browser's own edit commands for plain fields, and must
+        // never touch other elements — Tiptap editors keep their own
+        // ProseMirror history (and their own Mod+Z keymap), so anything
+        // not INPUT/TEXTAREA must be ignored. The script content is
+        // behaviorally covered by desktop/tests/test_linux_undo_fix.py;
+        // these assert the invariants it is built on.
+        let script = LINUX_EDIT_FIX;
+        assert!(!script.trim().is_empty(), "empty script");
+        assert!(
+            script.contains("\"keydown\"") && script.contains("addEventListener"),
+            "capture-phase key handler"
+        );
+        assert!(
+            script.contains("TEXTAREA") && script.contains("INPUT"),
+            "plain-field targets"
+        );
+        assert!(
+            script.contains("\"undo\"") && script.contains("\"redo\""),
+            "both directions"
+        );
+        assert!(
+            script.contains("KeyZ") && script.contains("KeyY"),
+            "Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y"
+        );
+        assert!(
+            script.contains("preventDefault") && script.contains("stopPropagation"),
+            "page must not apply the key again"
+        );
+        assert!(
+            script.contains("__PIDASH_LINUX_EDIT_FIX__"),
+            "idempotency guard against double registration"
         );
     }
 
