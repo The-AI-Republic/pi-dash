@@ -229,6 +229,58 @@ describe("useWarmUp", () => {
     expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
   });
 
+  it("closes out a create that lands after the contact changed", async () => {
+    let settleWarm: () => void = () => undefined;
+    contracts.warmChatSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleWarm = () => resolve({ ok: true });
+        })
+    );
+    const client = testClient();
+    const { rerender } = renderHook((props: Record<string, unknown>) => useWarmUp(props as never), {
+      wrapper: wrapper(client),
+      initialProps: base(),
+    });
+    await waitFor(() => expect(contracts.warmChatSession).toHaveBeenCalledWith(expect.anything(), "created"));
+    rerender(base({ runnerId: "r-7", runner: makeRunner({ id: "r-7" }) }));
+    await act(async () => {
+      settleWarm();
+    });
+    // The second contact never creates: its create is still outstanding
+    // while the first one closes out after the move.
+    expect(contracts.createChatSession.mock.calls[1]?.[1]).toMatchObject({ runner: "r-7" });
+    expect(contracts.createChatSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("forgets the failure count when the contact changes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      contracts.createChatSession.mockRejectedValue(new Error("cold"));
+      const client = testClient();
+      const { rerender } = renderHook((props: Record<string, unknown>) => useWarmUp(props as never), {
+        wrapper: wrapper(client),
+        initialProps: base(),
+      });
+      await act(async () => undefined);
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(2);
+      rerender(base({ runnerId: "r-8", runner: makeRunner({ id: "r-8" }) }));
+      await act(async () => undefined);
+      expect(contracts.createChatSession.mock.calls[2]?.[1]).toMatchObject({ runner: "r-8" });
+      // A fresh contact starts at the base wait, not the doubled one.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not create a second session while an attempt is outstanding", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
