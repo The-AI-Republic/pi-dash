@@ -931,6 +931,8 @@ pub async fn archive_issue(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(context.gate.user_id),
                         moved_by_run: None,
                         now,
@@ -1011,6 +1013,8 @@ pub async fn unarchive_issue(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(context.gate.user_id),
                         moved_by_run: None,
                         now,
@@ -1973,6 +1977,8 @@ mod tests {
                 prev_state_id: Some(uid(3)),
                 current_state_id: Some(uid(3)),
                 dispatch_immediate: true,
+                pod_once: false,
+
                 moved_by_run: None,
                 now,
                 jitter_secs: 0.0,
@@ -2004,6 +2010,8 @@ mod tests {
                 prev_state_id: Some(uid(3)),
                 current_state_id: Some(uid(4)),
                 dispatch_immediate: true,
+                pod_once: false,
+
                 moved_by_run: None,
                 now,
                 jitter_secs: 0.0,

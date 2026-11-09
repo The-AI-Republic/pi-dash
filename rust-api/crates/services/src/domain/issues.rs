@@ -710,12 +710,18 @@ impl ChainOutcome {
 /// The post-save transition fire arguments (one `fire_after_save` call).
 /// `moved_by_run` is the resolved `X-Pi-Dash-Run-Id` run on the v1 patch
 /// path (`views/issue.py:794-807`); every other driver passes `None`.
+/// `pod_once` is the `pin:"pod_once"` one-off (design §23.3): the
+/// transition's run goes to the pod unpinned for that run only; the
+/// issue stays dedicated. PIDASHCONV-1723 threads it from the MCP
+/// `pidash_update_issue` pin through `FireRequest` to
+/// `TransitionRequest`.
 #[derive(Debug, Clone)]
 pub struct FireSpec {
     pub dispatch_immediate: bool,
     pub created_by: Option<Uuid>,
     pub moved_by_run: Option<Uuid>,
     pub now: DateTime<Utc>,
+    pub pod_once: bool,
 }
 
 /// An `issue_activity` enqueue with its origin pre-resolved by the driver
@@ -929,6 +935,7 @@ pub(crate) async fn run_chain(
                     now: spec.now,
                     jitter_secs: 0.0,
                     created_by: spec.created_by,
+                    pod_once: spec.pod_once,
                 };
                 match transition.fire(actor_id, request).await {
                     Ok(FireOutcome::Failed { log_line, .. }) => {
@@ -4062,6 +4069,8 @@ mod tests {
     fn fire_spec() -> FireSpec {
         FireSpec {
             dispatch_immediate: true,
+            pod_once: false,
+
             created_by: Some(uid(9)),
             moved_by_run: None,
             now: Utc::now(),
@@ -4385,6 +4394,8 @@ mod tests {
                         labels: vec![],
                         fire: FireSpec {
                             dispatch_immediate: true,
+                            pod_once: false,
+
                             created_by: Some(actor),
                             moved_by_run: None,
                             now: now_micros(),
@@ -4462,6 +4473,8 @@ mod tests {
                         prev_state: Some(backlog_id),
                         fire: FireSpec {
                             dispatch_immediate: true,
+                            pod_once: false,
+
                             created_by: Some(actor),
                             moved_by_run: None,
                             now: now_micros(),
@@ -4932,6 +4945,8 @@ mod tests {
                                 prev_state: Some(backlog_id),
                                 fire: FireSpec {
                                     dispatch_immediate: true,
+                                    pod_once: false,
+
                                     created_by: Some(actor),
                                     moved_by_run: None,
                                     now: now_micros(),

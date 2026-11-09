@@ -1267,6 +1267,28 @@ impl From<&agent_run::Model> for RunWaitInputs {
     }
 }
 
+/// The active run `dispatch_wait` renders for: the newest QUEUED pinned
+/// run for the issue, newest first — exactly
+/// `AgentRun.objects.filter(work_item=obj, status=QUEUED)
+/// .exclude(pinned_runner__isnull=True).order_by("-created_at").first()`
+/// (`serializers/issue.py:get_dispatch_wait`). Returned as
+/// [`RunWaitInputs`] so [`build_dispatch_wait`] computes from one shape
+/// for both the SeaORM row and the L2 projection callers. `None` when
+/// no QUEUED pinned run exists.
+pub async fn fetch_active_dispatch_run(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+) -> Result<Option<RunWaitInputs>, sea_orm::DbErr> {
+    let row = agent_run::Entity::find()
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinnedRunnerId.is_not_null())
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .one(db)
+        .await?;
+    Ok(row.map(|model| RunWaitInputs::from(&model)))
+}
+
 /// The `dispatch_wait` object for a QUEUED pinned run (design §14.3), else
 /// `Null`. Dedicated pins are always `releasable: false` (H-13);
 /// `pause_reason` is set only with `runner_paused`; `expires_at` is

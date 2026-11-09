@@ -36,6 +36,38 @@ pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "is
 /// group (the completed-arm check on writes).
 pub const ISSUE_EXTRA_COLS: &str = r#""projects"."identifier" AS "project_identifier", "workspaces"."slug" AS "workspace_slug", "states"."group" AS "state_group""#;
 
+/// The `dispatch_wait` for one issue (design §14.3): the active QUEUED
+/// pinned run's wait object, `None` when there is none — exactly
+/// `get_dispatch_wait` (`serializers/issue.py:522-538`) via
+/// [`crate::domain::issue_assignment::fetch_active_dispatch_run`] +
+/// [`crate::domain::issue_assignment::build_dispatch_wait`].
+/// `is_list` callers pass `true` to short-circuit to `None` (the Django
+/// `ListSerializer` arm never queries per row).
+async fn fetch_dispatch_wait(
+    pool: &PgPool,
+    issue_id: Uuid,
+    viewer: Option<Uuid>,
+    is_list: bool,
+) -> Result<Option<Value>, Error> {
+    if is_list {
+        return Ok(None);
+    }
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let Some(run) = crate::domain::issue_assignment::fetch_active_dispatch_run(&orm, issue_id)
+        .await
+        .map_err(|_| Error::Failed("render-decoded"))?
+    else {
+        return Ok(None);
+    };
+    let value = crate::domain::issue_assignment::build_dispatch_wait(&orm, &run, viewer)
+        .await
+        .map_err(|_| Error::Failed("render-decoded"))?;
+    match value {
+        Value::Null => Ok(None),
+        other => Ok(Some(other)),
+    }
+}
+
 /// `assigned_runner_detail` by runner id (`issue_assignment.py`,
 /// design §14.1): `None` when the issue is pod-assigned or the runner
 /// is gone.
@@ -1226,6 +1258,18 @@ pub async fn render_decoded(
     } else {
         None
     };
+    let issue_id = decoded
+        .id
+        .parse::<Uuid>()
+        .map_err(|_| Error::Failed("render-decoded"))?;
+    // The dispatch_wait (design §14.3): fetched only when kept; `null`
+    // on list rows (is_list) without a per-row query — exactly
+    // `get_dispatch_wait`'s `ListSerializer` guard.
+    let dispatch_wait = if kept("dispatch_wait") {
+        fetch_dispatch_wait(pool, issue_id, req.viewer, req.is_list).await?
+    } else {
+        None
+    };
     let row = shape::IssueRow {
         id: &decoded.id,
         type_id: decoded.type_id.as_deref(),
@@ -1261,12 +1305,8 @@ pub async fn render_decoded(
         assigned_pod: decoded.assigned_pod.as_deref(),
         assigned_runner: decoded.assigned_runner.as_deref(),
         assigned_runner_detail: assigned_runner_detail.as_ref(),
+        dispatch_wait: dispatch_wait.as_ref(),
     };
-
-    let issue_id = decoded
-        .id
-        .parse::<Uuid>()
-        .map_err(|_| Error::Failed("render-decoded"))?;
 
     // `assignees` / `labels` (`issue.py:442-468`): ids always when kept,
     // objects under `expand=`.

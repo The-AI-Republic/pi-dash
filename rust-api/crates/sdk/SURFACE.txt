@@ -515,6 +515,7 @@ pidash_sdk::ops::agent_system_user_id
 pidash_sdk::ops::apply_user_save
 pidash_sdk::ops::base_settings_schema
 pidash_sdk::ops::blockers
+pidash_sdk::ops::bounce_issue_for_revoke
 pidash_sdk::ops::builtins
 pidash_sdk::ops::complete_project_move_handoff_inline
 pidash_sdk::ops::connect_primary
@@ -546,6 +547,7 @@ pidash_sdk::ops::move_to_project
 pidash_sdk::ops::new_user_token
 pidash_sdk::ops::next_event_seq
 pidash_sdk::ops::next_message_seq
+pidash_sdk::ops::overlay_store_deps
 pidash_sdk::ops::paginate_with
 pidash_sdk::ops::pending_entry_ticker_for
 pidash_sdk::ops::post_run_orchestration
@@ -553,6 +555,7 @@ pidash_sdk::ops::post_run_orchestration_in_tx
 pidash_sdk::ops::py_stripped
 pidash_sdk::ops::random_color
 pidash_sdk::ops::reconcile
+pidash_sdk::ops::recreate_issue_for_revoke
 pidash_sdk::ops::revoke
 pidash_sdk::ops::run
 pidash_sdk::ops::run_select_sql
@@ -637,6 +640,7 @@ pidash_sdk::read::RepointTarget
 pidash_sdk::read::RepresentationInput
 pidash_sdk::read::ReviewLinkRow
 pidash_sdk::read::ReviewMirrorFields
+pidash_sdk::read::RunWaitInputs
 pidash_sdk::read::SEQUENCE_CREATE_SQL
 pidash_sdk::read::SEQUENCE_DETACH_SQL
 pidash_sdk::read::SOURCE_ISSUE_LOCK_SQL
@@ -658,9 +662,11 @@ pidash_sdk::read::WriteProject
 pidash_sdk::read::asset_url
 pidash_sdk::read::attach_pull_request
 pidash_sdk::read::base_host
+pidash_sdk::read::build_dispatch_wait
 pidash_sdk::read::comment_is_synced
 pidash_sdk::read::comment_url
 pidash_sdk::read::decode_issue
+pidash_sdk::read::dedicated_refusal_body
 pidash_sdk::read::drf_datetime
 pidash_sdk::read::expand_estimate_point
 pidash_sdk::read::expand_parent
@@ -668,6 +674,7 @@ pidash_sdk::read::expand_project
 pidash_sdk::read::expand_state
 pidash_sdk::read::expand_user
 pidash_sdk::read::expand_workspace
+pidash_sdk::read::fetch_active_dispatch_run
 pidash_sdk::read::fetch_asset
 pidash_sdk::read::fetch_assignee_ids
 pidash_sdk::read::fetch_assignee_rows

@@ -949,6 +949,8 @@ pub async fn fire_sync_transition(
         // The sync path never stamps `_DISPATCH_IMMEDIATE_ATTR`, so the
         // receiver default (`True`) always applies.
         dispatch_immediate: true,
+        pod_once: false,
+
         // A sync write is never an agent's own move.
         moved_by_run: None,
         now,

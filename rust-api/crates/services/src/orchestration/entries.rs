@@ -649,6 +649,12 @@ pub struct FireRequest {
     pub jitter_secs: f64,
     /// The crum user for the ticker create-shape, or `None` on system paths.
     pub created_by: Option<Uuid>,
+    /// One-shot pod run (design §23.3, PIDASHCONV-1723): when `true` the
+    /// transition's run is created unpinned in the pod. Threaded from
+    /// `FireSpec::pod_once` (the MCP `pin:"pod_once"` on the state
+    /// move) to `TransitionRequest::pod_once`; `false` on the sync
+    /// path.
+    pub pod_once: bool,
 }
 
 /// Lock the ticker, apply one clock event, and persist the write — the
@@ -1436,7 +1442,7 @@ pub fn fire_transition_request(
         now: req.now,
         jitter_secs: req.jitter_secs,
         created_by: req.created_by,
-        pod_once: false,
+        pod_once: req.pod_once,
     }
 }
 
@@ -3829,6 +3835,8 @@ mod tests {
             prev_state_id: prev,
             current_state_id: current,
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: None,
             now,
             jitter_secs: 0.0,
