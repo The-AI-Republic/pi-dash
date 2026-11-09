@@ -1101,6 +1101,7 @@ mod tests {
             assigned_pod: None,
             assigned_runner: None,
             assigned_runner_detail: None,
+            dispatch_wait: None,
         }
     }
 

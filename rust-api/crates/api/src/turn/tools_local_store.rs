@@ -2985,6 +2985,8 @@ impl ToolStore for PgToolStore {
             prev_state_id: None,
             current_state_id: Some(to_state.id),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: None,
             now: *now,
             jitter_secs: 0.0,

@@ -2494,6 +2494,7 @@ async fn expand_issue(
         assigned_pod: assigned_pod.as_deref(),
         assigned_runner: assigned_runner.as_deref(),
         assigned_runner_detail: assigned_runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let assignee_ids = fetch_assignee_ids(pool, issue_id).await?;
     let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();

@@ -3284,6 +3284,10 @@ pub struct CreateOptions {
     ///
     /// [`ChainStop::Origin`]: domain_issues::ChainStop::Origin
     pub emit_model_activity: bool,
+    /// One-shot pod run (design §23.3): `pin:"pod_once"` on the
+    /// create's fire. PIDASHCONV-1723 threads it to `FireSpec`; the
+    /// MCP `pidash_create_issue` passes it.
+    pub pod_once: bool,
 }
 
 /// Per-caller options for [`update`] (design D6).
@@ -3291,6 +3295,10 @@ pub struct CreateOptions {
 pub struct UpdateOptions {
     /// Emit the `issue_activity` update leg (see [`CreateOptions`]).
     pub emit_activity: bool,
+    /// One-shot pod run (design §23.3, PIDASHCONV-1723): `pin:"pod_once"`
+    /// on the state move's fire. The MCP `pidash_update_issue` passes
+    /// it; the v1 view parses `pin` from the body and passes it here.
+    pub pod_once: bool,
 }
 
 /// The pre-resolved update target: the issue row, its rendered pre-image,
@@ -3557,6 +3565,7 @@ pub async fn create(
                     labels: parsed.labels.clone().unwrap_or_default(),
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: options.pod_once,
                         created_by: Some(actor_id),
                         moved_by_run: None,
                         now: Utc::now(),
@@ -3878,6 +3887,7 @@ pub async fn update(
                     prev_state: prev_state_id,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: options.pod_once,
                         created_by: Some(actor_id),
                         moved_by_run,
                         now: Utc::now(),
@@ -4271,6 +4281,7 @@ async fn render_moved_issue_api(
         assigned_pod: assigned_pod.as_deref(),
         assigned_runner: assigned_runner.as_deref(),
         assigned_runner_detail: assigned_runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let input = RepresentationInput {
         row: &row,

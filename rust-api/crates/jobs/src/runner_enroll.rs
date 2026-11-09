@@ -64,6 +64,7 @@
 //! Re-exported through `pidash-sdk::ops`.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use pidash_db::orm_tx::{into_sqlx, TxConn};
@@ -71,7 +72,7 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::RunnerSettings;
+use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::runner_sessions::machine_outbox;
 use pidash_db::runner_sessions::machine_outbox::MachineOutboxError;
 use pidash_db::runner_sessions::outbox as runner_outbox;
@@ -331,6 +332,121 @@ where
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AppState-free bounce/recreate (PIDASHCONV-1723, overlay revoke path)
+// ---------------------------------------------------------------------------
+
+/// Build the minimal [`StoreDeps`](crate::orchestration::StoreDeps) for
+/// the revoke post-commit effects: the pool's cloud/managed settings and
+/// the carried toolsets seam, with a fail-closed admission cache and the
+/// no-LLM / unavailable-profile closures. No [`AppState`] needed — the
+/// overlay platform consumer (`platform/access.rs`) has only
+/// [`EventContext`](crate::runner_enroll::RevokeCtx) fields and calls the
+/// helpers below with error-logged isolation, exactly Django's
+/// `on_commit` sweep.
+#[allow(clippy::type_complexity)]
+pub fn overlay_store_deps(
+    cloud: &CloudAgentSettings,
+    managed: &ManagedRunnerSettings,
+    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    now: DateTime<Utc>,
+) -> crate::orchestration::StoreDeps<
+    pidash_services::dispatch::admission::RedisAdmissionCache,
+    fn(Uuid) -> bool,
+    fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile,
+> {
+    fn no_llm(_: Uuid) -> bool {
+        false
+    }
+    fn no_profile(_: Option<Uuid>) -> pidash_services::dispatch::LlmProfile {
+        pidash_services::dispatch::LlmProfile {
+            available: false,
+            reason_code: "revoke-no-profile".to_owned(),
+        }
+    }
+    crate::orchestration::StoreDeps {
+        cloud: cloud.clone(),
+        managed: managed.clone(),
+        cache: pidash_services::dispatch::admission::RedisAdmissionCache::from_env(),
+        has_usable_llm_config: no_llm,
+        toolsets,
+        llm_profile: no_profile,
+        now_unix_secs: now.timestamp(),
+    }
+}
+
+/// Bounce a ticking issue to Backlog for the §13.1 revoke lost-runner
+/// rule — the AppState-free entry the overlay's `fire_revoke_bundle`
+/// bounce callback calls. Delegates to
+/// [`bounce_issue_no_eligible_runner`](crate::orchestration::bounce_issue_no_eligible_runner)
+/// with `overlay_store_deps`.
+#[allow(clippy::too_many_arguments)]
+pub async fn bounce_issue_for_revoke(
+    pool: &PgPool,
+    cloud: &CloudAgentSettings,
+    managed: &ManagedRunnerSettings,
+    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    now: DateTime<Utc>,
+    jitter_secs: f64,
+    issue_id: Uuid,
+    triggered_by: &str,
+    reason: &str,
+    reason_name: &str,
+) -> Result<
+    crate::orchestration::DispatchOutcome<pidash_services::orchestration::dispatch::BounceOutcome>,
+    crate::orchestration::DispatchJobsError,
+> {
+    let deps = overlay_store_deps(cloud, managed, toolsets, now);
+    crate::orchestration::bounce_issue_no_eligible_runner(
+        pool,
+        deps,
+        now,
+        jitter_secs,
+        issue_id,
+        triggered_by,
+        reason,
+        reason_name,
+    )
+    .await
+}
+
+/// Recreate a `fall_back` run in the default pod for the §13.1 revoke
+/// lost-runner rule — the AppState-free entry the overlay's
+/// `fire_revoke_bundle` recreate callback calls. Builds the
+/// `CreateDispatchRequest` for the default pod and delegates to
+/// [`create_and_dispatch_run`](crate::orchestration::create_and_dispatch_run)
+/// with `overlay_store_deps`.
+#[allow(clippy::too_many_arguments)]
+pub async fn recreate_issue_for_revoke(
+    pool: &PgPool,
+    cloud: &CloudAgentSettings,
+    managed: &ManagedRunnerSettings,
+    toolsets: Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    now: DateTime<Utc>,
+    issue_id: Uuid,
+    pod_id: Uuid,
+    trigger: &str,
+    creator: Option<Uuid>,
+) -> Result<
+    crate::orchestration::creation_jobs::CreationOutcome<
+        pidash_types::orchestration::TransitionOutcome,
+    >,
+    crate::orchestration::creation_jobs::CreationJobsError,
+> {
+    let deps = overlay_store_deps(cloud, managed, toolsets, now);
+    let req = pidash_services::orchestration::creation::CreateDispatchRequest {
+        issue_id,
+        parent: None,
+        creator_id: creator.unwrap_or(Uuid::nil()),
+        pod_id,
+        pod_once: false,
+        fresh_session: false,
+        trigger: trigger.to_owned(),
+        now,
+    };
+    crate::orchestration::create_and_dispatch_run(pool, deps, &req).await
 }
 
 // ---------------------------------------------------------------------------

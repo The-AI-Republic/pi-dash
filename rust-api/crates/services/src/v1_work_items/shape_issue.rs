@@ -290,6 +290,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "url",
     "description_markdown",
     "assigned_runner_detail",
+    "dispatch_wait",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -355,6 +356,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "type_id",
     "url",
     "assigned_runner_detail",
+    "dispatch_wait",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -1272,6 +1274,10 @@ pub struct IssueRow<'a> {
     /// The `assigned_runner_detail` object (design §14.1), `None` when
     /// the issue is pod-assigned or the runner is gone — renders `null`.
     pub assigned_runner_detail: Option<&'a Value>,
+    /// The `dispatch_wait` object (design §14.3), `None` on list rows or
+    /// when no QUEUED pinned run exists — renders `null` (Django
+    /// `get_dispatch_wait` returns `None` for list parents).
+    pub dispatch_wait: Option<&'a Value>,
 }
 
 /// Failure modes of [`render_issue`]: caller-contract violations and the two
@@ -1468,6 +1474,10 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             "assigned_pod" => opt_str(row.assigned_pod),
             "assigned_runner" => opt_str(row.assigned_runner),
             "assigned_runner_detail" => match row.assigned_runner_detail {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
+            "dispatch_wait" => match row.dispatch_wait {
                 Some(value) => value.clone(),
                 None => Value::Null,
             },
@@ -1711,11 +1721,15 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 38);
+        assert_eq!(FIELDS_IN_ORDER.len(), 39);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
         assert!(FIELDS_IN_ORDER.contains(&"type"));
+        // dispatch_wait sits immediately after assigned_runner_detail
+        // (Django `serializers/issue.py:156,165` declared order).
+        let pos = |name: &str| FIELDS_IN_ORDER.iter().position(|f| *f == name).unwrap();
+        assert_eq!(pos("dispatch_wait"), pos("assigned_runner_detail") + 1);
     }
 
     #[test]
@@ -1725,8 +1739,9 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 35);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 36);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
+        assert!(READABLE_FIELDS_IN_ORDER.contains(&"dispatch_wait"));
         assert_eq!(
             WRITE_ONLY_FIELDS,
             ["assignees", "labels", "description_markdown"]
@@ -2631,6 +2646,7 @@ mod tests {
             assigned_pod: None,
             assigned_runner: None,
             assigned_runner_detail: None,
+            dispatch_wait: None,
         }
     }
 
@@ -2698,7 +2714,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 39);
+        assert_eq!(keys.len(), 40);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(
@@ -2775,6 +2791,47 @@ mod tests {
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::MissingBlockers));
+    }
+
+    #[test]
+    fn render_dispatch_wait_null_and_value() {
+        // `dispatch_wait` renders the supplied object; `None` renders
+        // explicit `null` (Django `get_dispatch_wait` returns `None`
+        // for list parents and when there is no QUEUED pinned run).
+        let mut row = full_row();
+        let blockers = empty_blockers();
+        let out = render_with(&row, None, &[], false, &[], &[], &[], Some(&blockers), None);
+        assert_eq!(out["dispatch_wait"], Value::Null);
+
+        let wait: &'static Value = Box::leak(Box::new(serde_json::json!({
+            "reason": "offline",
+            "pin_kind": "dedicated",
+            "runner": "r-1",
+            "runner_name": "runner-1",
+            "queued_at": "2026-10-02T23:17:12.023611Z",
+            "runner_last_seen_at": null,
+            "runs_ahead": 0,
+            "pause_reason": null,
+            "expires_at": "2026-10-09T23:17:12.023611Z",
+            "releasable": false
+        })));
+        row.dispatch_wait = Some(wait);
+        let out = render_with(&row, None, &[], false, &[], &[], &[], Some(&blockers), None);
+        assert_eq!(out["dispatch_wait"], *wait);
+        // `fields=` filtering gates the key like any other field.
+        let fields = includes(&["id"]);
+        let out = render_with(
+            &row,
+            Some(&fields),
+            &[],
+            false,
+            &[],
+            &[],
+            &[],
+            Some(&blockers),
+            None,
+        );
+        assert!(!out.contains_key("dispatch_wait"));
     }
 
     #[test]

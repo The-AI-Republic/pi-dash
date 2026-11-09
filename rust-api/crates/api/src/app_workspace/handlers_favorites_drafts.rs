@@ -7297,6 +7297,8 @@ async fn draft_to_issue(
                     labels,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),

@@ -3758,6 +3758,8 @@ fn write_ctx(ctx: &Context, workspace_id: Uuid) -> WriteCtx {
 fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
     domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(*actor_id),
         moved_by_run: None,
         now,

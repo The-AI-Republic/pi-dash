@@ -1244,6 +1244,7 @@ pub async fn move_to_project(
                 actor_id,
                 spec: FireSpec {
                     dispatch_immediate: moved.dispatch_immediate,
+                    pod_once: false,
                     created_by: Some(actor_id),
                     moved_by_run: None,
                     now: input.now,
@@ -1725,6 +1726,8 @@ mod tests {
                     actor_id: uid(1),
                     spec: FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(uid(1)),
                         moved_by_run: None,
                         now: Utc::now(),
