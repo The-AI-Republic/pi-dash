@@ -18,7 +18,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
 const { chatKeys } = await import("./keys.js");
 const { makeRunner, makeSession, testClient, wrapper } = await import("./harness.js");
-const { useWarmUp } = await import("./useWarmUp.js");
+const { useWarmUp, warmUpRetryDelay } = await import("./useWarmUp.js");
 
 beforeEach(() => {
   createAppClient("https://api.test", {} as never);
@@ -132,6 +132,124 @@ describe("useWarmUp", () => {
     rerender(base({ enabled: false }));
     await act(async () => undefined);
     expect(contracts.createChatSession).not.toHaveBeenCalled();
+  });
+
+  it("waits longer after each consecutive failure, up to a cap", () => {
+    expect(warmUpRetryDelay(1)).toBe(1_000);
+    expect(warmUpRetryDelay(2)).toBe(2_000);
+    expect(warmUpRetryDelay(4)).toBe(8_000);
+    expect(warmUpRetryDelay(5)).toBe(15_000);
+    expect(warmUpRetryDelay(60)).toBe(15_000);
+    expect(warmUpRetryDelay(0)).toBe(1_000);
+  });
+
+  it("tries the auto-create again after a failed one", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      contracts.createChatSession.mockRejectedValueOnce(new Error("surface not in place"));
+      const client = testClient();
+      const onCreated = vi.fn();
+      const { result } = renderHook(() => useWarmUp(base({ onCreated })), { wrapper: wrapper(client) });
+      await act(async () => undefined);
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+      expect(result.current).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(contracts.warmChatSession).toHaveBeenCalledWith(expect.anything(), "created"));
+      expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: "created" }));
+      expect(result.current).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off further when the retry fails too", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      contracts.createChatSession.mockRejectedValue(new Error("still cold"));
+      const client = testClient();
+      renderHook(() => useWarmUp(base()), { wrapper: wrapper(client) });
+      await act(async () => undefined);
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(999);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(2);
+      // The second failure waits twice as long.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_999);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a pending retry when the page goes away", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      contracts.createChatSession.mockRejectedValueOnce(new Error("cold"));
+      const client = testClient();
+      const { unmount } = renderHook(() => useWarmUp(base()), { wrapper: wrapper(client) });
+      await act(async () => undefined);
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+      unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a create failure that lands after the page went away", async () => {
+    let rejectCreate: (error: Error) => void = () => undefined;
+    contracts.createChatSession.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => (rejectCreate = reject as never))
+    );
+    const client = testClient();
+    const { unmount } = renderHook(() => useWarmUp(base()), { wrapper: wrapper(client) });
+    await act(async () => undefined);
+    expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+    unmount();
+    await act(async () => {
+      rejectCreate(new Error("surface still cold"));
+    });
+    expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not create a second session while an attempt is outstanding", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let settle: (value: ReturnType<typeof makeSession>) => void = () => undefined;
+      contracts.createChatSession.mockImplementationOnce(() => new Promise((resolve) => (settle = resolve as never)));
+      const client = testClient();
+      const onCreated = vi.fn();
+      renderHook(() => useWarmUp(base({ onCreated })), { wrapper: wrapper(client) });
+      await act(async () => undefined);
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(contracts.createChatSession).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        settle(makeSession({ id: "created" }));
+      });
+      await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("swallows create and warm failures and clears the working state", async () => {

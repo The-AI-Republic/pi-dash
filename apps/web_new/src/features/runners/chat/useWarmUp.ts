@@ -33,6 +33,22 @@ export interface WarmUpInput {
   onCreated: (session: ChatSession) => void;
 }
 
+/**
+ * Wait before another auto-create after one failed. A create can fail
+ * because the surface that answers the contact was not in place yet (the
+ * desktop bootstrap installs the local transport after the page mounts),
+ * so a single failure must not latch the contact off. The wait doubles per
+ * consecutive failure so a genuinely broken surface is not hammered.
+ */
+export const WARM_UP_RETRY_BASE_MS = 1_000;
+export const WARM_UP_RETRY_MAX_MS = 15_000;
+
+/** Wait after `failures` consecutive failed creates, capped. */
+export function warmUpRetryDelay(failures: number): number {
+  const exponent = Math.max(0, failures - 1);
+  return Math.min(WARM_UP_RETRY_MAX_MS, WARM_UP_RETRY_BASE_MS * 2 ** exponent);
+}
+
 /** Prepare one session, tolerating a cold start that fails. */
 async function warmQuietly(sessionId: string): Promise<void> {
   try {
@@ -51,6 +67,10 @@ async function warmQuietly(sessionId: string): Promise<void> {
 export function useWarmUp(input: WarmUpInput): boolean {
   const queryClient = useQueryClient();
   const [creating, setCreating] = React.useState(false);
+  // Bumped when a failed create may be tried again; it re-runs the decision
+  // without changing what the page asked for.
+  const [attempt, setAttempt] = React.useState(0);
+  const failuresRef = React.useRef(0);
   const warmedRef = React.useRef<string | null>(null);
   const createdForKeyRef = React.useRef<string | null>(null);
   const liveRunnerRef = React.useRef(input.runnerId);
@@ -82,6 +102,7 @@ export function useWarmUp(input: WarmUpInput): boolean {
     // A different contact starts with a clean slate.
     warmedRef.current = null;
     createdForKeyRef.current = null;
+    failuresRef.current = 0;
     setCreating(false);
   }, [runnerId]);
 
@@ -100,15 +121,26 @@ export function useWarmUp(input: WarmUpInput): boolean {
     if (createdForKeyRef.current === createKey) return;
     createdForKeyRef.current = createKey;
     setCreating(true);
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
     void (async () => {
       let created: ChatSession;
       try {
         created = await openChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
       } catch {
-        // Leave the history as-is; the next decision (or New chat) retries.
-        if (liveRunnerRef.current === runnerId) setCreating(false);
+        // The create may have gone to a surface that does not answer this
+        // contact yet (the desktop installs its local transport after the
+        // page mounts), so release the latch and try the decision again
+        // shortly. The cleanup below clears the timer when the viewer leaves
+        // or the contact changes, so a stale attempt never creates here.
+        if (cancelled) return;
+        createdForKeyRef.current = null;
+        failuresRef.current += 1;
+        setCreating(false);
+        retryTimer = setTimeout(() => setAttempt((value) => value + 1), warmUpRetryDelay(failuresRef.current));
         return;
       }
+      failuresRef.current = 0;
       // The viewer moved to another contact while the create was in flight:
       // the stale session belongs to nobody on screen, so drop it silently.
       if (liveRunnerRef.current !== runnerId) return;
@@ -123,7 +155,11 @@ export function useWarmUp(input: WarmUpInput): boolean {
       setCreating(false);
       void queryClient.invalidateQueries({ queryKey: chatKeys.all(workspaceSlug) });
     })();
-  }, [enabled, queryClient, runnerId, step, workspaceId, workspaceSlug]);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+    };
+  }, [attempt, enabled, queryClient, runnerId, step, workspaceId, workspaceSlug]);
 
   return creating;
 }

@@ -100,6 +100,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       sessions: Array<[string, Record<string, unknown>]>;
       events: Array<[string, Record<string, unknown>[]]>;
       seq: number;
+      created: number;
       modes: Record<string, Record<string, string>>;
     };
     function loadPersisted(): PersistedChat {
@@ -111,13 +112,14 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
             sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
             events: Array.isArray(parsed.events) ? parsed.events : [],
             seq: typeof parsed.seq === "number" ? parsed.seq : 0,
+            created: typeof parsed.created === "number" ? parsed.created : 0,
             modes: parsed.modes !== null && typeof parsed.modes === "object" ? parsed.modes : {},
           };
         }
       } catch {
         // A store that cannot load reads as empty.
       }
-      return { sessions: [], events: [], seq: 0, modes: {} };
+      return { sessions: [], events: [], seq: 0, created: 0, modes: {} };
     }
     const persisted = loadPersisted();
     const store = {
@@ -127,6 +129,11 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       chatSessions: new Map<string, Record<string, unknown>>(persisted.sessions),
       chatEvents: new Map<string, Record<string, unknown>[]>(persisted.events),
       chatSeq: persisted.seq,
+      // Sessions take ids from a counter that only ever grows, so an id
+      // never repeats after a delete or a clear the way the native store's
+      // uuids never do. An address left pointing at a removed conversation
+      // therefore stays stale instead of aliasing a newer one.
+      chatCreated: persisted.created,
       chatModes: persisted.modes as Record<string, Record<string, string>>,
       installInFlight: false,
       apiControllers: new Map<string, AbortController>(),
@@ -159,6 +166,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
             sessions: [...store.chatSessions],
             events: [...store.chatEvents],
             seq: store.chatSeq,
+            created: store.chatCreated,
             modes: store.chatModes,
           } satisfies PersistedChat)
         );
@@ -308,6 +316,13 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       } finally {
         reader.releaseLock();
       }
+    }
+
+    /** Newest `updated_at` first, then newest `created_at`, like the native SQL. */
+    function compareSessionsByActivity(left: Record<string, unknown>, right: Record<string, unknown>): number {
+      const byUpdated = Number(right["updated_at"] ?? 0) - Number(left["updated_at"] ?? 0);
+      if (byUpdated !== 0) return byUpdated;
+      return Number(right["created_at"] ?? 0) - Number(left["created_at"] ?? 0);
     }
 
     function chatRecord(args: Record<string, unknown>): { account: string; sessionId: string } {
@@ -487,7 +502,8 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
         case "chat_create_session": {
           const account = String(params["account"] ?? "");
           const session = (params["session"] as Record<string, unknown> | undefined) ?? {};
-          const id = `mock-chat-${store.chatSessions.size + 1}`;
+          store.chatCreated += 1;
+          const id = `mock-chat-${store.chatCreated}`;
           const now = Date.now();
           const record = {
             id,
@@ -511,7 +527,10 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           for (const [key, record] of store.chatSessions) {
             if (key.startsWith(`${account}:`)) rows.push(record);
           }
-          return rows;
+          // The native store lists `ORDER BY updated_at DESC, created_at
+          // DESC`; an append bumps `updated_at`, so the conversation that
+          // just took a turn sorts first here too.
+          return rows.sort(compareSessionsByActivity);
         }
         case "chat_get_session": {
           const { account, sessionId } = chatRecord(params);
@@ -527,25 +546,37 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           const rows = store.chatEvents.get(key);
           if (!rows) throw new Error("mocked history has no such session");
           const event = (params["event"] as Record<string, unknown> | undefined) ?? {};
+          // The native store numbers each conversation's events from 1
+          // (`COALESCE(MAX(seq), 0) + 1`), and a turn bumps the session's
+          // `updated_at` so the list and the row's age follow the activity.
+          const nextSeq = rows.reduce((highest, entry) => Math.max(highest, Number(entry["seq"] ?? 0)), 0) + 1;
           store.chatSeq += 1;
+          const now = Date.now();
           const row = {
             id: `mock-event-${store.chatSeq}`,
             session_id: sessionId,
-            seq: store.chatSeq,
+            seq: nextSeq,
             role: String(event["role"] ?? "user"),
             content: String(event["content"] ?? ""),
             tool_calls: null,
             approval_decision: null,
-            created_at: Date.now(),
+            created_at: now,
           };
           rows.push(row);
+          const record = store.chatSessions.get(key);
+          if (record) record["updated_at"] = now;
           savePersisted();
           return row;
         }
         case "chat_set_thread_id": {
           const { account, sessionId } = chatRecord(params);
           const record = store.chatSessions.get(sessionKey(account, sessionId));
-          if (record) record["engine_thread_id"] = String(params["engineThreadId"] ?? "");
+          if (record) {
+            record["engine_thread_id"] = String(params["engineThreadId"] ?? "");
+            // The native command writes the same `updated_at` it stamps on
+            // an append.
+            record["updated_at"] = Date.now();
+          }
           savePersisted();
           return null;
         }
