@@ -93,6 +93,51 @@ def test_crud_list_group_by_mismatch(clients, seed):
     }
 
 
+def test_grouped_m2m_none_bucket_keeps_relation_less_issues(clients, seed):
+    # NEWPIDASH-131: grouping by an m2m key keeps issues with no
+    # relation row under the "None" bucket (Django's LEFT JOIN); the
+    # Rust INNER JOIN dropped them from results and total_count.
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    created = []
+    try:
+        for name in ("NEWPIDASH-131 probe A", "NEWPIDASH-131 probe B"):
+            resp = admin.post(f"{_base(ws, pid)}/issues/", json={"name": name})
+            assert resp.status_code == 201, resp.text
+            created.append(resp.json()["id"])
+        cases = (
+            ("assignees__id", "assignee_ids", seed["member"]),
+            ("labels__id", "label_ids", seed["label1"]),
+        )
+        for group_by, list_key, bucket_id in cases:
+            resp = admin.get(
+                f"{_base(ws, pid)}/issues/", params={"group_by": group_by}
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["grouped_by"] == group_by
+            # Seed I1/I2/I3 + the two probes = 5 visible issues.
+            assert body["total_count"] == 5, body
+            groups = body["results"]
+            none = groups["None"]
+            none_ids = {row["id"] for row in none["results"]}
+            assert none_ids == {seed["issue2"], seed["issue3"], *created}, (
+                group_by, none_ids,
+            )
+            assert none["total_results"] == 4
+            for row in none["results"]:
+                assert row[list_key] == []
+                assert row[group_by] is None
+            bucket = groups[bucket_id]
+            assert [row["id"] for row in bucket["results"]] == [seed["issue1"]]
+            assert bucket["total_results"] == 1
+    finally:
+        for issue_id in created:
+            assert admin.delete(
+                f"{_base(ws, pid)}/issues/{issue_id}/"
+            ).status_code == 204
+
+
 def test_create_minimal(clients, seed):
     admin = clients["admin"]
     ws, pid = seed["ws_slug"], seed["project"]
