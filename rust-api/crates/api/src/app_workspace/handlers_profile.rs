@@ -1723,6 +1723,35 @@ fn profile_shape_json_value(field: &str, value: &Value) -> Value {
     }
 }
 
+/// Unquote `sort_order` in serialized grouped rows: Django renders the
+/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
+/// a string for the grouping kernels (which never do math on it). The
+/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
+/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
+/// splicing the quotes is exact.
+fn unquote_sort_order(results_json: &str) -> String {
+    let mut out = String::with_capacity(results_json.len());
+    let mut rest = results_json;
+    let marker = "\"sort_order\":\"";
+    while let Some(start) = rest.find(marker) {
+        let (head, tail) = rest.split_at(start + marker.len());
+        out.push_str(&head[..head.len() - 1]);
+        match tail.find('"') {
+            Some(end) => {
+                out.push_str(&tail[..end]);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push_str(tail);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Grouped / sub-grouped branch (`user.py:174-242`): window-function
 /// pagination over the group partition, totals with the intake /
 /// archived / draft `count_filter`, buckets from QRY-C
@@ -1844,6 +1873,7 @@ async fn profile_grouped_response(
             .map_err(|_| Denial::ServerError)?,
     };
     let results_json = serde_json::to_string(&results_value).map_err(|_| Denial::ServerError)?;
+    let results_json = unquote_sort_order(&results_json);
     let top = group_totals
         .iter()
         .map(|(_, count)| *count)
@@ -3689,6 +3719,19 @@ mod tests {
             "/api/workspaces/{slug}/user-issues/{user_id}/"
         );
         assert_eq!(ME_ACTIVITIES_PATH, "/api/users/me/activities/");
+    }
+
+    #[test]
+    fn sort_order_unquotes_exactly() {
+        assert_eq!(
+            unquote_sort_order(r#"{"a":1,"sort_order":"65535.0","b":[]}"#),
+            r#"{"a":1,"sort_order":65535.0,"b":[]}"#
+        );
+        assert_eq!(
+            unquote_sort_order(r#"[{"sort_order":"1e+20"}]"#),
+            r#"[{"sort_order":1e+20}]"#
+        );
+        assert_eq!(unquote_sort_order(r#"{"x":"y"}"#), r#"{"x":"y"}"#);
     }
 
     #[test]
