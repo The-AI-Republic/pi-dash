@@ -73,6 +73,13 @@ export const PAGE_ASSISTANT_FLAG = "page-assistant";
  * in flags.ts, which accepts either signal), so OSS stays verbatim.
  */
 export const OPENHUB_FREE_QUOTA_FLAG = "openhub-free-quota";
+/**
+ * Pricing free-token allowance (NEWPIDASH-157, PRIVATEPI1-142). The
+ * dedicated free daily LLM token block on /pricing renders only where
+ * a build sets this; the community edition leaves it absent, so OSS
+ * shows no token section.
+ */
+export const PRICING_FREE_TOKENS_FLAG = "pricing-free-tokens";
 
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
