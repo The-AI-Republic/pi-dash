@@ -5794,6 +5794,18 @@ export class WebNewDriver implements ParityDriver {
     });
   }
 
+  async codeReviewAttachVisible(): Promise<boolean> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    const count = await input.count();
+    if (count === 0) return false;
+    return await input.isVisible().catch(() => true);
+  }
+
+  async codeReviewDetachVisible(): Promise<boolean> {
+    const buttons = this.page.locator('[data-widget-root="Code reviews"] [data-widget-row] button');
+    return (await buttons.count()) > 0;
+  }
+
   async worklogCreateVisible(): Promise<boolean> {
     // The community build renders no worklog control anywhere on the item.
     const texts = await this.page
