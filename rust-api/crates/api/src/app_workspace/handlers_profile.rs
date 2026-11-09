@@ -969,8 +969,11 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     true
 }
 
-/// M2M group filters force an INNER join on that relation with the deleted
-/// guard (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`).
+/// M2M group keys name the relation alias that must be joined (and its
+/// `deleted_at` guarded): the join is LEFT over `alias.deleted_at IS NULL`
+/// (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`), so linkless rows
+/// survive with the NULL group key that feeds the "None" bucket
+/// (NEWPIDASH-131 twin, NEWPIDASH-152).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -1293,7 +1296,11 @@ fn profile_filtered_set(
             if !used_leg {
                 continue;
             }
-            let inner = grouped || rich_inner || !nullable_only;
+            // NEWPIDASH-152 (NEWPIDASH-131 twin): a grouped m2m alias is
+            // joined LEFT (Django's LEFT OUTER JOIN + `deleted_at IS NULL`
+            // on `utils/grouper.py:41-49`); only a rich leaf or a
+            // positive legacy predicate upgrades to INNER.
+            let inner = rich_inner || (mentioned && !nullable_only);
             let kind = if inner {
                 JoinType::InnerJoin
             } else {
@@ -4197,6 +4204,97 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(r#""i2"."id" = "issue"."id""#), "{text}");
+    }
+
+    #[test]
+    fn grouped_m2m_aliases_join_left_and_keep_deleted_guard() {
+        // NEWPIDASH-152 (NEWPIDASH-131 twin): a bare m2m group key (no
+        // rich/legacy leaf through that alias) LEFT-joins with the
+        // GROUP_FILTER_MAPPER guard, so linkless rows survive as the
+        // "None" bucket. Group and sub-group keys alike.
+        use crate::app_issues::OneOrMany;
+        let uid = uuid::Uuid::nil();
+        let viewer = uuid::Uuid::max();
+        let query = QueryMap::new();
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("labels__id"),
+            Some("issue_module__module_id"),
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert_parens_balanced(&text);
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"LEFT JOIN "module_issues" AS "issue_module""#),
+            "{text}"
+        );
+        assert!(
+            !text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
+        assert!(
+            !text.contains(r#"INNER JOIN "module_issues" AS "issue_module""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""label_issue"."deleted_at" IS NULL"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""issue_module"."deleted_at" IS NULL"#),
+            "{text}"
+        );
+        // Assignees triple alone.
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("assignees__id"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert!(
+            text.contains(r#"LEFT JOIN "issue_assignees" AS "issue_assignee""#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#""issue_assignee"."deleted_at" IS NULL"#),
+            "{text}"
+        );
+        // A positive legacy filter through the same alias still upgrades
+        // to INNER (`mentioned && !nullable_only`), so grouped+filtered
+        // keeps the legacy fan-out behaviour.
+        let mut query = QueryMap::new();
+        query.insert(
+            "labels".to_owned(),
+            OneOrMany::One("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_owned()),
+        );
+        let filtered = profile_filtered_set(
+            &uid,
+            "acme",
+            &viewer,
+            &query,
+            Some("labels__id"),
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("filtered set");
+        let text = filtered.select().to_string(PostgresQueryBuilder);
+        assert!(
+            text.contains(r#"INNER JOIN "issue_labels" AS "label_issue""#),
+            "{text}"
+        );
     }
 
     #[test]
