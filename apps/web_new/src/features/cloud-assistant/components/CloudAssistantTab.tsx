@@ -37,7 +37,13 @@ import {
   TEST_OK_TITLE,
 } from "../lib/copy.js";
 import { byokSubmission, type ByokDraft } from "../lib/byok.js";
-import { connectionModelFlags, connectionTitle, isBlockedCommit, toConnectionRow } from "../lib/rows.js";
+import {
+  connectionModelFlags,
+  connectionTitle,
+  isBlockedCommit,
+  toConnectionRow,
+  type ConnectionRow,
+} from "../lib/rows.js";
 import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/index.js";
 import { AddConnectionView } from "./AddConnectionView.js";
 import { AppsPointer } from "./AppsPointer.js";
@@ -80,14 +86,17 @@ export function CloudAssistantTab(): React.ReactElement {
     }
   };
 
-  const commitModel = async (id: string, model: string): Promise<void> => {
-    if (flags !== null && isBlockedCommit(model, flags)) {
+  const commitModel = async (row: ConnectionRow, model: string): Promise<void> => {
+    // The meter gate lives on the hosted (OpenHub) lane: the codex lane
+    // draws on the ChatGPT plan and self-supplied models draw on the
+    // user's own key, so neither is credit-blocked here.
+    if (row.kind === "openhub" && flags !== null && isBlockedCommit(model, flags)) {
       notifyError(MODEL_BLOCKED_TITLE, MODEL_BLOCKED_BODY);
       return;
     }
-    setBusyId(id);
+    setBusyId(row.id);
     try {
-      await actions.setModel(id, model);
+      await actions.setModel(row.id, model);
       await actions.invalidate();
     } catch (error) {
       notifyError(MODEL_FAILED_TITLE, actionFailureDetail(error, MODEL_FAILED_TITLE));
@@ -202,7 +211,7 @@ export function CloudAssistantTab(): React.ReactElement {
           busyId={busyId}
           topUpHref={topUpHref}
           onSelect={(row) => void selectRow(row.id)}
-          onCommitModel={(row, model) => void commitModel(row.id, model)}
+          onCommitModel={(row, model) => void commitModel(row, model)}
           onTest={() => void testActive()}
           onRemove={(row) => void removeRow(row.id, row.title)}
           onDisconnect={(row) => void disconnectRow(row.id)}
