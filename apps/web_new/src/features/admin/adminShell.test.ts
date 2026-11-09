@@ -21,7 +21,7 @@ import {
 } from "./adminShell.js";
 
 describe("sidebar entries", () => {
-  it("lists the seven settings areas in order with no image entry", () => {
+  it("lists the eight settings areas in order with no image entry", () => {
     expect(ADMIN_SIDEBAR_ENTRIES.map((entry) => entry.name)).toEqual([
       "General",
       "Email",
@@ -30,6 +30,7 @@ describe("sidebar entries", () => {
       "Artificial intelligence",
       "Loop",
       "Runners",
+      "Runner models",
     ]);
     expect(ADMIN_SIDEBAR_ENTRIES.some((entry) => entry.slug === "image")).toBe(false);
   });

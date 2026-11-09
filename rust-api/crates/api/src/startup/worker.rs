@@ -438,6 +438,9 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             self.pools.primary(),
         ))
         .await?;
+        // The runner LLM model catalog table (NEWPIDASH-169) is
+        // Rust-owned like the queue tables.
+        crate::runner_models::schema::ensure_schema(self.pools.primary()).await?;
         let built = self.build()?;
         let worker_config = WorkerConfig {
             concurrency: built.concurrency.max(1) as usize,

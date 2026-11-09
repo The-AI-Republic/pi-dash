@@ -1229,6 +1229,16 @@ export type {
 export { InstanceRunner, InstanceRunnerListResponse, listInstanceRunners } from "./contracts/admin-runners.js";
 export type { InstanceRunnerListQuery } from "./contracts/admin-runners.js";
 export {
+  RunnerModelCatalogResponse,
+  RunnerModelRow,
+  createRunnerModel,
+  deleteRunnerModel,
+  getModelCatalog,
+  listAdminRunnerModels,
+  updateRunnerModel,
+} from "./contracts/runner-models.js";
+export type { RunnerModelCreateInput, RunnerModelPatchInput } from "./contracts/runner-models.js";
+export {
   AdminMe,
   CloudAuthUser,
   EmailCredentialCheckResult,
