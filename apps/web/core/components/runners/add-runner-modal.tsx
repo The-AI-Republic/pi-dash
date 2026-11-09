@@ -152,6 +152,10 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // One-shot per open: prefill the project field from the route projectId
   // once the projects list arrives (project-scoped page only).
   const prefilledProject = useRef(false);
+  // One-shot per open: set once the user changes the model themselves. The
+  // catalog-late snap below only adopts the DB preselected while this is
+  // false, so a late fetch can never overwrite a model the user picked.
+  const modelTouched = useRef(false);
 
   // Runner LLM model catalog (PDASHOSS01-364): picker source from the
   // database. Falls back to the hardcoded list when the endpoint is
@@ -186,11 +190,15 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     pollCancelled.current = false;
     autoSelectedMachine.current = false;
     prefilledProject.current = false;
+    modelTouched.current = false;
     setRunnerCommand(null);
     setRemoteCreate(null);
     setLastSubmitted(null);
+    // Run on open only: read the catalog's preselected at open time. The
+    // late-arriving catalog goes through the snap effect below; it must
+    // never re-run this reset and wipe a filled form.
     reset({ ...DEFAULT_VALUES, model: defaultByAgent[DEFAULT_AGENT] });
-  }, [isOpen, reset, defaultByAgent]);
+  }, [isOpen, reset]);
 
   // Connected dev machines for the picker. Kept fresh while the modal
   // is open so a machine coming online mid-flow becomes selectable.
@@ -320,9 +328,12 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // pick (or default) whenever the agent changes.
   const selectedAgent = watch("agent");
   const selectedModel = watch("model");
+  // Agent switch resets the model: a selection from another agent would
+  // generate an inapplicable --model. Run on agent change only — a later
+  // catalog arrival must not overwrite the model the user picked.
   useEffect(() => {
     setValue("model", defaultByAgent[selectedAgent]);
-  }, [selectedAgent, setValue, defaultByAgent]);
+  }, [selectedAgent, setValue]);
 
   // Dynamic label/resolve against the fetched catalog when present;
   // fall back to the hardcoded helpers so the form degrades silently
@@ -343,11 +354,21 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
 
   // When the catalog lands after open, snap a now-invalid selection back
   // to the agent's preselected/default so the picker never shows a value
-  // it cannot resolve.
+  // it cannot resolve. If the user has not touched the model yet, adopt
+  // the DB preselected for the current agent (a god-mode change reflects
+  // without a reopen); never overwrite a model the user already picked.
   useEffect(() => {
     if (!isOpen || !modelCatalog) return;
     const opts = modelOptions[selectedAgent];
     if (opts && !opts.some((o) => o.id === selectedModel)) {
+      setValue("model", defaultByAgent[selectedAgent]);
+      return;
+    }
+    if (
+      !modelTouched.current &&
+      selectedModel === DEFAULT_MODEL_BY_AGENT[selectedAgent] &&
+      defaultByAgent[selectedAgent] !== selectedModel
+    ) {
       setValue("model", defaultByAgent[selectedAgent]);
     }
   }, [isOpen, modelCatalog, modelOptions, selectedAgent, selectedModel, setValue, defaultByAgent]);
@@ -788,7 +809,10 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                     <CustomSelect
                       value={field.value}
                       label={currentLabel(selectedAgent, field.value)}
-                      onChange={field.onChange}
+                      onChange={(value: string) => {
+                        modelTouched.current = true;
+                        field.onChange(value);
+                      }}
                       buttonClassName="border border-subtle"
                       input
                       maxHeight="lg"

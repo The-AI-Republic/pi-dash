@@ -6,6 +6,7 @@
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { SWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // These cases exercise the web picker. Desktop's native computer hook is
@@ -22,6 +23,7 @@ const {
   listDevMachines,
   createRunnerOnMachine,
   getCreateRunnerOnMachineStatus,
+  getModelCatalog,
 } = vi.hoisted(() => ({
   apiBaseUrl: { value: "http://localhost:8000" },
   listPods: vi.fn(),
@@ -30,6 +32,7 @@ const {
   listDevMachines: vi.fn(),
   createRunnerOnMachine: vi.fn(),
   getCreateRunnerOnMachineStatus: vi.fn(),
+  getModelCatalog: vi.fn(),
 }));
 
 vi.mock("@pi-dash/constants", () => ({
@@ -46,6 +49,7 @@ vi.mock("@pi-dash/services", () => ({
     listDevMachines = listDevMachines;
     createRunnerOnMachine = createRunnerOnMachine;
     getCreateRunnerOnMachineStatus = getCreateRunnerOnMachineStatus;
+    getModelCatalog = getModelCatalog;
   },
 }));
 
@@ -150,6 +154,49 @@ const CONNECTED_MACHINE = {
   updated_at: "2026-07-14T00:00:00Z",
 };
 
+type CatalogRowFixture = {
+  id: string;
+  agent: string;
+  model: string;
+  label: string;
+  reasoning_efforts: string[];
+  sort_order: number;
+  is_enabled: boolean;
+  is_preselected: boolean;
+};
+
+const catalogRow = (
+  id: string,
+  agent: string,
+  model: string,
+  label: string,
+  overrides: Partial<CatalogRowFixture> = {}
+): CatalogRowFixture => ({
+  id,
+  agent,
+  model,
+  label,
+  reasoning_efforts: [],
+  sort_order: 0,
+  is_enabled: true,
+  is_preselected: false,
+  ...overrides,
+});
+
+const CATALOG_AGENTS = {
+  "claude-code": [
+    catalogRow("claude-fable-5", "claude-code", "claude-fable-5", "Fable 5", {
+      is_preselected: true,
+    }),
+    catalogRow("claude-opus-4-8", "claude-code", "claude-opus-4-8", "Opus 4.8", { sort_order: 1 }),
+  ],
+  codex: [catalogRow("gpt-9", "codex", "gpt-9", "GPT-9", { reasoning_efforts: ["low", "high"] })],
+  "cursor-agent": [],
+  "open-claw": [],
+  grok: [],
+  "muse-code": [],
+};
+
 describe("AddRunnerModal", () => {
   beforeEach(() => {
     apiBaseUrl.value = "http://localhost:8000";
@@ -158,6 +205,7 @@ describe("AddRunnerModal", () => {
     listDevMachines.mockReset().mockResolvedValue([]);
     createRunnerOnMachine.mockReset();
     getCreateRunnerOnMachineStatus.mockReset();
+    getModelCatalog.mockReset().mockRejectedValue(new Error("catalog unavailable"));
     setToast.mockReset();
   });
 
@@ -165,12 +213,15 @@ describe("AddRunnerModal", () => {
     vi.clearAllMocks();
   });
 
-  // SWR caches by key across tests in this file; pass a unique
+  // Each render gets its own SWR cache entry, so catalog behavior pinned
+  // in one test cannot leak into a later one. Pass a unique
   // workspaceId when a test needs fresh dev-machine data.
   function renderModal(workspaceId = "workspace-1", projectId?: string) {
     const onClose = vi.fn();
     const utils = render(
-      <AddRunnerModal isOpen onClose={onClose} workspaceId={workspaceId} workspaceSlug="acme" projectId={projectId} />
+      <SWRConfig value={{ provider: () => new Map() }}>
+        <AddRunnerModal isOpen onClose={onClose} workspaceId={workspaceId} workspaceSlug="acme" projectId={projectId} />
+      </SWRConfig>
     );
     return { ...utils, onClose };
   }
@@ -366,5 +417,61 @@ describe("AddRunnerModal", () => {
     );
     expect(command.textContent).toContain("pidash runner add");
     expect(command.textContent).toContain("--project BROWSERX");
+  });
+
+  // The catalog fetch is async and can resolve well after the user starts
+  // completing the form. A reset tied to the catalog loads would erase
+  // entered values, so the late arrival must only adopt a model while the
+  // user has not touched the picker yet.
+  it("adopts the DB preselected model when the catalog lands late and keeps entered values", async () => {
+    const user = userEvent.setup();
+    let resolveCatalog!: (value: unknown) => void;
+    getModelCatalog.mockReturnValueOnce(
+      new Promise<unknown>((resolve) => {
+        resolveCatalog = resolve;
+      })
+    );
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    const nameInput = screen.getByPlaceholderText("my-laptop-runner");
+    await user.type(nameInput, "my-runner");
+
+    resolveCatalog({ agents: CATALOG_AGENTS });
+
+    const selects = screen.getAllByTestId("select");
+    await waitFor(() => expect(selects[4]).toHaveValue("claude-fable-5"));
+    expect(screen.getByPlaceholderText("my-laptop-runner")).toHaveValue("my-runner");
+  });
+
+  it("uses DB catalog rows expanded with efforts and emits the command flags", async () => {
+    const user = userEvent.setup();
+    getModelCatalog.mockResolvedValue({ agents: CATALOG_AGENTS });
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    const selects = screen.getAllByTestId("select");
+    await user.selectOptions(selects[1], "BROWSERX");
+    await user.selectOptions(selects[3], "codex");
+    await waitFor(() => {
+      expect(selects[4].querySelector('option[value="gpt-9:low"]')).not.toBeNull();
+    });
+    await user.selectOptions(selects[4], "gpt-9:low");
+    await user.type(screen.getByPlaceholderText("my-laptop-runner"), "catalog-runner");
+    await user.type(screen.getByPlaceholderText("local dev machine project working dir"), "/tmp/work");
+    await user.click(screen.getByRole("button", { name: "Generate Runner" }));
+
+    const command = await screen.findByText(
+      (_content: string, node: Element | null) => node?.tagName.toLowerCase() === "pre"
+    );
+    expect(command.textContent).toContain("--model gpt-9");
+    expect(command.textContent).toContain("--reasoning-effort low");
+  });
+
+  it("falls back to the built-in list when the catalog call fails", async () => {
+    renderModal();
+
+    await screen.findByRole("option", { name: "BrowserX" });
+    expect(screen.getAllByTestId("select")[4]).toHaveValue("claude-opus-4-8");
   });
 });
