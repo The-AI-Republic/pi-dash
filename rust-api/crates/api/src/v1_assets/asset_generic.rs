@@ -1251,7 +1251,7 @@ async fn generic_post(
         is_deleted: Set(false),
         is_archived: Set(false),
         is_uploaded: Set(false),
-        storage_metadata: Set(None),
+        storage_metadata: Set(Some(serde_json::json!({}))),
         ..Default::default()
     };
     let inserted = record
