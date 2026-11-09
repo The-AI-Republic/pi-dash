@@ -833,16 +833,48 @@ async function desk002Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
       expect(keys.session.filter((key) => key.startsWith("pidash-managed-workspaces:"))).toEqual([]);
     });
 
-    await test.step("no Run control exists yet to press (tripwire for the RUN area)", async () => {
-      // The readiness gate itself (prepareAgentRun's early return and its
-      // project connection) is unit-covered; the press half of this row
-      // needs a Run control on the issue detail, which this build has not
-      // got. This pins the gap so the day the control lands the leg fails
-      // and grows the press proof instead of silently staying partial.
-      await expect.poll(() => driver.page.getByTestId("issue-run-ai").count(), RUNTIME_POLL).toBe(0);
+    await test.step("pressing Run dispatches through the cloud path with no local traffic", async () => {
+      // The work item carries the project default (no managed pin — the
+      // server refuses one on this stack, DESK-004), so preparation reads
+      // the issue and project and returns early; the run then posts
+      // through the cloud dispatch like on a plain browser (RUN-046).
+      const selectionBefore = await serverDeskRuntimeIssueExecutor(
+        seed.workspaceSlug,
+        seed.projectId,
+        issue.id,
+        session
+      );
+      const dispatch = await driver.issueRunAiDispatch();
+      const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
+      // Each app keeps its own dispatch copy (NEWFRONT-557); the new app
+      // names the queued outcome, which still attaches exactly one run.
+      if (dispatch.toast !== null && /run started/i.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else if (dispatch.toast !== null && /run queued/i.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else {
+        expect(dispatch.toast).toMatch(/couldn't start the run/i);
+        expect(attached).toHaveLength(0);
+      }
+      expect(dispatch.requestUrls.some((url) => url.includes("/api/runners/runs/"))).toBe(true);
+      // The press prepared nothing locally: no enrollment post, no daemon
+      // set-up verb, and the executor selection is left untouched.
+      expect(dispatch.requestUrls.filter((url) => url.includes("/desktop-enroll/"))).toEqual([]);
+      for (const command of ["daemon_engine_runner_add", "daemon_install_service", "install_pidash_cli"]) {
+        expect(await desktopInvocations(driver.page, command)).toEqual([]);
+      }
+      expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toEqual(
+        selectionBefore
+      );
     });
   } finally {
-    await runsDeleteRuns(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => undefined);
+    // deleteIssue nulls work_item instead of cascading, so attached runs
+    // from the press are captured and deleted first — or the success path
+    // leaks one run per attempt.
+    const leftovers = (await recentRuns(session))
+      .filter((row) => row["work_item"] === issue.id)
+      .map((row) => row["id"] as string);
+    await runsDeleteRuns(leftovers);
     await deleteIssue(seed.workspaceSlug, seed.projectId, issue.id, session);
   }
 
