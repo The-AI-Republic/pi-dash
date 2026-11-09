@@ -29,6 +29,7 @@
 //!   engine credential, the profile (fetched at start, on credential issue
 //!   and every 15 minutes) and the in-memory model token.
 //! - [`codex_config`] writes the engine's private `CODEX_HOME`.
+//! - [`free_quota`] classifies the OpenHub free-lane answers by error code.
 //! - [`agent`] turns an `agent.kind = "engine"` block into a Codex launch.
 //! - [`provision`] turns the engine on for a project (`EngineRunnerAdd`,
 //!   `pidash runner add --agent engine`).
@@ -43,6 +44,7 @@ pub mod api;
 pub mod auto_install;
 pub mod cleanup;
 pub mod codex_config;
+pub mod free_quota;
 pub mod install;
 pub mod locate;
 pub mod manager;
