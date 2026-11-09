@@ -393,6 +393,53 @@ pub fn project_list_get(scope: &TenantScope<'_>, order_by: &str) -> SelectStatem
     sel
 }
 
+/// Annotation names produced by [`project_head`] that are valid `ORDER BY`
+/// targets via their select alias. Mirrors the handler's `ANNOTATIONS`
+/// (`resolve_list_order`): any other validated name is a `projects` column
+/// and must be qualified as `p.<col>`.
+const ANNOTATION_ORDERABLE: &[&str] = &[
+    "total_members",
+    "total_cycles",
+    "total_modules",
+    "is_member",
+    "sort_order",
+    "member_role",
+    "is_deployed",
+];
+
+/// List-GET statement ordered by a caller-supplied custom key.
+///
+/// Django's `order_by(request.GET.get("order_by", "sort_order"))`
+/// (`views/project.py:186`) **replaces** the queryset default ordering: it
+/// always carries the `sort_order` annotation and applies exactly the one
+/// requested key. This builder mirrors that: it starts from
+/// [`project_head`] with `with_sort = true` (the `sort_order` subquery
+/// annotation), adds **no** default `ORDER BY`, then orders by `name` in
+/// `direction`. Annotation keys order by their alias; project columns order
+/// by `p.<col>` — the same split [`project_list_get`] uses for the eight
+/// known keys. Callers must have validated `name` against the project
+/// columns plus this annotation set (the handler's `resolve_list_order`
+/// already does); an unknown name would render `ORDER BY "p"."<name>"`,
+/// which Postgres rejects — but the handler never reaches here with one.
+///
+/// The previous handler path built [`project_list`] (which already carries
+/// `ORDER BY p.created_at DESC` and lacks the `sort_order` annotation) and
+/// then appended the requested key, yielding `ORDER BY p.created_at DESC,
+/// "<key>"` and `sort_order: null` (PIDASHCONV-1720).
+pub fn project_list_get_custom(
+    scope: &TenantScope<'_>,
+    name: &str,
+    direction: Order,
+) -> SelectStatement {
+    let mut sel = project_head(scope, false, true);
+    if ANNOTATION_ORDERABLE.contains(&name) {
+        sel.order_by(Alias::new(name), direction);
+    } else {
+        sel.order_by((Alias::new("p"), Alias::new(name)), direction);
+    }
+    sel
+}
+
 /// Member prefetch for the projects on the page (`:178-185`).
 ///
 /// `WHERE pm.workspace_id = <id> AND pm.is_active AND pm.deleted_at IS NULL`
@@ -1243,6 +1290,41 @@ mod tests {
         assert_eq!(order_by_sql("name"), "ORDER BY p.name ASC");
         assert_eq!(order_by_sql("-name"), "ORDER BY p.name DESC");
         assert_eq!(order_by_sql(""), "ORDER BY sort_order");
+    }
+
+    #[test]
+    fn custom_list_get_carries_sort_order_and_single_order_by() {
+        // PIDASHCONV-1720: custom keys must carry sort_order and must not
+        // leak the list base's `ORDER BY p.created_at DESC`.
+        let sql = render(&project_list_get_custom(&scope(), "identifier", Order::Asc));
+        assert!(sql.contains(r#"AS "sort_order""#), "{sql}");
+        assert!(sql.contains(r#"ORDER BY "p"."identifier" ASC"#), "{sql}");
+        assert!(!sql.contains(r#"ORDER BY "p"."created_at" DESC"#), "{sql}");
+        assert!(
+            sql.matches("ORDER BY").count() == 1,
+            "exactly one ORDER BY expected, got: {sql}"
+        );
+
+        // Annotation keys order by their alias.
+        let total = render(&project_list_get_custom(
+            &scope(),
+            "total_members",
+            Order::Desc,
+        ));
+        assert!(
+            total.contains(r#"ORDER BY "total_members" DESC"#),
+            "{total}"
+        );
+        assert!(!total.contains(r#""p"."total_members""#), "{total}");
+        assert!(total.contains(r#"AS "sort_order""#), "{total}");
+
+        // Reverse direction flips only the direction, not the target.
+        let rev = render(&project_list_get_custom(
+            &scope(),
+            "identifier",
+            Order::Desc,
+        ));
+        assert!(rev.contains(r#"ORDER BY "p"."identifier" DESC"#), "{rev}");
     }
 
     #[test]

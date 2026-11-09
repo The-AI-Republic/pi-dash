@@ -2667,9 +2667,10 @@ pub async fn list_projects_inner(
         "-name",
     ];
     // The eight queryset arms use the list-GET builder (with the
-    // `sort_order` annotation); any other validated key uses the plain
-    // list base (no `sort_order`, like the old
-    // `PROJECT_LIST_BASE_SQL` + `ORDER BY`).
+    // `sort_order` annotation); any other validated key uses the custom
+    // builder, which also carries `sort_order` and replaces the default
+    // ordering with exactly the one requested key (Django
+    // `order_by(request.GET order_by)`, PIDASHCONV-1720).
     let stmt = if KNOWN_ORDER.contains(&order_key.as_str()) {
         pidash_db::v1_projects::queries_projmem::project_list_get(&scope, &order_key)
     } else {
@@ -2682,9 +2683,7 @@ pub async fn list_projects_inner(
         } else {
             sea_query::Order::Asc
         };
-        let mut stmt = pidash_db::v1_projects::queries_projmem::project_list(&scope);
-        stmt.order_by(Alias::new(name), direction);
-        stmt
+        pidash_db::v1_projects::queries_projmem::project_list_get_custom(&scope, name, direction)
     };
     let rows: Vec<Row> = orm(&pre.pool)
         .query_all(DbBackend::Postgres.build(&stmt))
