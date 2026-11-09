@@ -2322,10 +2322,7 @@ async fn load_children(
             sea_orm::JoinType::InnerJoin,
             issues::Relation::Projects.def(),
         )
-        .join(
-            sea_orm::JoinType::LeftJoin,
-            issues::Relation::States.def(),
-        )
+        .join(sea_orm::JoinType::LeftJoin, issues::Relation::States.def())
         .filter(issues::Column::ParentId.eq(*issue_id))
         .filter(issues::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage".to_owned()))
@@ -2418,10 +2415,7 @@ async fn load_relations(
                 sea_orm::JoinType::InnerJoin,
                 issues::Relation::Projects.def(),
             )
-            .join(
-                sea_orm::JoinType::LeftJoin,
-                issues::Relation::States.def(),
-            )
+            .join(sea_orm::JoinType::LeftJoin, issues::Relation::States.def())
             .filter(issues::Column::Id.is_in(other_ids))
             .filter(issues::Column::DeletedAt.is_null());
         let rows: Vec<TargetRow> = q

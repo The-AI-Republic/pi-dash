@@ -1264,35 +1264,35 @@ async fn render_issue_full(
             "assigned_runner".to_owned(),
             opt_uuid(&issue.assigned_runner_id),
         );
-        let assigned_runner_detail =
-            crate::app_issues::access::fetch_assigned_runner_detail(
-                &pidash_db::pool::sea_orm_connection(pool),
-                issue.assigned_runner_id,
-            )
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+            &pidash_db::pool::sea_orm_connection(pool),
+            issue.assigned_runner_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
         map.insert(
             "assigned_runner_detail".to_owned(),
             assigned_runner_detail.unwrap_or(Value::Null),
         );
         // `get_dispatch_wait`: single-item, latest QUEUED pinned run, no
         // request in context on the dump path (viewer `None`).
-        let dispatch_wait = match pidash_services::domain::issue_assignment::fetch_active_dispatch_run(
-            &pidash_db::pool::sea_orm_connection(pool),
-            issue.id,
-        )
-        .await
-        .map_err(|_| Denial::ServerError)?
-        {
-            Some(run) => pidash_services::domain::issue_assignment::build_dispatch_wait(
+        let dispatch_wait =
+            match pidash_services::domain::issue_assignment::fetch_active_dispatch_run(
                 &pidash_db::pool::sea_orm_connection(pool),
-                &run,
-                None,
+                issue.id,
             )
             .await
-            .map_err(|_| Denial::ServerError)?,
-            None => Value::Null,
-        };
+            .map_err(|_| Denial::ServerError)?
+            {
+                Some(run) => pidash_services::domain::issue_assignment::build_dispatch_wait(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    &run,
+                    None,
+                )
+                .await
+                .map_err(|_| Denial::ServerError)?,
+                None => Value::Null,
+            };
         map.insert("dispatch_wait".to_owned(), dispatch_wait);
     }
     Ok(rendered)

@@ -3311,13 +3311,12 @@ pub async fn render_issue_detail(
     );
     // `assigned_runner_detail` last (`IssueDetailSerializer.Meta.fields`,
     // design §14.1): the shared access helper, null when pod-assigned.
-    let assigned_runner_detail =
-        crate::app_issues::access::fetch_assigned_runner_detail(
-            &sea_conn(pool),
-            issue.assigned_runner_id,
-        )
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+        &sea_conn(pool),
+        issue.assigned_runner_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     map.insert(
         "assigned_runner_detail".to_owned(),
         assigned_runner_detail.unwrap_or(serde_json::Value::Null),
@@ -7147,8 +7146,7 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
     );
     issue.insert(
         "assigned_runner_detail".to_owned(),
-        rows
-            .assigned_runner_detail
+        rows.assigned_runner_detail
             .clone()
             .unwrap_or(serde_json::Value::Null),
     );
