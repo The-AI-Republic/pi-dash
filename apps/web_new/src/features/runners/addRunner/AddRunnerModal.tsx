@@ -100,6 +100,10 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   const generation = React.useRef(0);
   const cancelled = React.useRef(false);
   const prefilled = React.useRef(false);
+  // One-shot per open: set once the user changes the model themselves. The
+  // catalog-late snap below only adopts the DB preselected while this is
+  // false, so a late fetch can never overwrite a model the user picked.
+  const modelTouched = React.useRef(false);
 
   const machines = useAddRunnerMachines(workspaceSlug, area.workspaceId, open);
   const projects = useAddRunnerProjects(workspaceSlug, open);
@@ -146,7 +150,12 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
     const openedAt = generation.current;
     cancelled.current = false;
     prefilled.current = false;
-    setValues(emptyValues());
+    modelTouched.current = false;
+    const init = emptyValues();
+    setValues({
+      ...init,
+      model: catalogPreselected?.[init.agent] ?? defaultModelFor(init.agent),
+    });
     setErrors({});
     setScreen({ kind: "form" });
     setLastFields(null);
@@ -221,7 +230,9 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
 
   // When the catalog lands after open, snap a now-invalid selection back
   // to the agent's preselected/default so the picker never shows a value
-  // it cannot resolve.
+  // it cannot resolve. If the user has not touched the model yet, adopt
+  // the DB preselected for the current agent (a god-mode change reflects
+  // without a reopen); never overwrite a model the user already picked.
   React.useEffect(() => {
     if (!open || !modelCatalog.data) return;
     const choices = catalogChoices[values.agent];
@@ -230,12 +241,22 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
         ...current,
         model: catalogPreselected?.[current.agent] ?? defaultModelFor(current.agent),
       }));
+      return;
+    }
+    if (!modelTouched.current && values.model === defaultModelFor(values.agent)) {
+      const target = catalogPreselected?.[values.agent];
+      if (target !== undefined && target !== values.model) {
+        setValues((current) => ({ ...current, model: target }));
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, modelCatalog.data, values.agent, values.model]);
 
   function setField<K extends keyof AddRunnerValues>(key: K, value: AddRunnerValues[K]): void {
     setValues((current) => ({ ...current, [key]: value }));
+    if (key === "model") {
+      modelTouched.current = true;
+    }
     if (key === "projectIdentifier" || key === "name") {
       setErrors((current) => ({ ...current, [key]: undefined }));
     }

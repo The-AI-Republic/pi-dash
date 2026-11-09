@@ -8,7 +8,14 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import type { CreateRunnerStatus, DevMachine, Pod, Project } from "@pidash/api-client";
+import type {
+  CreateRunnerStatus,
+  DevMachine,
+  Pod,
+  Project,
+  RunnerCatalogResponse,
+  RunnerCatalogRow,
+} from "@pidash/api-client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const area = {
@@ -23,6 +30,31 @@ let machineData: DevMachine[] = machineRows;
 const projectRows: Project[] = [];
 const podRows: Pod[] = [];
 const loadErrors = { machines: false, projects: false, pods: false };
+// DB catalog fixture (PDASHOSS01-364): the hook mock reads this live so a
+// test can pin the picker to a god-mode catalog — including different
+// preselected rows than the built-in defaults.
+const catalogState: { data: RunnerCatalogResponse | undefined } = { data: undefined };
+
+function catalogRow(
+  agent: string,
+  model: string,
+  label: string,
+  overrides: Partial<RunnerCatalogRow> = {}
+): RunnerCatalogRow {
+  return {
+    id: "00000000-0000-4000-8000-000000000001",
+    agent,
+    model,
+    label,
+    reasoning_efforts: [],
+    sort_order: 0,
+    is_enabled: true,
+    is_preselected: false,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
 const createRunner = vi.fn<(machineId: string, input: unknown) => Promise<{ request_id: string }>>();
 const readStatus = vi.fn<(machineId: string, requestId: string, workspaceId: string) => Promise<CreateRunnerStatus>>();
 
@@ -30,7 +62,7 @@ vi.mock("./queries.js", () => ({
   useAddRunnerMachines: () => ({ data: loadErrors.machines ? undefined : machineData, isError: loadErrors.machines }),
   useAddRunnerProjects: () => ({ data: loadErrors.projects ? undefined : projectRows, isError: loadErrors.projects }),
   useAddRunnerPods: () => ({ data: loadErrors.pods ? undefined : podRows, isError: loadErrors.pods }),
-  useModelCatalog: () => ({ data: undefined, isError: false }),
+  useModelCatalog: () => ({ data: catalogState.data, isError: false }),
   createRunnerTransport: () => ({ createRunner, readStatus }),
 }));
 
@@ -146,6 +178,7 @@ beforeEach(() => {
   loadErrors.machines = false;
   loadErrors.projects = false;
   loadErrors.pods = false;
+  catalogState.data = undefined;
   createRunner.mockReset();
   readStatus.mockReset();
   createRunner.mockResolvedValue({ request_id: "44444444-4444-4444-8444-444444444444" });
@@ -247,6 +280,55 @@ describe("catalog (RUN-009, RUN-049)", () => {
     await submit();
     const command = screen.getByTestId("add-runner-command-text");
     expect(command).toHaveTextContent("--model claude-opus-5-5");
+  });
+
+  // The DB catalog drives the picker once loaded (PDASHOSS01-364). The
+  // preselected row replaces the built-in default, and effort-bearing
+  // rows expand to model:effort options whose flags reach the command.
+  it("adopts the DB preselected model on open", () => {
+    catalogState.data = {
+      agents: {
+        "claude-code": [
+          catalogRow("claude-code", "claude-fable-5", "Fable 5", { is_preselected: true }),
+          catalogRow("claude-code", "claude-opus-4-8", "Opus 4.8", { sort_order: 1 }),
+        ],
+        codex: [],
+        "cursor-agent": [],
+        "open-claw": [],
+        grok: [],
+        "muse-code": [],
+      },
+    };
+    harness();
+    expect(screen.getByRole("button", { name: "Model (optional)" })).toHaveTextContent("Fable 5");
+  });
+
+  it("offers DB catalog rows expanded with efforts and emits the command flags", async () => {
+    catalogState.data = {
+      agents: {
+        "claude-code": [catalogRow("claude-code", "claude-opus-4-8", "Opus 4.8", { is_preselected: true })],
+        codex: [catalogRow("codex", "gpt-9", "GPT-9", { reasoning_efforts: ["low", "high"] })],
+        "cursor-agent": [],
+        "open-claw": [],
+        grok: [],
+        "muse-code": [],
+      },
+    };
+    harness();
+    await pickPicker("Agent", "Codex");
+    await userEvent.click(screen.getByRole("button", { name: "Model (optional)" }));
+    const list = await screen.findByRole("listbox", { name: "Model (optional)" });
+    const labels = within(list)
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(labels).toContain("GPT-9 (Low)");
+    expect(labels).toContain("GPT-9 (High)");
+    await userEvent.click(within(list).getByRole("option", { name: "GPT-9 (Low)" }));
+    await pickPicker("Project", "Acme");
+    await submit();
+    const command = screen.getByTestId("add-runner-command-text");
+    expect(command).toHaveTextContent("--model gpt-9");
+    expect(command).toHaveTextContent("--reasoning-effort low");
   });
 });
 
