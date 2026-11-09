@@ -104,3 +104,15 @@ export const TOOL_SERVERS_HEADING = "Tool servers (MCP)";
 export const TOOL_SERVERS_INTRO =
   "Servers listed here are offered to the assistant as tools. Give each one a name and the address it answers on.";
 export const APPS_POINTER = "Looking for apps? Open Apps in the sidebar to browse, install and connect them.";
+
+// Free-quota model badges (NEWPIDASH-150, PRIVATEPI1-138). The free list
+// comes from the usage-meter contract, never hardcoded here.
+export const FREE_BADGE = "Free";
+export const USES_CREDIT_BADGE = "Uses credit";
+export const NEEDS_CREDIT_BADGE = "Needs credit";
+export const TOP_UP_LABEL = "Top up";
+export const NEEDS_CREDIT_NOTICE =
+  "This model needs credit on the free plan. Switch to a free model, or top up to use it.";
+export const MODEL_BLOCKED_TITLE = "Model needs credit";
+export const MODEL_BLOCKED_BODY =
+  "Free plans can use free models only. Switch to a free model or top up to use this one.";

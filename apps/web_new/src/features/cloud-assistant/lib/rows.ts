@@ -8,18 +8,24 @@
 // unit-testable without a DOM or a server.
 
 import {
+  isFreeModel,
+  isFreePlan,
   resolveOpenhubAvailable,
   type AssistantConnectionKind,
   type AssistantConnectionList,
   type AssistantConnectionListItem,
+  type FreeQuota,
 } from "@pidash/api-client";
 
 import {
+  FREE_BADGE,
   IN_USE_MARKER,
   INCLUDED_MARKER,
+  NEEDS_CREDIT_BADGE,
   NOT_CONNECTED_MARKER,
   PLAN_CONNECTED_MARKER,
   PLAN_SELECTED_MARKER,
+  USES_CREDIT_BADGE,
 } from "./copy.js";
 
 /**
@@ -62,11 +68,20 @@ export const ACTIVE_MARKER = IN_USE_MARKER;
 
 export type ModelControlKind = "select" | "input" | "hidden";
 
+/** Credit state of one hosted-lane model; `null` when quota is unavailable. */
+export type ModelCredit = "free" | "uses-credit" | "blocked";
+
 export interface ModelChoice {
   /** Value sent as the model name. */
   value: string;
   /** What the picker shows; the provider's own label when it sent one. */
   label: string;
+  /** Server-declared credit state, or null when no quota answer backs it. */
+  credit: ModelCredit | null;
+  /** Badge text beside the label, or null when no quota answer exists. */
+  badge: string | null;
+  /** False only for a paid model on the free plan — it cannot become active. */
+  selectable: boolean;
 }
 
 export interface ConnectionRow {
@@ -92,12 +107,20 @@ export interface ConnectionRow {
   removable: boolean;
   /** The row can be disconnected (a connected provider account). */
   disconnectable: boolean;
+  /** Normalized quota plan backing the hosted-lane badges; null when absent. */
+  quotaPlan: string | null;
+  /** Credit state of the stored model; null when quota is unavailable. */
+  modelCredit: ModelCredit | null;
 }
 
 export interface ConnectionModelFlags {
   codexModels: string[];
   codexModelLabels: Record<string, string>;
   openhubModels: string[];
+  /** Server-declared free catalog; empty when quota is unavailable. */
+  freeModels: readonly string[];
+  /** Normalized quota plan; null when quota is unavailable. */
+  quotaPlan: string | null;
 }
 
 /** True when the provider-account row has no account behind it. */
@@ -133,7 +156,9 @@ function hostOf(raw: string): string | null {
 /**
  * Managed pickers always keep the stored model selectable: a choice saved
  * before the account's catalog changed stays visible (and valid) until the
- * user reconnects. Provider labels win over descriptions.
+ * user reconnects. Provider labels win over descriptions. Quota badges
+ * (`annotateChoices`) ride on top; this builder stays quota-free so the
+ * codex lane and older answers keep their prior shape.
  */
 export function modelChoices(
   models: readonly string[],
@@ -144,8 +169,38 @@ export function modelChoices(
   const values = current !== "" && !models.includes(current) ? [...models, current] : [...models];
   return values.map((value) => {
     const label = labels[value] ?? descriptions[value];
-    return label === undefined ? { value, label: value } : { value, label };
+    const headed = label === undefined ? { value, label: value } : { value, label };
+    return { ...headed, credit: null, badge: null, selectable: true };
   });
+}
+
+/**
+ * Stamp each hosted-lane choice with its credit state. Free-plan users see
+ * paid models as "Needs credit" and cannot select them; paid plans see
+ * "Free" vs "Uses credit" with every model selectable. Without a quota
+ * answer nothing changes (prior behavior).
+ */
+export function annotateChoices(choices: readonly ModelChoice[], flags: ConnectionModelFlags): ModelChoice[] {
+  if (flags.quotaPlan === null) return [...choices];
+  const freePlan = isFreePlan(flags.quotaPlan);
+  return choices.map((choice) => {
+    const free = isFreeModel(choice.value, flags.freeModels);
+    if (free) return { ...choice, credit: "free" as const, badge: FREE_BADGE, selectable: true };
+    if (freePlan) return { ...choice, credit: "blocked" as const, badge: NEEDS_CREDIT_BADGE, selectable: false };
+    return { ...choice, credit: "uses-credit" as const, badge: USES_CREDIT_BADGE, selectable: true };
+  });
+}
+
+/** Credit state of one model under the flags; `null` without a quota answer. */
+export function creditForModel(model: string, flags: ConnectionModelFlags): ModelCredit | null {
+  if (flags.quotaPlan === null) return null;
+  if (isFreeModel(model, flags.freeModels)) return "free";
+  return isFreePlan(flags.quotaPlan) ? "blocked" : "uses-credit";
+}
+
+/** True when this model commit would charge credit the plan cannot pay. */
+export function isBlockedCommit(model: string, flags: ConnectionModelFlags): boolean {
+  return creditForModel(model, flags) === "blocked";
 }
 
 /** A hosted row on a lane the session's permissions cannot reach. */
@@ -169,6 +224,7 @@ export function toConnectionRow(
 
   const control = modelControlFor(row, disconnected, stale);
   const modelName = row.model_name;
+  const quotaPlan = row.kind === "openhub" ? flags.quotaPlan : null;
   return {
     id: row.id,
     kind: row.kind,
@@ -186,6 +242,8 @@ export function toConnectionRow(
     disconnected,
     removable: row.kind === "byok",
     disconnectable: row.kind === "codex" && !disconnected,
+    quotaPlan,
+    modelCredit: row.kind === "openhub" ? creditForModel(modelName, flags) : null,
   };
 }
 
@@ -197,17 +255,26 @@ function modelControlFor(row: AssistantConnectionListItem, disconnected: boolean
 
 function choicesFor(row: AssistantConnectionListItem, flags: ConnectionModelFlags, current: string): ModelChoice[] {
   if (row.kind === "openhub") {
-    return modelChoices(flags.openhubModels, {}, OPENHUB_MODEL_DESCRIPTIONS, current);
+    return annotateChoices(modelChoices(flags.openhubModels, {}, OPENHUB_MODEL_DESCRIPTIONS, current), flags);
   }
   const models = flags.codexModels.length > 0 ? flags.codexModels : [...BUILTIN_CODEX_MODELS];
   return modelChoices(models, flags.codexModelLabels, BUILTIN_CODEX_MODEL_DESCRIPTIONS, current);
 }
 
-/** Managed model flags for a list answer, defaulting each field. */
-export function connectionModelFlags(list: AssistantConnectionList): ConnectionModelFlags {
+/**
+ * Managed model flags for a list answer, defaulting each field. The free
+ * quota is an optional second read (null until the usage-meter proxy
+ * answers); without it the picker renders exactly as before.
+ */
+export function connectionModelFlags(
+  list: AssistantConnectionList,
+  quota: FreeQuota | null = null
+): ConnectionModelFlags {
   return {
     codexModels: list.codex_model_options,
-    codexModelLabels: list.codex_model_labels,
+    codexModelLabels: list.codex_model_labels ?? {},
     openhubModels: list.openhub_model_options,
+    freeModels: quota?.freeModels ?? [],
+    quotaPlan: quota?.plan ?? null,
   };
 }

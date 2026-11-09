@@ -9695,6 +9695,30 @@ export interface CloudAssistantConnectionFacts {
   actions: string[];
 }
 
+/** One hosted-lane picker option (NEWPIDASH-150). */
+export interface CloudAssistantModelOptionFacts {
+  /** Picker option value (the model slug). */
+  value: string;
+  /** Option text as rendered (label plus credit badge, when present). */
+  text: string;
+  /** Whether the option is disabled (paid model on the free plan). */
+  disabled: boolean;
+}
+
+/** Hosted-lane picker budget facts (NEWPIDASH-150). */
+export interface CloudAssistantModelBudgetFacts {
+  /** Card title the facts were read from. */
+  title: string;
+  /** Current picker value (the active model). */
+  value: string;
+  /** Picker options in display order, with badges and disabled states. */
+  options: CloudAssistantModelOptionFacts[];
+  /** Needs-credit notice text, or null when the stored model is affordable. */
+  notice: string | null;
+  /** Top-up link target, or null when no wallet address is wired. */
+  topUpHref: string | null;
+}
+
 /** AI Assistant add-form structure (NEWFRONT-440, CLOUD-033). */
 export interface CloudAssistantAddFormFacts {
   /** Provider option values in display order. */
@@ -11509,6 +11533,12 @@ export interface DeskSigninUpdateLink {
   ganttDependencyHandleCount(): Promise<number>;
   /** Drag the handle of `fromId` onto the lane of `toId`; resolves once the pointer releases. */
   ganttLinkBlocks(fromId: string, toId: string): Promise<void>;
+  // --- Cloud assistant model budget (NEWPIDASH-150). Appended; existing
+  // --- methods above are untouched per the shared driver contract. The
+  // --- scenario runs on web_new only: the OSS oracle provably lacks the
+  // --- free-quota picker, so the old-app driver throws on these.
+  /** Hosted-lane picker budget facts for the titled connection. */
+  cloudAssistantModelBudget(title: string): Promise<CloudAssistantModelBudgetFacts>;
 }
 
 /** General-tab field keys for the NEWFRONT-426 settingsProfile readers. */

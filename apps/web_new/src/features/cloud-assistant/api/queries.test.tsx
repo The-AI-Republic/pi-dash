@@ -9,15 +9,18 @@ import { renderHook, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { FREE_QUOTA_PATH, FREE_QUOTA_STALE_TIME_MS } from "@pidash/api-client";
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { cloudAssistantKeys } from "./keys.js";
 import {
-  USAGE_QUOTA_STALE_TIME_MS,
   cloudAssistantConfigQueryOptions,
   cloudConnectionsQueryOptions,
-  usageQuotaQueryOptions,
+  cloudQuotaQueryOptions,
   useCloudAssistantConfig,
+  USAGE_QUOTA_STALE_TIME_MS,
+  usageQuotaQueryOptions,
   useFreeTokenUsage,
 } from "./queries.js";
 
@@ -31,6 +34,7 @@ describe("cloud assistant keys", () => {
   it("are user-level, not workspace-scoped", () => {
     expect(cloudAssistantKeys.connections()).toEqual(["cloud-assistant", "connections"]);
     expect(cloudAssistantKeys.config()).toEqual(["cloud-assistant", "config"]);
+    expect(cloudAssistantKeys.quota()).toEqual(["cloud-assistant", "quota"]);
     expect(cloudAssistantKeys.usageQuota()).toEqual(["cloud-assistant", "usage-quota"]);
   });
 });
@@ -53,6 +57,34 @@ describe("cloudAssistantConfigQueryOptions", () => {
     expect(options.queryKey).toEqual(cloudAssistantKeys.config());
     await options.queryFn?.({} as never);
     expect(getJson).toHaveBeenCalledWith("/api/users/me/ai-assistant/config/");
+  });
+});
+
+describe("cloudQuotaQueryOptions", () => {
+  it("reads the free quota with a short stale time", async () => {
+    const getJson = vi.fn(
+      async (_path: string): Promise<unknown> => ({
+        llm: { freeTokensUsed: 1, freeTokensLimit: 10, freeModels: ["deepseek/deepseek-v4-flash"] },
+        resetsAt: "2026-11-10T00:00:00Z",
+        plan: "free",
+      })
+    );
+    const client = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = cloudQuotaQueryOptions(client);
+    expect(options.queryKey).toEqual(cloudAssistantKeys.quota());
+    expect(options.staleTime).toBe(FREE_QUOTA_STALE_TIME_MS);
+    const quota = await options.queryFn?.({} as never);
+    expect(getJson).toHaveBeenCalledWith(FREE_QUOTA_PATH);
+    expect(quota).toMatchObject({ plan: "free", freeModels: ["deepseek/deepseek-v4-flash"] });
+  });
+
+  it("degrades to null when the proxy is missing (never blocks the tab)", async () => {
+    const getJson = vi.fn(async (): Promise<unknown> => {
+      throw new Error("404");
+    });
+    const client = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = cloudQuotaQueryOptions(client);
+    await expect(options.queryFn?.({} as never)).resolves.toBeNull();
   });
 });
 
