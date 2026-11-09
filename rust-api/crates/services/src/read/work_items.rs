@@ -1058,8 +1058,8 @@ pub async fn fetch_assignee_rows(
     let id_sub = SeaQuery::select()
         .column(issue_assignees::Column::AssigneeId)
         .from(issue_assignees::Entity)
-        .expr(Expr::col(issue_assignees::Column::IssueId).eq(*issue_id))
-        .expr(Expr::col(issue_assignees::Column::DeletedAt).is_null())
+        .and_where(Expr::col(issue_assignees::Column::IssueId).eq(*issue_id))
+        .and_where(Expr::col(issue_assignees::Column::DeletedAt).is_null())
         .to_owned();
     let models = users::Entity::find()
         .filter(Expr::col(users::Column::Id).in_subquery(id_sub))
@@ -1129,8 +1129,8 @@ pub async fn fetch_expanded_labels(
     let id_sub = SeaQuery::select()
         .column(issue_labels::Column::LabelId)
         .from(issue_labels::Entity)
-        .expr(Expr::col(issue_labels::Column::IssueId).eq(*issue_id))
-        .expr(Expr::col(issue_labels::Column::DeletedAt).is_null())
+        .and_where(Expr::col(issue_labels::Column::IssueId).eq(*issue_id))
+        .and_where(Expr::col(issue_labels::Column::DeletedAt).is_null())
         .to_owned();
     let models = pidash_db::entity::labels::Entity::find()
         .filter(Expr::col(pidash_db::entity::labels::Column::Id).in_subquery(id_sub))
@@ -2315,6 +2315,40 @@ mod live {
 
     use super::*;
     use crate::read::test_support::{pool, seed_world};
+
+    /// The converted expansion and relations-pool queries run on Postgres
+    /// (their bugs were planner errors that SQL-text tests cannot see).
+    #[tokio::test]
+    async fn expansion_and_relation_queries_plan_on_postgres() {
+        use sea_orm::QueryTrait;
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        let issue = world.issue_id;
+        sqlx::query(
+            "INSERT INTO issue_assignees (id, created_at, updated_at, assignee_id, issue_id,
+                project_id, workspace_id)
+             VALUES ($1, now(), now(), $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(world.user_id)
+        .bind(issue)
+        .bind(world.project_id)
+        .bind(world.workspace_id)
+        .execute(&db)
+        .await
+        .expect("seed assignee");
+        let assignees = fetch_assignee_rows(&db, &issue).await.expect("assignees");
+        assert_eq!(assignees.len(), 1);
+        fetch_expanded_labels(&db, &issue, &chrono_tz::UTC)
+            .await
+            .expect("labels");
+        let sql = relations_pool_select(&[issue], &world.workspace_id, &world.user_id)
+            .build(sea_orm::DbBackend::Postgres);
+        sqlx::query(&format!("EXPLAIN {}", sql.to_string()))
+            .execute(&db)
+            .await
+            .expect("relations pool plans");
+    }
 
     #[tokio::test]
     async fn decode_and_write_render_roundtrip() {

@@ -2628,7 +2628,7 @@ fn member_pool_stmt(creator_id: Uuid, workspace_slug: &str) -> sea_orm::sea_quer
         states as st_entity, workspaces as ws_entity,
     };
     sea_orm::sea_query::Query::select()
-        .expr_as(Expr::col(i_entity::Column::Id), "id")
+        .expr_as(Expr::col((i_entity::Entity, i_entity::Column::Id)), "id")
         .from(i_entity::Entity)
         .join(
             JoinType::LeftJoin,

@@ -1539,6 +1539,7 @@ async fn resolve_pk_lookups(
         let found = users::Entity::find_by_id(item.uuid)
             .select_only()
             .column(users::Column::Id)
+            .into_tuple::<uuid::Uuid>()
             .one(&db)
             .await
             .map_err(|_| Denial::ServerError)?

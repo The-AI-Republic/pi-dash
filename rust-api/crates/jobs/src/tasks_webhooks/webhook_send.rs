@@ -1145,11 +1145,12 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
     let receiver_email: Option<String> = users::Entity::find_by_id(receiver_id)
         .select_only()
         .column(users::Column::Email)
+        .into_tuple::<Option<String>>()
         .one(&db)
         .await
         .ok()
         .flatten()
-        .and_then(|user| user.email);
+        .flatten();
     let webhook_row: Option<(uuid::Uuid, String, uuid::Uuid)> =
         webhooks::Entity::find_by_id(webhook_id)
             .select_only()
