@@ -35,6 +35,7 @@ export {
   OPENHUB_FREE_QUOTA_FLAG,
   PAGE_ASSISTANT_FLAG,
   PAGE_MOVE_FLAG,
+  PRICING_FREE_TOKENS_FLAG,
   SIDEBAR_TOGGLE_FLAG,
 } from "./types.js";
 export {
@@ -42,6 +43,7 @@ export {
   isOpenhubFreeQuotaEnabled,
   isPageAssistantEnabled,
   isPageMoveEnabled,
+  isPricingFreeTokensEnabled,
   isSidebarToggleEnabled,
 } from "./flags.js";
 export {

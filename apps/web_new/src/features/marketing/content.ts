@@ -200,7 +200,8 @@ export const MARKETING_META: Readonly<Record<string, MarketingPageMeta>> = {
   },
   "/pricing": {
     title: "Pi Dash pricing",
-    description: "A free tier for small work and a membership for teams that run agents continuously.",
+    description:
+      "A free tier for small work and a membership for teams that run agents continuously. Every plan includes free daily token allowance on deepseek-v4-flash.",
   },
 };
 

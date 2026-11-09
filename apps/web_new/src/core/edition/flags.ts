@@ -10,6 +10,7 @@ import {
   OPENHUB_FREE_QUOTA_FLAG,
   PAGE_ASSISTANT_FLAG,
   PAGE_MOVE_FLAG,
+  PRICING_FREE_TOKENS_FLAG,
   SIDEBAR_TOGGLE_FLAG,
   type Edition,
 } from "./types.js";
@@ -51,4 +52,13 @@ export function isPageAssistantEnabled(edition: Edition): boolean {
  */
 export function isOpenhubFreeQuotaEnabled(edition: Edition): boolean {
   return edition.id === "cloud" || edition.flags[OPENHUB_FREE_QUOTA_FLAG] === true;
+}
+
+/**
+ * True only where the pricing page advertises the free daily token
+ * allowance (NEWPIDASH-157). The cloud build sets
+ * `pricing-free-tokens`; OSS leaves it absent, so no token section renders.
+ */
+export function isPricingFreeTokensEnabled(edition: Edition): boolean {
+  return edition.flags[PRICING_FREE_TOKENS_FLAG] === true;
 }

@@ -7,6 +7,7 @@
 // the copy is ours.
 import * as React from "react";
 
+import { edition, PRICING_FREE_TOKENS_FLAG } from "../../../core/edition/index.js";
 import { MarketingColumn } from "./MarketingFrame.js";
 
 import { ENTERPRISE_CONTACT_URL, metaFor, PRICING_FAQ, PRICING_TIERS, type PricingTier } from "../content.js";
@@ -17,10 +18,12 @@ const SECONDARY_ACTION =
   "text-body inline-flex items-center rounded-(--radius-control) border border-(--border) px-(--space-6) py-(--space-3) font-medium text-(--text) hover:bg-(--subtle) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-2 focus-visible:outline-none";
 
 export function MarketingPricing(): React.ReactElement {
+  const showFreeTokens = edition.flags[PRICING_FREE_TOKENS_FLAG] === true;
   return (
     <MarketingColumn className="py-(--space-8)">
       <PricingHero />
       <TiersSection />
+      {showFreeTokens ? <FreeTokensSection /> : null}
       <EnterpriseSection />
       <FaqSection />
     </MarketingColumn>
@@ -89,6 +92,44 @@ function TierCard({ tier }: { tier: PricingTier }): React.ReactElement {
         {tier.label}
       </a>
     </article>
+  );
+}
+
+function FreeTokensSection(): React.ReactElement {
+  return (
+    <section
+      aria-labelledby="pricing-free-tokens-heading"
+      aria-label="Free daily LLM tokens"
+      className="py-(--space-10)"
+    >
+      <div className="flex flex-col gap-(--space-6)">
+        <SectionHeading id="pricing-free-tokens-heading">Free tokens every day</SectionHeading>
+        <p className="text-body max-w-2xl text-(--text-muted)">
+          Every plan includes a daily allowance on deepseek-v4-flash so you can try agents without pre-funding.
+        </p>
+        <div className="grid gap-(--space-6) md:grid-cols-2" data-testid="pricing-free-tokens">
+          <article className="flex flex-col gap-(--space-4) rounded-(--radius-card) border border-(--border) p-(--space-8)">
+            <p className="text-body font-medium text-(--text)">Free</p>
+            <p className="text-h1 font-semibold text-(--text)">2M</p>
+            <p className="text-caption text-(--text-muted)">tokens per day on deepseek-v4-flash</p>
+          </article>
+          <article className="flex flex-col gap-(--space-4) rounded-(--radius-card) border border-(--border) p-(--space-8)">
+            <p className="text-body font-medium text-(--text)">Pay as you go and membership</p>
+            <p className="text-h1 font-semibold text-(--text)">5M</p>
+            <p className="text-caption text-(--text-muted)">tokens per day on deepseek-v4-flash</p>
+          </article>
+        </div>
+        <ul className="flex flex-col gap-(--space-2)">
+          <li className="text-body text-(--text-muted)">
+            The allowance resets at 00:00 UTC each day. Unused tokens do not carry over.
+          </li>
+          <li className="text-body text-(--text-muted)">
+            Other models draw on OpenHub credit. After the free allowance is used up, paid plans continue from the
+            wallet.
+          </li>
+        </ul>
+      </div>
+    </section>
   );
 }
 
