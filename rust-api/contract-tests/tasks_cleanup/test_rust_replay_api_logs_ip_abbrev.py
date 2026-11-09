@@ -12,8 +12,8 @@ requeued).
 
 Mongo environment only: the Rust worker under test boots with
 ``MONGO_DB_URL`` / ``MONGO_DB_DATABASE`` pointing at a live MongoDB.
-This module runs alone in its own CI job (see
-``rust-api-contract-tests-tasks-cleanup-mongo.yml``); the shared replay
+Runs in ``rust-api-contract-tests-tasks-cleanup-mongo.yml`` (Rust job,
+alongside ``test_rust_replay_mongo_write_error.py``); the shared replay
 job pins the live file only, and the Django worker-plane job ignores
 ``test_rust_replay*.py`` by glob.
 
@@ -32,9 +32,11 @@ Local run (own scratch database, Django worker STOPPED)::
     pytest -p no:django tasks_cleanup/test_rust_replay_api_logs_ip_abbrev.py
 """
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from pymongo import MongoClient
 
 from _harness import rust_queue
@@ -43,6 +45,12 @@ from _harness.db import insert_row, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 COLLECTION = "api_activity_logs"
+
+# Mongo environment only (see rust-api-contract-tests-tasks-cleanup-mongo.yml).
+pytestmark = pytest.mark.skipif(
+    not (os.environ.get("MONGO_DB_URL") and os.environ.get("MONGO_DB_DATABASE")),
+    reason="mongo oracle: requires MONGO_DB_URL and MONGO_DB_DATABASE",
+)
 
 SETTLE_BOUND_SECS = 120
 
@@ -98,7 +106,11 @@ def test_rust_api_logs_ip_address_is_host_not_cidr(db_conn):
     docs = {d["id"]: d for d in coll.find({"id": {"$in": sorted(ids.values())}})}
     assert len(docs) == 3, f"expected 3 archived docs, got {len(docs)}: {docs}"
 
-    by_ip = {label: docs[rid].get("ip_address") for label, rid in ids.items()}
+    # Key presence matters: a missing ip_address would read as None via
+    # .get() and pass the NULL assertion below vacuously.
+    for label, rid in ids.items():
+        assert "ip_address" in docs[rid], f"archived doc for {label} has no ip_address key"
+    by_ip = {label: docs[rid]["ip_address"] for label, rid in ids.items()}
     assert by_ip["v4"] == "10.0.0.1", f'IPv4 archived as {by_ip["v4"]!r}, expected "10.0.0.1"'
     assert by_ip["v6"] == "2001:db8::1", f'IPv6 archived as {by_ip["v6"]!r}, expected "2001:db8::1"'
     assert by_ip["null"] is None, f'NULL archived as {by_ip["null"]!r}, expected None'

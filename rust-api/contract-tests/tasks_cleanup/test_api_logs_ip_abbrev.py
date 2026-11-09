@@ -6,9 +6,9 @@
 
 Mongo environment only: the Django worker under test boots with
 ``MONGO_DB_URL`` / ``MONGO_DB_DATABASE`` pointing at a live MongoDB.
-Runs alone in its own CI job (see
-``rust-api-contract-tests-tasks-cleanup-mongo.yml``); the shared
-worker-plane job ignores it — its worker boots without Mongo.
+Runs in ``rust-api-contract-tests-tasks-cleanup-mongo.yml`` (Django job,
+alongside ``test_mongo_write_error.py``); the shared worker-plane job
+ignores it — its worker boots without Mongo.
 
 Django behavior (``cleanup_task.py:274-291`` + ``:180``): the ``inet``
 column is loaded as plain text (``10.0.0.1``) and copied as-is, so the
@@ -32,9 +32,11 @@ Local run (own scratch database, Django worker only)::
     pytest -p no:django tasks_cleanup/test_api_logs_ip_abbrev.py
 """
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from pymongo import MongoClient
 
 from _harness import celery_wire
@@ -43,6 +45,15 @@ from _harness.db import insert_row, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 COLLECTION = "api_activity_logs"
+
+# Mongo environment only: without MONGO_DB_URL/MONGO_DB_DATABASE this
+# oracle cannot run (the shared worker-plane job boots its worker with no
+# Mongo and collects this file; the dedicated job in
+# rust-api-contract-tests-tasks-cleanup-mongo.yml sets both).
+pytestmark = pytest.mark.skipif(
+    not (os.environ.get("MONGO_DB_URL") and os.environ.get("MONGO_DB_DATABASE")),
+    reason="mongo oracle: requires MONGO_DB_URL and MONGO_DB_DATABASE",
+)
 
 SETTLE_BOUND_SECS = 300
 
@@ -111,7 +122,10 @@ def test_api_logs_ip_address_is_host_not_cidr(db_conn):
 
     by_ip = {}
     for label, rid in ids.items():
-        by_ip[label] = docs[rid].get("ip_address")
+        # Key presence matters: a missing ip_address would read as None via
+        # .get() and pass the NULL assertion below vacuously.
+        assert "ip_address" in docs[rid], f"archived doc for {label} has no ip_address key"
+        by_ip[label] = docs[rid]["ip_address"]
 
     assert by_ip["v4"] == "10.0.0.1", f'IPv4 archived as {by_ip["v4"]!r}, expected "10.0.0.1"'
     assert by_ip["v6"] == "2001:db8::1", f'IPv6 archived as {by_ip["v6"]!r}, expected "2001:db8::1"'

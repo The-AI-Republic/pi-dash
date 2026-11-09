@@ -924,9 +924,12 @@ pub async fn run_cleanup(
         | CleanupTask::PageVersions
         | CleanupTask::IssueDescriptionVersions => {
             let sql = task.select_sql_for_exec(cutoff);
-            // raw-sql: ApiLogs projects `inet` `ip_address` via `abbrev()` (Entity
-            // `CAST AS text` appends `/32`/`/128`); window tasks need `ROW_NUMBER()`
-            // inexpressible in sea-query 0.32 (`Func` has no `row_number`). The fixture-pinned Django text runs through sqlx for these three.
+            // ApiLogs projects `inet` `ip_address` via `abbrev()` (Entity
+            // `CAST AS text` appends `/32`/`/128`); window tasks need
+            // `ROW_NUMBER()` inexpressible in sea-query 0.32 (`Func` has no
+            // `row_number`). The fixture-pinned Django text runs through
+            // sqlx for these three.
+            // raw-sql: abbrev() for inet ip_address; ROW_NUMBER() for window tasks
             let mut stream = sqlx::query(&sql).fetch(pool);
             while let Some(row) = stream.try_next().await? {
                 driver.push(decode_row(task, &row)?).await?;
