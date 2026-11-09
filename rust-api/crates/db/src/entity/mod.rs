@@ -231,6 +231,7 @@ pub mod runner;
 pub mod runner_force_refresh;
 pub mod runner_live_state;
 pub mod runner_session;
+pub mod rust_runner_model_catalog;
 pub mod scheduler_bindings;
 pub mod schedulers;
 pub mod sessions;

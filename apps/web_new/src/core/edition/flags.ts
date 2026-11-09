@@ -5,7 +5,14 @@
 // §5). The rail stays suppressed unless an edition opts in; the sidebar
 // toggle stays mounted unless an edition opts out (the community
 // default on every build today).
-import { APP_RAIL_FLAG, PAGE_ASSISTANT_FLAG, PAGE_MOVE_FLAG, SIDEBAR_TOGGLE_FLAG, type Edition } from "./types.js";
+import {
+  APP_RAIL_FLAG,
+  OPENHUB_FREE_QUOTA_FLAG,
+  PAGE_ASSISTANT_FLAG,
+  PAGE_MOVE_FLAG,
+  SIDEBAR_TOGGLE_FLAG,
+  type Edition,
+} from "./types.js";
 
 /** True only when the edition opts into the far-left app rail. */
 export function isAppRailEnabled(edition: Edition): boolean {
@@ -34,4 +41,14 @@ export function isPageMoveEnabled(edition: Edition): boolean {
  */
 export function isPageAssistantEnabled(edition: Edition): boolean {
   return edition.flags[PAGE_ASSISTANT_FLAG] === true;
+}
+
+/**
+ * True only where the edition emits the OpenHub free-quota turn codes
+ * (NEWPIDASH-148). The cloud edition is recognized by `id === "cloud"`
+ * (private `ee-overlay/.../cloud.ts`) or by the explicit
+ * `openhub-free-quota` flag; OSS leaves both absent.
+ */
+export function isOpenhubFreeQuotaEnabled(edition: Edition): boolean {
+  return edition.id === "cloud" || edition.flags[OPENHUB_FREE_QUOTA_FLAG] === true;
 }

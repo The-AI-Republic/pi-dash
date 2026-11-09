@@ -156,7 +156,7 @@ def create_agent_run(
                    'direct',NULL,%s,0,
                    %s,
                    %s,%s,
-                   NULL,NULL,'','','locality')""",
+                   NULL,NULL,'','{}','{}','locality')""",
         (
             run_id, status, prompt,
             now + timedelta(seconds=lease_in_seconds) if lease_in_seconds is not None else None,

@@ -32,11 +32,18 @@ export {
   APP_RAIL_FLAG,
   INTAKE_SOURCE_PILL_FLAG,
   ISSUE_DEDUPE_FLAG,
+  OPENHUB_FREE_QUOTA_FLAG,
   PAGE_ASSISTANT_FLAG,
   PAGE_MOVE_FLAG,
   SIDEBAR_TOGGLE_FLAG,
 } from "./types.js";
-export { isAppRailEnabled, isPageAssistantEnabled, isPageMoveEnabled, isSidebarToggleEnabled } from "./flags.js";
+export {
+  isAppRailEnabled,
+  isOpenhubFreeQuotaEnabled,
+  isPageAssistantEnabled,
+  isPageMoveEnabled,
+  isSidebarToggleEnabled,
+} from "./flags.js";
 export {
   APPS_CATALOG_ROUTE_PATH,
   CLOUD_LOGIN_PATH,

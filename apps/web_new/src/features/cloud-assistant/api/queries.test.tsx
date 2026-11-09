@@ -19,6 +19,9 @@ import {
   cloudConnectionsQueryOptions,
   cloudQuotaQueryOptions,
   useCloudAssistantConfig,
+  USAGE_QUOTA_STALE_TIME_MS,
+  usageQuotaQueryOptions,
+  useFreeTokenUsage,
 } from "./queries.js";
 
 function fakeClient() {
@@ -32,6 +35,7 @@ describe("cloud assistant keys", () => {
     expect(cloudAssistantKeys.connections()).toEqual(["cloud-assistant", "connections"]);
     expect(cloudAssistantKeys.config()).toEqual(["cloud-assistant", "config"]);
     expect(cloudAssistantKeys.quota()).toEqual(["cloud-assistant", "quota"]);
+    expect(cloudAssistantKeys.usageQuota()).toEqual(["cloud-assistant", "usage-quota"]);
   });
 });
 
@@ -81,6 +85,48 @@ describe("cloudQuotaQueryOptions", () => {
     const client = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
     const options = cloudQuotaQueryOptions(client);
     await expect(options.queryFn?.({} as never)).resolves.toBeNull();
+  });
+});
+
+describe("usageQuotaQueryOptions", () => {
+  it("reads the usage quota on its short stale window", async () => {
+    const { client, getJson } = fakeClient();
+    const options = usageQuotaQueryOptions(client);
+    expect(options.queryKey).toEqual(cloudAssistantKeys.usageQuota());
+    expect(options.staleTime).toBe(USAGE_QUOTA_STALE_TIME_MS);
+    expect(USAGE_QUOTA_STALE_TIME_MS).toBeGreaterThanOrEqual(30_000);
+    expect(USAGE_QUOTA_STALE_TIME_MS).toBeLessThanOrEqual(60_000);
+    await options.queryFn?.({} as never);
+    expect(getJson).toHaveBeenCalledWith("/api/openhub/usage/quota/");
+  });
+});
+
+describe("useFreeTokenUsage", () => {
+  it("exposes the plan and free models for the meter and picker", async () => {
+    createAppClient("https://api.test", (async () => ({
+      status: 200,
+      url: "https://api.test/api/openhub/usage/quota/",
+      headers: { get: () => "application/json" },
+      text: async () =>
+        JSON.stringify({
+          plan: "free",
+          llm: {
+            freeTokensUsed: 5,
+            freeTokensLimit: 2_000_000,
+            freeModels: ["deepseek/deepseek-v4-flash"],
+          },
+          resetsAt: "2026-11-10T00:00:00+00:00",
+        }),
+    })) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children?: React.ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children as never}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useFreeTokenUsage(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.plan).toBe("free");
+    expect(result.current.data?.llm.freeModels).toEqual(["deepseek/deepseek-v4-flash"]);
+    resetAppClient();
   });
 });
 

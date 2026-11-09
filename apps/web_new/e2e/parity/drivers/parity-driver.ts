@@ -1225,6 +1225,10 @@ export interface ParityDriver {
   codeReviewInputValue(): Promise<string>;
   /** Detach the review row showing `title`; resolves once its row is gone. */
   codeReviewDetach(title: string): Promise<void>;
+  /** Whether the attach form input is present (archived items hide it). */
+  codeReviewAttachVisible(): Promise<boolean>;
+  /** Whether any per-row detach control is present (archived items hide it). */
+  codeReviewDetachVisible(): Promise<boolean>;
   /** Whether the worklog create control renders in the activity header. */
   worklogCreateVisible(): Promise<boolean>;
   // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Observed on

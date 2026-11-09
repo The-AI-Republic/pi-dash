@@ -4609,6 +4609,8 @@ async fn create_issue_inner(
                     labels,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -4851,6 +4853,7 @@ async fn partial_update_inner(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate,
+                        pod_once: false,
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -5004,6 +5007,8 @@ pub async fn put_update_issue(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),
@@ -5167,6 +5172,8 @@ async fn destroy_issue_inner(
                     prev_state: prev,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(user_id),
                         moved_by_run: None,
                         now: utc_now_micros(),

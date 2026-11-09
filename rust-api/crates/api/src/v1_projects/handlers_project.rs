@@ -813,6 +813,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "dedicated_runner_lost_action",
     "created_by",
     "updated_by",
     "workspace",
@@ -1144,6 +1145,11 @@ pub async fn render_project(
         &mut map,
         "default_agent_executor",
         Value::String(row_string(row, "default_agent_executor")?),
+    );
+    put(
+        &mut map,
+        "dedicated_runner_lost_action",
+        Value::String(row_string(row, "dedicated_runner_lost_action")?),
     );
     put(
         &mut map,
@@ -2667,9 +2673,10 @@ pub async fn list_projects_inner(
         "-name",
     ];
     // The eight queryset arms use the list-GET builder (with the
-    // `sort_order` annotation); any other validated key uses the plain
-    // list base (no `sort_order`, like the old
-    // `PROJECT_LIST_BASE_SQL` + `ORDER BY`).
+    // `sort_order` annotation); any other validated key uses the custom
+    // builder, which also carries `sort_order` and replaces the default
+    // ordering with exactly the one requested key (Django
+    // `order_by(request.GET order_by)`, PIDASHCONV-1720).
     let stmt = if KNOWN_ORDER.contains(&order_key.as_str()) {
         pidash_db::v1_projects::queries_projmem::project_list_get(&scope, &order_key)
     } else {
@@ -2682,9 +2689,7 @@ pub async fn list_projects_inner(
         } else {
             sea_query::Order::Asc
         };
-        let mut stmt = pidash_db::v1_projects::queries_projmem::project_list(&scope);
-        stmt.order_by(Alias::new(name), direction);
-        stmt
+        pidash_db::v1_projects::queries_projmem::project_list_get_custom(&scope, name, direction)
     };
     let rows: Vec<Row> = orm(&pre.pool)
         .query_all(DbBackend::Postgres.build(&stmt))

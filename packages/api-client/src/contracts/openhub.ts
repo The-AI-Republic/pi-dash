@@ -390,3 +390,42 @@ export async function getFreeQuota(client: ApiClient): Promise<FreeQuota> {
   }
   return normalized;
 }
+
+/**
+ * The free-lane LLM allowance behind `GET /api/openhub/usage/quota/`
+ * (NEWPIDASH-149). The proxy answers the Hub's quota payload verbatim,
+ * so the LLM fields arrive nested here; `plan` (free, PAYG, Member) and
+ * `freeModels` are the two the model picker reuses (NEWPIDASH-150).
+ */
+export const OpenhubUsageQuotaLlm = z.object({
+  freeTokensUsed: z.number(),
+  freeTokensLimit: z.number(),
+  freeModels: z.array(z.string()),
+});
+export type OpenhubUsageQuotaLlm = z.infer<typeof OpenhubUsageQuotaLlm>;
+
+/** The Hub's free-lane Apps allowance; present when the Hub reports it. */
+export const OpenhubUsageQuotaApps = z.object({
+  freeCallsUsed: z.number(),
+  freeCallsLimit: z.number(),
+});
+export type OpenhubUsageQuotaApps = z.infer<typeof OpenhubUsageQuotaApps>;
+
+/**
+ * One usage-quota answer. `resetsAt` is the ISO instant the daily
+ * allowance rolls over (midnight UTC); the UI renders it in local time.
+ * Failures surface as taxonomy ApiErrors (openhub_reauth_required and
+ * friends), so a caller that cannot read it hides rather than blocks.
+ */
+export const OpenhubUsageQuota = z.object({
+  plan: z.string(),
+  llm: OpenhubUsageQuotaLlm,
+  apps: z.optional(OpenhubUsageQuotaApps),
+  resetsAt: z.string(),
+});
+export type OpenhubUsageQuota = z.infer<typeof OpenhubUsageQuota>;
+
+export async function getUsageQuota(client: ApiClient): Promise<OpenhubUsageQuota> {
+  const body = await client.getJson<unknown>("/api/openhub/usage/quota/");
+  return client.parse(OpenhubUsageQuota, body, "GET /api/openhub/usage/quota/");
+}

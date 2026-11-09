@@ -1288,6 +1288,7 @@ async fn cycle_grouped_response(
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
         process_sub_grouped_results, sub_field_dict, sub_total_dicts, total_dict,
+        unquote_sort_order,
     };
     use pidash_services::app_issues::shape::envelope;
     let limit = per_page.min(1000);
@@ -1391,6 +1392,7 @@ async fn cycle_grouped_response(
             .map_err(group_denial)?,
     };
     let results_json = serde_json::to_string(&results_value).map_err(|_| Denial::ServerError)?;
+    let results_json = unquote_sort_order(&results_json);
     let top_group = group_totals
         .iter()
         .map(|(_, count)| *count)

@@ -107,6 +107,13 @@ pub mod domain {
     pub use pidash_services::domain::workspaces::members::add_with_active;
     // Renamed: the flat `deactivate_by_workspace` is the projects twin
     // (UPDATE project_members); this one writes workspace_members.
+    pub use pidash_services::domain::issue_assignment::list_project_runners;
+    pub use pidash_services::domain::issue_assignment::resolve_pod_ref;
+    pub use pidash_services::domain::issue_assignment::resolve_runner_ref;
+    pub use pidash_services::domain::issue_assignment::runner_list_row_to_value;
+    pub use pidash_services::domain::issue_assignment::ResolveError;
+    pub use pidash_services::domain::issue_assignment::RunnerListParams;
+    pub use pidash_services::domain::issue_assignment::RunnerListRow;
     pub use pidash_services::domain::workspaces::members::deactivate_by_workspace as deactivate_workspace_members_by_workspace;
     pub use pidash_services::domain::workspaces::members::deactivate_without_updated_by;
     pub use pidash_services::domain::workspaces::members::overwrite;
@@ -229,6 +236,13 @@ pub mod read {
     pub use pidash_services::read::workspace_of;
     pub use pidash_services::read::workspace_row;
     pub use pidash_services::read::workspace_slug;
+    // PIDASHCONV-1723: dispatch_wait render seam for MCP pidash_get_issue
+    // (design §14.3). Overlay calls fetch_active_dispatch_run then
+    // build_dispatch_wait with the viewer for `releasable`.
+    pub use pidash_services::domain::issue_assignment::build_dispatch_wait;
+    pub use pidash_services::domain::issue_assignment::dedicated_refusal_body;
+    pub use pidash_services::domain::issue_assignment::fetch_active_dispatch_run;
+    pub use pidash_services::domain::issue_assignment::RunWaitInputs;
     pub use pidash_services::read::ActorDetailView;
     pub use pidash_services::read::AssetRow;
     pub use pidash_services::read::BlockerRows;
@@ -302,7 +316,10 @@ pub mod ops {
     pub use pidash_jobs::orchestration::run_work_item_id;
     pub use pidash_jobs::orchestration::HandoffInlineDeps;
     pub use pidash_jobs::orchestration::HandoffStore;
+    pub use pidash_jobs::runner_enroll::bounce_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::fire_revoke_bundle;
+    pub use pidash_jobs::runner_enroll::overlay_store_deps;
+    pub use pidash_jobs::runner_enroll::recreate_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::revoke as runners_revoke; // renamed: `revoke` is the services revoke module.
     pub use pidash_jobs::runner_enroll::RevokeBundle;
     pub use pidash_jobs::runner_enroll::RevokeCollected;

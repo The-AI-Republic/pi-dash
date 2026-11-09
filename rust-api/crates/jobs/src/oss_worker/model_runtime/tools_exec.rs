@@ -1564,6 +1564,8 @@ async fn op_create_project_issue(
     // Inert: the fire is skipped (the caller drives it post-commit).
     let fire = domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(scope.creator_id),
         moved_by_run: None,
         now,
@@ -2221,6 +2223,8 @@ async fn fire_create_transition(
         prev_state_id: None,
         current_state_id: Some(current_state_id),
         dispatch_immediate: true,
+        pod_once: false,
+
         moved_by_run: None,
         now,
         // Caller-drawn jitter (L5 quirk-5): none, like the v1 create

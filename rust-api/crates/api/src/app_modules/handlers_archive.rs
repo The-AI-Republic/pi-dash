@@ -44,7 +44,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Router;
 use sea_orm::sea_query::Expr;
@@ -63,9 +63,9 @@ use super::handlers_module_links::{
 use super::handlers_modules::{
     empty_response, fetch_archive_label_estimate, fetch_assignee_distribution,
     fetch_burndown_chart, fetch_estimate_type, fetch_label_distribution, fetch_module_links,
-    fetch_sub_issues, json_response, parse_uuid_or_invalid, pool_of, render_distribution_array,
-    render_float, shape_link, shape_value, shift_datetime, HandlerResult, ASSIGNEE_COUNT_ORDER,
-    ASSIGNEE_ESTIMATE_ORDER, DETAIL_ROW_ORDER,
+    fetch_sub_issues, is_noncanonical_uuid, json_response, parse_uuid_or_invalid, pool_of,
+    proxy_segment, render_distribution_array, render_float, shape_link, shape_value,
+    shift_datetime, HandlerResult, ASSIGNEE_COUNT_ORDER, ASSIGNEE_ESTIMATE_ORDER, DETAIL_ROW_ORDER,
 };
 use crate::app_issues::Denial;
 use crate::state::AppState;
@@ -307,7 +307,14 @@ async fn archive_get(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     match archive_context(
         &state,
         &slug,
@@ -364,7 +371,14 @@ async fn archive_post(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match archive_context(
         &state,
         &slug,
@@ -432,7 +446,14 @@ async fn archive_delete(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match archive_context(
         &state,
         &slug,
@@ -527,7 +548,14 @@ async fn archived_detail(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth).
+    if is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match archive_context(
         &state,
         &slug,

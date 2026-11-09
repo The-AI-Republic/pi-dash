@@ -349,9 +349,17 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 /// detail"}`.
 const INVALID_DETAIL_MSG: &str = "Please provide valid detail";
 
-fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
-    raw.parse::<uuid::Uuid>()
-        .map_err(|_| Denial::BadError(INVALID_DETAIL_MSG.to_owned()))
+/// Parse a `<uuid:user_id>` path segment the way Django's converter routes
+/// it: only the canonical lowercase hyphenated spelling reaches the view;
+/// anything else is the resolver 404 before auth (`UUIDConverter` matches
+/// `[0-9a-f]{8}-…` lowercase-only, PIDASHCONV-1713).
+fn parse_uuid_path(raw: &str) -> Result<uuid::Uuid, Denial> {
+    match crate::uuid_path::classify_uuid_segment(raw) {
+        crate::uuid_path::UuidSegment::Canonical(id) => Ok(id),
+        crate::uuid_path::UuidSegment::NonCanonical | crate::uuid_path::UuidSegment::Garbage => {
+            Err(Denial::PageNotFound)
+        }
+    }
 }
 
 /// The actor's `user_timezone` (`users.user_timezone`), parsed for DRF
@@ -628,9 +636,10 @@ async fn user_profile(
     Path((slug, user_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth.
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     // `User.objects.get(pk=user_id)` (`:283`): miss → 404.
     let db = pidash_db::pool::sea_orm_connection(&pool);
     let profile_row: Option<users::Model> = users::Entity::find_by_id(user_id)
@@ -1144,7 +1153,7 @@ fn p_rich_condition(
                 for leaf in leaves {
                     let name = crate::app_issues::leaf_name(&leaf.field, leaf.lookup);
                     let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !matches!(expr, SimpleExpr::Custom(_)) {
+                    if !pidash_db::filterset::is_constant(&expr) {
                         if let Some(alias) = relation_alias(&name) {
                             used.insert(alias);
                         }
@@ -1405,17 +1414,18 @@ async fn user_profile_issues(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth
+    // and before the class gate (a non-member with a garbage id 404s,
+    // never 403s).
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    // Class gates run in `initial()`, before the body parses `user_id`
-    // (a non-member with a garbage id 403s, never 400s).
     let gate = gates::gate_for("GET", "workspaces/<slug>/user-issues/<user_id>/")
         .expect("user-issues gate")
         .gate;
     if let Some(denied) = check_class_gate(&pool, &gate, &slug, &viewer).await? {
         return Ok(denied);
     }
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     // Group clash is checked in-view before `paginate` parses per_page
     // (`user.py:174-182`).
     if let Some(mismatch) = qp::profile_group_mismatch(
@@ -1713,6 +1723,35 @@ fn profile_shape_json_value(field: &str, value: &Value) -> Value {
     }
 }
 
+/// Unquote `sort_order` in serialized grouped rows: Django renders the
+/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
+/// a string for the grouping kernels (which never do math on it). The
+/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
+/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
+/// splicing the quotes is exact.
+fn unquote_sort_order(results_json: &str) -> String {
+    let mut out = String::with_capacity(results_json.len());
+    let mut rest = results_json;
+    let marker = "\"sort_order\":\"";
+    while let Some(start) = rest.find(marker) {
+        let (head, tail) = rest.split_at(start + marker.len());
+        out.push_str(&head[..head.len() - 1]);
+        match tail.find('"') {
+            Some(end) => {
+                out.push_str(&tail[..end]);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push_str(tail);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Grouped / sub-grouped branch (`user.py:174-242`): window-function
 /// pagination over the group partition, totals with the intake /
 /// archived / draft `count_filter`, buckets from QRY-C
@@ -1834,6 +1873,7 @@ async fn profile_grouped_response(
             .map_err(|_| Denial::ServerError)?,
     };
     let results_json = serde_json::to_string(&results_value).map_err(|_| Denial::ServerError)?;
+    let results_json = unquote_sort_order(&results_json);
     let top = group_totals
         .iter()
         .map(|(_, count)| *count)
@@ -2909,9 +2949,10 @@ async fn user_profile_stats(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth.
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     // No permission_classes (`:397`): any authenticated caller runs the
     // bundle; the queries scope by requester.
     let (legacy, sub_legacy) = compile_stats_legacy(&query)?;
@@ -3588,17 +3629,18 @@ async fn user_activity(
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
 ) -> HandlerResult {
+    // The `<uuid:user_id>` converter runs at URL resolution, before auth
+    // and before the class gate (a non-member with a garbage id 404s,
+    // never 403s).
+    let user_id = parse_uuid_path(&user_raw)?;
     let pool = pool_of(&state)?;
     let viewer = actor_user_id(extension)?;
-    // Class gates run in `initial()`, before the body parses `user_id`
-    // (a non-member with a garbage id 403s, never 400s).
     let gate = gates::gate_for("GET", "workspaces/<slug>/user-activity/<user_id>/")
         .expect("user-activity gate")
         .gate;
     if let Some(denied) = check_class_gate(&pool, &gate, &slug, &viewer).await? {
         return Ok(denied);
     }
-    let user_id = parse_uuid_or_invalid(&user_raw)?;
     let (params, order_by) = activity_params(&query)?;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw).map_err(page_denial)?;
     // `?project=` getlist (`:375,386-387`): raw strings, UUID-validated
@@ -3677,6 +3719,43 @@ mod tests {
             "/api/workspaces/{slug}/user-issues/{user_id}/"
         );
         assert_eq!(ME_ACTIVITIES_PATH, "/api/users/me/activities/");
+    }
+
+    #[test]
+    fn sort_order_unquotes_exactly() {
+        assert_eq!(
+            unquote_sort_order(r#"{"a":1,"sort_order":"65535.0","b":[]}"#),
+            r#"{"a":1,"sort_order":65535.0,"b":[]}"#
+        );
+        assert_eq!(
+            unquote_sort_order(r#"[{"sort_order":"1e+20"}]"#),
+            r#"[{"sort_order":1e+20}]"#
+        );
+        assert_eq!(unquote_sort_order(r#"{"x":"y"}"#), r#"{"x":"y"}"#);
+    }
+
+    #[test]
+    fn uuid_spelling_follows_the_converter() {
+        // PIDASHCONV-1713: only the canonical lowercase hyphenated spelling
+        // routes; uppercase/simple/braced/urn/garbage 404 at resolution.
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        assert_eq!(
+            parse_uuid_path(canonical).unwrap(),
+            uuid::Uuid::parse_str(canonical).unwrap()
+        );
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "xyz",
+            "",
+        ] {
+            assert!(
+                matches!(parse_uuid_path(raw), Err(Denial::PageNotFound)),
+                "{raw}"
+            );
+        }
     }
 
     #[test]

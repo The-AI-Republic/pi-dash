@@ -200,6 +200,22 @@ pub fn should_retry(attempts: i32, max_retries: i32) -> bool {
     attempts < max_retries
 }
 
+/// Advisory-lock key serializing the queue DDL at boot
+/// (NEWPIDASH-156). Distinct from
+/// [`crate::scheduler::BEAT_LOCK_KEY`] (the scheduler singleton) and
+/// from the per-project keys derived in
+/// `pidash_db::entity::issue_hooks`: the queue DDL lock is global to
+/// the database, not per project.
+pub const SCHEMA_LOCK_KEY: i64 = 474_002_156_156_156;
+
+/// Statement taking the transaction-scoped [`SCHEMA_LOCK_KEY`] lock.
+/// The lock is held until the DDL transaction commits, so concurrent
+/// first-boots run the `CREATE TABLE IF NOT EXISTS` statements one at
+/// a time (NEWPIDASH-156).
+pub fn schema_lock_sql() -> &'static str {
+    "SELECT pg_advisory_xact_lock($1)"
+}
+
 /// DDL for the queue table. Idempotent: safe to run on every worker boot.
 pub fn ensure_schema_sql() -> &'static str {
     "CREATE TABLE IF NOT EXISTS rust_job_queue (\
@@ -229,15 +245,35 @@ pub fn ensure_claim_index_sql() -> &'static str {
 }
 
 /// Create both queue tables. Runs at worker boot, never from requests.
+///
+/// The three DDL statements run inside one transaction under the
+/// [`SCHEMA_LOCK_KEY`] advisory lock (NEWPIDASH-156): Postgres does
+/// not make `CREATE TABLE IF NOT EXISTS` safe under concurrency — two
+/// sessions that both see no table race on the catalogue insert and
+/// the loser fails with 23505 (`pg_class_relname_nsp_index`) or 42P07
+/// (`duplicate_table`). The lock serializes concurrent first-boots
+/// (compose starting api + worker, several api replicas), so each
+/// later booter runs its `IF NOT EXISTS` statements only after the
+/// winner has committed and is a no-op. Covers the schedule table
+/// too: its DDL is the third statement below.
 pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    // raw-sql: advisory xact locks have no SeaORM/sea-query builder form (orm-migration.md §6); the key is bound, never interpolated.
+    sqlx::query(schema_lock_sql())
+        .bind(SCHEMA_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
     // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
-    sqlx::query(ensure_schema_sql()).execute(pool).await?;
+    sqlx::query(ensure_schema_sql()).execute(&mut *tx).await?;
     // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
-    sqlx::query(ensure_claim_index_sql()).execute(pool).await?;
+    sqlx::query(ensure_claim_index_sql())
+        .execute(&mut *tx)
+        .await?;
     // raw-sql: Rust-owned DDL passthrough (schedule schema) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
     sqlx::query(crate::schedule::ensure_schedule_schema_sql())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -680,6 +716,7 @@ mod tests {
     #[test]
     fn all_statements_parse_as_postgres() {
         for sql in [
+            schema_lock_sql(),
             ensure_schema_sql(),
             ensure_claim_index_sql(),
             enqueue_sql(),
@@ -959,5 +996,89 @@ mod tests {
             .contains("reclaimed stale"));
         let (status, _, _) = state(&pool, queued_id).await;
         assert_eq!(status, "queued");
+    }
+
+    /// Concurrent first-boot (NEWPIDASH-156): several tasks run
+    /// [`ensure_schema`] at once against a fresh scratch schema; every
+    /// one must succeed. Without the advisory-lock serialization in
+    /// `ensure_schema`, concurrent `CREATE TABLE IF NOT EXISTS` races
+    /// on the catalogue: two sessions both see no table, race on the
+    /// `pg_class` insert and the loser fails with 23505
+    /// (`pg_class_relname_nsp_index`, here on `rust_job_queue_id_seq`).
+    /// Needs a live Postgres; ignored by default. Uses a dedicated
+    /// schema so the table drop below never races another live queue
+    /// test on the shared tables.
+    #[tokio::test]
+    #[ignore = "needs live Postgres via DATABASE_URL"]
+    async fn ensure_schema_concurrent_first_boot_all_succeed() {
+        use std::str::FromStr;
+
+        let url =
+            std::env::var("DATABASE_URL").expect("export DATABASE_URL for the live queue tests");
+        let bootstrap = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect scratch database");
+        // A fresh schema per run: the tables must not already exist.
+        let schema = format!("race_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&bootstrap)
+            .await
+            .expect("create test schema");
+        bootstrap.close().await;
+
+        // A pool pinned to the test schema: the unqualified queue DDL
+        // lands there through `search_path`.
+        let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+            .expect("parse DATABASE_URL")
+            .options([("search_path", schema.as_str())]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(options)
+            .await
+            .expect("connect test pool");
+
+        // Several fresh rounds: each drops both tables, then releases
+        // every task on one barrier so they all enter `ensure_schema`
+        // together. A single 23505 in any round fails the test.
+        for round in 0..5 {
+            sqlx::query("DROP TABLE IF EXISTS rust_job_queue, rust_job_schedule")
+                .execute(&pool)
+                .await
+                .expect("drop queue tables for fresh round");
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let pool = pool.clone();
+                let barrier = barrier.clone();
+                tasks.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    ensure_schema(&pool).await
+                }));
+            }
+            let mut failures = Vec::new();
+            for (i, task) in tasks.into_iter().enumerate() {
+                match task.await.expect("spawned task") {
+                    Ok(()) => {}
+                    Err(error) => failures.push(format!("task {i}: {error:?}")),
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "round {round}: concurrent ensure_schema must all succeed: {failures:?}"
+            );
+            for table in ["rust_job_queue", "rust_job_schedule"] {
+                let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                    .bind(table)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("check table exists");
+                assert!(
+                    exists,
+                    "round {round}: {table} must exist after ensure_schema"
+                );
+            }
+        }
     }
 }

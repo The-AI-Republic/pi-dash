@@ -1726,7 +1726,7 @@ async fn archive_post(
         .col_expr(user_favorites::Column::DeletedAt, Expr::value(Some(now_tz)))
         .filter(user_favorites::Column::WorkspaceId.in_subquery(workspace_id_sub))
         .filter(user_favorites::Column::EntityType.eq("cycle"))
-        .filter(user_favorites::Column::EntityIdentifier.eq(cycle_id.to_string()))
+        .filter(user_favorites::Column::EntityIdentifier.eq(Some(cycle_id)))
         .filter(user_favorites::Column::ProjectId.eq(project_id))
         .filter(user_favorites::Column::DeletedAt.is_null())
         .exec(&db)

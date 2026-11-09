@@ -8,7 +8,7 @@
 // off-canvas mobile rail. God-mode's own chrome: the main shell
 // sidebar is not reused.
 import { Link, useLocation } from "@tanstack/react-router";
-import { Cpu, LayoutGrid, Repeat, Send, Settings, ShieldCheck, Sparkles } from "lucide-react";
+import { Cpu, LayoutGrid, ListOrdered, Repeat, Send, Settings, ShieldCheck, Sparkles } from "lucide-react";
 import * as React from "react";
 
 import { Tooltip } from "@pidash/kit";
@@ -32,6 +32,7 @@ const ENTRY_ICONS: Record<string, typeof Settings> = {
   ai: Sparkles,
   loop: Repeat,
   runners: Cpu,
+  "runner-models": ListOrdered,
 };
 
 type RouterLinkProps = Parameters<typeof Link>[0];

@@ -916,12 +916,16 @@ export {
   OpenhubMarketplacePage,
   OpenhubOAuthStart,
   OpenhubStatus,
+  OpenhubUsageQuota,
+  OpenhubUsageQuotaApps,
+  OpenhubUsageQuotaLlm,
   appIconUrl,
   appOAuthBeginUrl,
   getAppAuthStatus,
   getAppManifest,
   getFreeQuota,
   getOpenhubStatus,
+  getUsageQuota,
   installApp,
   isFreeModel,
   isFreePlan,
@@ -1232,6 +1236,16 @@ export type {
 } from "./contracts/admin-loop.js";
 export { InstanceRunner, InstanceRunnerListResponse, listInstanceRunners } from "./contracts/admin-runners.js";
 export type { InstanceRunnerListQuery } from "./contracts/admin-runners.js";
+export {
+  RunnerModelCatalogResponse,
+  RunnerModelRow,
+  createRunnerModel,
+  deleteRunnerModel,
+  getModelCatalog,
+  listAdminRunnerModels,
+  updateRunnerModel,
+} from "./contracts/runner-models.js";
+export type { RunnerModelCreateInput, RunnerModelPatchInput } from "./contracts/runner-models.js";
 export {
   AdminMe,
   CloudAuthUser,

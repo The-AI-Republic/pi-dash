@@ -21,8 +21,8 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, JoinType,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use sea_query::LockType;
 use serde_json::{json, Value};
@@ -483,6 +483,550 @@ pub async fn validate_execution_target(
 }
 
 // ---------------------------------------------------------------------------
+// Hosted MCP seams: visibility-aware resolve-by-name + project runner list (PIDASHCONV-1721)
+//
+// Mirrors `apps/api/pi_dash/assistant/tools/issues.py:_resolve_runner_ref/_resolve_pod_ref`
+// and `apps/api/pi_dash/assistant/tools/projects.py:list_project_runners` plus
+// `apps/api/pi_dash/runner/services/permissions.py:runner_visible_to_user_q`,
+// behind the OSS SDK so the hosted MCP overlay never queries OSS tables directly.
+// The hosted entry `pi_dash_cloud/mcp/tools.py:_resolve_runner_ref/_resolve_pod_ref`
+// and `list_project_runners` (private-pi-dash PR #347) use identical semantics.
+
+/// Strip Python `str.strip()` parity: Rust `trim` leaves U+001C-U+001F;
+/// `py_strip` trims them too (assistant `py_strip` precedent).
+fn py_strip(text: &str) -> &str {
+    text.trim_matches(|ch: char| ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch))
+}
+
+/// Strip one matched pair of braces (`uuid.UUID` accepts `{...}`).
+fn strip_uuid_braces(value: &str) -> &str {
+    value
+        .strip_prefix('{')
+        .and_then(|inner| inner.strip_suffix('}'))
+        .unwrap_or(value)
+}
+
+/// `_is_uuid` (`assistant/tools/issues.py:252-266`): `uuid.UUID(str)` accepting
+/// hex with or without braces and dashes. `Uuid::parse_str` alone rejects the
+/// braced form, so strip first.
+fn is_uuid_token(value: &str) -> bool {
+    Uuid::parse_str(strip_uuid_braces(value)).is_ok()
+}
+
+/// Why a name resolution failed: a malformed choice or a database failure.
+/// The `Message` variant carries the byte-exact MCP tool text (Tier-2,
+/// a client can produce this input); `Db` follows the 500 path.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("{0}")]
+    Message(String),
+    #[error(transparent)]
+    Db(#[from] sea_orm::DbErr),
+}
+
+fn parse_uuid_token(value: &str) -> Uuid {
+    // Caller checked `is_uuid_token`, so this cannot fail.
+    Uuid::parse_str(strip_uuid_braces(value)).expect("is_uuid_token checked")
+}
+
+/// Resolve an `assigned_runner` input (UUID or name) in `project_id`.
+///
+/// UUIDs scope to `pod__project = project_id` with no visibility filter
+/// (unknown UUIDs fail closed). Names resolve among runners the acting
+/// `user_id` can see in the project (`runner_visible_to_user_q`: owner +
+/// `visibility = PRIVATE`), ordered by `name`, matched case-insensitively
+/// after `strip()` on both sides. Ambiguity lists matches with their UUIDs.
+pub async fn resolve_runner_ref(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+    user_id: Uuid,
+    ref_str: &str,
+) -> Result<runner::Model, ResolveError> {
+    let lookup = py_strip(ref_str);
+    if lookup.is_empty() {
+        return Err(ResolveError::Message(
+            "assigned_runner must not be empty".to_owned(),
+        ));
+    }
+    if is_uuid_token(lookup) {
+        let id = parse_uuid_token(lookup);
+        let relation = runner::Entity::belongs_to(pod::Entity)
+            .from(runner::Column::PodId)
+            .to(pod::Column::Id);
+        let found = runner::Entity::find()
+            .join(JoinType::InnerJoin, relation.into())
+            .filter(runner::Column::Id.eq(id))
+            .filter(pod::Column::ProjectId.eq(project_id))
+            .one(db)
+            .await?;
+        return match found {
+            Some(row) => Ok(row),
+            None => Err(ResolveError::Message(
+                "assigned_runner not found in this project".to_owned(),
+            )),
+        };
+    }
+    let relation = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id);
+    let rows = runner::Entity::find()
+        .join(JoinType::InnerJoin, relation.into())
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .filter(runner::Column::OwnerId.eq(user_id))
+        .filter(runner::Column::Visibility.eq(0i16))
+        .order_by_asc(runner::Column::Name)
+        .all(db)
+        .await?;
+    let lower = lookup.to_lowercase();
+    let matches: Vec<&runner::Model> = rows
+        .iter()
+        .filter(|r| py_strip(&r.name).to_lowercase() == lower)
+        .collect();
+    match matches.len() {
+        1 => Ok((*matches[0]).clone()),
+        0 => {
+            let available = if rows.is_empty() {
+                "(none)".to_owned()
+            } else {
+                rows.iter()
+                    .map(|r| r.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            Err(ResolveError::Message(format!(
+                "assigned_runner '{lookup}' not found; available: {available}"
+            )))
+        }
+        n => {
+            let listed = matches
+                .iter()
+                .map(|r| format!("{} ({})", r.name, r.id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(ResolveError::Message(format!(
+                "assigned_runner '{lookup}' matched {n} runners; disambiguate with the UUID: {listed}"
+            )))
+        }
+    }
+}
+
+/// Resolve an `assigned_pod` input (UUID or name) in `project_id`.
+///
+/// Accepts the full `<PROJ>_<name>` or the bare `<name>` (suffix after the
+/// first `_`). Pods have no visibility filter; all live pods in the project
+/// are candidates, ordered by `name` (`Pod.objects` excludes soft-deleted).
+/// Exact match is case-sensitive; the suffix fallback is also case-sensitive.
+pub async fn resolve_pod_ref(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+    ref_str: &str,
+) -> Result<pod::Model, ResolveError> {
+    let lookup = py_strip(ref_str);
+    if lookup.is_empty() {
+        return Err(ResolveError::Message(
+            "assigned_pod must not be empty".to_owned(),
+        ));
+    }
+    if is_uuid_token(lookup) {
+        let id = parse_uuid_token(lookup);
+        let found = pod::Entity::find_by_id(id)
+            .filter(pod::Column::DeletedAt.is_null())
+            .filter(pod::Column::ProjectId.eq(project_id))
+            .one(db)
+            .await?;
+        return match found {
+            Some(row) => Ok(row),
+            None => Err(ResolveError::Message(
+                "assigned_pod not found in this project".to_owned(),
+            )),
+        };
+    }
+    let rows = pod::Entity::find()
+        .filter(pod::Column::DeletedAt.is_null())
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .order_by_asc(pod::Column::Name)
+        .all(db)
+        .await?;
+    let mut matches: Vec<&pod::Model> = rows.iter().filter(|p| p.name == lookup).collect();
+    if matches.is_empty() {
+        matches = rows
+            .iter()
+            .filter(|p| {
+                let suffix = match p.name.split_once('_') {
+                    Some((_, suffix)) => suffix,
+                    None => p.name.as_str(),
+                };
+                suffix == lookup
+            })
+            .collect();
+    }
+    match matches.len() {
+        1 => Ok((*matches[0]).clone()),
+        0 => {
+            let available = if rows.is_empty() {
+                "(none)".to_owned()
+            } else {
+                rows.iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            Err(ResolveError::Message(format!(
+                "assigned_pod '{lookup}' not found; available: {available}"
+            )))
+        }
+        n => {
+            let listed = matches
+                .iter()
+                .map(|p| format!("{} ({})", p.name, p.id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(ResolveError::Message(format!(
+                "assigned_pod '{lookup}' matched {n} pods; disambiguate with the UUID: {listed}"
+            )))
+        }
+    }
+}
+
+/// One project-runner list request (the hosted `pidash_list_project_runners`
+/// read). `assignable_for` is the raw `assignable_for` string (`None` = not
+/// requested, `Some("new")` = new issue, `Some(uuid)` = that issue; garbage
+/// behaves as "new"). `pod_id` narrows to one pod when set. `include_bundled`
+/// false excludes `provisioning = desktop_bundled`.
+#[derive(Clone, Debug)]
+pub struct RunnerListParams {
+    pub project_id: Uuid,
+    pub user_id: Uuid,
+    pub pod_id: Option<Uuid>,
+    pub include_bundled: bool,
+    pub assignable_for: Option<String>,
+}
+
+/// One list row: the runner plus its eligibility read when asked.
+#[derive(Clone, Debug)]
+pub struct RunnerListRow {
+    pub runner: runner::Model,
+    pub pod_name: String,
+    pub pod_id: Uuid,
+    pub pod_is_default: bool,
+    pub pod_project_id: Uuid,
+    pub project_identifier: String,
+    pub dev_machine: Option<crate::runner_enroll::queries::manage_reads::RunnerJoinRow>,
+    pub live_state: Option<pidash_db::entity::runner_live_state::Model>,
+    // eligibility
+    pub assignable: Option<bool>,
+    pub not_assignable_code: Option<&'static str>,
+    pub is_busy: Option<bool>,
+    pub queue_depth: Option<u64>,
+}
+
+/// Visible runners of a project, most-recent-first (`-updated_at`), with the
+/// optional `assignable_for` eligibility read (design §7.4). Visibility is
+/// `owner = user AND visibility = PRIVATE`; bundled runners are excluded
+/// unless `include_bundled`. The shape helper that renders each row to the
+/// `RunnerSerializer` JSON is `runner_list_row_to_value` below.
+pub async fn list_project_runners(
+    db: &impl ConnectionTrait,
+    params: &RunnerListParams,
+) -> Result<Vec<RunnerListRow>, sea_orm::DbErr> {
+    // Resolve the project row for workspace + identifier; a missing project
+    // reads as empty (the caller already scope-checked the project).
+    let Some(project_row) = projects::Entity::find_by_id(params.project_id)
+        .one(db)
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
+    // Reuse the R1 join query (owner + visibility + pod/project filters +
+    // bundled exclusion) so list, picker and CLI cannot drift.
+    let exclude = if params.include_bundled {
+        None
+    } else {
+        Some("desktop_bundled")
+    };
+    let join_rows = crate::runner_enroll::queries::manage_reads::runner_list(
+        db,
+        project_row.workspace_id,
+        params.user_id,
+        0i16,
+        params.pod_id,
+        exclude,
+        Some(params.project_id),
+    )
+    .await?;
+
+    // `assignable_for` resolution: None => not requested; Some("new") => new;
+    // Some(uuid) => that issue or new when missing/garbage.
+    let assignable_issue: Option<Option<issues::Model>> = match params.assignable_for.as_deref() {
+        None => None,
+        Some("new") => Some(None),
+        Some(raw) => {
+            let parsed: Option<Uuid> = if is_uuid_token(raw) {
+                Some(parse_uuid_token(raw))
+            } else {
+                None
+            };
+            let found: Option<issues::Model> = match parsed {
+                Some(id) => issues::Entity::find_by_id(id).one(db).await?,
+                None => None,
+            };
+            Some(found)
+        }
+    };
+
+    let mut out = Vec::with_capacity(join_rows.len());
+    for join in join_rows {
+        let runner_row = runner::Entity::find_by_id(join.id)
+            .one(db)
+            .await?
+            .ok_or_else(|| sea_orm::DbErr::RecordNotFound("runner".to_owned()))?;
+        let live_state =
+            crate::runner_enroll::queries::manage_reads::runner_live_state(db, runner_row.id)
+                .await?;
+        let (assignable, code, busy, depth) = match assignable_issue.as_ref() {
+            None => (None, None, None, None),
+            Some(issue_opt_ref) => {
+                let check = AssignmentCheck {
+                    user_id: Some(params.user_id),
+                    issue_id: issue_opt_ref.as_ref().map(|i| i.id),
+                    pod_id: None,
+                    project_id: Some(params.project_id),
+                    issue: issue_opt_ref.as_ref(),
+                };
+                let (ok, code_str) = assignable_for_runner(db, &runner_row, &check).await?;
+                let busy = is_busy(db, runner_row.id).await?;
+                let depth = queue_depth(db, runner_row.id).await?;
+                (Some(ok), Some(code_str), Some(busy), Some(depth))
+            }
+        };
+        out.push(RunnerListRow {
+            runner: runner_row,
+            pod_name: join.pod_name.clone(),
+            pod_id: join.pod_id,
+            pod_is_default: join.pod_is_default,
+            pod_project_id: join.pod_project_id,
+            project_identifier: join.project_identifier.clone(),
+            dev_machine: Some(join),
+            live_state,
+            assignable,
+            not_assignable_code: code,
+            is_busy: busy,
+            queue_depth: depth,
+        });
+    }
+    Ok(out)
+}
+
+/// Render one `RunnerListRow` to the `RunnerSerializer` JSON value (wire
+/// order via `runner_to_representation`). Datetimes render through the
+/// DRF kernel (`render_datetime`); `live_state` renders from the prefetched
+/// row (`null` only when the reverse one-to-one is missing), matching the
+/// API render and `RunnerLiveStateSerializer`.
+pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
+    use crate::runner_enroll::serializers::shapes::{
+        self, DevMachineMiniRow, LiveStateRow, PodMiniRow, RunnerRow,
+    };
+
+    let is_engine = row.runner.provisioning == PROVISIONING_DESKTOP_BUNDLED;
+    let dispatch_paused = row.runner.paused_at.is_some();
+    // machine display: dev_machine display_name or host_label or name
+    let machine_display = match &row.dev_machine {
+        Some(join) if join.dm_id.is_some() => {
+            let label = join.dm_label.clone().unwrap_or_default();
+            let host = join.dm_host_label.clone().unwrap_or_default();
+            if !label.is_empty() {
+                label
+            } else if !host.is_empty() {
+                host
+            } else {
+                "This computer".to_owned()
+            }
+        }
+        _ => {
+            if !row.runner.host_label.is_empty() {
+                row.runner.host_label.clone()
+            } else {
+                row.runner.name.clone()
+            }
+        }
+    };
+    let engine_paused = match &row.dev_machine {
+        Some(join) if is_engine => {
+            join.dm_engine_paused_by_owner.unwrap_or(false)
+                || !join
+                    .dm_engine_auto_pause_reason
+                    .clone()
+                    .unwrap_or_default()
+                    .is_empty()
+        }
+        _ => false,
+    };
+    // pod mini
+    let pod_id_str = row.pod_id.to_string();
+    let pod_project_str = row.pod_project_id.to_string();
+    let pod_mini = PodMiniRow {
+        id: &pod_id_str,
+        name: &row.pod_name,
+        is_default: row.pod_is_default,
+        project: &pod_project_str,
+        project_identifier: &row.project_identifier,
+    };
+    // Hold strings for the dev-machine mini so they outlive the row borrow.
+    let dm_id_str = row
+        .dev_machine
+        .as_ref()
+        .and_then(|j| j.dm_id.map(|id| id.to_string()));
+    let dm_host = row
+        .dev_machine
+        .as_ref()
+        .map(|j| j.dm_host_label.clone().unwrap_or_default())
+        .unwrap_or_default();
+    let dm_label = row
+        .dev_machine
+        .as_ref()
+        .map(|j| j.dm_label.clone().unwrap_or_default())
+        .unwrap_or_default();
+    let dm_pause_reason = row
+        .dev_machine
+        .as_ref()
+        .map(|j| j.dm_engine_auto_pause_reason.clone().unwrap_or_default())
+        .unwrap_or_default();
+    let dm_stored_sign_in = row
+        .dev_machine
+        .as_ref()
+        .map(|j| j.dm_engine_sign_in_state.clone().unwrap_or_default())
+        .unwrap_or_default();
+    let dm_expires_at = row
+        .dev_machine
+        .as_ref()
+        .and_then(|j| j.dm_engine_credential_expires_at);
+    let dm_sign_in = crate::domain::engine_credential::current_engine_sign_in_state(
+        &dm_stored_sign_in,
+        dm_expires_at,
+        Utc::now(),
+    );
+    let dm_expires = dm_expires_at.map(|d| pidash_compat::datetime::render_datetime(&d));
+    let dm_engine_paused_by_owner = row
+        .dev_machine
+        .as_ref()
+        .map(|j| j.dm_engine_paused_by_owner.unwrap_or(false))
+        .unwrap_or(false);
+    let dm_engine_team_runs = row
+        .dev_machine
+        .as_ref()
+        .map(|j| j.dm_engine_team_runs.unwrap_or(false))
+        .unwrap_or(false);
+    let dev_machine_id_str = row.runner.dev_machine_id.map(|id| id.to_string());
+    let dev_mini = dm_id_str.as_ref().map(|id| DevMachineMiniRow {
+        id: id.as_str(),
+        host_label: dm_host.as_str(),
+        label: dm_label.as_str(),
+        engine_paused_by_owner: dm_engine_paused_by_owner,
+        engine_auto_pause_reason: dm_pause_reason.as_str(),
+        engine_team_runs: dm_engine_team_runs,
+        engine_sign_in_state: dm_sign_in.as_str(),
+        engine_credential_expires_at: dm_expires.as_deref(),
+    });
+    let id_str = row.runner.id.to_string();
+    let owner_str = row.runner.owner_id.to_string();
+    let pod_str = row.pod_id.to_string();
+    // Datetimes through the DRF kernel (`pidash_compat::datetime::render_datetime`).
+    let last_hb = row.runner.last_heartbeat_at.map(|d| {
+        let utc = d.with_timezone(&Utc);
+        pidash_compat::datetime::render_datetime(&utc)
+    });
+    let enrolled = row
+        .runner
+        .enrolled_at
+        .map(|d| pidash_compat::datetime::render_datetime(&d.with_timezone(&Utc)));
+    let revoked = row
+        .runner
+        .revoked_at
+        .map(|d| pidash_compat::datetime::render_datetime(&d.with_timezone(&Utc)));
+    let paused = row
+        .runner
+        .paused_at
+        .map(|d| pidash_compat::datetime::render_datetime(&d.with_timezone(&Utc)));
+    let created =
+        pidash_compat::datetime::render_datetime(&row.runner.created_at.with_timezone(&Utc));
+    let updated =
+        pidash_compat::datetime::render_datetime(&row.runner.updated_at.with_timezone(&Utc));
+    let live_observed = row
+        .live_state
+        .as_ref()
+        .and_then(|m| m.observed_run_id.map(|id| id.to_string()));
+    let live_last_event_at = row.live_state.as_ref().and_then(|m| {
+        m.last_event_at
+            .as_ref()
+            .map(|d| pidash_compat::datetime::render_datetime(&d.with_timezone(&Utc)))
+    });
+    let live_agent_activity = row.live_state.as_ref().and_then(|m| {
+        m.agent_last_activity_at
+            .as_ref()
+            .map(|d| pidash_compat::datetime::render_datetime(&d.with_timezone(&Utc)))
+    });
+    let live_updated = row
+        .live_state
+        .as_ref()
+        .map(|m| pidash_compat::datetime::render_datetime(&m.updated_at.with_timezone(&Utc)));
+    let live_row: Option<LiveStateRow> = row.live_state.as_ref().map(|m| LiveStateRow {
+        observed_run_id: live_observed.as_deref(),
+        last_event_at: live_last_event_at.as_deref(),
+        last_event_kind: m.last_event_kind.as_deref(),
+        last_event_summary: m.last_event_summary.as_deref(),
+        agent_pid: m.agent_pid.map(i64::from),
+        agent_subprocess_alive: m.agent_subprocess_alive,
+        approvals_pending: m.approvals_pending.map(i64::from),
+        usage: &m.usage,
+        llm_model: m.llm_model.as_deref(),
+        turn_count: m.turn_count.map(i64::from),
+        agent_health: m.agent_health.as_deref(),
+        agent_last_activity_at: live_agent_activity.as_deref(),
+        updated_at: live_updated.as_deref().unwrap_or_default(),
+    });
+    let paused_by = row.runner.paused_by_id.map(|id| id.to_string());
+    let runner_row = RunnerRow {
+        id: &id_str,
+        name: &row.runner.name,
+        status: &row.runner.status,
+        host_label: &row.runner.host_label,
+        is_engine,
+        engine_paused,
+        dispatch_paused,
+        machine_display_name: &machine_display,
+        provisioning: &row.runner.provisioning,
+        pod_dispatch: &row.runner.pod_dispatch,
+        os: &row.runner.os,
+        arch: &row.runner.arch,
+        runner_version: &row.runner.runner_version,
+        dev_metadata: &row.runner.dev_metadata,
+        protocol_version: i64::from(row.runner.protocol_version),
+        capabilities: &row.runner.capabilities,
+        last_heartbeat_at: last_hb.as_deref(),
+        owner: &owner_str,
+        dev_machine: dev_machine_id_str.as_deref(),
+        dev_machine_detail: dev_mini,
+        visibility: i64::from(row.runner.visibility),
+        pod: &pod_str,
+        pod_detail: pod_mini,
+        live_state: live_row,
+        enrolled_at: enrolled.as_deref(),
+        revoked_at: revoked.as_deref(),
+        revoked_reason: &row.runner.revoked_reason,
+        paused_at: paused.as_deref(),
+        paused_by: paused_by.as_deref(),
+        created_at: &created,
+        updated_at: &updated,
+        assignable: row.assignable,
+        not_assignable_code: row.not_assignable_code,
+        is_busy: row.is_busy,
+        queue_depth: row.queue_depth,
+    };
+    serde_json::to_value(shapes::runner_to_representation(&runner_row))
+        .expect("runner view serializes")
+}
+
+// ---------------------------------------------------------------------------
 // Engine usage rule (Python form, NEWPIDASH-49 kernel)
 // ---------------------------------------------------------------------------
 
@@ -721,6 +1265,28 @@ impl From<&agent_run::Model> for RunWaitInputs {
             created_at: run.created_at,
         }
     }
+}
+
+/// The active run `dispatch_wait` renders for: the newest QUEUED pinned
+/// run for the issue, newest first — exactly
+/// `AgentRun.objects.filter(work_item=obj, status=QUEUED)
+/// .exclude(pinned_runner__isnull=True).order_by("-created_at").first()`
+/// (`serializers/issue.py:get_dispatch_wait`). Returned as
+/// [`RunWaitInputs`] so [`build_dispatch_wait`] computes from one shape
+/// for both the SeaORM row and the L2 projection callers. `None` when
+/// no QUEUED pinned run exists.
+pub async fn fetch_active_dispatch_run(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+) -> Result<Option<RunWaitInputs>, sea_orm::DbErr> {
+    let row = agent_run::Entity::find()
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinnedRunnerId.is_not_null())
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .one(db)
+        .await?;
+    Ok(row.map(|model| RunWaitInputs::from(&model)))
 }
 
 /// The `dispatch_wait` object for a QUEUED pinned run (design §14.3), else
@@ -2557,5 +3123,293 @@ mod tests {
             Some(value) => std::env::set_var("DEDICATED_RUN_QUEUED_MAX_AGE_SECS", value),
             None => std::env::remove_var("DEDICATED_RUN_QUEUED_MAX_AGE_SECS"),
         }
+    }
+    #[test]
+    fn py_strip_trims_control_chars() {
+        // Python `str.strip()` trims U+001C-U+001F; Rust `trim` leaves them.
+        assert_eq!(py_strip("  hello  "), "hello");
+        assert_eq!(py_strip("\u{1c}hello\u{1f}"), "hello");
+        assert_eq!(py_strip("\u{1d}\u{1e}  foo  \u{1c}"), "foo");
+    }
+
+    #[test]
+    fn is_uuid_handles_braced() {
+        let id = Uuid::new_v4().to_string();
+        assert!(is_uuid_token(&id));
+        assert!(is_uuid_token(&format!("{{{id}}}")));
+        assert!(!is_uuid_token("not-a-uuid"));
+        assert!(!is_uuid_token(""));
+        assert_eq!(strip_uuid_braces(&format!("{{{id}}}")), id);
+        assert_eq!(strip_uuid_braces(&id), id);
+    }
+
+    #[test]
+    fn runner_not_found_message_matches_python() {
+        let lookup = "my-runner";
+        let rows: Vec<runner::Model> = vec![];
+        let available = if rows.is_empty() {
+            "(none)".to_owned()
+        } else {
+            rows.iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let msg = format!("assigned_runner '{lookup}' not found; available: {available}");
+        assert_eq!(
+            msg,
+            "assigned_runner 'my-runner' not found; available: (none)"
+        );
+        // With rows
+        let mut a = runner_fixture();
+        a.name = "alpha".to_owned();
+        let mut b = runner_fixture();
+        b.name = "beta".to_owned();
+        let avail2 = [a.clone(), b.clone()]
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg2 = format!("assigned_runner '{lookup}' not found; available: {avail2}");
+        assert_eq!(
+            msg2,
+            "assigned_runner 'my-runner' not found; available: alpha, beta"
+        );
+    }
+
+    #[test]
+    fn runner_ambiguous_message_lists_ids() {
+        let lookup = "dup";
+        let mut a = runner_fixture();
+        a.name = "dup".to_owned();
+        let mut b = runner_fixture();
+        b.name = "dup".to_owned();
+        let listed = vec![&a, &b]
+            .into_iter()
+            .map(|r| format!("{} ({})", r.name, r.id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg = format!(
+            "assigned_runner '{lookup}' matched {} runners; disambiguate with the UUID: {listed}",
+            2
+        );
+        assert!(msg.starts_with("assigned_runner 'dup' matched 2 runners;"));
+        assert!(msg.contains(&a.id.to_string()));
+        assert!(msg.contains(&b.id.to_string()));
+    }
+
+    #[test]
+    fn pod_suffix_fallback_matches_python() {
+        let pods = ["WEB_pod_1", "API_pod_2", "plain"];
+        let lookup = "pod_1";
+        let exact: Vec<_> = pods.iter().filter(|p| **p == lookup).collect();
+        assert!(exact.is_empty());
+        let suffix: Vec<_> = pods
+            .iter()
+            .filter(|p| {
+                let s = match p.split_once('_') {
+                    Some((_, suffix)) => suffix,
+                    None => *p,
+                };
+                s == lookup
+            })
+            .collect();
+        assert_eq!(suffix.len(), 1);
+        assert_eq!(*suffix[0], "WEB_pod_1");
+        // Exact match wins first
+        let lookup2 = "plain";
+        let exact2: Vec<_> = pods.iter().filter(|p| **p == lookup2).collect();
+        assert_eq!(exact2.len(), 1);
+    }
+
+    #[test]
+    fn pod_ambiguous_and_missing_messages() {
+        let lookup = "missing";
+        let rows: Vec<String> = vec!["WEB_a".to_owned(), "API_b".to_owned()];
+        let avail = rows.join(", ");
+        assert_eq!(
+            format!("assigned_pod '{lookup}' not found; available: {avail}"),
+            "assigned_pod 'missing' not found; available: WEB_a, API_b"
+        );
+        let empty: Vec<String> = vec![];
+        let avail_empty = if empty.is_empty() {
+            "(none)".to_owned()
+        } else {
+            empty.join(", ")
+        };
+        assert_eq!(avail_empty, "(none)");
+    }
+
+    #[test]
+    fn list_row_value_gates_eligibility_fields() {
+        let mut runner = runner_fixture();
+        runner.name = "mini".to_owned();
+        let join = crate::runner_enroll::queries::manage_reads::RunnerJoinRow {
+            id: runner.id,
+            owner_id: runner.owner_id,
+            workspace_id: runner.workspace_id,
+            dev_machine_id: runner.dev_machine_id,
+            pod_id: runner.pod_id,
+            name: runner.name.clone(),
+            host_label: runner.host_label.clone(),
+            provisioning: runner.provisioning.clone(),
+            pod_dispatch: runner.pod_dispatch.clone(),
+            visibility: runner.visibility,
+            enrolled_at: runner.enrolled_at.map(|d| d.with_timezone(&Utc)),
+            capabilities: runner.capabilities.clone(),
+            status: runner.status.clone(),
+            os: runner.os.clone(),
+            arch: runner.arch.clone(),
+            runner_version: runner.runner_version.clone(),
+            dev_metadata: runner.dev_metadata.clone(),
+            protocol_version: runner.protocol_version,
+            last_heartbeat_at: runner.last_heartbeat_at.map(|d| d.with_timezone(&Utc)),
+            created_at: runner.created_at.with_timezone(&Utc),
+            updated_at: runner.updated_at.with_timezone(&Utc),
+            revoked_at: runner.revoked_at.map(|d| d.with_timezone(&Utc)),
+            revoked_reason: runner.revoked_reason.clone(),
+            paused_at: runner.paused_at.map(|d| d.with_timezone(&Utc)),
+            paused_by_id: runner.paused_by_id,
+            dm_id: None,
+            dm_host_label: None,
+            dm_label: None,
+            dm_engine_paused_by_owner: None,
+            dm_engine_auto_pause_reason: None,
+            dm_engine_team_runs: None,
+            dm_engine_sign_in_state: None,
+            dm_engine_credential_expires_at: None,
+            pod_workspace_id: runner.workspace_id,
+            pod_project_id: Uuid::new_v4(),
+            pod_name: "WEB_pod".to_owned(),
+            pod_description: String::new(),
+            pod_created_by_id: None,
+            pod_is_default: true,
+            pod_created_at: Utc::now(),
+            pod_updated_at: Utc::now(),
+            project_identifier: "WEB".to_owned(),
+        };
+        let row = super::RunnerListRow {
+            runner: runner.clone(),
+            pod_name: join.pod_name.clone(),
+            pod_id: join.pod_id,
+            pod_is_default: join.pod_is_default,
+            pod_project_id: join.pod_project_id,
+            project_identifier: join.project_identifier.clone(),
+            dev_machine: Some(join),
+            live_state: None,
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
+        };
+        let v = super::runner_list_row_to_value(&row);
+        assert!(
+            v.get("assignable").is_none(),
+            "plain list hides eligibility: {v}"
+        );
+        assert!(v.get("not_assignable_code").is_none());
+        let row2 = super::RunnerListRow {
+            assignable: Some(true),
+            not_assignable_code: Some(""),
+            is_busy: Some(false),
+            queue_depth: Some(2),
+            ..row
+        };
+        let v2 = super::runner_list_row_to_value(&row2);
+        assert_eq!(v2["assignable"], true);
+        assert_eq!(v2["not_assignable_code"], "");
+        assert_eq!(v2["is_busy"], false);
+        assert_eq!(v2["queue_depth"], 2);
+    }
+
+    #[test]
+    fn list_row_value_renders_live_state_and_derived_sign_in() {
+        let mut runner = runner_fixture();
+        runner.name = "mini".to_owned();
+        let dm_id = Uuid::new_v4();
+        runner.dev_machine_id = Some(dm_id);
+        // active + already-expired: Python derives `expired` and renders the expiry.
+        let expires = Utc::now() - chrono::Duration::hours(1);
+        let join = crate::runner_enroll::queries::manage_reads::RunnerJoinRow {
+            id: runner.id,
+            owner_id: runner.owner_id,
+            workspace_id: runner.workspace_id,
+            dev_machine_id: runner.dev_machine_id,
+            pod_id: runner.pod_id,
+            name: runner.name.clone(),
+            host_label: runner.host_label.clone(),
+            provisioning: runner.provisioning.clone(),
+            pod_dispatch: runner.pod_dispatch.clone(),
+            visibility: runner.visibility,
+            enrolled_at: runner.enrolled_at.map(|d| d.with_timezone(&Utc)),
+            capabilities: runner.capabilities.clone(),
+            status: runner.status.clone(),
+            os: runner.os.clone(),
+            arch: runner.arch.clone(),
+            runner_version: runner.runner_version.clone(),
+            dev_metadata: runner.dev_metadata.clone(),
+            protocol_version: runner.protocol_version,
+            last_heartbeat_at: runner.last_heartbeat_at.map(|d| d.with_timezone(&Utc)),
+            created_at: runner.created_at.with_timezone(&Utc),
+            updated_at: runner.updated_at.with_timezone(&Utc),
+            revoked_at: runner.revoked_at.map(|d| d.with_timezone(&Utc)),
+            revoked_reason: runner.revoked_reason.clone(),
+            paused_at: runner.paused_at.map(|d| d.with_timezone(&Utc)),
+            paused_by_id: runner.paused_by_id,
+            dm_id: Some(dm_id),
+            dm_host_label: Some("host".to_owned()),
+            dm_label: Some("mac".to_owned()),
+            dm_engine_paused_by_owner: Some(false),
+            dm_engine_auto_pause_reason: Some(String::new()),
+            dm_engine_team_runs: Some(false),
+            dm_engine_sign_in_state: Some("active".to_owned()),
+            dm_engine_credential_expires_at: Some(expires),
+            pod_workspace_id: runner.workspace_id,
+            pod_project_id: Uuid::new_v4(),
+            pod_name: "WEB_pod".to_owned(),
+            pod_description: String::new(),
+            pod_created_by_id: None,
+            pod_is_default: true,
+            pod_created_at: Utc::now(),
+            pod_updated_at: Utc::now(),
+            project_identifier: "WEB".to_owned(),
+        };
+        let live = pidash_db::entity::runner_live_state::Model {
+            runner_id: runner.id,
+            observed_run_id: Some(Uuid::new_v4()),
+            last_event_at: Some(Utc::now().into()),
+            last_event_kind: Some("turn".to_owned()),
+            last_event_summary: Some("hi".to_owned()),
+            agent_pid: Some(12),
+            agent_subprocess_alive: Some(true),
+            approvals_pending: Some(0),
+            turn_count: Some(3),
+            updated_at: Utc::now().into(),
+            llm_model: Some("m".to_owned()),
+            usage: serde_json::json!({"input_tokens": 3}),
+            agent_health: Some("healthy".to_owned()),
+            agent_last_activity_at: Some(Utc::now().into()),
+        };
+        let row = super::RunnerListRow {
+            runner: runner.clone(),
+            pod_name: join.pod_name.clone(),
+            pod_id: join.pod_id,
+            pod_is_default: join.pod_is_default,
+            pod_project_id: join.pod_project_id,
+            project_identifier: join.project_identifier.clone(),
+            dev_machine: Some(join),
+            live_state: Some(live),
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
+        };
+        let v = super::runner_list_row_to_value(&row);
+        assert_eq!(v["live_state"]["last_event_kind"], "turn");
+        assert_eq!(v["live_state"]["llm_model"], "m");
+        assert_eq!(v["dev_machine_detail"]["engine_sign_in_state"], "expired");
+        assert!(v["dev_machine_detail"]["engine_credential_expires_at"]
+            .as_str()
+            .is_some());
     }
 }

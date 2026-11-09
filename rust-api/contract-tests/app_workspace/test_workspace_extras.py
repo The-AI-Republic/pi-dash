@@ -522,6 +522,37 @@ def test_user_issues_labels_filter_keeps_duplicate_rows(user_api, space, world):
     assert [row["id"] for row in body["results"]] == [issue_id, issue_id]
 
 
+def test_user_issues_empty_relation_filter_returns_all(user_api, space, world):
+    # PIDASHCONV-1716: the profile-issues list runs the same rich-filter
+    # compiler; an empty relation leaf ({"assignee_id":""}) compiles to
+    # match-all and must not INNER JOIN the relation (both issues stay,
+    # total_count == 2). Before the fix the leaf promoted the join and
+    # the bare issue vanished.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        related = seed.issue(ws_id, project_id, name="EL related")
+        bare = seed.issue(ws_id, project_id, name="EL bare")
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id IN (%s, %s)",
+                (uid, related, bare),
+            )
+        other_id = world["other"]["id"]
+        seed.issue_assignee(ws_id, project_id, related, other_id)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(url, params={"filters": json.dumps({"assignee_id": ""})})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert {row["id"] for row in body["results"]} == {related, bare}
+    assert body["total_count"] == 2
+
+
 def test_user_issues_non_member_denied(other_api, space, world):
     res = other_api.get(f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/")
     assert res.status_code == 403

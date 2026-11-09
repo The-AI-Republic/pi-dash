@@ -12,6 +12,7 @@
 import {
   FREE_QUOTA_STALE_TIME_MS,
   getFreeQuota,
+  getUsageQuota,
   getLlmConfig,
   listAssistantConnections,
   type ApiClient,
@@ -22,6 +23,10 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { cloudAssistantKeys } from "./keys.js";
+
+/** Freshness for the free-lane quota: it moves daily, so a short window
+ * keeps the meter honest without polling while the user is mid-turn. */
+export const USAGE_QUOTA_STALE_TIME_MS = 45_000;
 
 /** The saved connections plus the server's managed-model and lane flags. */
 export function cloudConnectionsQueryOptions(client: ApiClient) {
@@ -76,4 +81,21 @@ export function cloudQuotaQueryOptions(client: ApiClient) {
 
 export function useCloudQuota() {
   return useQuery(cloudQuotaQueryOptions(getAppClient()));
+}
+
+/**
+ * The free-lane usage quota behind the meter. The full payload (plan
+ * plus the LLM allowance with freeModels) is the picker's source too,
+ * so the one read backs both surfaces without a second request shape.
+ */
+export function usageQuotaQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: cloudAssistantKeys.usageQuota(),
+    queryFn: () => getUsageQuota(client),
+    staleTime: USAGE_QUOTA_STALE_TIME_MS,
+  });
+}
+
+export function useFreeTokenUsage() {
+  return useQuery(usageQuotaQueryOptions(getAppClient()));
 }

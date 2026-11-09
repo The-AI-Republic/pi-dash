@@ -563,9 +563,9 @@ pub async fn fetch_issue_annotated(
         )
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(
@@ -772,9 +772,9 @@ pub async fn fetch_detail(
         .join(JoinType::InnerJoin, bridge_entity::Relation::Issues1.def())
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(
@@ -3207,7 +3207,7 @@ pub async fn render_issue_detail(
     let status = render_agent_status(pool, issue, ticker_view).await?;
     let summary = blocker_summary(pool, &issue.id, &issue.workspace_id).await?;
     let is_epic = fetch_is_epic(pool, issue.type_id).await?;
-    let mut map = serde_json::Map::with_capacity(31);
+    let mut map = serde_json::Map::with_capacity(33);
     map.insert(
         "id".to_owned(),
         serde_json::Value::String(issue.id.to_string()),
@@ -3253,6 +3253,10 @@ pub async fn render_issue_detail(
     map.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&issue.assigned_pod_id),
+    );
+    map.insert(
+        "assigned_runner_id".to_owned(),
+        opt_uuid(&issue.assigned_runner_id),
     );
     map.insert(
         "agent_executor".to_owned(),
@@ -3304,6 +3308,18 @@ pub async fn render_issue_detail(
     map.insert(
         "has_open_blockers".to_owned(),
         serde_json::Value::Bool(summary.has_open),
+    );
+    // `assigned_runner_detail` last (`IssueDetailSerializer.Meta.fields`,
+    // design §14.1): the shared access helper, null when pod-assigned.
+    let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+        &sea_conn(pool),
+        issue.assigned_runner_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    map.insert(
+        "assigned_runner_detail".to_owned(),
+        assigned_runner_detail.unwrap_or(serde_json::Value::Null),
     );
     Ok(serde_json::Value::Object(map))
 }
@@ -5575,6 +5591,8 @@ fn write_ctx(
 fn fire_spec(actor_id: &Uuid, now: DateTime<Utc>) -> domain_issues::FireSpec {
     domain_issues::FireSpec {
         dispatch_immediate: true,
+        pod_once: false,
+
         created_by: Some(*actor_id),
         moved_by_run: None,
         now,
@@ -6833,6 +6851,8 @@ struct CreatedRows {
     type_id: Option<Uuid>,
     is_epic: bool,
     assigned_pod_id: Option<Uuid>,
+    assigned_runner_id: Option<Uuid>,
+    assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -6901,9 +6921,9 @@ async fn render_created_detail(
         .column_as(label_ids_annotation(), "label_ids")
         .join(
             JoinType::LeftJoin,
-            il_entity::Entity::belongs_to(issue_entity::Entity)
-                .from(il_entity::Column::IssueId)
-                .to(issue_entity::Column::Id)
+            issue_entity::Entity::belongs_to(il_entity::Entity)
+                .from(issue_entity::Column::Id)
+                .to(il_entity::Column::IssueId)
                 .into(),
         )
         .join(JoinType::LeftJoin, il_entity::Relation::Labels.def())
@@ -6928,9 +6948,9 @@ async fn render_created_detail(
         .join(JoinType::LeftJoin, ia_entity2::Relation::Users3.def())
         .join(
             JoinType::LeftJoin,
-            pm_entity::Entity::belongs_to(pidash_db::entity::users::Entity)
-                .from(pm_entity::Column::MemberId)
-                .to(pidash_db::entity::users::Column::Id)
+            pidash_db::entity::users::Entity::belongs_to(pm_entity::Entity)
+                .from(pidash_db::entity::users::Column::Id)
+                .to(pm_entity::Column::MemberId)
                 .into(),
         )
         .group_by(issue_entity::Column::Id)
@@ -6968,6 +6988,13 @@ async fn render_created_detail(
         type_id: created_type_id,
         is_epic: created_is_epic,
         assigned_pod_id: m.assigned_pod_id,
+        assigned_runner_id: m.assigned_runner_id,
+        assigned_runner_detail: crate::app_issues::access::fetch_assigned_runner_detail(
+            &db,
+            m.assigned_runner_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: m.agent_executor,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
@@ -7008,7 +7035,7 @@ async fn render_created_detail(
 /// them; ticker/runs/relations are null/empty on a fresh row.
 /// `type_id` and `is_epic` always render (NEWFRONT-984).
 fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_json::Value {
-    let mut issue = serde_json::Map::with_capacity(31);
+    let mut issue = serde_json::Map::with_capacity(33);
     issue.insert("id".to_owned(), uuid_string(&rows.issue_id));
     issue.insert(
         "name".to_owned(),
@@ -7059,6 +7086,10 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
     issue.insert(
         "assigned_pod_id".to_owned(),
         opt_uuid(&rows.assigned_pod_id),
+    );
+    issue.insert(
+        "assigned_runner_id".to_owned(),
+        opt_uuid(&rows.assigned_runner_id),
     );
     issue.insert(
         "agent_executor".to_owned(),
@@ -7112,6 +7143,12 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
     issue.insert(
         "has_open_blockers".to_owned(),
         serde_json::Value::Bool(false),
+    );
+    issue.insert(
+        "assigned_runner_detail".to_owned(),
+        rows.assigned_runner_detail
+            .clone()
+            .unwrap_or(serde_json::Value::Null),
     );
     serde_json::Value::Object(issue)
 }

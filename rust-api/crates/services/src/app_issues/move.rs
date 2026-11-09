@@ -1664,6 +1664,7 @@ async fn render_current_instance<S: MoveStore>(
         assigned_pod: pod_s.as_deref(),
         assigned_runner: runner_s.as_deref(),
         assigned_runner_detail: runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let input = RepresentationInput {
         row: &row,

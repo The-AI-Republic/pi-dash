@@ -11,4 +11,5 @@ export const cloudAssistantKeys = {
   connections: () => [...cloudAssistantKeys.all, "connections"] as const,
   config: () => [...cloudAssistantKeys.all, "config"] as const,
   quota: () => [...cloudAssistantKeys.all, "quota"] as const,
+  usageQuota: () => [...cloudAssistantKeys.all, "usage-quota"] as const,
 };

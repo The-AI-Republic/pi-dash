@@ -190,6 +190,12 @@ SKIP_TABLES = frozenset(
         # compared through the jobs path (compare_jobs), not the DB path.
         "rust_job_queue",
         "rust_job_schedule",
+        # Rust-owned model catalog (runner_models/schema.rs,
+        # NEWPIDASH-169): created by the Rust server at boot, never by
+        # the Django schema. Replay sessions never write catalog rows,
+        # so the table stays empty on the rust side and absent on the
+        # django side — skipping is the same precedent as the queues.
+        "rust_runner_model_catalog",
     }
 )
 

@@ -7,12 +7,16 @@
 // old app; the archived sidebar is the live read-only surface.)
 // NEWPIDASH-141 extends the row: the sub-work-item and attachment action
 // entries stay disabled too, matching the old whole-widgets disable.
+// NEWPIDASH-155 extends the row further: the code-reviews attach and
+// detach entries stay hidden on archived items too, matching the old
+// disabled={disabled || is_archived} pass.
 // Rows: ISS-220 (read-only property components).
 import { test, expect } from "../fixtures";
 import {
   issueBrowseKey,
   parityProjectIdentifier,
   serverArchiveIssue,
+  serverAttachCodeReview,
   serverCleanupIssueWithSession,
   serverCleanupProject,
   serverCreateIssueFull,
@@ -56,6 +60,11 @@ test(
       `${tag} done`;
     const issue = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} issue`, session);
     await serverPatchIssue(seed.workspaceSlug, projectId, issue.id, { state_id: doneStateId }, session);
+    // Seed one review link so the Code reviews section mounts; review repo
+    // names are globally unique, so mint a per-run one.
+    const reviewRepo = `hello-world-nf122-${tag.replace(/[^0-9]/g, "").slice(-10)}`;
+    const reviewUrl = `https://github.com/octocat/${reviewRepo}/pull/1`;
+    await serverAttachCodeReview(seed.workspaceSlug, projectId, issue.id, reviewUrl, session);
     await serverArchiveIssue(seed.workspaceSlug, projectId, issue.id, session);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
@@ -93,6 +102,22 @@ test(
         for (let attempt = 0; attempt < 8; attempt++) {
           expect(await driver.widgetActionDisabled("Add sub-work item")).toBe(true);
           expect(await driver.widgetActionDisabled("Attach")).toBe(true);
+          if (attempt < 7) await page.waitForTimeout(1000);
+        }
+      });
+
+      await test.step("the code-reviews widget stays read-only on the archived browse address", async () => {
+        // The section is still visible (list, not form) on the browse
+        // address; its attach and detach entries must be hidden while
+        // archived. Poll for the section to settle; any live entry at any
+        // point is NEWPIDASH-155.
+        for (let attempt = 0; attempt < 8; attempt++) {
+          expect(await driver.codeReviewsVisible()).toBe(true);
+          const links = await driver.codeReviewLinks();
+          expect(links).toHaveLength(1);
+          expect(links[0]!.href).toBe(reviewUrl);
+          expect(await driver.codeReviewAttachVisible()).toBe(false);
+          expect(await driver.codeReviewDetachVisible()).toBe(false);
           if (attempt < 7) await page.waitForTimeout(1000);
         }
       });

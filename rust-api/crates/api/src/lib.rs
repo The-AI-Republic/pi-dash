@@ -56,6 +56,7 @@ pub mod response_headers;
 pub mod routes;
 pub mod runner_engine;
 pub mod runner_enroll;
+pub mod runner_models;
 pub mod runner_runs;
 pub mod runner_sessions;
 pub mod serializer;
