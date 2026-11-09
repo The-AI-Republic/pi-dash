@@ -143,6 +143,81 @@ export function modelContribution(agent: RunnerAgent, id: string): { model?: str
   };
 }
 
+/** Effort display labels (the `:<effort>` id suffixes stay machine values). */
+export const EFFORT_LABELS: Record<string, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+};
+
+/** One catalog row as the add-runner form reads it. */
+export interface CatalogRow {
+  model: string;
+  label: string;
+  reasoning_efforts: string[];
+  sort_order: number;
+  is_preselected: boolean;
+}
+
+/**
+ * Expand catalog rows into picker choices for one agent: the Default
+ * sentinel first, then one choice per row (one per effort for rows
+ * offering efforts, with the effort label appended). Rows sort by
+ * (sort_order, model) — the server already orders them, this keeps the
+ * picker deterministic if the cache is used directly.
+ */
+export function choicesForAgent(rows: readonly CatalogRow[]): ModelChoice[] {
+  const ordered = [...rows].sort((a, b) => a.sort_order - b.sort_order || a.model.localeCompare(b.model));
+  const choices: ModelChoice[] = [AGENT_DEFAULT];
+  for (const entry of ordered) {
+    if (entry.reasoning_efforts.length === 0) {
+      choices.push({ id: entry.model, label: entry.label, model: entry.model });
+    } else {
+      for (const effort of entry.reasoning_efforts) {
+        choices.push({
+          id: `${entry.model}:${effort}`,
+          label: `${entry.label} (${EFFORT_LABELS[effort] ?? effort})`,
+          model: entry.model,
+          reasoningEffort: effort,
+        });
+      }
+    }
+  }
+  return choices;
+}
+
+/**
+ * The preselected choice id for one agent's catalog rows: the first
+ * expanded choice of the preselected row (the first effort when the
+ * row offers efforts), or the Default sentinel when none is marked.
+ */
+export function preselectedId(rows: readonly CatalogRow[]): string {
+  const marked = rows.find((entry) => entry.is_preselected);
+  if (marked === undefined) return DEFAULT_MODEL_ID;
+  if (marked.reasoning_efforts.length === 0) return marked.model;
+  const firstEffort = marked.reasoning_efforts[0];
+  return firstEffort === undefined ? DEFAULT_MODEL_ID : `${marked.model}:${firstEffort}`;
+}
+
+/** Label for a selection against resolved choices; unknown ids read as the default. */
+export function selectedModelLabelFrom(choices: readonly ModelChoice[], id: string): string {
+  return choices.find((choice) => choice.id === id)?.label ?? DEFAULT_MODEL_LABEL;
+}
+
+/** The CLI contribution of a selection against resolved choices. */
+export function modelContributionFrom(
+  choices: readonly ModelChoice[],
+  id: string
+): { model?: string; reasoningEffort?: string } {
+  const choice = choices.find((candidate) => candidate.id === id);
+  if (choice?.model === undefined) return {};
+  return {
+    model: choice.model,
+    ...(choice.reasoningEffort === undefined ? {} : { reasoningEffort: choice.reasoningEffort }),
+  };
+}
+
 /** The first agent a machine can run, or null when it advertises none we know. */
 export function firstSupportedAgent(supported: readonly string[] | undefined): RunnerAgent | null {
   if (supported === undefined || supported.length === 0) return RUNNER_AGENTS[0];
