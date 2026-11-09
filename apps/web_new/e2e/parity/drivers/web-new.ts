@@ -274,6 +274,7 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  CloudAssistantModelBudgetFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
@@ -51104,6 +51105,33 @@ export class WebNewDriver implements ParityDriver {
     if ((await notice.count()) === 0 || !(await notice.isVisible().catch(() => false))) return null;
     const text = this.cloudNorm(await notice.locator("xpath=ancestor::div[1]").innerText());
     return text === "" ? null : text;
+  }
+
+  // --- Cloud assistant model budget (NEWPIDASH-150). New-app-only: the
+  // --- OSS oracle has no free-quota picker, so the old-app driver throws.
+  async cloudAssistantModelBudget(title: string): Promise<CloudAssistantModelBudgetFacts> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const select = card.locator("select").first();
+    const value = (await select.count()) > 0 ? await select.inputValue() : "";
+    const options = select.locator("option");
+    const optionCount = await options.count();
+    const facts = [];
+    for (let index = 0; index < optionCount; index++) {
+      const option = options.nth(index);
+      facts.push({
+        value: (await option.getAttribute("value")) ?? "",
+        text: this.cloudNorm(await option.innerText()),
+        disabled: await option.isDisabled().catch(() => false),
+      });
+    }
+    const noticeLocator = card.getByText("needs credit on the free plan", { exact: false }).first();
+    let notice: string | null = null;
+    if ((await noticeLocator.count()) > 0 && (await noticeLocator.isVisible().catch(() => false))) {
+      notice = this.cloudNorm(await noticeLocator.locator("xpath=ancestor::p[1]").innerText());
+    }
+    const topUp = card.getByRole("link", { name: "Top up" }).first();
+    const topUpHref = (await topUp.count()) > 0 ? ((await topUp.getAttribute("href")) ?? null) : null;
+    return { title, value, options: facts, notice, topUpHref };
   }
 
   private cloudProfileTabLabels(): string[] {

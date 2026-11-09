@@ -277,6 +277,7 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  CloudAssistantModelBudgetFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
@@ -58772,6 +58773,15 @@ export class WebDriver implements ParityDriver {
     if ((await notice.count()) === 0 || !(await notice.isVisible().catch(() => false))) return null;
     const text = this.cloudNorm(await notice.locator("xpath=ancestor::div[1]").innerText());
     return text === "" ? null : text;
+  }
+
+  // --- Cloud assistant model budget (NEWPIDASH-150). New-app-only: the old
+  // --- app has no free-quota picker (new-system-only feature).
+  private cloudAssistantModelBudgetMissing(): never {
+    throw new Error("[parity] the old app has no free-quota model budget (new-system-only NEWPIDASH-150).");
+  }
+  async cloudAssistantModelBudget(_title: string): Promise<CloudAssistantModelBudgetFacts> {
+    this.cloudAssistantModelBudgetMissing();
   }
 
   private cloudProfileTabLabels(): string[] {

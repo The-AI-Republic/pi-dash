@@ -10,6 +10,7 @@
 // cloud oracle proved (marketplace pages, app rows, auth states).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { ApiError } from "../errors.js";
 
 /**
  * The catalog gate. `connected` plus `has_gateway_scopes` decide which
@@ -242,4 +243,150 @@ export async function submitAppApiKey(
 export function appIconUrl(apiBase: string, iconUrl: string): string {
   const base = apiBase.replace(/\/+$/, "");
   return `${base}/api/openhub/apps/icon/?url=${encodeURIComponent(iconUrl)}`;
+}
+
+/**
+ * Free-quota proxy path (NEWPIDASH-149/150, PRIVATEPI1-137). The cloud
+ * backend proxies the Hub's `GET /usage/quota` at this Pi Dash address.
+ * Single constant on purpose: when PRIVATEPI1-137 lands its final path,
+ * only this line changes and every picker consumer follows. Until then the
+ * 404 reads as "quota unavailable" and the picker degrades to its prior
+ * behavior (no badges, every model selectable).
+ */
+export const FREE_QUOTA_PATH = "/api/openhub/usage/quota/";
+
+/** Freshness for the free-quota read: short, never blocking a turn. */
+export const FREE_QUOTA_STALE_TIME_MS = 45_000;
+
+/**
+ * One free-quota answer, normalized. `freeModels` is the server-declared
+ * free catalog (today only `deepseek/deepseek-v4-flash`, on every plan);
+ * `plan` is the normalized plan id (`"free"`, `"payg"`, `"member"`).
+ * Token counters are `null` when the proxy omits them (the picker only
+ * needs `freeModels` + `plan`, but both surfaces share this read).
+ */
+export interface FreeQuota {
+  freeModels: readonly string[];
+  plan: string;
+  freeTokensUsed: number | null;
+  freeTokensLimit: number | null;
+  resetsAt: string | null;
+}
+
+/** Normalize a plan value to its id. Unknown values stay usable, never "free". */
+export function normalizePlanId(raw: unknown): string {
+  if (typeof raw === "number") {
+    if (raw === 0) return "free";
+    if (raw === 5) return "payg";
+    if (raw === 6) return "member";
+    return "";
+  }
+  if (typeof raw !== "string") return "";
+  const value = raw.trim().toLowerCase().replace(/_/g, "-").replace(/\s+/g, "-");
+  if (value === "free") return "free";
+  if (value === "payg" || value === "pay-as-you-go" || value === "pay-as-you-go-plan") return "payg";
+  if (value === "member" || value === "member+payg" || value === "member-payg" || value === "member+pay-as-you-go") {
+    return "member";
+  }
+  if (value.startsWith("free")) return "free";
+  if (value.startsWith("member")) return "member";
+  if (value.startsWith("pay")) return "payg";
+  return value;
+}
+
+/** True only for the integer-free plan; unknown plans never block a model. */
+export function isFreePlan(plan: string | null | undefined): boolean {
+  if (plan === null || plan === undefined) return false;
+  return normalizePlanId(plan) === "free";
+}
+
+function quotaRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function readNumber(record: Record<string, unknown>, keys: readonly string[]): number | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+  }
+  return null;
+}
+
+function readString(record: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return null;
+}
+
+function readModels(record: Record<string, unknown>): readonly string[] | null {
+  for (const key of ["freeModels", "free_models", "free-models"]) {
+    const value = record[key];
+    if (Array.isArray(value)) {
+      return value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalize one Hub quota body. Accepts the documented shapes: nested
+ * `llm` (`llm.freeTokensUsed`, `llm.freeTokensLimit`, `llm.freeModels`),
+ * flat camelCase, and snake_case dialects. Returns `null` when neither
+ * `freeModels` nor `plan` can be read — the caller treats that as quota
+ * unavailable rather than guessing.
+ */
+export function normalizeFreeQuota(body: unknown): FreeQuota | null {
+  const root = quotaRecord(body);
+  if (root === null) return null;
+  const llm = quotaRecord(root["llm"]) ?? quotaRecord(root["llm_quota"]) ?? {};
+  const models = readModels(llm) ?? readModels(root) ?? readModels(quotaRecord(root["free-quota"]) ?? {});
+  const plan = readString(llm, ["plan"]) ?? readString(root, ["plan", "plan_name", "planName", "user_type"]);
+  if (models === null || plan === null) return null;
+  return {
+    freeModels: models,
+    plan: normalizePlanId(plan),
+    freeTokensUsed:
+      readNumber(llm, ["freeTokensUsed", "free_tokens_used"]) ??
+      readNumber(root, ["freeTokensUsed", "free_tokens_used"]),
+    freeTokensLimit:
+      readNumber(llm, ["freeTokensLimit", "free_tokens_limit"]) ??
+      readNumber(root, ["freeTokensLimit", "free_tokens_limit"]),
+    resetsAt:
+      readString(llm, ["resetsAt", "resets_at"]) ??
+      readString(root, ["resetsAt", "resets_at", "resetAt", "reset_at"]) ??
+      readString(quotaRecord(root["free-quota"]) ?? {}, ["resetsAt", "resets_at"]),
+  };
+}
+
+/** True when the model slug is server-declared free on every plan. */
+export function isFreeModel(model: string, freeModels: readonly string[]): boolean {
+  return freeModels.includes(model.trim());
+}
+
+/**
+ * Picker rule: a model is selectable when the plan can pay for it. Free
+ * plans may select only server-declared free models; paid plans
+ * (`payg`, `member`, and any unknown plan) may select every model.
+ */
+export function isModelSelectableForPlan(
+  plan: string | null | undefined,
+  model: string,
+  freeModels: readonly string[]
+): boolean {
+  if (!isFreePlan(plan)) return true;
+  return isFreeModel(model, freeModels);
+}
+
+/** Read the signed-in user's free quota. Throws on transport failure; callers degrade. */
+export async function getFreeQuota(client: ApiClient): Promise<FreeQuota> {
+  const body = await client.getJson<unknown>(FREE_QUOTA_PATH);
+  const normalized = normalizeFreeQuota(body);
+  if (normalized === null) {
+    throw new ApiError({ code: "contract", message: "Free quota response could not be read." });
+  }
+  return normalized;
 }

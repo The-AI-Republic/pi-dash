@@ -10,8 +10,10 @@ export type { CloudAssistantActions } from "./api/mutations.js";
 export {
   cloudAssistantConfigQueryOptions,
   cloudConnectionsQueryOptions,
+  cloudQuotaQueryOptions,
   useCloudAssistantConfig,
   useCloudConnections,
+  useCloudQuota,
 } from "./api/queries.js";
 export { AppsPointer } from "./components/AppsPointer.js";
 export { CloudAssistantTab } from "./components/CloudAssistantTab.js";
@@ -31,12 +33,14 @@ export {
   BYOK_MODEL_SUGGESTIONS,
   connectionModelFlags,
   connectionTitle,
+  creditForModel,
+  isBlockedCommit,
   isDisconnected,
   isStaleHostedRow,
   modelChoices,
   toConnectionRow,
 } from "./lib/rows.js";
-export type { ConnectionModelFlags, ConnectionRow, ModelChoice, ModelControlKind } from "./lib/rows.js";
+export type { ConnectionModelFlags, ConnectionRow, ModelChoice, ModelControlKind, ModelCredit } from "./lib/rows.js";
 export {
   SIGN_IN_POLL_INTERVAL_MS,
   SIGN_IN_POLL_TIMEOUT_MS,

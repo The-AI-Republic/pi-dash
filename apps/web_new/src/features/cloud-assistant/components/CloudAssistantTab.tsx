@@ -12,7 +12,7 @@ import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
 
 import { actionFailureDetail, useCloudAssistantActions } from "../api/mutations.js";
-import { useCloudConnections } from "../api/queries.js";
+import { useCloudConnections, useCloudQuota } from "../api/queries.js";
 import {
   ADD_ACTION,
   ADD_FAILED_FALLBACK,
@@ -24,6 +24,8 @@ import {
   DISCONNECT_FAILED_TITLE,
   EMPTY_BODY,
   EMPTY_TITLE,
+  MODEL_BLOCKED_BODY,
+  MODEL_BLOCKED_TITLE,
   MODEL_FAILED_TITLE,
   REMOVED_TITLE,
   REMOVE_FAILED_TITLE,
@@ -35,7 +37,7 @@ import {
   TEST_OK_TITLE,
 } from "../lib/copy.js";
 import { byokSubmission, type ByokDraft } from "../lib/byok.js";
-import { connectionModelFlags, connectionTitle, toConnectionRow } from "../lib/rows.js";
+import { connectionModelFlags, connectionTitle, isBlockedCommit, toConnectionRow } from "../lib/rows.js";
 import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/index.js";
 import { AddConnectionView } from "./AddConnectionView.js";
 import { AppsPointer } from "./AppsPointer.js";
@@ -47,6 +49,7 @@ type View = "list" | "add";
 
 export function CloudAssistantTab(): React.ReactElement {
   const connections = useCloudConnections();
+  const quota = useCloudQuota();
   const actions = useCloudAssistantActions();
   const [view, setView] = React.useState<View>("list");
   const [busyId, setBusyId] = React.useState<string | null>(null);
@@ -57,9 +60,12 @@ export function CloudAssistantTab(): React.ReactElement {
   const signIn = useProviderSignIn();
 
   const list = connections.data;
+  const flags = list === undefined ? null : connectionModelFlags(list, quota.data ?? null);
   const rows =
-    list === undefined ? [] : list.connections.map((row) => toConnectionRow(row, list, connectionModelFlags(list)));
+    list === undefined || flags === null ? [] : list.connections.map((row) => toConnectionRow(row, list, flags));
   const signInAvailable = list?.openai_login_available ?? false;
+  const rawWalletUrl = list?.openhub_wallet_url ?? "";
+  const topUpHref = rawWalletUrl.trim() === "" ? null : rawWalletUrl;
 
   const selectRow = async (id: string): Promise<void> => {
     setBusyId(id);
@@ -75,6 +81,10 @@ export function CloudAssistantTab(): React.ReactElement {
   };
 
   const commitModel = async (id: string, model: string): Promise<void> => {
+    if (flags !== null && isBlockedCommit(model, flags)) {
+      notifyError(MODEL_BLOCKED_TITLE, MODEL_BLOCKED_BODY);
+      return;
+    }
     setBusyId(id);
     try {
       await actions.setModel(id, model);
@@ -190,6 +200,7 @@ export function CloudAssistantTab(): React.ReactElement {
           signInPending={signIn.pending}
           testing={testing}
           busyId={busyId}
+          topUpHref={topUpHref}
           onSelect={(row) => void selectRow(row.id)}
           onCommitModel={(row, model) => void commitModel(row.id, model)}
           onTest={() => void testActive()}

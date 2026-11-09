@@ -478,4 +478,137 @@ describe("CloudAssistantTab", () => {
       api_key: "k",
     });
   });
+
+  it("blocks a paid model for a free-plan user before any request leaves", async () => {
+    const hosted = {
+      ...BYOK,
+      kind: "openhub",
+      provider_kind: "openhub",
+      base_url: "",
+      model_name: "deepseek/deepseek-v4-flash",
+    };
+    const calls = stubTransport((method, url) => {
+      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
+      if (method === "GET" && url.endsWith("/api/openhub/usage/quota/")) {
+        return {
+          status: 200,
+          body: {
+            llm: { freeTokensUsed: 1, freeTokensLimit: 10, freeModels: ["deepseek/deepseek-v4-flash"] },
+            plan: "free",
+          },
+        };
+      }
+      if (method === "GET") {
+        return {
+          status: 200,
+          body: list({
+            connections: [hosted],
+            openhub_model_options: ["deepseek/deepseek-v4-flash", "moonshotai/kimi-k3"],
+            openhub_wallet_url: "https://hub.example.com/account/credits",
+          }),
+        };
+      }
+      if (method === "PATCH") return { status: 200, body: hosted };
+      return undefined;
+    });
+    renderTab();
+    const picker = await screen.findByRole("combobox", { name: "Model for OpenHub" });
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" })).toBeInTheDocument()
+    );
+    expect(screen.getByRole("option", { name: "Lowest cost (Free)" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" })).toBeDisabled();
+    expect(picker).toHaveValue("deepseek/deepseek-v4-flash");
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith("/api/openhub/usage/quota/"))).toBe(true));
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("refuses a blocked model commit with a toast and sends no PATCH", async () => {
+    const { fireEvent } = await import("@testing-library/react");
+    const hosted = {
+      ...BYOK,
+      kind: "openhub",
+      provider_kind: "openhub",
+      base_url: "",
+      model_name: "deepseek/deepseek-v4-flash",
+    };
+    const calls = stubTransport((method, url) => {
+      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
+      if (method === "GET" && url.endsWith("/api/openhub/usage/quota/")) {
+        return {
+          status: 200,
+          body: { llm: { freeModels: ["deepseek/deepseek-v4-flash"] }, plan: "free" },
+        };
+      }
+      if (method === "GET") {
+        return {
+          status: 200,
+          body: list({
+            connections: [hosted],
+            openhub_model_options: ["deepseek/deepseek-v4-flash", "moonshotai/kimi-k3"],
+            openhub_wallet_url: "https://hub.example.com/account/credits",
+          }),
+        };
+      }
+      if (method === "PATCH") return { status: 200, body: hosted };
+      return undefined;
+    });
+    renderTab();
+    const picker = await screen.findByRole("combobox", { name: "Model for OpenHub" });
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" })).toBeInTheDocument()
+    );
+    // Browsers block picking a disabled option, so drive the change the
+    // tab owns directly to prove the second line of defense holds.
+    fireEvent.change(picker, { target: { value: "moonshotai/kimi-k3" } });
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Model needs credit", expect.anything()));
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("saves a paid model for a paid-plan user and keeps the top-up link hidden", async () => {
+    const user = userEvent.setup();
+    const hosted = {
+      ...BYOK,
+      kind: "openhub",
+      provider_kind: "openhub",
+      base_url: "",
+      model_name: "deepseek/deepseek-v4-flash",
+    };
+    const calls = stubTransport((method, url) => {
+      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
+      if (method === "GET" && url.endsWith("/api/openhub/usage/quota/")) {
+        return {
+          status: 200,
+          body: { llm: { freeModels: ["deepseek/deepseek-v4-flash"] }, plan: "payg" },
+        };
+      }
+      if (method === "GET") {
+        return {
+          status: 200,
+          body: list({
+            connections: [hosted],
+            openhub_model_options: ["deepseek/deepseek-v4-flash", "moonshotai/kimi-k3"],
+            openhub_wallet_url: "https://hub.example.com/account/credits",
+          }),
+        };
+      }
+      if (method === "PATCH") {
+        return {
+          status: 200,
+          body: { ...hosted, model_name: "moonshotai/kimi-k3" },
+        };
+      }
+      return undefined;
+    });
+    renderTab();
+    const picker = await screen.findByRole("combobox", { name: "Model for OpenHub" });
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: "Balanced hosted model (Uses credit)" })).toBeInTheDocument()
+    );
+    expect(screen.getByRole("option", { name: "Balanced hosted model (Uses credit)" })).toBeEnabled();
+    expect(screen.queryByRole("link", { name: "Top up" })).toBeNull();
+    await user.selectOptions(picker, "moonshotai/kimi-k3");
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({ model_name: "moonshotai/kimi-k3" });
+  });
 });

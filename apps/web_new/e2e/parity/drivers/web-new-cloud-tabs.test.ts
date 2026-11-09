@@ -449,3 +449,64 @@ describe("cloud assistant popups, counters and focus", () => {
     expect(closed).toBe(true);
   });
 });
+
+describe("cloud assistant model budget", () => {
+  it("reads badges, disabled states, the notice and the top-up link", async () => {
+    const option = (value: string, text: string, disabled: boolean) =>
+      locator({ getAttribute: async () => value, innerText: async () => text, isDisabled: async () => disabled });
+    const select = locator({
+      count: async () => 1,
+      inputValue: async () => "deepseek/deepseek-v4-flash",
+      locator: () =>
+        locator({
+          count: async () => 2,
+          nth: (index: number) =>
+            index === 0
+              ? option("deepseek/deepseek-v4-flash", "Lowest cost (Free)", false)
+              : option("moonshotai/kimi-k3", "Balanced hosted model (Needs credit)", true),
+        }),
+    });
+    const card = locator({
+      count: async () => 1,
+      locator: (selector: string) => {
+        if (selector === "label")
+          return locator({
+            locator: () => locator({ allInnerTexts: async () => ["OpenHub"] }),
+          });
+        if (selector === "select") return select;
+        return locator();
+      },
+      getByText: () =>
+        locator({
+          count: async () => 1,
+          isVisible: async () => true,
+          locator: () =>
+            locator({
+              innerText: async () =>
+                "This model needs credit on the free plan. Switch to a free model, or top up to use it. Top up",
+            }),
+        }),
+      getByRole: (role: string, options?: { name?: string }) =>
+        role === "link" && options?.name === "Top up"
+          ? locator({ count: async () => 1, getAttribute: async () => "https://hub.example.com/account/credits" })
+          : locator(),
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid^="assistant-connection-"]'
+          ? locator({ count: async () => 1, nth: () => card })
+          : locator(),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.cloudAssistantModelBudget("OpenHub")).resolves.toEqual({
+      title: "OpenHub",
+      value: "deepseek/deepseek-v4-flash",
+      options: [
+        { value: "deepseek/deepseek-v4-flash", text: "Lowest cost (Free)", disabled: false },
+        { value: "moonshotai/kimi-k3", text: "Balanced hosted model (Needs credit)", disabled: true },
+      ],
+      notice: "This model needs credit on the free plan. Switch to a free model, or top up to use it. Top up",
+      topUpHref: "https://hub.example.com/account/credits",
+    });
+  });
+});

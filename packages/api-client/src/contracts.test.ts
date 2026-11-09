@@ -154,14 +154,22 @@ import {
   updateConnectionModel,
 } from "./contracts/assistant.js";
 import {
+  FREE_QUOTA_PATH,
+  FREE_QUOTA_STALE_TIME_MS,
   appIconUrl,
   appOAuthBeginUrl,
   getAppAuthStatus,
   getAppManifest,
+  getFreeQuota,
   getOpenhubStatus,
   installApp,
+  isFreeModel,
+  isFreePlan,
+  isModelSelectableForPlan,
   listInstalledApps,
   listMarketplaceApps,
+  normalizeFreeQuota,
+  normalizePlanId,
   setAppActivation,
   startAppOAuth,
   submitAppApiKey,
@@ -6746,6 +6754,89 @@ describe("openhub contracts", () => {
     expect(appIconUrl("https://api.test/", "https://cdn.example.com/icon.png?size=64")).toBe(
       "https://api.test/api/openhub/apps/icon/?url=https%3A%2F%2Fcdn.example.com%2Ficon.png%3Fsize%3D64"
     );
+  });
+});
+
+describe("free-quota contracts", () => {
+  it("reads the nested hub shape through the proxy path", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          llm: { freeTokensUsed: 123, freeTokensLimit: 2_000_000, freeModels: ["deepseek/deepseek-v4-flash"] },
+          resetsAt: "2026-11-10T00:00:00Z",
+          plan: "free",
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const quota = await getFreeQuota(client);
+    expect(quota).toEqual({
+      freeModels: ["deepseek/deepseek-v4-flash"],
+      plan: "free",
+      freeTokensUsed: 123,
+      freeTokensLimit: 2_000_000,
+      resetsAt: "2026-11-10T00:00:00Z",
+    });
+    expect(transport.calls[0]?.url).toBe(`https://api.test${FREE_QUOTA_PATH}`);
+    expect(FREE_QUOTA_STALE_TIME_MS).toBeGreaterThanOrEqual(30_000);
+    expect(FREE_QUOTA_STALE_TIME_MS).toBeLessThanOrEqual(60_000);
+  });
+
+  it("reads the flat snake-case dialect with no nested envelope", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        free_tokens_used: 7,
+        free_tokens_limit: 5_000_000,
+        free_models: ["other/model"],
+        resets_at: "2026-11-10T00:00:00Z",
+        plan: "Member",
+      }),
+    });
+    const quota = await getFreeQuota(client);
+    expect(quota.freeModels).toEqual(["other/model"]);
+    expect(quota.plan).toBe("member");
+    expect(quota.freeTokensUsed).toBe(7);
+    expect(quota.freeTokensLimit).toBe(5_000_000);
+    expect(quota.resetsAt).toBe("2026-11-10T00:00:00Z");
+  });
+
+  it("normalizes plan ids case-insensitively and keeps unknown plans usable", () => {
+    expect(normalizePlanId("Free")).toBe("free");
+    expect(normalizePlanId(" PAY_AS_YOU_GO ")).toBe("payg");
+    expect(normalizePlanId("Pay-as-you-go")).toBe("payg");
+    expect(normalizePlanId("Member")).toBe("member");
+    expect(normalizePlanId(0)).toBe("free");
+    expect(normalizePlanId(5)).toBe("payg");
+    expect(normalizePlanId(6)).toBe("member");
+    expect(normalizePlanId(null)).toBe("");
+    expect(isFreePlan("free")).toBe(true);
+    expect(isFreePlan("Free")).toBe(true);
+    expect(isFreePlan("payg")).toBe(false);
+    expect(isFreePlan("member")).toBe(false);
+    expect(isFreePlan("enterprise")).toBe(false);
+    expect(isFreePlan(null)).toBe(false);
+  });
+
+  it("classifies models from the server list, never a hardcoded one", () => {
+    const freeModels = ["deepseek/deepseek-v4-flash"];
+    expect(isFreeModel("deepseek/deepseek-v4-flash", freeModels)).toBe(true);
+    expect(isFreeModel("  deepseek/deepseek-v4-flash  ", freeModels)).toBe(true);
+    expect(isFreeModel("moonshotai/kimi-k3", freeModels)).toBe(false);
+    expect(isModelSelectableForPlan("free", "deepseek/deepseek-v4-flash", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("free", "moonshotai/kimi-k3", freeModels)).toBe(false);
+    expect(isModelSelectableForPlan("payg", "moonshotai/kimi-k3", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("member", "moonshotai/kimi-k3", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan(null, "moonshotai/kimi-k3", freeModels)).toBe(true);
+  });
+
+  it("rejects an unreadable quota answer instead of guessing", async () => {
+    for (const body of [{ plan: "free" }, { freeModels: [] }, null, "nope", { llm: {} }]) {
+      expect(normalizeFreeQuota(body)).toBeNull();
+    }
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ plan: "free" }) });
+    const error = await getFreeQuota(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
   });
 });
 

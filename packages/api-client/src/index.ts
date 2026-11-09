@@ -920,16 +920,24 @@ export {
   appOAuthBeginUrl,
   getAppAuthStatus,
   getAppManifest,
+  getFreeQuota,
   getOpenhubStatus,
   installApp,
+  isFreeModel,
+  isFreePlan,
+  isModelSelectableForPlan,
   listInstalledApps,
   listMarketplaceApps,
+  normalizeFreeQuota,
+  normalizePlanId,
   setAppActivation,
   startAppOAuth,
   submitAppApiKey,
   uninstallApp,
 } from "./contracts/openhub.js";
 export type { AppApiKeyInput, MarketplaceQuery } from "./contracts/openhub.js";
+export { FREE_QUOTA_PATH, FREE_QUOTA_STALE_TIME_MS } from "./contracts/openhub.js";
+export type { FreeQuota } from "./contracts/openhub.js";
 export {
   ARCHIVABLE_MODULE_STATUSES,
   MODULE_STATUSES,
