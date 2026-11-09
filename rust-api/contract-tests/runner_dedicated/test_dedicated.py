@@ -113,6 +113,42 @@ def test_merge_repoints_queued_same_pod(admin_client, world, merge_world, merge_
     assert body["pinned_runner"] == str(merge_world["survivor_id"])
 
 
+def test_fallback_moves_to_default_pod(admin_client, world, pod2, doomed_runner, online_runner):
+    """§13.1 fall_back step 2: with no eligible runner in the issue's own
+    pod, revoking the dedicated runner moves the issue to the project's
+    default pod (which has an eligible runner) and clears the assignment.
+    PDASHOSS01-362: the Rust must check the pod branch (pod_once), not the
+    still-set dedicated pin, or step 2 never fires."""
+    assign = admin_client.patch(
+        _issue_url(world, world["issue1"]["id"]),
+        json={"assigned_runner_id": doomed_runner["id"], "assigned_pod_id": pod2["id"]},
+    )
+    assert assign.status_code in (200, 204), assign.text[:500]
+    lost = admin_client.patch(
+        f"/api/workspaces/{world['ws']['slug']}/projects/{world['project']['id']}/",
+        json={"dedicated_runner_lost_action": "fall_back"},
+    )
+    assert lost.status_code in (200, 204), lost.text[:500]
+    revoke = admin_client.post(f"/api/runners/{doomed_runner['id']}/revoke/", json={})
+    assert revoke.status_code == 200, revoke.text[:500]
+    body = admin_client.get(_issue_url(world, world["issue1"]["id"])).json()
+    assert body["assigned_runner_id"] is None
+    assert body["assigned_pod_id"] == world["pod"]["id"]
+
+
+def test_lost_action_rejects_unknown_choice(admin_client, world):
+    """Django ChoiceField parity: an unknown dedicated_runner_lost_action
+    is a 400 field error, not silently stored (PDASHOSS01-362)."""
+    resp = admin_client.patch(
+        f"/api/workspaces/{world['ws']['slug']}/projects/{world['project']['id']}/",
+        json={"dedicated_runner_lost_action": "bogus"},
+    )
+    assert resp.status_code == 400, resp.text[:500]
+    assert resp.json()["dedicated_runner_lost_action"] == [
+        '"bogus" is not a valid choice.'
+    ]
+
+
 def test_cross_project_pod_move_refused(admin_client, world, dedicated_issue, online_runner, project2, seeder):
     seeder.create_pod(world["ws"]["id"], project2["id"], name="dr-pod2")
     pods = admin_client.get(f"/api/runners/pods/?project={project2['id']}")

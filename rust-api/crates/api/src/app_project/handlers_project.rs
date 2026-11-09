@@ -3731,6 +3731,7 @@ struct Validated {
     agent_test_default_interval_seconds: Option<i64>,
     agent_ticking_enabled: Option<bool>,
     default_agent_executor: Option<String>,
+    dedicated_runner_lost_action: Option<String>,
     members_can_edit_states: Option<bool>,
     /// Writable on update (`update()` persists it; `save()` overwrites
     /// only `updated_by` — `models/base.py`). On create the crum
@@ -3805,6 +3806,7 @@ const WRITE_FIELDS: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "dedicated_runner_lost_action",
     "created_by",
     "updated_by",
     "workspace",
@@ -4209,6 +4211,12 @@ async fn validate_one_field(
         "default_agent_executor" => {
             match validate_str_choice(value, &["local_runner", "cloud_agent", "managed_runner"]) {
                 Ok(executor) => out.default_agent_executor = Some(executor),
+                Err(message) => return fail(message),
+            }
+        }
+        "dedicated_runner_lost_action" => {
+            match validate_str_choice(value, &["fail_to_backlog", "fall_back"]) {
+                Ok(action) => out.dedicated_runner_lost_action = Some(action),
                 Err(message) => return fail(message),
             }
         }
@@ -4732,6 +4740,10 @@ async fn insert_project(
             agent_test,
             agent_ticking: validated.agent_ticking_enabled.unwrap_or(true),
             default_executor: &default_executor,
+            dedicated_runner_lost_action: validated
+                .dedicated_runner_lost_action
+                .as_deref()
+                .unwrap_or(pidash_services::domain::projects::DEDICATED_RUNNER_LOST_ACTION_DEFAULT),
             members_can_edit_states: validated.members_can_edit_states.unwrap_or(true),
             created_by: *actor_id,
             created_at: now,
@@ -5042,6 +5054,10 @@ async fn apply_update(
             .default_agent_executor
             .as_deref()
             .unwrap_or(&instance.default_agent_executor),
+        dedicated_runner_lost_action: validated
+            .dedicated_runner_lost_action
+            .as_deref()
+            .unwrap_or(&instance.dedicated_runner_lost_action),
         members_can_edit_states: validated
             .members_can_edit_states
             .unwrap_or(instance.members_can_edit_states),
@@ -7445,7 +7461,7 @@ mod tests {
         assert!(position("identifier") < position("workspace"));
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 43);
+        assert_eq!(WRITE_FIELDS.len(), 44);
     }
 
     #[test]

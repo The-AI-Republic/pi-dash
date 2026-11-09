@@ -2156,8 +2156,13 @@ async fn apply_fall_back(
         let Some(pod_id) = pod_id else {
             return Ok(false);
         };
+        // "A runner that could serve the issue": the pod branch
+        // (Django `pod_once=True` forces that branch even though the
+        // assignment is still set at this point). With the dedicated
+        // branch the check pins to the revoked runner, so step 2
+        // could never see the default pod's spare.
         crate::runner_sessions::pod_match::pod_has_runner_for_issue_principal(
-            db, pod_id, issue.id, creator, human, false,
+            db, pod_id, issue.id, creator, human, true,
         )
         .await
     };

@@ -1823,6 +1823,7 @@ pub const CREATE_FIELD_ORDER: &[&str] = &[
     "repo_url",
     "base_branch",
     "default_agent_executor",
+    "dedicated_runner_lost_action",
 ];
 
 /// `ProjectUpdateSerializer` extra writable fields
@@ -1897,6 +1898,9 @@ async fn coerce_field(
             value,
             &["local_runner", "cloud_agent", "managed_runner"],
         )?),
+        "dedicated_runner_lost_action" => {
+            FieldValue::Str(coerce_choice(value, &["fail_to_backlog", "fall_back"])?)
+        }
         _ => return Ok(None),
     }))
 }
@@ -3009,6 +3013,9 @@ pub async fn create_project_inner(
     let v1_ext_id = field_opt_str(&data, "external_id").unwrap_or(None);
     let v1_repo = field_str(&data, "repo_url").unwrap_or_default();
     let v1_branch = field_str(&data, "base_branch").unwrap_or_else(|| "main".to_owned());
+    let v1_lost_action = field_str(&data, "dedicated_runner_lost_action").unwrap_or_else(|| {
+        pidash_services::domain::projects::DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()
+    });
     let project_id = pidash_services::domain::projects::create(
         &pre.pool,
         &pidash_services::domain::projects::NewProject {
@@ -3053,6 +3060,7 @@ pub async fn create_project_inner(
             agent_test: 10800,
             agent_ticking: true,
             default_executor: &default_executor,
+            dedicated_runner_lost_action: &v1_lost_action,
             members_can_edit_states: field_bool(&data, "members_can_edit_states").unwrap_or(true),
             created_by: pre.actor.id,
             created_at: now,
@@ -3621,6 +3629,13 @@ pub async fn apply_project_update(
             &mut sets,
             "default_agent_executor",
             ProjectPatchBind::Str(stored),
+        );
+    }
+    if let Some(v) = field_str(data, "dedicated_runner_lost_action") {
+        push(
+            &mut sets,
+            "dedicated_runner_lost_action",
+            ProjectPatchBind::Str(v),
         );
     }
     // New `is_default` value (or the stored one when untouched).
