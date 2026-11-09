@@ -21,6 +21,7 @@ import { assistantThreadsQueryOptions } from "../api/queries.js";
 import { transcriptKey } from "../api/threadKeys.js";
 import { assistantTranscriptQueryOptions } from "../api/transcript.js";
 import { sendFailureLine, useSendMessage, useStopTurn } from "../api/threadMutations.js";
+import { turnFailureNotice } from "../lib/notices.js";
 import {
   EMPTY_TRANSCRIPT,
   addNotice,
@@ -57,10 +58,8 @@ function turnPending(rows: readonly AssistantMessage[] | undefined): boolean {
 }
 
 function failureDetail(event: AssistantEvent): string {
-  const payload = event.payload as { detail?: unknown; error_code?: unknown };
-  if (typeof payload.detail === "string" && payload.detail.trim() !== "") return payload.detail;
-  if (typeof payload.error_code === "string" && payload.error_code.trim() !== "") return payload.error_code;
-  return TURN_FAILED_FALLBACK;
+  const payload = event.payload as { detail?: unknown; error_code?: unknown; resets_at?: unknown };
+  return turnFailureNotice(payload);
 }
 
 type Action =
