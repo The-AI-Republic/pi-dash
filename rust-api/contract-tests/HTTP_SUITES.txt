@@ -42,6 +42,7 @@ orchestration
 prompting
 runner
 runner_dedicated
+runner_models
 space
 v1_cli_auth
 v1_cycles_modules

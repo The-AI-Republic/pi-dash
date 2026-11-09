@@ -286,6 +286,10 @@ impl ServeBuilder {
             pools.primary(),
         ))
         .await?;
+        // The runner LLM model catalog table (NEWPIDASH-169) is
+        // Rust-owned like the queue tables; serve must ensure it too
+        // (workerless matrix runs have no worker to do it).
+        crate::runner_models::schema::ensure_schema(pools.primary()).await?;
         tracing::info!(
             %addr,
             upstream = edge.upstream(),
