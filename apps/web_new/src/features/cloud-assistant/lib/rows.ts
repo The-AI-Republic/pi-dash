@@ -272,7 +272,7 @@ export function connectionModelFlags(
 ): ConnectionModelFlags {
   return {
     codexModels: list.codex_model_options,
-    codexModelLabels: list.codex_model_labels,
+    codexModelLabels: list.codex_model_labels ?? {},
     openhubModels: list.openhub_model_options,
     freeModels: quota?.freeModels ?? [],
     quotaPlan: quota?.plan ?? null,

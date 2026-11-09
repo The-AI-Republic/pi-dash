@@ -117,6 +117,11 @@ describe("modelChoices", () => {
 });
 
 describe("connection flags", () => {
+  it("defaults a missing model-labels map to empty", () => {
+    const flags = connectionModelFlags(list({ codex_model_labels: undefined }));
+    expect(flags.codexModelLabels).toEqual({});
+  });
+
   it("copies the managed options the list answered", () => {
     const flags = connectionModelFlags(
       list({ codex_model_options: ["x"], codex_model_labels: { x: "X" }, openhub_model_options: ["y"] })

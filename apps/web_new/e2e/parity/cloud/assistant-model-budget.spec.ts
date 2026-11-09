@@ -13,7 +13,10 @@ import { cloudAssistantConnectionsRaw, cloudBrowserCookies } from "../helpers/ap
 import { specTags, specTitle } from "../helpers/tags";
 import { cloudWorkspaceUser } from "./cloud-user-setup";
 
-const CONNECTIONS_PATH = "**/api/users/me/ai-assistant/connections/";
+// `**` at the end, not `/`: the item PATCH lands on
+// `.../connections/{id}/`, which a trailing-slash list pattern misses,
+// letting the model commit escape to the live API (404 there).
+const CONNECTIONS_PATH = "**/api/users/me/ai-assistant/connections/**";
 const QUOTA_PATH = "**/api/openhub/usage/quota/";
 const HOSTED_ID = "00000000-0000-4000-8000-0000000000aa";
 
@@ -121,6 +124,17 @@ test(
     await expect
       .poll(() => driver.cloudAssistantModelBudget("OpenHub"), { timeout: 60_000 })
       .toMatchObject({ value: "deepseek/deepseek-v4-flash" });
+    // The quota read annotates the picker after first paint; wait for
+    // the blocked state rather than reading the pre-quota unbadged list.
+    await expect
+      .poll(
+        () =>
+          driver
+            .cloudAssistantModelBudget("OpenHub")
+            .then((facts) => facts.options.find((option) => option.value === "moonshotai/kimi-k3")?.disabled),
+        { timeout: 60_000 }
+      )
+      .toBe(true);
     const budget = await driver.cloudAssistantModelBudget("OpenHub");
     expect(budget.options).toHaveLength(2);
     const freeOption = budget.options.find((option) => option.value === "deepseek/deepseek-v4-flash");
@@ -130,7 +144,8 @@ test(
     expect(paidOption?.text).toContain("Needs credit");
     expect(paidOption?.disabled).toBe(true);
     expect(budget.notice).toBeNull();
-    expect(budget.topUpHref).toBe("https://hub.example.com/account/credits");
+    // The top-up link only renders with the stranded-model warning.
+    expect(budget.topUpHref).toBeNull();
     await driver.page.unroute(QUOTA_PATH);
     await driver.page.unroute(CONNECTIONS_PATH);
   }
@@ -149,12 +164,23 @@ test(
     await expect
       .poll(() => driver.cloudAssistantModelBudget("OpenHub"), { timeout: 60_000 })
       .toMatchObject({ value: "deepseek/deepseek-v4-flash" });
+    // Wait for the quota annotations (pre-quota the list is unbadged).
+    await expect
+      .poll(
+        () =>
+          driver
+            .cloudAssistantModelBudget("OpenHub")
+            .then((facts) => facts.options.find((option) => option.value === "moonshotai/kimi-k3")?.text ?? ""),
+        { timeout: 60_000 }
+      )
+      .toContain("Uses credit");
     let budget = await driver.cloudAssistantModelBudget("OpenHub");
     expect(budget.options.find((option) => option.value === "deepseek/deepseek-v4-flash")?.text).toContain("Free");
     const paidOption = budget.options.find((option) => option.value === "moonshotai/kimi-k3");
     expect(paidOption?.text).toContain("Uses credit");
     expect(paidOption?.disabled).toBe(false);
-    expect(budget.topUpHref).toBe("https://hub.example.com/account/credits");
+    // The top-up link only renders with the stranded-model warning.
+    expect(budget.topUpHref).toBeNull();
 
     await driver.cloudAssistantSetModel("OpenHub", "moonshotai/kimi-k3");
     await expect

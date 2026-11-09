@@ -453,7 +453,11 @@ describe("cloud assistant popups, counters and focus", () => {
 describe("cloud assistant model budget", () => {
   it("reads badges, disabled states, the notice and the top-up link", async () => {
     const option = (value: string, text: string, disabled: boolean) =>
-      locator({ getAttribute: async () => value, innerText: async () => text, isDisabled: async () => disabled });
+      locator({
+        getAttribute: async (name: string) => (name === "value" ? value : disabled ? "" : null),
+        innerText: async () => text,
+        isDisabled: async () => disabled,
+      });
     const select = locator({
       count: async () => 1,
       inputValue: async () => "deepseek/deepseek-v4-flash",
@@ -480,11 +484,8 @@ describe("cloud assistant model budget", () => {
         locator({
           count: async () => 1,
           isVisible: async () => true,
-          locator: () =>
-            locator({
-              innerText: async () =>
-                "This model needs credit on the free plan. Switch to a free model, or top up to use it. Top up",
-            }),
+          innerText: async () =>
+            "This model needs credit on the free plan. Switch to a free model, or top up to use it. Top up",
         }),
       getByRole: (role: string, options?: { name?: string }) =>
         role === "link" && options?.name === "Top up"

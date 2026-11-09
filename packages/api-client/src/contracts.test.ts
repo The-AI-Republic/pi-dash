@@ -6902,6 +6902,25 @@ describe("assistant connection contracts", () => {
     expect(resolveOpenhubAvailable(list)).toBe(true);
   });
 
+  it("parses a cloud list that omits the model-labels map", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connections: [],
+        codex_model_options: ["gpt-5.6-sol"],
+        has_codex_credential: false,
+        openai_login_available: true,
+        openhub_model_options: [],
+        openhub_available: false,
+        openhub_wallet_url: "https://hub.airepublic.com/account/credits",
+      }),
+    });
+    const list = await listAssistantConnections(client);
+    expect(list.connections).toEqual([]);
+    expect(list.codex_model_labels).toBeUndefined();
+    expect(list.codex_model_options).toEqual(["gpt-5.6-sol"]);
+  });
+
   it("keeps an explicit hosted-lane flag as-is", () => {
     for (const flag of [true, false]) {
       expect(

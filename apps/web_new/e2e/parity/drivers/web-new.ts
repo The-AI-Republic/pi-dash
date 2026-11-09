@@ -51121,13 +51121,17 @@ export class WebNewDriver implements ParityDriver {
       facts.push({
         value: (await option.getAttribute("value")) ?? "",
         text: this.cloudNorm(await option.innerText()),
-        disabled: await option.isDisabled().catch(() => false),
+        // Locator.isDisabled() reports false for a disabled <option>
+        // (probed: property true, attribute present, isDisabled false),
+        // so read the attribute the picker renders.
+        disabled: (await option.getAttribute("disabled")) !== null,
       });
     }
     const noticeLocator = card.getByText("needs credit on the free plan", { exact: false }).first();
     let notice: string | null = null;
     if ((await noticeLocator.count()) > 0 && (await noticeLocator.isVisible().catch(() => false))) {
-      notice = this.cloudNorm(await noticeLocator.locator("xpath=ancestor::p[1]").innerText());
+      // The match is the notice <p> itself, whose own text is the notice.
+      notice = this.cloudNorm(await noticeLocator.innerText());
     }
     const topUp = card.getByRole("link", { name: "Top up" }).first();
     const topUpHref = (await topUp.count()) > 0 ? ((await topUp.getAttribute("href")) ?? null) : null;
