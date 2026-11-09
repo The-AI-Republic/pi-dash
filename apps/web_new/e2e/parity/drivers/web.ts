@@ -7650,8 +7650,9 @@ export class WebDriver implements ParityDriver {
   }
 
   async codeReviewDetachVisible(): Promise<boolean> {
-    // Old app rows carry the detach as the row's button (TrashIcon inside a tooltip).
-    // Scope to the code-reviews container discovered via the heading, as codeReviewLinks does.
+    // Old app rows carry the detach as the row's button (TrashIcon inside a tooltip),
+    // as a sibling of the row link inside the row div; the Collapsible toggle
+    // and the attach form are section-level, so scope to the row element.
     return this.page.evaluate(() => {
       const heading = Array.from(document.querySelectorAll("*")).find(
         (el) => el.children.length === 0 && el.textContent?.trim() === "Code reviews"
@@ -7661,7 +7662,12 @@ export class WebDriver implements ParityDriver {
       while (container && container.querySelectorAll('a[target="_blank"]').length === 0)
         container = container.parentElement;
       if (!container) return false;
-      return container.querySelector("button") !== null;
+      const links = container.querySelectorAll('a[target="_blank"]');
+      for (const link of links) {
+        const row = link.parentElement;
+        if (row && row.querySelector("button")) return true;
+      }
+      return false;
     });
   }
 
