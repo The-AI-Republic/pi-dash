@@ -1446,6 +1446,10 @@ fn render_app_detail(
     map.insert("type".to_string(), opt_uuid(&issue.type_id));
     map.insert("assigned_pod".to_string(), opt_uuid(&issue.assigned_pod_id));
     map.insert(
+        "assigned_runner".to_string(),
+        opt_uuid(&issue.assigned_runner_id),
+    );
+    map.insert(
         "assignees".to_string(),
         detail.assignee_ids.iter().map(uuid_string).collect(),
     );
