@@ -813,6 +813,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "dedicated_runner_lost_action",
     "created_by",
     "updated_by",
     "workspace",
@@ -1144,6 +1145,11 @@ pub async fn render_project(
         &mut map,
         "default_agent_executor",
         Value::String(row_string(row, "default_agent_executor")?),
+    );
+    put(
+        &mut map,
+        "dedicated_runner_lost_action",
+        Value::String(row_string(row, "dedicated_runner_lost_action")?),
     );
     put(
         &mut map,
