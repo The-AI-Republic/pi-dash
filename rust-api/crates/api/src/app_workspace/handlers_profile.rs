@@ -1153,7 +1153,7 @@ fn p_rich_condition(
                 for leaf in leaves {
                     let name = crate::app_issues::leaf_name(&leaf.field, leaf.lookup);
                     let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !matches!(expr, SimpleExpr::Custom(_)) {
+                    if !pidash_db::filterset::is_constant(&expr) {
                         if let Some(alias) = relation_alias(&name) {
                             used.insert(alias);
                         }

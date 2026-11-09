@@ -31,7 +31,7 @@
 use std::collections::HashSet;
 
 use chrono::{TimeZone, Timelike};
-use sea_query::{Alias, Condition, Expr, SimpleExpr};
+use sea_query::{Alias, Condition, Expr, Keyword, SimpleExpr};
 use serde_json::Value;
 
 use crate::filter::FilterError;
@@ -1040,6 +1040,23 @@ pub fn build_combined(
     Ok(combined)
 }
 
+/// Whether a compiled leaf is one of the match-all / match-nothing
+/// constants (`1 = 1` / `FALSE`) that filter nothing through a relation
+/// join. Callers that decide whether a relation leaf "really filters"
+/// through its join must skip these constants: an empty leaf adds no
+/// join in Django, so a constant must not promote the join to INNER.
+///
+/// `compile_leaf` builds the constants with
+/// `Expr::custom_keyword(..).into()`, which sea-query 0.32 turns into
+/// `SimpleExpr::Keyword(Keyword::Custom(..))` (not `SimpleExpr::Custom(..)`).
+/// Match both shapes so the detection survives that representation.
+pub fn is_constant(expr: &SimpleExpr) -> bool {
+    matches!(
+        expr,
+        SimpleExpr::Custom(_) | SimpleExpr::Keyword(Keyword::Custom(_))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,6 +1202,28 @@ mod tests {
         assert!(one.contains("1 = 1"), "{one}");
         let null = select_where(leaf("is_archived", &Value::Null).unwrap());
         assert!(null.contains("1 = 1"), "{null}");
+    }
+
+    #[test]
+    fn is_constant_matches_both_constant_shapes() {
+        // PIDASHCONV-1716: `compile_leaf` returns the match-all /
+        // match-nothing constants via `Expr::custom_keyword(..).into()`,
+        // which sea-query 0.32 turns into `SimpleExpr::Keyword`, not
+        // `SimpleExpr::Custom`. `is_constant` must match both shapes so
+        // callers skip the constants when deciding join upgrades.
+        let empty_assignee = leaf("assignee_id", &Value::from("")).unwrap();
+        assert!(is_constant(&empty_assignee), "{empty_assignee:?}");
+        let empty_labels = leaf("label_id__in", &Value::from("")).unwrap();
+        assert!(is_constant(&empty_labels), "{empty_labels:?}");
+        let filled = leaf(
+            "assignee_id",
+            &Value::from("00000000-0000-0000-0000-000000000001"),
+        )
+        .unwrap();
+        assert!(!is_constant(&filled), "{filled:?}");
+        // The `Expr::cust` spelling is also a constant shape.
+        let cust = Expr::cust("1 = 1");
+        assert!(is_constant(&cust), "{cust:?}");
     }
 
     #[test]

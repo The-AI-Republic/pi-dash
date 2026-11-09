@@ -252,7 +252,7 @@ fn rich_condition(
                 for leaf in leaves {
                     let name = super::leaf_name(&leaf.field, leaf.lookup);
                     let expr = pidash_db::filterset::compile_leaf(&name, &leaf.value, tz)?;
-                    if !matches!(expr, SimpleExpr::Custom(_)) {
+                    if !pidash_db::filterset::is_constant(&expr) {
                         if let Some(alias) = relation_alias(&name) {
                             used.insert(alias);
                         }
@@ -2256,6 +2256,74 @@ mod tests {
         assert_eq!(
             render(legacy_expr("state__in", &FilterValue::Uuids(vec![]), &tz).expect("expr")),
             "SELECT 1 WHERE FALSE"
+        );
+    }
+
+    #[test]
+    fn empty_relation_leaves_do_not_inner_join() {
+        // PIDASHCONV-1716: an empty/null relation leaf compiles to the
+        // match-all constant (`1 = 1`) and must not mark its alias as
+        // "used". Without grouping, `finish_set` must not join the
+        // relation table at all (so unassigned/unlabelled issues survive).
+        // Before the fix, `compile_leaf` returned
+        // `SimpleExpr::Keyword(_)` while `rich_condition` only skipped
+        // `SimpleExpr::Custom(_)`, so the empty leaf INNER-joined.
+        let empty_assignee = query(&[("filters", r#"{"assignee_id":""}"#)]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &empty_assignee,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(set.referenced.is_empty(), "referenced={:?}", set.referenced);
+        let text = sql(&count_distinct(&set));
+        assert!(
+            !text.contains(r#"JOIN "issue_assignees" AS "issue_assignee""#),
+            "empty assignee leaf must not join issue_assignees: {text}"
+        );
+        let empty_labels = query(&[("filters", r#"{"label_id__in":""}"#)]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &empty_labels,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        assert!(set.referenced.is_empty(), "referenced={:?}", set.referenced);
+        let text = sql(&count_distinct(&set));
+        assert!(
+            !text.contains(r#"JOIN "issue_labels" AS "label_issue""#),
+            "empty label leaf must not join issue_labels: {text}"
+        );
+        // Filled leaf still INNER-joins (regression check).
+        let filled = query(&[(
+            "filters",
+            r#"{"assignee_id":"00000000-0000-0000-0000-000000000001"}"#,
+        )]);
+        let set = issue_set(
+            &gate(false),
+            "w",
+            &filled,
+            None,
+            None,
+            None,
+            false,
+            FilterLayers::FULL,
+        )
+        .expect("set");
+        let text = sql(&count_distinct(&set));
+        assert!(
+            text.contains(r#"INNER JOIN "issue_assignees" AS "issue_assignee""#),
+            "filled assignee leaf must INNER JOIN: {text}"
         );
     }
 }
