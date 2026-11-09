@@ -12,6 +12,8 @@ from pi_dash.license.api.views import (
     InstanceConfigurationEndpoint,
     DisableEmailFeatureEndpoint,
     InstanceEndpoint,
+    RunnerModelDetailEndpoint,
+    RunnerModelListEndpoint,
     SignUpScreenVisitedEndpoint,
     InstanceAdminUserMeEndpoint,
     InstanceAdminSignOutEndpoint,
@@ -71,6 +73,9 @@ urlpatterns = [
         name="instance-workspace-availability",
     ),
     path("workspaces/", InstanceWorkSpaceEndpoint.as_view(), name="instance-workspace"),
+    # Runner LLM model catalog admin CRUD (PDASHOSS01-364).
+    path("runner-models/", RunnerModelListEndpoint.as_view(), name="instance-runner-models"),
+    path("runner-models/<uuid:pk>/", RunnerModelDetailEndpoint.as_view(), name="instance-runner-model"),
     # Loop (Auto Project Management) admin — see
     # .ai_design/loop_project_management/design.md §9.2.
     path("loop/", include("pi_dash.loop.admin_urls")),

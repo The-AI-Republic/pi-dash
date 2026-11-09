@@ -61,6 +61,7 @@ from .run_endpoints import (
     RunStartedEndpoint,
     RunStreamUpgradeEndpoint,
 )
+from .model_catalog import ModelCatalogEndpoint
 from .runners import (
     DevMachineDeleteEndpoint,
     DevMachineListEndpoint,
@@ -96,6 +97,7 @@ from .sessions import (
 )
 
 __all__ = [
+    "ModelCatalogEndpoint",
     "DaemonDevMachineEndpoint",
     "DevMachineEngineSignOutEndpoint",
     "DevMachineMergeEndpoint",

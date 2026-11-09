@@ -139,6 +139,87 @@ export const DEFAULT_MODEL_BY_AGENT: Record<TRunnerAgent, string> = {
   "muse-code": DEFAULT_MODEL_ID,
 };
 
+/** Extra High label for the API-driven effort titles (``xhigh``). */
+const EFFORT_LABELS: Record<string, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+};
+
+/** One catalog row as ``GET /api/runners/model-catalog/`` reports it. */
+export interface IRunnerModelCatalogRow {
+  id: string;
+  agent: TRunnerAgent;
+  model: string;
+  label: string;
+  reasoning_efforts: string[];
+  sort_order: number;
+  is_enabled: boolean;
+  is_preselected: boolean;
+}
+
+/** Response envelope for the picker source (frozen for both backends). */
+export interface IRunnerModelCatalogResponse {
+  agents: Record<TRunnerAgent, IRunnerModelCatalogRow[]>;
+}
+
+/**
+ * Build picker options from the database catalog. Rows with no
+ * ``reasoning_efforts`` are a single option; rows with efforts expand
+ * into the same ``model:effort`` cross product as the hardcoded list,
+ * so day one renders identically. The sentinel stays first.
+ */
+export function buildOptionsFromCatalog(
+  catalog: Record<TRunnerAgent, IRunnerModelCatalogRow[]>
+): Record<TRunnerAgent, IRunnerModelOption[]> {
+  const pick: Record<TRunnerAgent, IRunnerModelOption[]> = {
+    "claude-code": [DEFAULT_OPTION],
+    codex: [DEFAULT_OPTION],
+    "cursor-agent": [DEFAULT_OPTION],
+    "open-claw": [DEFAULT_OPTION],
+    grok: [DEFAULT_OPTION],
+    "muse-code": [DEFAULT_OPTION],
+  };
+  (Object.keys(pick) as TRunnerAgent[]).forEach((agent) => {
+    const rows = catalog[agent] ?? [];
+    const sorted = [...rows].toSorted((a, b) => a.sort_order - b.sort_order || a.label.localeCompare(b.label));
+    for (const row of sorted) {
+      const efforts = row.reasoning_efforts ?? [];
+      if (efforts.length === 0) {
+        pick[agent].push({ id: row.model, label: row.label, model: row.model });
+      } else {
+        for (const effort of efforts) {
+          const title = EFFORT_LABELS[effort] ?? effort;
+          pick[agent].push({
+            id: `${row.model}:${effort}`,
+            label: `${row.label} (${title})`,
+            model: row.model,
+            reasoningEffort: effort,
+          });
+        }
+      }
+    }
+  });
+  return pick;
+}
+
+/** Picker id of the preselected row for an agent (``default`` when unset). */
+export function preselectedIdForAgent(
+  agent: TRunnerAgent,
+  catalog: Record<TRunnerAgent, IRunnerModelCatalogRow[]> | undefined
+): string {
+  const fallback = DEFAULT_MODEL_BY_AGENT[agent];
+  if (!catalog) return fallback;
+  const row = (catalog[agent] ?? []).find((r) => r.is_preselected);
+  if (!row) return fallback;
+  const efforts = row.reasoning_efforts ?? [];
+  // For effort-bearing rows the picker id is the first effort's
+  // ``model:effort``. Any choice is valid; the admin page lets the
+  // operator tune the list, the picker just needs a stable default.
+  return efforts.length > 0 ? `${row.model}:${efforts[0]}` : row.model;
+}
+
 /** Look up a selected option's label; falls back to the default label. */
 export function runnerModelLabel(agent: TRunnerAgent, id: string): string {
   const opt = RUNNER_MODEL_OPTIONS[agent].find((o) => o.id === id);

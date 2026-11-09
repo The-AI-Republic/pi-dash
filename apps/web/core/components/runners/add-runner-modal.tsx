@@ -19,10 +19,13 @@ import { CustomSelect, EModalPosition, EModalWidth, Input, ModalCore } from "@pi
 // app
 import { RunnerCliCommand } from "@/components/runners/runner-cli-command";
 import {
+  buildOptionsFromCatalog,
   DEFAULT_MODEL_BY_AGENT,
+  preselectedIdForAgent,
   RUNNER_MODEL_OPTIONS,
   resolveRunnerModel,
   runnerModelLabel,
+  type IRunnerModelCatalogResponse,
 } from "@/components/runners/runner-models";
 import { useThisComputer } from "@/components/runners/this-computer";
 import { ProjectService } from "@/services/project";
@@ -150,6 +153,28 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   // once the projects list arrives (project-scoped page only).
   const prefilledProject = useRef(false);
 
+  // Runner LLM model catalog (PDASHOSS01-364): picker source from the
+  // database. Falls back to the hardcoded list when the endpoint is
+  // unreachable or the backend predates it, so day one is unchanged.
+  const { data: modelCatalog } = useSWR<IRunnerModelCatalogResponse>(
+    isOpen ? "model-catalog" : null,
+    () => runnerService.getModelCatalog() as unknown as Promise<IRunnerModelCatalogResponse>
+  );
+  const modelOptions = useMemo(() => {
+    if (modelCatalog?.agents) return buildOptionsFromCatalog(modelCatalog.agents);
+    return RUNNER_MODEL_OPTIONS;
+  }, [modelCatalog]);
+  const defaultByAgent = useMemo(() => {
+    if (modelCatalog?.agents) {
+      const out = {} as Record<TAgent, string>;
+      for (const agent of AGENT_OPTIONS) {
+        out[agent] = preselectedIdForAgent(agent, modelCatalog.agents);
+      }
+      return out;
+    }
+    return DEFAULT_MODEL_BY_AGENT;
+  }, [modelCatalog]);
+
   // Reset everything on close→open. State persists between consecutive
   // opens otherwise (RHF + local command state would carry the stale
   // last-submission and confuse the next user).
@@ -164,8 +189,8 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
     setRunnerCommand(null);
     setRemoteCreate(null);
     setLastSubmitted(null);
-    reset(DEFAULT_VALUES);
-  }, [isOpen, reset]);
+    reset({ ...DEFAULT_VALUES, model: defaultByAgent[DEFAULT_AGENT] });
+  }, [isOpen, reset, defaultByAgent]);
 
   // Connected dev machines for the picker. Kept fresh while the modal
   // is open so a machine coming online mid-flow becomes selectable.
@@ -291,12 +316,41 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
   };
 
   // Model options are agent-specific, so a stale selection from a previous
-  // agent would generate an inapplicable ``--model``. Reset to the default
-  // sentinel whenever the agent changes.
+  // agent would generate an inapplicable ``--model``. Reset to the preselected
+  // pick (or default) whenever the agent changes.
   const selectedAgent = watch("agent");
+  const selectedModel = watch("model");
   useEffect(() => {
-    setValue("model", DEFAULT_MODEL_BY_AGENT[selectedAgent]);
-  }, [selectedAgent, setValue]);
+    setValue("model", defaultByAgent[selectedAgent]);
+  }, [selectedAgent, setValue, defaultByAgent]);
+
+  // Dynamic label/resolve against the fetched catalog when present;
+  // fall back to the hardcoded helpers so the form degrades silently
+  // before the catalog arrives or when the backend is older.
+  const currentLabel = (agent: TAgent, id: string): string => {
+    const opts = modelOptions[agent];
+    return opts?.find((o) => o.id === id)?.label ?? runnerModelLabel(agent, id);
+  };
+  const currentResolve = (agent: TAgent, id: string): { model?: string; reasoningEffort?: string } => {
+    if (modelCatalog?.agents) {
+      const opts = modelOptions[agent];
+      const found = opts?.find((o) => o.id === id);
+      if (found) return { model: found.model, reasoningEffort: found.reasoningEffort };
+      return {};
+    }
+    return resolveRunnerModel(agent, id);
+  };
+
+  // When the catalog lands after open, snap a now-invalid selection back
+  // to the agent's preselected/default so the picker never shows a value
+  // it cannot resolve.
+  useEffect(() => {
+    if (!isOpen || !modelCatalog) return;
+    const opts = modelOptions[selectedAgent];
+    if (opts && !opts.some((o) => o.id === selectedModel)) {
+      setValue("model", defaultByAgent[selectedAgent]);
+    }
+  }, [isOpen, modelCatalog, modelOptions, selectedAgent, selectedModel, setValue, defaultByAgent]);
 
   // Drive the cloud → daemon creation and poll the daemon's result.
   // Transient status-poll failures are retried until the deadline; a
@@ -378,7 +432,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
       void runEngineAdd(values.projectIdentifier, values.workingDir);
       return;
     }
-    const { model, reasoningEffort } = resolveRunnerModel(values.agent, values.model);
+    const { model, reasoningEffort } = currentResolve(values.agent, values.model);
     const cmd: RunnerCommandValues = {
       projectIdentifier: values.projectIdentifier,
       podName: values.podName,
@@ -733,7 +787,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                   render={({ field }) => (
                     <CustomSelect
                       value={field.value}
-                      label={runnerModelLabel(selectedAgent, field.value)}
+                      label={currentLabel(selectedAgent, field.value)}
                       onChange={field.onChange}
                       buttonClassName="border border-subtle"
                       input
@@ -741,7 +795,7 @@ export const AddRunnerModal = observer(function AddRunnerModal(props: Props) {
                       placement="bottom-start"
                     >
                       <>
-                        {RUNNER_MODEL_OPTIONS[selectedAgent].map((opt) => (
+                        {modelOptions[selectedAgent].map((opt) => (
                           <CustomSelect.Option key={opt.id} value={opt.id}>
                             {opt.label}
                           </CustomSelect.Option>

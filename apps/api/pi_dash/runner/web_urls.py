@@ -30,6 +30,7 @@ from pi_dash.runner.views import (
     MachineCreateRunnerEndpoint,
     MachineCreateRunnerStatusEndpoint,
     MachineTokenTicketEndpoint,
+    ModelCatalogEndpoint,
     PodDetailEndpoint,
     PodListEndpoint,
     ProjectListEndpoint,
@@ -45,6 +46,10 @@ from pi_dash.runner.views import (
 
 urlpatterns = [
     path("", RunnerListEndpoint.as_view(), name="runner-list"),
+    # Runner LLM model catalog (PDASHOSS01-364): picker source for any
+    # signed-in user. The ``model-catalog/`` prefix must precede
+    # ``<uuid:runner_id>/`` so it is not shadowed by a UUID route.
+    path("model-catalog/", ModelCatalogEndpoint.as_view(), name="runner-model-catalog"),
     path("dev-machines/", DevMachineListEndpoint.as_view(), name="dev-machine-list"),
     path(
         "dev-machines/<uuid:machine_id>/revoke/",

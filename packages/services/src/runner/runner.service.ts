@@ -355,6 +355,34 @@ export class RunnerService extends APIService {
       });
   }
 
+  /**
+   * Runner LLM model catalog (PDASHOSS01-364): picker source for the
+   * add-runner form. Any signed-in user may read it; it returns
+   * enabled models grouped by agent in sort order. Callers keep the
+   * hardcoded fallback when this fails or the backend predates it.
+   */
+  async getModelCatalog(): Promise<{
+    agents: Record<
+      string,
+      Array<{
+        id: string;
+        agent: string;
+        model: string;
+        label: string;
+        reasoning_efforts: string[];
+        sort_order: number;
+        is_enabled: boolean;
+        is_preselected: boolean;
+      }>
+    >;
+  }> {
+    return this.get("/api/runners/model-catalog/")
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
   chatEventsUrl(sessionId: string, after = 0): string {
     const url = `${this.baseURL}/api/runners/chat/sessions/${sessionId}/events/`;
     return after > 0 ? `${url}?after=${after}` : url;

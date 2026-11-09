@@ -1965,3 +1965,53 @@ class RunnerLiveState(models.Model):
     @property
     def total_tokens(self) -> Optional[int]:
         return flat_token_fields(self.usage)["total_tokens"]
+
+
+# The six CLI agent identifiers the runner catalog is grouped by (PDASHOSS01-364).
+# Kept in code: adding/removing agents needs runner support and is out of scope.
+RUNNER_MODEL_AGENTS = ("claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code")
+
+# The reasoning-effort vocabulary the catalog accepts. Codex models use the
+# full set; other agents store an empty list. Kept as a constant so the
+# Django serializer and the Rust port cannot drift.
+ALLOWED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+
+
+class RunnerModelCatalog(models.Model):
+    """Instance-wide LLM model catalog for the add-runner picker (PDASHOSS01-364).
+
+    One row per (agent, model). The picker reads enabled rows grouped by
+    ``agent`` in ``sort_order``; ``is_preselected`` pins the agent's default
+    pick (at most one per agent). Deleting a row never touches runners that
+    already store the model string in their own config.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
+    agent = models.CharField(max_length=32, choices=[(a, a) for a in RUNNER_MODEL_AGENTS], db_index=True)
+    model = models.CharField(max_length=128)
+    label = models.CharField(max_length=128)
+    reasoning_efforts = models.JSONField(default=list, blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    is_enabled = models.BooleanField(default=True)
+    is_preselected = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "runner_model_catalog"
+        ordering = ("agent", "sort_order", "created_at")
+        constraints = [
+            models.UniqueConstraint(fields=["agent", "model"], name="runner_model_unique_per_agent"),
+            models.UniqueConstraint(
+                fields=["agent"],
+                condition=models.Q(is_preselected=True),
+                name="runner_model_one_preselected_per_agent",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["agent", "sort_order"], name="runner_model_agent_sort_idx"),
+            models.Index(fields=["agent", "is_enabled"], name="runner_model_agent_enabled_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.agent}:{self.model}"

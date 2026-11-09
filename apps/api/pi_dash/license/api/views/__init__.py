@@ -22,6 +22,8 @@ from .admin import (
 )
 
 
+from .runner_models import RunnerModelDetailEndpoint, RunnerModelListEndpoint
+
 from .workspace import (
     InstanceWorkSpaceAvailabilityCheckEndpoint,
     InstanceWorkSpaceEndpoint,

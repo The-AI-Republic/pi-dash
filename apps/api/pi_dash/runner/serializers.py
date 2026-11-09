@@ -6,6 +6,8 @@ from django.core.validators import RegexValidator
 from rest_framework import serializers
 
 from pi_dash.runner.models import (
+    ALLOWED_REASONING_EFFORTS,
+    RUNNER_MODEL_AGENTS,
     AgentChatApprovalRequest,
     AgentChatEvent,
     AgentChatMessage,
@@ -18,6 +20,7 @@ from pi_dash.runner.models import (
     Pod,
     Runner,
     RunnerLiveState,
+    RunnerModelCatalog,
 )
 from pi_dash.runner.diagnostics import classify_run_error
 
@@ -577,6 +580,78 @@ class AgentChatEventSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+
+
+class RunnerModelCatalogSerializer(serializers.ModelSerializer):
+    """Row shape for the runner LLM model catalog (PDASHOSS01-364).
+
+    The public read returns only enabled rows grouped by agent; the
+    admin CRUD returns the full row. ``reasoning_efforts`` is a JSON
+    list; ``reasoning_effort`` (singular) is not a field — the picker
+    combines model + effort client-side for Codex rows.
+    """
+
+    agent = serializers.ChoiceField(choices=[(a, a) for a in RUNNER_MODEL_AGENTS])
+    model = serializers.CharField(max_length=128, allow_blank=False, trim_whitespace=True)
+    label = serializers.CharField(max_length=128, allow_blank=False, trim_whitespace=True)
+    reasoning_efforts = serializers.JSONField(required=False, default=list)
+    sort_order = serializers.IntegerField(min_value=0, required=False, default=0)
+    is_enabled = serializers.BooleanField(required=False, default=True)
+    is_preselected = serializers.BooleanField(required=False, default=False)
+
+    class Meta:
+        model = RunnerModelCatalog
+        fields = [
+            "id",
+            "agent",
+            "model",
+            "label",
+            "reasoning_efforts",
+            "sort_order",
+            "is_enabled",
+            "is_preselected",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate_reasoning_efforts(self, value):
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("reasoning_efforts must be a list")
+        seen = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise serializers.ValidationError("reasoning_efforts entries must be strings")
+            if item not in ALLOWED_REASONING_EFFORTS:
+                allowed = ", ".join(ALLOWED_REASONING_EFFORTS)
+                raise serializers.ValidationError(f"reasoning_efforts entries must be one of: {allowed}")
+            if item in seen:
+                raise serializers.ValidationError("reasoning_efforts entries must be unique")
+            seen.add(item)
+        return list(value)
+
+    def validate(self, attrs):
+        # Enforce non-empty model/label after trim (CharField already
+        # trims but a whitespace-only string becomes "" and would slip
+        # through allow_blank=False as an empty string; keep it a 400).
+        for field in ("model", "label"):
+            if field in attrs and not str(attrs[field]).strip():
+                raise serializers.ValidationError({field: "This field may not be blank."})
+        # Duplicate model within an agent — friendly 400 instead of the
+        # generic IntegrityError handler.
+        agent = attrs.get("agent", getattr(self.instance, "agent", None))
+        model = attrs.get("model", getattr(self.instance, "model", None))
+        if agent and model:
+            qs = RunnerModelCatalog.objects.filter(agent=agent, model=model)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    {"model": "A model with this agent and model already exists."}
+                )
+        return attrs
 
 
 class AgentChatApprovalRequestSerializer(serializers.ModelSerializer):
