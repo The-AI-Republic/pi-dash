@@ -181,7 +181,14 @@ jobs:
       AWS_S3_ENDPOINT_URL: http://localhost:4566
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
-      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      # NEWPIDASH-158 (same family as NEWPIDASH-147): the task-oracle
+      # harness only speaks the redis broker protocol and raises on amqp.
+      # AMQP_URL mirrors CELERY_BROKER_URL so the Django worker/beat
+      # (which read AMQP_URL via settings) consume the same redis broker
+      # the harness publishes to. DB 1 keeps the broker off the cache
+      # DB 0 (REDIS_URL / CONTRACT_REDIS_URL).
+      AMQP_URL: redis://localhost:6379/1
+      CELERY_BROKER_URL: redis://localhost:6379/1
       CONTRACT_REDIS_URL: redis://localhost:6379/0
       CONTRACT_TASK_TIMEOUT: "60"
       # NEWPIDASH-30: suites that mint sessions (rrule parity) read the
