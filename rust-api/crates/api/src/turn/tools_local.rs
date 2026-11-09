@@ -1,4 +1,4 @@
-//! Local tool executors: the 17 `assistant/tools/*.py` tools as
+//! Local tool executors: the 18 `assistant/tools/*.py` tools as
 //! `ToolStore` operations (PIDASHCONV-1113).
 //!
 //! Each executor mirrors its Python tool line for line: scope checks
