@@ -6,9 +6,22 @@
 // counts and the FAQ count are what the oracle pins; copy is free.
 import { render } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+const editionHarness = vi.hoisted(() => ({ flags: {} as Record<string, boolean> }));
+vi.mock("../../../core/edition/index.js", () => ({
+  PRICING_FREE_TOKENS_FLAG: "pricing-free-tokens",
+  get edition() {
+    return { id: "test", flags: editionHarness.flags };
+  },
+}));
+
+import { PRICING_FREE_TOKENS_FLAG } from "../../../core/edition/index.js";
 import { MarketingPricing } from "./MarketingPricing.js";
+
+afterEach(() => {
+  editionHarness.flags = {};
+});
 
 describe("MarketingPricing", () => {
   it("owns the page's only top-level heading", () => {
@@ -60,5 +73,42 @@ describe("MarketingPricing", () => {
       "Do members still pay beyond their quotas?",
       "Are self-hosted deployments affected?",
     ]);
+  });
+
+  it("hides the free-token block while the edition flag is absent (OSS)", () => {
+    const { container } = render(<MarketingPricing />);
+    expect(container.querySelector('[data-testid="pricing-free-tokens"]')).toBeNull();
+    expect(container.textContent).not.toContain("2M");
+  });
+
+  it("shows the daily allowance block when the edition flag is set (cloud)", () => {
+    editionHarness.flags = { [PRICING_FREE_TOKENS_FLAG]: true };
+    const { container } = render(<MarketingPricing />);
+    const block = container.querySelector('[data-testid="pricing-free-tokens"]');
+    expect(block?.textContent).toContain("2M");
+    expect(block?.textContent).toContain("5M");
+    expect(block?.textContent).toContain("deepseek-v4-flash");
+    const section = container.querySelector('section[aria-label="Free daily LLM tokens"]');
+    expect(section).not.toBeNull();
+    expect(section?.querySelector("#pricing-free-tokens-heading")?.textContent).toContain("Free tokens");
+    // The block sits between tiers and FAQ: it is not a tier nor an FAQ entry.
+    expect(container.querySelectorAll('[data-testid="pricing-tier"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-testid="pricing-faq"]')).toHaveLength(4);
+    const sections = [...container.querySelectorAll("section")];
+    const faqIdx = sections.findIndex((s) => s.querySelector('[data-testid="pricing-faq"]'));
+    const tokenIdx = sections.findIndex((s) => s.getAttribute("aria-label") === "Free daily LLM tokens");
+    expect(tokenIdx).toBeGreaterThan(-1);
+    expect(tokenIdx).toBeLessThan(faqIdx);
+    expect(sections[sections.length - 1]!.querySelectorAll('[data-testid="pricing-faq"]')).toHaveLength(4);
+  });
+
+  it("keeps the reset and wallet fallback copy inside the cloud block", () => {
+    editionHarness.flags = { [PRICING_FREE_TOKENS_FLAG]: true };
+    const { container } = render(<MarketingPricing />);
+    const section = container.querySelector('section[aria-label="Free daily LLM tokens"]');
+    expect(section?.textContent).toMatch(/00:00 UTC/);
+    expect(section?.textContent).toMatch(/do not carry over/i);
+    expect(section?.textContent).toMatch(/OpenHub credit/i);
+    expect(section?.textContent).toMatch(/wallet/i);
   });
 });

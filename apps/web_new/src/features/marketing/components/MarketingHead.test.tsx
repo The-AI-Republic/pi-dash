@@ -80,4 +80,12 @@ describe("MarketingHead", () => {
     expect(canonicalUrl("/docs", "https://site.test///")).toBe("https://site.test/docs");
     expect(canonicalUrl("/docs")).toBe("https://pidash.airepublic.com/docs");
   });
+
+  it("mentions the free daily token allowance on /pricing", () => {
+    const pricing = MARKETING_META["/pricing"]!;
+    expect(pricing.description).toContain("free daily token allowance");
+    expect(pricing.description).toContain("deepseek-v4-flash");
+    render(<MarketingHead path="/pricing" />);
+    expect(meta('meta[name="description"]')).toBe(pricing.description);
+  });
 });

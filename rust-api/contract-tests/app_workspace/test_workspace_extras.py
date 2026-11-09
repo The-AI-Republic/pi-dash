@@ -553,6 +553,118 @@ def test_user_issues_empty_relation_filter_returns_all(user_api, space, world):
     assert body["total_count"] == 2
 
 
+def test_user_issues_grouped_m2m_none_bucket_keeps_relation_less_issues(
+    user_api, space, world,
+):
+    # NEWPIDASH-152 (NEWPIDASH-131 twin): grouping the profile list by an
+    # m2m key keeps relation-less issues under the "None" bucket (Django's
+    # LEFT JOIN + deleted guard); the Rust INNER JOIN dropped them from
+    # results and total_count. Four issues, at most one link per relation
+    # per issue so Django's fanned count and Rust's distinct count agree.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        other_id = world["other"]["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        seed.project_member(project_id, ws_id, other_id, role=15)
+        state_id = seed.state(project_id, ws_id, name="152 state",
+                              group="unstarted")
+        label_a = seed.label(ws_id, project_id, name="152 alpha")
+        label_b = seed.label(ws_id, project_id, name="152 beta")
+        mod = seed.module(ws_id, project_id, name="152 mod")
+        i1 = seed.issue(ws_id, project_id, name="152 A", state_id=state_id)
+        i2 = seed.issue(ws_id, project_id, name="152 B", state_id=state_id)
+        i3 = seed.issue(ws_id, project_id, name="152 C", state_id=state_id)
+        i4 = seed.issue(ws_id, project_id, name="152 D", state_id=state_id)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id IN (%s, %s, %s, %s)",
+                (uid, i1, i2, i3, i4),
+            )
+        # A: alpha + assigned + module. B: beta + assigned. C: bare.
+        # D: bare + assigned (the None bucket under the assignees filter).
+        seed.issue_label(ws_id, project_id, i1, label_a)
+        seed.issue_label(ws_id, project_id, i2, label_b)
+        seed.issue_assignee(ws_id, project_id, i1, other_id)
+        seed.issue_assignee(ws_id, project_id, i2, other_id)
+        seed.issue_assignee(ws_id, project_id, i4, other_id)
+        seed.module_issue(ws_id, project_id, mod, i1)
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    # Labels by creator: the Done-when case.
+    res = user_api.get(url, params={"group_by": "labels__id", "created_by": uid,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["grouped_by"] == "labels__id"
+    assert body["total_count"] == 4, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i3, i4}
+    assert groups["None"]["total_results"] == 2
+    assert {row["id"] for row in groups[label_a]["results"]} == {i1}
+    assert groups[label_a]["total_results"] == 1
+    assert {row["id"] for row in groups[label_b]["results"]} == {i2}
+    assert groups[label_b]["total_results"] == 1
+    for row in groups["None"]["results"]:
+        assert row["label_ids"] == []
+        assert row["labels__id"] is None
+    # Assignees by creator: the second Done-when case.
+    res = user_api.get(url, params={"group_by": "assignees__id", "created_by": uid,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["grouped_by"] == "assignees__id"
+    assert body["total_count"] == 4, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i3}
+    assert groups["None"]["total_results"] == 1
+    assert {row["id"] for row in groups[other_id]["results"]} == {i1, i2, i4}
+    assert groups[other_id]["total_results"] == 3
+    # Modules by creator: the third m2m alias.
+    res = user_api.get(url, params={"group_by": "issue_module__module_id",
+                                     "created_by": uid, "order_by": "-created_at",
+                                     "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["grouped_by"] == "issue_module__module_id"
+    assert body["total_count"] == 4, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i2, i3, i4}
+    assert groups["None"]["total_results"] == 3
+    assert {row["id"] for row in groups[mod]["results"]} == {i1}
+    assert groups[mod]["total_results"] == 1
+    # Labels with the assignees filter: the assigned-but-unlabeled issue
+    # stays under None.
+    res = user_api.get(url, params={"group_by": "labels__id", "assignees": other_id,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 3, body
+    groups = body["results"]
+    assert "None" in groups, groups
+    assert {row["id"] for row in groups["None"]["results"]} == {i4}
+    assert groups["None"]["total_results"] == 1
+    # State with sub-group labels: the None sub-bucket survives.
+    res = user_api.get(url, params={"group_by": "state_id", "sub_group_by": "labels__id",
+                                     "assignees": other_id,
+                                     "order_by": "-created_at", "per_page": 100})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["total_count"] == 3, body
+    groups = body["results"]
+    cell = groups[state_id]["results"]
+    assert {row["id"] for row in cell["None"]["results"]} == {i4}
+    assert cell["None"]["total_results"] == 1
+    assert {row["id"] for row in cell[label_a]["results"]} == {i1}
+    assert {row["id"] for row in cell[label_b]["results"]} == {i2}
+
+
 def test_user_issues_non_member_denied(other_api, space, world):
     res = other_api.get(f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/")
     assert res.status_code == 403
