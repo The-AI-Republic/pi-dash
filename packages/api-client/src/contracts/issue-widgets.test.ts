@@ -733,4 +733,15 @@ describe("agent contracts", () => {
     expect(status.latest_run?.total_tokens).toBe(1540);
     expect(status.ticker?.max_ticks).toBe(10);
   });
+
+  it("parses a run without queue_position (dropped by PDASHOSS01-156)", () => {
+    const { queue_position: _dropped, ...current } = agentRunSummary;
+    const status = AgentStatus.parse({
+      ticker: agentTicker,
+      active_run: current,
+      latest_run: current,
+      run_count: 1,
+    });
+    expect(status.latest_run?.id).toBe(UUID);
+  });
 });

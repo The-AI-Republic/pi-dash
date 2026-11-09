@@ -4520,6 +4520,15 @@ describe("runs contracts", () => {
     ],
   };
 
+  it("parses a run without queue_position (dropped by PDASHOSS01-156)", async () => {
+    const { queue_position: _dropped, ...current } = run;
+    const page = { results: [current], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 30 };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listRuns(client);
+    expect(parsed.results[0]?.id).toBe(UUID);
+  });
+
   it("lists runs with no query", async () => {
     const page = { results: [run], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 30 };
     const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));

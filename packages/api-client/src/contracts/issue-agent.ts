@@ -91,7 +91,9 @@ export const AgentRunSummary = z.object({
   id: uuid(),
   status: z.string(),
   executor_kind: z.string(),
-  queue_position: z.nullable(z.number()),
+  // Dropped with the worktree-pool columns (PDASHOSS01-156): current
+  // servers omit it, older ones still send it.
+  queue_position: z.optional(z.nullable(z.number())),
   runner: nullableUuid(),
   runner_name: z.nullable(z.string()),
   /**
