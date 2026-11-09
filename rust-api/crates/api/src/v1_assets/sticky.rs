@@ -422,6 +422,7 @@ struct MachineTokenLookup {
     user_id: Uuid,
     workspace_id: Uuid,
     revoked_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
     dev_machine_id: Option<Uuid>,
     dm_revoked: Option<DateTime<Utc>>,
     dm_found: Option<Uuid>,
@@ -442,6 +443,7 @@ async fn machine_token_with_device(
             machine_token::Column::UserId,
             machine_token::Column::WorkspaceId,
             machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
             machine_token::Column::DevMachineId,
         ])
         .column_as(
@@ -489,10 +491,11 @@ async fn is_active_workspace_member(
     Ok(hit.is_some())
 }
 
-/// `validate_machine_token` (`api_authentication.py:45-63`): match on
-/// `token_hash`, unrevoked, dev-machine unrevoked, workspace member (a
+/// `validate_machine_token` (`api_authentication.py:45-63`, via
+/// `resolve_machine_token`): match on `token_hash`, unrevoked, inside the
+/// 60-day idle expiry, dev-machine unrevoked, workspace member (a
 /// non-member's token is revoked, then rejected) — then stamp
-/// `last_used_at`.
+/// `last_used_at` (renewing the idle expiry).
 async fn authenticate_machine(
     pool: &sqlx::PgPool,
     secret_key: &[u8],
@@ -506,6 +509,7 @@ async fn authenticate_machine(
         user_id,
         workspace_id,
         revoked_at,
+        expires_at,
         dev_machine_id,
         dm_revoked,
         dm_found,
@@ -515,6 +519,14 @@ async fn authenticate_machine(
     };
     if revoked_at.is_some() {
         return Err(Denial::InvalidToken);
+    }
+    // 60-day idle expiry (`resolve_machine_token`:
+    // `token.is_expired()` — `expires_at <= now`), checked after the
+    // revoked gate and before the dev-machine/membership/touch steps.
+    if let Some(expires) = expires_at {
+        if expires <= now {
+            return Err(Denial::InvalidToken);
+        }
     }
     if let Some(machine_id) = dev_machine_id {
         if dm_found != Some(machine_id) {
