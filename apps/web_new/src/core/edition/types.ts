@@ -65,6 +65,14 @@ export const PAGE_MOVE_FLAG = "page-move";
  * detail.
  */
 export const PAGE_ASSISTANT_FLAG = "page-assistant";
+/**
+ * OpenHub free-quota notices (NEWPIDASH-148, PRIVATEPI1-136). Editions whose
+ * server emits the `openhub_*` turn error codes set this; the community
+ * edition leaves it absent, so no free-quota mapping renders. The cloud
+ * build enables it by its `id === "cloud"` (see `isOpenhubFreeQuotaEnabled`
+ * in flags.ts, which accepts either signal), so OSS stays verbatim.
+ */
+export const OPENHUB_FREE_QUOTA_FLAG = "openhub-free-quota";
 
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
