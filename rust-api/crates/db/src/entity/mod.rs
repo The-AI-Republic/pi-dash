@@ -230,6 +230,7 @@ pub mod run_message_dedupe;
 pub mod runner;
 pub mod runner_force_refresh;
 pub mod runner_live_state;
+pub mod runner_model_catalog;
 pub mod runner_session;
 pub mod scheduler_bindings;
 pub mod schedulers;

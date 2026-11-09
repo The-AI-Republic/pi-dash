@@ -12,11 +12,14 @@ import {
   cloudSignInUrl,
   createInstanceWorkspace,
   createLoopJob,
+  createRunnerModel,
   deleteLoopJob,
+  deleteRunnerModel,
   disableEmailFeature,
   updateInstance,
   updateInstanceConfigurations,
   updateLoopJob,
+  updateRunnerModel,
   type ApiClient,
   type EmailCredentialCandidate,
   type InstanceBootstrap,
@@ -26,6 +29,7 @@ import {
   type LoopJobCreateInput,
   type LoopJobList,
   type LoopJobPatchInput,
+  type RunnerModelWrite,
 } from "@pidash/api-client";
 import { showToast } from "@pidash/kit";
 import * as React from "react";
@@ -59,6 +63,7 @@ import {
   loopJobsQueryOptions,
   loopJobTargetsQueryOptions,
   mergeConfigurationRows,
+  runnerModelCatalogQueryOptions,
 } from "./queries.js";
 import {
   CONFIG_SAVE_FAILURE_MESSAGE,
@@ -525,4 +530,48 @@ export function useCreateInstanceWorkspace() {
  */
 export function useInstanceRunners(provisioning: string, page: number) {
   return useQuery(instanceRunnersQueryOptions(getAppClient(), provisioning, page));
+}
+
+/** Runner LLM model catalog admin list (PDASHOSS01-364). */
+export function useRunnerModelCatalog() {
+  return useQuery(runnerModelCatalogQueryOptions(getAppClient()));
+}
+
+export function createRunnerModelMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (write: RunnerModelWrite) => createRunnerModel(client, write),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.runnerModels });
+    },
+  });
+}
+
+export function updateRunnerModelMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (args: { id: string; patch: RunnerModelWrite }) => updateRunnerModel(client, args.id, args.patch),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.runnerModels });
+    },
+  });
+}
+
+export function deleteRunnerModelMutationOptions(client: ApiClient, queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: (id: string) => deleteRunnerModel(client, id),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: adminKeys.runnerModels });
+    },
+  });
+}
+
+export function useCreateRunnerModel() {
+  return useMutation(createRunnerModelMutationOptions(getAppClient(), useQueryClient()));
+}
+
+export function useUpdateRunnerModel() {
+  return useMutation(updateRunnerModelMutationOptions(getAppClient(), useQueryClient()));
+}
+
+export function useDeleteRunnerModel() {
+  return useMutation(deleteRunnerModelMutationOptions(getAppClient(), useQueryClient()));
 }

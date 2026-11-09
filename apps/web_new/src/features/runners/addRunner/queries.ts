@@ -10,6 +10,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   createRunnerOnMachine,
   getCreateRunnerStatus,
+  getRunnerCatalog,
   listDevMachines,
   listPods,
   listProjects,
@@ -25,6 +26,7 @@ import { MACHINE_REFRESH_MS } from "./model.js";
 export const addRunnerKeys = {
   machines: (workspaceSlug: string, workspaceId: string) =>
     [...runnersKeys.all(workspaceSlug), "dev-machines", workspaceId] as const,
+  modelCatalog: ["runners", "model-catalog"] as const,
 };
 
 /** Connected-capable machines for the workspace; polls while enabled. */
@@ -75,6 +77,24 @@ export function useAddRunnerPods(
   enabled: boolean
 ) {
   return useQuery({ ...podsForRunnerQueryOptions(getAppClient(), workspaceSlug, workspaceId, projectId), enabled });
+}
+
+/**
+ * Picker catalog (PDASHOSS01-364): the add-runner source from the
+ * database. The caller keeps the hardcoded fallback when this read
+ * fails or the backend predates the endpoint.
+ */
+export function modelCatalogQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: addRunnerKeys.modelCatalog,
+    queryFn: () => getRunnerCatalog(client),
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+export function useModelCatalog(enabled: boolean) {
+  return useQuery({ ...modelCatalogQueryOptions(getAppClient()), enabled });
 }
 
 /**

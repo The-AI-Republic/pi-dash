@@ -14,8 +14,10 @@ import * as React from "react";
 import { useRunnersArea } from "../area.js";
 import {
   AGENT_LABELS,
+  buildChoicesFromCatalog,
   MODEL_CHOICES,
   modelContribution,
+  preselectedFromCatalog,
   RUNNER_AGENTS,
   selectedModelLabel,
   type RunnerAgent,
@@ -45,7 +47,13 @@ import {
   type ConnectedMachine,
   type RemoteState,
 } from "./model.js";
-import { createRunnerTransport, useAddRunnerMachines, useAddRunnerPods, useAddRunnerProjects } from "./queries.js";
+import {
+  createRunnerTransport,
+  useAddRunnerMachines,
+  useAddRunnerPods,
+  useAddRunnerProjects,
+  useModelCatalog,
+} from "./queries.js";
 import { runRemoteCreate } from "./remoteCreate.js";
 
 /** Build-time API base, baked by the harness as `VITE_API_BASE_URL`. */
@@ -96,6 +104,24 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   const machines = useAddRunnerMachines(workspaceSlug, area.workspaceId, open);
   const projects = useAddRunnerProjects(workspaceSlug, open);
   const pods = useAddRunnerPods(workspaceSlug, area.workspaceId, scopeProjectId, open);
+  const modelCatalog = useModelCatalog(open);
+
+  // Picker choices: database catalog when loaded, hardcoded list otherwise.
+  const catalogChoices = React.useMemo(() => {
+    if (modelCatalog.data?.agents) return buildChoicesFromCatalog(modelCatalog.data.agents as never);
+    return MODEL_CHOICES;
+  }, [modelCatalog.data]);
+  const catalogPreselected = React.useMemo(() => {
+    if (modelCatalog.data?.agents) {
+      const out = {} as Record<RunnerAgent, string>;
+      for (const agent of RUNNER_AGENTS) {
+        out[agent] = preselectedFromCatalog(agent, modelCatalog.data.agents as never);
+      }
+      return out;
+    }
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelCatalog.data]);
 
   const connected = React.useMemo(() => connectedMachines(machines.data), [machines.data]);
   const connectedForPicker = React.useMemo<ConnectedMachine[]>(
@@ -186,8 +212,27 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   React.useEffect(() => {
     if (values.agent === lastAgent) return;
     setLastAgent(values.agent);
-    setValues((current) => ({ ...current, model: defaultModelFor(values.agent) }));
+    setValues((current) => ({
+      ...current,
+      model: catalogPreselected?.[values.agent] ?? defaultModelFor(values.agent),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastAgent, values.agent]);
+
+  // When the catalog lands after open, snap a now-invalid selection back
+  // to the agent's preselected/default so the picker never shows a value
+  // it cannot resolve.
+  React.useEffect(() => {
+    if (!open || !modelCatalog.data) return;
+    const choices = catalogChoices[values.agent];
+    if (choices && !choices.some((c) => c.id === values.model)) {
+      setValues((current) => ({
+        ...current,
+        model: catalogPreselected?.[current.agent] ?? defaultModelFor(current.agent),
+      }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, modelCatalog.data, values.agent, values.model]);
 
   function setField<K extends keyof AddRunnerValues>(key: K, value: AddRunnerValues[K]): void {
     setValues((current) => ({ ...current, [key]: value }));
@@ -207,7 +252,13 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   }
 
   function fieldsFor(V: AddRunnerValues): CommandFields {
-    const contribution = modelContribution(V.agent, V.model);
+    const dynamic = modelCatalog.data?.agents ? catalogChoices[V.agent].find((c) => c.id === V.model) : undefined;
+    const contribution = dynamic
+      ? {
+          model: dynamic.model,
+          reasoningEffort: dynamic.reasoningEffort,
+        }
+      : modelContribution(V.agent, V.model);
     return {
       cloudUrl: resolvedOrigin.url,
       workspaceSlug,
@@ -360,11 +411,18 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
             { id: MANUAL_MACHINE, label: MANUAL_MACHINE_LABEL },
           ]}
           machinesError={machines.isError}
+          gating={gating}
           onField={setField}
           onPickMachine={pickMachine}
-          gating={gating}
           onCancel={close}
           onSubmit={submit}
+          modelOptions={catalogChoices[values.agent].map((choice) => ({ id: choice.id, label: choice.label }))}
+          modelLabel={
+            modelCatalog.data?.agents
+              ? (catalogChoices[values.agent].find((c) => c.id === values.model)?.label ??
+                selectedModelLabel(values.agent, values.model))
+              : selectedModelLabel(values.agent, values.model)
+          }
         />
       )}
     </Dialog>
@@ -390,6 +448,8 @@ interface FormPanelProps {
   onPickMachine: (id: string) => void;
   onCancel: () => void;
   onSubmit: () => void;
+  modelOptions: ComboboxOption[];
+  modelLabel: string;
 }
 
 function FormPanel({
@@ -407,6 +467,8 @@ function FormPanel({
   onPickMachine,
   onCancel,
   onSubmit,
+  modelOptions,
+  modelLabel,
 }: FormPanelProps): React.ReactElement {
   const machineLabelText = machineOptions.find((option) => option.id === values.devMachineId)?.label;
   const projectLabel =
@@ -416,10 +478,6 @@ function FormPanel({
     id: agent,
     label: AGENT_LABELS[agent],
     disabled: gating.disabled.includes(agent),
-  }));
-  const modelOptions: ComboboxOption[] = MODEL_CHOICES[values.agent].map((choice) => ({
-    id: choice.id,
-    label: choice.label,
   }));
 
   return (
@@ -517,7 +575,7 @@ function FormPanel({
           value={values.model}
           options={modelOptions}
           onChange={(id) => onField("model", id)}
-          triggerLabel={selectedModelLabel(values.agent, values.model)}
+          triggerLabel={modelLabel}
         />
         <p className="text-meta text-(--text-muted)">
           Default model this runner&apos;s agent uses. The sentinel lets the agent pick its own.

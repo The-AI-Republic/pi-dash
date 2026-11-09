@@ -128,6 +128,78 @@ export const PRESELECTED_MODEL: Record<RunnerAgent, string> = {
   "muse-code": DEFAULT_MODEL_ID,
 };
 
+/** Extra High label for the API-driven effort titles (PDASHOSS01-364). */
+const EFFORT_LABELS: Record<string, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+};
+
+/** One catalog row as the picker source reports it. */
+export interface CatalogRow {
+  agent: string;
+  model: string;
+  label: string;
+  reasoning_efforts: string[];
+  sort_order: number;
+  is_enabled: boolean;
+  is_preselected: boolean;
+}
+
+/**
+ * Build picker options from the database catalog (PDASHOSS01-364).
+ * Rows with no efforts are a single option; rows with efforts expand
+ * into the same `model:effort` cross product as the hardcoded list,
+ * so day one renders identically. The sentinel stays first.
+ */
+export function buildChoicesFromCatalog(
+  catalog: Record<string, CatalogRow[] | undefined>
+): Record<RunnerAgent, ModelChoice[]> {
+  const pick: Record<RunnerAgent, ModelChoice[]> = {
+    "claude-code": [AGENT_DEFAULT],
+    codex: [AGENT_DEFAULT],
+    "cursor-agent": [AGENT_DEFAULT],
+    "open-claw": [AGENT_DEFAULT],
+    grok: [AGENT_DEFAULT],
+    "muse-code": [AGENT_DEFAULT],
+  };
+  for (const agent of RUNNER_AGENTS) {
+    const rows = catalog[agent] ?? [];
+    const sorted = [...rows].sort((a, b) => a.sort_order - b.sort_order || a.label.localeCompare(b.label));
+    for (const row of sorted) {
+      const efforts = row.reasoning_efforts ?? [];
+      if (efforts.length === 0) {
+        pick[agent].push({ id: row.model, label: row.label, model: row.model });
+      } else {
+        for (const effort of efforts) {
+          const title = EFFORT_LABELS[effort] ?? effort;
+          pick[agent].push({
+            id: `${row.model}:${effort}`,
+            label: `${row.label} (${title})`,
+            model: row.model,
+            reasoningEffort: effort,
+          });
+        }
+      }
+    }
+  }
+  return pick;
+}
+
+/** Picker id of the preselected row for an agent (``default`` when unset). */
+export function preselectedFromCatalog(
+  agent: RunnerAgent,
+  catalog: Record<string, CatalogRow[] | undefined> | undefined
+): string {
+  const fallback = PRESELECTED_MODEL[agent];
+  if (!catalog) return fallback;
+  const row = (catalog[agent] ?? []).find((r) => r.is_preselected);
+  if (!row) return fallback;
+  const efforts = row.reasoning_efforts ?? [];
+  return efforts.length > 0 ? `${row.model}:${efforts[0]}` : row.model;
+}
+
 /** Label for a selection; unknown ids read as the agent default. */
 export function selectedModelLabel(agent: RunnerAgent, id: string): string {
   return MODEL_CHOICES[agent].find((choice) => choice.id === id)?.label ?? DEFAULT_MODEL_LABEL;

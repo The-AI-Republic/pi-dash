@@ -1301,6 +1301,18 @@ export {
   revokeRunner,
   updateRunner,
 } from "./contracts/runners.js";
+export {
+  RunnerCatalogRow,
+  RunnerCatalogResponse,
+  RunnerModelCatalogList,
+  RUNNER_CATALOG_AGENTS,
+  RUNNER_CATALOG_EFFORTS,
+  getRunnerCatalog,
+  listRunnerModelCatalog,
+  createRunnerModel,
+  updateRunnerModel,
+  deleteRunnerModel,
+} from "./contracts/runner-model-catalog.js";
 export type {
   RunnerListScope,
   RunnerPatch,
@@ -1308,6 +1320,7 @@ export type {
   RunnerProvisioning,
   RunnerStatus,
 } from "./contracts/runners.js";
+export type { RunnerCatalogAgent, RunnerCatalogEffort, RunnerModelWrite } from "./contracts/runner-model-catalog.js";
 export {
   AgentRun,
   AgentRunCreateResult,

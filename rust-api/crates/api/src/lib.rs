@@ -45,6 +45,7 @@ pub mod issue_transition;
 pub mod license;
 pub mod r#loop;
 pub mod middleware;
+pub mod model_catalog;
 pub mod ops;
 pub mod orchestration;
 pub mod overlay;

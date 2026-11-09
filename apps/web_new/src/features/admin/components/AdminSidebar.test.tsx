@@ -89,8 +89,9 @@ describe("sidebar entries", () => {
       expect.stringContaining("Artificial intelligence"),
       expect.stringContaining("Loop"),
       expect.stringContaining("Runners"),
+      expect.stringContaining("Runner models"),
     ]);
-    expect(links).toHaveLength(7);
+    expect(links).toHaveLength(8);
     expect(links.map((link) => link.getAttribute("href"))).toEqual([
       "/god-mode/general/",
       "/god-mode/email/",
@@ -99,6 +100,7 @@ describe("sidebar entries", () => {
       "/god-mode/ai/",
       "/god-mode/loop/",
       "/god-mode/runners/",
+      "/god-mode/runner-models/",
     ]);
     for (const link of links) {
       expect(link.querySelector("svg")).toBeInTheDocument();
@@ -131,7 +133,7 @@ describe("collapsed rail", () => {
     useAdminSidebarStore.getState().setCollapsed(true);
     await renderSidebar("/god-mode/general/");
     const links = screen.getAllByTestId(/^admin-nav-/);
-    expect(links).toHaveLength(7);
+    expect(links).toHaveLength(8);
     expect(links.map((link) => link.getAttribute("href"))).toEqual([
       "/god-mode/general/",
       "/god-mode/email/",
@@ -140,6 +142,7 @@ describe("collapsed rail", () => {
       "/god-mode/ai/",
       "/god-mode/loop/",
       "/god-mode/runners/",
+      "/god-mode/runner-models/",
     ]);
     for (const link of links) {
       expect(link.textContent).toBe("");

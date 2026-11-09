@@ -77,6 +77,13 @@ export const ADMIN_SIDEBAR_ENTRIES: readonly AdminSidebarEntryDef[] = [
     slug: "runners",
     href: "/god-mode/runners/",
   },
+  {
+    key: "runner-models",
+    name: "Runner models",
+    description: "LLM catalog the add-runner picker reads.",
+    slug: "runner-models",
+    href: "/god-mode/runner-models/",
+  },
 ];
 
 /** Trailing slashes trimmed for comparison; the root keeps its own. */

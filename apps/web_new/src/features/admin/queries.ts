@@ -21,6 +21,7 @@ import {
   listInstanceWorkspaces,
   listLoopJobs,
   listLoopTargets,
+  listRunnerModelCatalog,
   probeCloudAuthSession,
   type AdminWorkspaceListResponse,
   type ApiClient,
@@ -68,6 +69,8 @@ export const adminKeys = {
    * reuses the cache instead of refetching.
    */
   runners: (provisioning: string, page: number) => ["admin", "runners", provisioning, page],
+  /** Runner LLM model catalog admin list (PDASHOSS01-364). */
+  runnerModels: ["admin", "runner-models"] as const,
 } as const;
 
 /**
@@ -290,6 +293,20 @@ export function instanceRunnersQueryOptions(client: ApiClient, provisioning: str
   return queryOptions({
     queryKey: adminKeys.runners(provisioning, page),
     queryFn: () => listInstanceRunners(client, { provisioning, page }),
+    ...adminQueryDefaults,
+    retry: false,
+  });
+}
+
+/**
+ * Runner LLM model catalog admin list (PDASHOSS01-364): the flat ordered
+ * list the god-mode page renders. Never stale, no background refetch;
+ * every mutation invalidates this key explicitly.
+ */
+export function runnerModelCatalogQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.runnerModels,
+    queryFn: () => listRunnerModelCatalog(client),
     ...adminQueryDefaults,
     retry: false,
   });

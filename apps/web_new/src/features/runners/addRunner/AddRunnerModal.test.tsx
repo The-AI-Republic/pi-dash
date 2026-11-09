@@ -30,6 +30,7 @@ vi.mock("./queries.js", () => ({
   useAddRunnerMachines: () => ({ data: loadErrors.machines ? undefined : machineData, isError: loadErrors.machines }),
   useAddRunnerProjects: () => ({ data: loadErrors.projects ? undefined : projectRows, isError: loadErrors.projects }),
   useAddRunnerPods: () => ({ data: loadErrors.pods ? undefined : podRows, isError: loadErrors.pods }),
+  useModelCatalog: () => ({ data: undefined, isError: false }),
   createRunnerTransport: () => ({ createRunner, readStatus }),
 }));
 
