@@ -319,6 +319,9 @@ pidash_sdk::domain::NewApiToken
 pidash_sdk::domain::NewMemberWithActive
 pidash_sdk::domain::NewWorkspace
 pidash_sdk::domain::ProvisionedUser
+pidash_sdk::domain::ResolveError
+pidash_sdk::domain::RunnerListParams
+pidash_sdk::domain::RunnerListRow
 pidash_sdk::domain::TokenFields
 pidash_sdk::domain::UserFieldUpdates
 pidash_sdk::domain::WriteActor
@@ -337,11 +340,15 @@ pidash_sdk::domain::insert_llm_config
 pidash_sdk::domain::insert_provisioned_user
 pidash_sdk::domain::insert_user_notification_preference
 pidash_sdk::domain::issue_token
+pidash_sdk::domain::list_project_runners
 pidash_sdk::domain::make_unusable_password
 pidash_sdk::domain::overwrite
+pidash_sdk::domain::resolve_pod_ref
+pidash_sdk::domain::resolve_runner_ref
 pidash_sdk::domain::revoke_machine_token_by_hash
 pidash_sdk::domain::revoke_machine_tokens_by_workspace
 pidash_sdk::domain::revoke_runner_sessions_by_workspace
+pidash_sdk::domain::runner_list_row_to_value
 pidash_sdk::domain::save_llm_config_full
 pidash_sdk::domain::set_name
 pidash_sdk::domain::set_profile_last_workspace
