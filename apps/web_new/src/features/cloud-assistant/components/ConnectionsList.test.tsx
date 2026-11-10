@@ -303,13 +303,13 @@ describe("ConnectionsList", () => {
           removable: false,
           disconnectable: false,
           modelControl: "select",
-          modelName: "deepseek/deepseek-v4.1-flash-1017",
+          modelName: "openhub_free_llm",
           quotaPlan: "free",
           modelCredit: "free",
           modelChoices: [
             {
-              value: "deepseek/deepseek-v4.1-flash-1017",
-              label: "Lowest cost",
+              value: "openhub_free_llm",
+              label: "OpenHub free model",
               credit: "free",
               badge: "Free",
               selectable: true,
@@ -328,8 +328,8 @@ describe("ConnectionsList", () => {
       { topUpHref: "https://hub.example.com/account/credits" }
     );
     const picker = screen.getByRole("combobox", { name: "Model for OpenHub" });
-    expect(picker).toHaveValue("deepseek/deepseek-v4.1-flash-1017");
-    const freeOption = screen.getByRole("option", { name: "Lowest cost (Free)" });
+    expect(picker).toHaveValue("openhub_free_llm");
+    const freeOption = screen.getByRole("option", { name: "OpenHub free model (Free)" });
     const paidOption = screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" });
     expect(freeOption).toBeEnabled();
     expect(paidOption).toBeDisabled();
@@ -405,8 +405,8 @@ describe("ConnectionsList", () => {
         modelCredit: "uses-credit",
         modelChoices: [
           {
-            value: "deepseek/deepseek-v4.1-flash-1017",
-            label: "Lowest cost",
+            value: "openhub_free_llm",
+            label: "OpenHub free model",
             credit: "free",
             badge: "Free",
             selectable: true,
@@ -422,7 +422,7 @@ describe("ConnectionsList", () => {
         markers: ["Included in your plan", "In use"],
       }),
     ]);
-    expect(screen.getByRole("option", { name: "Lowest cost (Free)" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "OpenHub free model (Free)" })).toBeEnabled();
     expect(screen.getByRole("option", { name: "Balanced hosted model (Uses credit)" })).toBeEnabled();
     expect(screen.queryByRole("status")).toBeNull();
   });
