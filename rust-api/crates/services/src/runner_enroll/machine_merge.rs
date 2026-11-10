@@ -921,9 +921,13 @@ pub async fn merge_dev_machine(
         .exec(db)
         .await
         .map(drop)?;
-    engine_credential::revoke_engine_credential(db, source.id, "machine_merged", now)
-        .await
-        .map_err(|err| MergeError::Db(err.to_string()))?;
+    let (_revoked, revoke_effects) =
+        engine_credential::revoke_engine_credential(db, source.id, "machine_merged", now)
+            .await
+            .map_err(|err| MergeError::Db(err.to_string()))?;
+    for pod in revoke_effects.drain_pod_ids {
+        drain_pods.insert(pod);
+    }
     let mut drain_pod_ids: Vec<Uuid> = drain_pods.into_iter().collect();
     drain_pod_ids.sort();
     Ok(MergeOutcome {

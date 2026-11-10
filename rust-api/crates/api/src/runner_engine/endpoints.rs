@@ -31,11 +31,40 @@ use serde_json::Map;
 use uuid::Uuid;
 
 use pidash_db::entity::dev_machine;
+use pidash_db::redis::client_from_settings;
 use pidash_services::domain::engine_credential::{
     authenticate_engine_credential, engine_profile_for_user, is_legacy_desktop, AuthError,
 };
 use pidash_services::domain::engine_state::{apply_model_token_outcome, apply_profile_outcome};
 use pidash_services::extensions::CredentialError;
+use pidash_services::runner_enroll::dispatch_rules::PauseEffects;
+
+/// Fire post-commit drains for a pause flip, mirroring Django's
+/// `transaction.on_commit` (`dispatch_rules.py:208-217`).
+async fn drain_pause_effects(pool: &sqlx::PgPool, state: &AppState, effects: &PauseEffects) {
+    if effects.drain_pod_ids.is_empty() && effects.drain_runner_ids.is_empty() {
+        return;
+    }
+    let redis = client_from_settings(state.settings());
+    for pod_id in &effects.drain_pod_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod_id,
+        )
+        .await;
+    }
+    for runner_id in &effects.drain_runner_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *runner_id,
+        )
+        .await;
+    }
+}
 
 use crate::assistant::governor;
 use crate::assistant::throttles::{ThrottleSpec, RATE_LIMIT_BODY};
@@ -304,7 +333,7 @@ pub async fn engine_model_token(
                     // renewed since the daemon's last report must not get
                     // its engine paused. Failure logs, never fails the 401.
                     if !has_live_credential_for(&sea, carried.dev_machine_id, now).await {
-                        if let Err(inner) = apply_model_token_outcome(
+                        match apply_model_token_outcome(
                             &sea,
                             carried.dev_machine_id,
                             CODE_ENGINE_SIGN_IN_REQUIRED,
@@ -312,11 +341,16 @@ pub async fn engine_model_token(
                         )
                         .await
                         {
-                            tracing::error!(
-                                dev_machine_id = %carried.dev_machine_id,
-                                error = %inner,
-                                "model token pause update failed"
-                            );
+                            Ok((_changed, effects)) => {
+                                drain_pause_effects(pool, &state, &effects).await;
+                            }
+                            Err(inner) => {
+                                tracing::error!(
+                                    dev_machine_id = %carried.dev_machine_id,
+                                    error = %inner,
+                                    "model token pause update failed"
+                                );
+                            }
                         }
                     }
                 }
@@ -352,11 +386,13 @@ pub async fn engine_model_token(
         } else {
             ENGINE_OFF_DETAIL.to_owned()
         };
-        if apply_model_token_outcome(&sea, credential.dev_machine_id, pause_reason, now)
-            .await
-            .is_err()
-        {
-            return server_error();
+        match apply_model_token_outcome(&sea, credential.dev_machine_id, pause_reason, now).await {
+            Ok((_changed, effects)) => {
+                drain_pause_effects(pool, &state, &effects).await;
+            }
+            Err(_) => {
+                return server_error();
+            }
         }
         tracing::warn!(reason = %pause_reason, "engine.model_token_error");
         return model_token_reason_body(pause_reason, &detail);
@@ -368,11 +404,13 @@ pub async fn engine_model_token(
         .await
     {
         Ok((token, expires_at)) => {
-            if apply_model_token_outcome(&sea, credential.dev_machine_id, "", now)
-                .await
-                .is_err()
-            {
-                return server_error();
+            match apply_model_token_outcome(&sea, credential.dev_machine_id, "", now).await {
+                Ok((_changed, effects)) => {
+                    drain_pause_effects(pool, &state, &effects).await;
+                }
+                Err(_) => {
+                    return server_error();
+                }
             }
             tracing::info!(
                 request_id = %request_id_from(&headers),
@@ -401,11 +439,15 @@ pub async fn engine_model_token(
             );
             match classify_model_token_failure(&error) {
                 ModelTokenFailure::Reason { reason, detail } => {
-                    if apply_model_token_outcome(&sea, credential.dev_machine_id, &reason, now)
+                    match apply_model_token_outcome(&sea, credential.dev_machine_id, &reason, now)
                         .await
-                        .is_err()
                     {
-                        return server_error();
+                        Ok((_changed, effects)) => {
+                            drain_pause_effects(pool, &state, &effects).await;
+                        }
+                        Err(_) => {
+                            return server_error();
+                        }
                     }
                     model_token_reason_body(&reason, &detail)
                 }
@@ -462,12 +504,15 @@ pub async fn engine_profile(State(state): State<AppState>, headers: HeaderMap) -
         .await;
     let (available, pause_reason) =
         engine_profile_for_user(state.settings().managed_runner.enabled, &profile);
-    if !is_legacy_desktop(&machine.provisioning)
-        && apply_profile_outcome(&sea, machine_id, pause_reason, now)
-            .await
-            .is_err()
-    {
-        return server_error();
+    if !is_legacy_desktop(&machine.provisioning) {
+        match apply_profile_outcome(&sea, machine_id, pause_reason, now).await {
+            Ok((_changed, effects)) => {
+                drain_pause_effects(pool, &state, &effects).await;
+            }
+            Err(_) => {
+                return server_error();
+            }
+        }
     }
     // The profile endpoint's answer for `reason_code`: its own
     // `engine_disabled` when the instance switch off is the pause,
@@ -543,17 +588,19 @@ pub async fn engine_credential_revoke(
     };
     // Idempotent: revoking a signed-out machine is a no-op that still
     // answers the payload.
-    let revoked = match pidash_services::domain::engine_credential::revoke_engine_credential(
-        &sea,
-        machine_id,
-        "signed_out",
-        now,
-    )
-    .await
-    {
-        Ok(revoked) => revoked,
-        Err(_) => return server_error(),
-    };
+    let (revoked, revoke_effects) =
+        match pidash_services::domain::engine_credential::revoke_engine_credential(
+            &sea,
+            machine_id,
+            "signed_out",
+            now,
+        )
+        .await
+        {
+            Ok((revoked, effects)) => (revoked, effects),
+            Err(_) => return server_error(),
+        };
+    drain_pause_effects(pool, &state, &revoke_effects).await;
     let Some(machine) = (match read_machine_row(&sea, machine_id).await {
         Ok(machine) => machine,
         Err(response) => return response,

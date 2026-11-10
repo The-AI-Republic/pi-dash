@@ -3176,7 +3176,31 @@ pub async fn me_deactivate(
         )
         .await
         {
-            Ok(_) => {}
+            Ok((_count, effects)) => {
+                if !effects.drain_pod_ids.is_empty() || !effects.drain_runner_ids.is_empty() {
+                    // Mirror Django's on_commit drains for the pause flips.
+                    let redis = pidash_db::redis::client_from_settings(state.settings());
+                    for pod_id in &effects.drain_pod_ids {
+                        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                            pool,
+                            redis.as_ref(),
+                            &state.settings().runner,
+                            *pod_id,
+                        )
+                        .await;
+                    }
+                    for runner_id in &effects.drain_runner_ids {
+                        let _ =
+                            pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                                pool,
+                                redis.as_ref(),
+                                &state.settings().runner,
+                                *runner_id,
+                            )
+                            .await;
+                    }
+                }
+            }
             Err(pidash_services::domain::engine_credential::RevokeError::Database(error)) => {
                 return write_denial(error).into_response();
             }

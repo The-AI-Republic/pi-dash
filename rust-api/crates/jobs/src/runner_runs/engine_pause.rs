@@ -36,13 +36,42 @@ fn pause_engines_handler(pool: PgPool) -> Handler {
         let fut: Pin<Box<dyn Future<Output = Result<Verdict, HandlerError>> + Send>> =
             Box::pin(async move {
                 let sea = pidash_db::pool::sea_orm_connection(&pool);
-                pidash_services::domain::engine_state::pause_engines_with_expired_credentials(
-                    &sea,
-                    Utc::now(),
-                )
-                .await
-                .map(|_| Verdict::Ack)
-                .map_err(|error| error.to_string())
+                let (_paused, effects) =
+                    pidash_services::domain::engine_state::pause_engines_with_expired_credentials(
+                        &sea,
+                        Utc::now(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if !effects.drain_pod_ids.is_empty() || !effects.drain_runner_ids.is_empty() {
+                    // Mirror Django's on_commit drains: pause drains pods,
+                    // resume (not exercised here) would drain runners. Here
+                    // only the pause arm fires.
+                    let runner = pidash_db::config::Settings::test_defaults().runner;
+                    let redis = pidash_db::redis::client_from_settings(
+                        &pidash_db::config::Settings::test_defaults(),
+                    );
+                    for pod_id in &effects.drain_pod_ids {
+                        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                            &pool,
+                            redis.as_ref(),
+                            &runner,
+                            *pod_id,
+                        )
+                        .await;
+                    }
+                    for runner_id in &effects.drain_runner_ids {
+                        let _ =
+                            pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                                &pool,
+                                redis.as_ref(),
+                                &runner,
+                                *runner_id,
+                            )
+                            .await;
+                    }
+                }
+                Ok(Verdict::Ack)
             });
         fut
     })
