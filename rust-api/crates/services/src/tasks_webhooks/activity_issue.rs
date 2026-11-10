@@ -2,7 +2,7 @@
 //!
 //! Port of `apps/api/pi_dash/bgtasks/issue_activities_task.py:557-927`:
 //! `create/update/delete_issue_activity` (`:557-665`,
-//! `ISSUE_ACTIVITY_MAPPER` 17 keys `:604-622`), the three comment builders
+//! `ISSUE_ACTIVITY_MAPPER` 21 keys `:604-622`, PDASHOSS01-297), the three comment builders
 //! (`:666-754`), `create/delete_cycle_issue_activity` (`:755-860`) and
 //! `create/delete_module_issue_activity` (`:861-927`) — one closure on top
 //! of the `track_*` helpers from [`super::activity_tracks`] (PIDASHCONV-196).
@@ -73,11 +73,13 @@
 use serde_json::Value;
 
 use super::activity_tracks::{
-    plan_track_archive_at, plan_track_assignees, plan_track_closed_to, plan_track_description,
-    plan_track_estimate_points, plan_track_labels, plan_track_name, plan_track_parent,
-    plan_track_priority, plan_track_start_date, plan_track_state, plan_track_target_date,
-    AssigneeOutcome, DescriptionLatest, DescriptionOutcome, EstimatePointRef, IssueActivityDraft,
-    IssueSubscriberDraft, LabelRef, ParentRef, StateRef, TrackError, TrackFrame, UserRef,
+    plan_track_archive_at, plan_track_assigned_pod, plan_track_assigned_runner,
+    plan_track_assignees, plan_track_closed_to, plan_track_description, plan_track_estimate_points,
+    plan_track_labels, plan_track_name, plan_track_parent, plan_track_priority,
+    plan_track_start_date, plan_track_state, plan_track_target_date, AssigneeOutcome,
+    DescriptionLatest, DescriptionOutcome, EstimatePointRef, IssueActivityDraft,
+    IssueSubscriberDraft, LabelRef, ParentRef, PodRef, RunnerRef, StateRef, TrackError, TrackFrame,
+    UserRef,
 };
 
 /// One appended `IssueActivity` row: every column the entity builders write.
@@ -307,23 +309,26 @@ pub fn plan_create_issue(
     })
 }
 
-/// The resolver bundle `update_issue_activity` threads into the twelve
-/// `track_*` helpers; each closure owns its query scoping (project-scoped
-/// state lookup, latest-`IssueActivity` projection, …) exactly as the
-/// Python's inline ORM reads do.
+/// The resolver bundle `update_issue_activity` threads into the
+/// `track_*` helpers; each closure owns its query scoping
+/// (project-scoped state lookup, latest-`IssueActivity` projection,
+/// runner/pod name lookups, …) exactly as the Python's inline ORM reads do.
 pub struct UpdateResolvers<'a> {
     pub parent: &'a dyn Fn(&str) -> Option<ParentRef>,
     pub state: &'a dyn Fn(&str) -> Option<StateRef>,
     pub label: &'a dyn Fn(&str) -> Option<LabelRef>,
     pub user: &'a dyn Fn(&str) -> Option<UserRef>,
     pub estimate: &'a dyn Fn(&str) -> Option<EstimatePointRef>,
+    pub runner: &'a dyn Fn(&str) -> Option<RunnerRef>,
+    pub pod: &'a dyn Fn(&str) -> Option<PodRef>,
     pub description_latest: Option<DescriptionLatest>,
 }
 
-/// `update_issue_activity` (`:585-646`): every key of the parsed requested
-/// dict dispatches through `ISSUE_ACTIVITY_MAPPER` (17 keys → 12 helpers);
-/// unknown keys are skipped silently. A raising helper aborts the loop and
-/// propagates to the dispatcher, like the Python.
+/// `update_issue_activity` (`:585-646`, PDASHOSS01-297 mapping `:702-723`):
+/// every key of the parsed requested dict dispatches through
+/// `ISSUE_ACTIVITY_MAPPER` (21 keys → 14 helpers with the dedicated-runner
+/// `assigned_*` twins); unknown keys are skipped silently. A raising helper
+/// aborts the loop and propagates to the dispatcher, like the Python.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateOutcome {
     pub rows: Vec<IssueActivityDraft>,
@@ -376,6 +381,10 @@ pub fn plan_update_issue(
                 | "assignees"
                 | "estimate_point"
                 | "archived_at"
+                | "assigned_pod"
+                | "assigned_pod_id"
+                | "assigned_runner"
+                | "assigned_runner_id"
         );
         if !mapped {
             continue;
@@ -460,6 +469,20 @@ pub fn plan_update_issue(
             }
             "archived_at" => {
                 if let Some(row) = plan_track_archive_at(&requested, current, frame) {
+                    out.rows.push(row);
+                }
+            }
+            "assigned_pod" | "assigned_pod_id" => {
+                if let Some(row) =
+                    plan_track_assigned_pod(&requested, current, frame, resolvers.pod)
+                {
+                    out.rows.push(row);
+                }
+            }
+            "assigned_runner" | "assigned_runner_id" => {
+                if let Some(row) =
+                    plan_track_assigned_runner(&requested, current, frame, resolvers.runner)
+                {
                     out.rows.push(row);
                 }
             }
@@ -933,12 +956,16 @@ mod tests {
         let label = |_: &str| None;
         let user = |_: &str| None;
         let estimate = |_: &str| None;
+        let runner = |_: &str| None;
+        let pod = |_: &str| None;
         let r = UpdateResolvers {
             parent: &parent,
             state: &state,
             label: &label,
             user: &user,
             estimate: &estimate,
+            runner: &runner,
+            pod: &pod,
             description_latest: None,
         };
         let outcome = plan_update_issue(
@@ -994,12 +1021,16 @@ mod tests {
             })
         };
         let estimate = |_: &str| None;
+        let runner = |_: &str| None;
+        let pod = |_: &str| None;
         let r = UpdateResolvers {
             parent: &parent,
             state: &state,
             label: &label,
             user: &user,
             estimate: &estimate,
+            runner: &runner,
+            pod: &pod,
             description_latest: None,
         };
         // Assignee with a `None` current: the added assignee diffs
@@ -1033,6 +1064,8 @@ mod tests {
         let label = |_: &str| None;
         let user = |_: &str| None;
         let estimate = |_: &str| None;
+        let runner = |_: &str| None;
+        let pod = |_: &str| None;
         let state = |id: &str| {
             (id == STATE_DONE).then(|| StateRef {
                 id: STATE_DONE.to_owned(),
@@ -1047,6 +1080,8 @@ mod tests {
             label: &label,
             user: &user,
             estimate: &estimate,
+            runner: &runner,
+            pod: &pod,
             description_latest: Some(DescriptionLatest {
                 field: "description".to_owned(),
                 actor_id: "actor-1".to_owned(),
@@ -1080,6 +1115,84 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.rows.len(), 1);
         assert_eq!(outcome.rows[0].field, "state");
+    }
+
+    #[test]
+    fn update_issue_assigned_runner_pod_dispatch() {
+        let f = frame();
+        const RUNNER_OLD: &str = "10101010-1010-4101-8101-101010101010";
+        const RUNNER_NEW: &str = "20202020-2020-4202-8202-202020202020";
+        const POD_OLD: &str = "40404040-4040-4404-8404-404040404040";
+        const POD_NEW: &str = "50505050-5050-4505-8505-505050505050";
+        let runner = |id: &str| {
+            if id == RUNNER_OLD {
+                Some(RunnerRef {
+                    id: RUNNER_OLD.to_owned(),
+                    name: "probe runner A".to_owned(),
+                })
+            } else if id == RUNNER_NEW {
+                Some(RunnerRef {
+                    id: RUNNER_NEW.to_owned(),
+                    name: "probe runner B".to_owned(),
+                })
+            } else {
+                None
+            }
+        };
+        let pod = |id: &str| {
+            if id == POD_OLD {
+                Some(PodRef {
+                    id: POD_OLD.to_owned(),
+                    name: "pod-a".to_owned(),
+                })
+            } else if id == POD_NEW {
+                Some(PodRef {
+                    id: POD_NEW.to_owned(),
+                    name: "pod-b".to_owned(),
+                })
+            } else {
+                None
+            }
+        };
+        let parent = |_: &str| None;
+        let state = |_: &str| None;
+        let label = |_: &str| None;
+        let user = |_: &str| None;
+        let estimate = |_: &str| None;
+        let r = UpdateResolvers {
+            parent: &parent,
+            state: &state,
+            label: &label,
+            user: &user,
+            estimate: &estimate,
+            runner: &runner,
+            pod: &pod,
+            description_latest: None,
+        };
+        // Runner change via assigned_runner_id.
+        let outcome = plan_update_issue(
+            Some(&format!(r#"{{"assigned_runner_id": "{RUNNER_NEW}"}}"#)),
+            Some(&format!(r#"{{"assigned_runner_id": "{RUNNER_OLD}"}}"#)),
+            &f,
+            &r,
+        )
+        .unwrap();
+        assert_eq!(outcome.rows.len(), 1);
+        assert_eq!(outcome.rows[0].field, "assigned_runner");
+        assert_eq!(outcome.rows[0].old_value.as_deref(), Some("probe runner A"));
+        assert_eq!(outcome.rows[0].new_value.as_deref(), Some("probe runner B"));
+        assert_eq!(outcome.rows[0].epoch, 1750000000.5);
+        // Pod change via assigned_pod.
+        let outcome = plan_update_issue(
+            Some(&format!(r#"{{"assigned_pod": "{POD_NEW}"}}"#)),
+            Some(&format!(r#"{{"assigned_pod": "{POD_OLD}"}}"#)),
+            &f,
+            &r,
+        )
+        .unwrap();
+        assert_eq!(outcome.rows.len(), 1);
+        assert_eq!(outcome.rows[0].field, "assigned_pod");
+        assert_eq!(outcome.rows[0].comment, "updated the execution pod to");
     }
 
     // FX-ACT-02 · issue delete.
