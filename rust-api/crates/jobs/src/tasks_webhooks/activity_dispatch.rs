@@ -100,7 +100,8 @@ use uuid::Uuid;
 
 use pidash_db::entity::{
     comment_reactions, cycles, estimate_points, estimates, issue_activities, issue_comments,
-    issue_reactions, issue_subscribers, issues, labels, modules, projects, states, users,
+    issue_reactions, issue_subscribers, issues, labels, modules, pod, projects, runner, states,
+    users,
 };
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::Pools;
@@ -121,7 +122,7 @@ use pidash_services::tasks_webhooks::activity_misc::{
 };
 use pidash_services::tasks_webhooks::activity_tracks::{
     DescriptionLatest, EstimatePointRef, IssueActivityDraft, IssueSubscriberDraft, LabelRef,
-    ParentRef, StateRef, TrackFrame, UserRef,
+    ParentRef, PodRef, RunnerRef, StateRef, TrackFrame, UserRef,
 };
 
 use crate::queue::{enqueue, NewJob};
@@ -904,6 +905,18 @@ struct CreatedIssueRow {
 }
 
 #[derive(Debug, Clone, FromQueryResult)]
+struct RunnerRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct PodRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
 struct CommentReactionRow {
     id: Uuid,
     comment_id: Uuid,
@@ -946,7 +959,7 @@ fn scalar_id(payload: Option<&Value>, key: &str) -> Option<String> {
     })
 }
 
-/// The snapshot bundle the update dispatcher feeds the twelve `track_*`
+/// The snapshot bundle the update dispatcher feeds the `track_*`
 /// helpers through [`UpdateResolvers`], plus the side-write keys.
 struct UpdateSnapshots {
     parents: HashMap<String, ParentRef>,
@@ -954,6 +967,8 @@ struct UpdateSnapshots {
     labels: HashMap<String, LabelRef>,
     users: HashMap<String, UserRef>,
     estimates: HashMap<String, EstimatePointRef>,
+    runners: HashMap<String, RunnerRef>,
+    pods: HashMap<String, PodRef>,
     latest: Option<(Uuid, DescriptionLatest)>,
 }
 
@@ -1154,6 +1169,78 @@ async fn fetch_update_snapshots(
             );
         }
     }
+    // Runner ids (`assigned_runner_id or assigned_runner`, both sides)
+    // — `filter(pk=...).first()`, invalid UUIDs coerce to `None` in the
+    // planner (not fatal), so unparseable ids simply miss here.
+    let mut runner_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_runner_id", "assigned_runner"] {
+            if let Some(id) = scalar_id(payload, key) {
+                runner_ids.insert(id);
+            }
+        }
+    }
+    let runner_list: Vec<String> = runner_ids.into_iter().collect();
+    let mut runners = HashMap::new();
+    if !runner_list.is_empty() {
+        let parsed = parse_snapshot_ids(&runner_list);
+        if !parsed.is_empty() {
+            let models = runner::Entity::find()
+                .select_only()
+                .columns([runner::Column::Id, runner::Column::Name])
+                .filter(runner::Column::Id.is_in(parsed))
+                .into_model::<RunnerRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                runners.insert(
+                    key.clone(),
+                    RunnerRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
+    }
+    // Pod ids (`assigned_pod_id or assigned_pod`, both sides) — same
+    // shape, scoped to non-deleted pods.
+    let mut pod_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_pod_id", "assigned_pod"] {
+            if let Some(id) = scalar_id(payload, key) {
+                pod_ids.insert(id);
+            }
+        }
+    }
+    let pod_list: Vec<String> = pod_ids.into_iter().collect();
+    let mut pods = HashMap::new();
+    if !pod_list.is_empty() {
+        let parsed = parse_snapshot_ids(&pod_list);
+        if !parsed.is_empty() {
+            let models = pod::Entity::find()
+                .select_only()
+                .columns([pod::Column::Id, pod::Column::Name])
+                .filter(pod::Column::Id.is_in(parsed))
+                .filter(pod::Column::DeletedAt.is_null())
+                .into_model::<PodRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                pods.insert(
+                    key.clone(),
+                    PodRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
+    }
     // Latest activity for `track_description` (`:89`). `actor_id`
     // stringifies like `str(...)` (`None` → `"None"`); a null `field`
     // behaves as not-`"description"`, rendered as `""`. A missing issue
@@ -1185,6 +1272,8 @@ async fn fetch_update_snapshots(
         labels,
         users,
         estimates,
+        runners,
+        pods,
         latest,
     })
 }
@@ -1412,6 +1501,8 @@ async fn collect_rows(
                 label: &|id| snapshots.labels.get(id).cloned(),
                 user: &|id| snapshots.users.get(id).cloned(),
                 estimate: &|id| snapshots.estimates.get(id).cloned(),
+                runner: &|id| snapshots.runners.get(id).cloned(),
+                pod: &|id| snapshots.pods.get(id).cloned(),
                 description_latest: snapshots.latest.as_ref().map(|(_, latest)| latest.clone()),
             };
             let outcome = plan_update_issue(requested, current, frame, &resolvers).map_err(fail)?;

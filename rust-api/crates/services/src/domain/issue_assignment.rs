@@ -1717,7 +1717,7 @@ pub async fn clear_dedicated_runner(
         verb: sea_orm::Set("updated".to_owned()),
         field: sea_orm::Set(Some("assigned_runner".to_owned())),
         old_value: sea_orm::Set(Some(runner_name.clone())),
-        new_value: sea_orm::Set(None),
+        new_value: sea_orm::Set(Some(String::new())),
         comment: sea_orm::Set(format!(
             "cleared the dedicated runner {runner_name}: {reason}"
         )),
@@ -1731,7 +1731,7 @@ pub async fn clear_dedicated_runner(
         actor_id: sea_orm::Set(actor_id),
         new_identifier: sea_orm::Set(None),
         old_identifier: sea_orm::Set(runner_id),
-        epoch: sea_orm::Set(None),
+        epoch: sea_orm::Set(Some(1.0)),
         deleted_at: sea_orm::Set(None),
         created_at: sea_orm::Set(now.into()),
         updated_at: sea_orm::Set(now.into()),
@@ -2148,7 +2148,6 @@ pub async fn apply_execution_target_in(
         .one(db)
         .await?
         .ok_or_else(|| sea_orm::DbErr::RecordNotFound("issue".to_owned()))?;
-    let prev_runner_id = issue.assigned_runner_id;
     let now = Utc::now();
     let mut model = issue.clone().into_active_model();
     model.updated_at = sea_orm::Set(now.into());
@@ -2176,14 +2175,6 @@ pub async fn apply_execution_target_in(
         repoint_queued_run(db, &queued, new_runner_id, actor_id).await?;
         drain_pod = Some(queued.pod_id);
     }
-    let old_name = match prev_runner_id {
-        Some(id) => runner::Entity::find_by_id(id)
-            .one(db)
-            .await?
-            .map(|r| r.name)
-            .unwrap_or_default(),
-        None => String::new(),
-    };
     let new_name = match new_runner_id {
         Some(id) => runner::Entity::find_by_id(id)
             .one(db)
@@ -2192,12 +2183,17 @@ pub async fn apply_execution_target_in(
             .unwrap_or_default(),
         None => String::new(),
     };
+    // Django's synchronous activity (issue_assignment.py:646-662):
+    // old_value is always "" and old_identifier always None, epoch 1.
+    // The previous runner is carried by the async task row
+    // (`_track_named_target`), not this row — reading the already-moved
+    // row here made old==new (NEWPIDASH-172).
     let activity = issue_activities::ActiveModel {
         id: sea_orm::Set(Uuid::new_v4()),
         verb: sea_orm::Set("updated".to_owned()),
         field: sea_orm::Set(Some("assigned_runner".to_owned())),
-        old_value: sea_orm::Set(Some(old_name)),
-        new_value: sea_orm::Set(Some(new_name)),
+        old_value: sea_orm::Set(Some(String::new())),
+        new_value: sea_orm::Set(Some(new_name.clone())),
         comment: sea_orm::Set("updated the dedicated runner to".to_owned()),
         attachments: sea_orm::Set(Vec::new()),
         created_by_id: sea_orm::Set(Some(actor_id)),
@@ -2208,8 +2204,8 @@ pub async fn apply_execution_target_in(
         workspace_id: sea_orm::Set(issue.workspace_id),
         actor_id: sea_orm::Set(Some(actor_id)),
         new_identifier: sea_orm::Set(new_runner_id),
-        old_identifier: sea_orm::Set(prev_runner_id),
-        epoch: sea_orm::Set(None),
+        old_identifier: sea_orm::Set(None),
+        epoch: sea_orm::Set(Some(1.0)),
         deleted_at: sea_orm::Set(None),
         created_at: sea_orm::Set(now.into()),
         updated_at: sea_orm::Set(now.into()),
