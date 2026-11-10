@@ -112,6 +112,12 @@ export function EstimateCreateDialog({
 }: EstimateCreateDialogProps): React.ReactElement {
   const families = React.useMemo(() => estimateFamilies(edition.flags), []);
   const [step, setStep] = React.useState<1 | 2>(1);
+  // The first family choice takes the dialog's open-time focus: step one
+  // leads with it, and it is the dialog's first editable control. Left to
+  // the kit's default, the deferred initial-focus pass picks the header's
+  // Close button and can land after the reader has clicked into a control,
+  // eating their input on a busy host (NEWFRONT-1055, 1058).
+  const firstFamilyRef = React.useRef<HTMLInputElement | null>(null);
   const [family, setFamily] = React.useState<EstimateFamily>(ESTIMATE_FAMILY_POINTS);
   const [values, setValues] = React.useState<string[]>([]);
   const [editing, setEditing] = React.useState<{ index: number; draft: string } | null>(null);
@@ -250,9 +256,10 @@ export function EstimateCreateDialog({
   const starters = estimateStarters(family);
   const templates = starters.filter((starter) => starter.id !== CUSTOM_STARTER_ID);
 
-  const renderFamilyRadio = (choice: EstimateFamilyOption): React.ReactElement => (
+  const renderFamilyRadio = (choice: EstimateFamilyOption, first: boolean): React.ReactElement => (
     <label key={choice.value} className="text-body flex items-center gap-(--space-2) text-(--text)">
       <input
+        ref={first ? firstFamilyRef : undefined}
         type="radio"
         name="estimate-family"
         value={choice.value}
@@ -272,6 +279,7 @@ export function EstimateCreateDialog({
       title={ESTIMATE_DIALOG_TITLE}
       description={ESTIMATE_DIALOG_DESCRIPTION}
       nonDismissable={create.isPending}
+      initialFocus={firstFamilyRef}
       actions={
         step === 1 ? (
           <Button variant="secondary" onClick={() => onOpenChange(false)}>
@@ -301,7 +309,9 @@ export function EstimateCreateDialog({
         <div className="mt-(--space-4) flex flex-col gap-(--space-6)">
           <fieldset className="flex flex-col gap-(--space-2)">
             <legend className="text-emphasis text-(--text)">{ESTIMATE_STEP_ONE_HEADING}</legend>
-            <div className="flex flex-wrap gap-(--space-6)">{families.map(renderFamilyRadio)}</div>
+            <div className="flex flex-wrap gap-(--space-6)">
+              {families.map((choice, at) => renderFamilyRadio(choice, at === 0))}
+            </div>
           </fieldset>
 
           <div className="flex flex-col gap-(--space-2)">

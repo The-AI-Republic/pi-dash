@@ -29,6 +29,8 @@ export interface ScheduleFieldsProps {
   errors: ScheduleErrors;
   disabled?: boolean;
   onChange: <K extends keyof ScheduleValue>(field: K, next: ScheduleValue[K]) => void;
+  /** Handle on the "Starts at" field, for a dialog's open-time focus. */
+  startsAtRef?: React.Ref<HTMLInputElement> | undefined;
 }
 
 /** Ids the shared fields and their labels are wired through. */
@@ -47,6 +49,7 @@ export function ScheduleFields({
   errors,
   disabled = false,
   onChange,
+  startsAtRef,
 }: ScheduleFieldsProps): React.ReactElement {
   const ids = scheduleFieldIds(idPrefix);
   const zones = React.useMemo(() => timeZoneOptions(), []);
@@ -57,6 +60,7 @@ export function ScheduleFields({
       <div className="grid grid-cols-1 gap-(--space-4) md:grid-cols-2">
         <Input
           id={ids.startsAt}
+          inputRef={startsAtRef}
           label="Starts at"
           type="datetime-local"
           value={value.startsAt}
