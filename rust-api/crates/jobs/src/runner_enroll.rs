@@ -868,15 +868,20 @@ impl delete_svc::RunnerDeleteStore for PoolRevokeStore<'_, '_, '_> {
         machine_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), RevokeError> {
-        pidash_services::domain::engine_credential::revoke_engine_credential(
-            &pidash_db::orm_tx::TxConn::new(self.tx),
-            machine_id,
-            "machine_removed",
-            now,
-        )
-        .await
-        .map_err(store_err)
-        .map(|_| ())
+        let (_revoked, _effects) =
+            pidash_services::domain::engine_credential::revoke_engine_credential(
+                &pidash_db::orm_tx::TxConn::new(self.tx),
+                machine_id,
+                "machine_removed",
+                now,
+            )
+            .await
+            .map_err(store_err)?;
+        // The job's transaction will drain pods via its own post-commit
+        // bundle; the pin release already happened in-tx. Effects are
+        // intentionally dropped here — the machine is being deleted, so
+        // pod drains are covered by the delete bundle, not the engine pause.
+        Ok(())
     }
 
     async fn lock_machine_runners(

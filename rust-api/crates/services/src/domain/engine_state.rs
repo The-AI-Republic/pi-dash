@@ -29,6 +29,8 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelec
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::runner_enroll::dispatch_rules::{on_engine_pause_changed, PauseEffects};
+
 use super::engine_credential::{
     has_live_engine_credential, is_legacy_desktop, utc, SIGN_IN_STATE_EXPIRED,
     SIGN_IN_STATE_REVOKED, SIGN_IN_STATE_SIGNED_OUT,
@@ -149,8 +151,8 @@ fn stamp_now(now: DateTime<Utc>) -> sea_orm::prelude::DateTimeWithTimeZone {
 /// `set_engine_auto_pause_reason(machine, reason, keep=(), only_from=None)`:
 /// the seam for the heartbeat report and the model-token endpoint (§8).
 /// Pausing releases the engines' queued locality pins; clearing drains
-/// them (through [`on_engine_pause_changed`]). Returns True when the
-/// value changed.
+/// them (through [`on_engine_pause_changed`]). Returns whether the value
+/// changed and the post-commit drains to fire.
 ///
 /// The conditions are checked on the row, so a caller that decided on an
 /// earlier read cannot overwrite a reason set meanwhile: nothing changes
@@ -163,7 +165,7 @@ pub async fn set_engine_auto_pause_reason(
     keep: &[&str],
     only_from: Option<&[&str]>,
     now: DateTime<Utc>,
-) -> Result<bool, PauseError> {
+) -> Result<(bool, PauseEffects), PauseError> {
     if !is_known_reason(reason) {
         return Err(PauseError::UnknownReason(reason.to_owned()));
     }
@@ -179,6 +181,10 @@ pub async fn set_engine_auto_pause_reason(
     let was_paused = before
         .as_ref()
         .map(|row| row.engine_paused_by_owner || !row.engine_auto_pause_reason.is_empty())
+        .unwrap_or(false);
+    let owner_paused = before
+        .as_ref()
+        .map(|row| row.engine_paused_by_owner)
         .unwrap_or(false);
 
     let mut update = dev_machine::Entity::update_many()
@@ -202,37 +208,17 @@ pub async fn set_engine_auto_pause_reason(
         .map_err(|error| PauseError::Database(into_sqlx(error)))?
         .rows_affected
         > 0;
-    if changed {
-        let now_paused = {
-            let reason_on_row = dev_machine::Entity::find_by_id(machine_id)
-                .one(db)
-                .await
-                .map_err(|error| PauseError::Database(into_sqlx(error)))?
-                .map(|row| row.engine_paused_by_owner || !row.engine_auto_pause_reason.is_empty())
-                .unwrap_or(false);
-            reason_on_row
-        };
-        on_engine_pause_changed(machine_id, was_paused, now_paused);
+    if !changed {
+        return Ok((false, PauseEffects::default()));
     }
-    Ok(changed)
-}
-
-/// `on_engine_pause_changed(machine, was_paused=...)`: the dispatch side
-/// effects of a machine's engine pause flipping (release locality pins on
-/// pause, drain them on resume; `dispatch_rules.py:207-215+`).
-///
-/// Task-queue placeholder until NEWPIDASH-48's dispatch core lands: the
-/// matcher side of the hook (engine runner ids, pin release/drain) does
-/// not exist in Rust yet, so flipping the pause reason is the whole
-/// behaviour today. When the dispatch port lands, this calls it; the call
-/// site below does not change.
-pub fn on_engine_pause_changed(machine_id: Uuid, was_paused: bool, now_paused: bool) {
-    tracing::debug!(
-        dev_machine_id = %machine_id,
-        was_paused,
-        now_paused,
-        "engine_pause_changed (NEWPIDASH-48 dispatch hook pending)",
-    );
+    // Mirror Django's `set_engine_auto_pause_reason` (`dispatch_rules.py:176-205`):
+    // the pin release / drain decision runs in the same transaction as the write.
+    // `on_engine_pause_changed` (NEWPIDASH-48) releases locality pins on pause
+    // and queues engine drains on resume; the caller drains after commit.
+    let effects = on_engine_pause_changed(db, machine_id, owner_paused, reason, was_paused)
+        .await
+        .map_err(|error| PauseError::Database(into_sqlx(error)))?;
+    Ok((true, effects))
 }
 
 /// `_apply(machine, reason, keep=())`: skip `engine_sign_in_required` on
@@ -243,12 +229,12 @@ async fn apply_reason(
     reason: &str,
     keep: &[&str],
     now: DateTime<Utc>,
-) -> Result<bool, PauseError> {
+) -> Result<(bool, PauseEffects), PauseError> {
     if reason == PAUSE_ENGINE_SIGN_IN_REQUIRED && is_legacy_desktop(&machine.provisioning) {
-        return Ok(false);
+        return Ok((false, PauseEffects::default()));
     }
     if machine.revoked_at.is_some() {
-        return Ok(false);
+        return Ok((false, PauseEffects::default()));
     }
     set_engine_auto_pause_reason(db, machine.id, reason, keep, None, now).await
 }
@@ -265,10 +251,10 @@ async fn clear_reason(
     machine: &dev_machine::Model,
     clearable: &[&str],
     now: DateTime<Utc>,
-) -> Result<bool, PauseError> {
+) -> Result<(bool, PauseEffects), PauseError> {
     let current = machine.engine_auto_pause_reason.clone();
     if current.is_empty() || !clearable.contains(&current.as_str()) {
-        return Ok(false);
+        return Ok((false, PauseEffects::default()));
     }
     if current == PAUSE_ENGINE_SIGN_IN_REQUIRED && !is_legacy_desktop(&machine.provisioning) {
         // Re-read: a revocation that committed after the caller's read is
@@ -278,14 +264,14 @@ async fn clear_reason(
             .await
             .map_err(|error| PauseError::Database(into_sqlx(error)))?
         else {
-            return Ok(false);
+            return Ok((false, PauseEffects::default()));
         };
         if !has_live_engine_credential(
             &fresh.engine_sign_in_state,
             fresh.engine_credential_expires_at.map(utc),
             now,
         ) {
-            return Ok(false);
+            return Ok((false, PauseEffects::default()));
         }
     }
     set_engine_auto_pause_reason(
@@ -318,13 +304,14 @@ fn clean(value: Option<&Value>) -> String {
 /// `{"state", "reason_code"?, "sign_in_state"?, "credential_expires_at"?}`;
 /// `state` is one of `available`, `signed_out`, `expiring`, `unavailable`.
 /// Returns the machine's pause reason after the write (Django refreshes
-/// `machine.engine_auto_pause_reason` on the caller's row).
+/// `machine.engine_auto_pause_reason` on the caller's row) and the
+/// post-commit drains to fire for a pause flip, if one happened.
 pub async fn record_engine_state_report(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     report: &Map<String, Value>,
     now: DateTime<Utc>,
-) -> Result<String, PauseError> {
+) -> Result<(String, PauseEffects), PauseError> {
     let state = clean(report.get("state"));
     let reason_code = clean(report.get("reason_code"));
     let mut stored = Map::new();
@@ -360,8 +347,9 @@ pub async fn record_engine_state_report(
         .await
         .map_err(|error| PauseError::Database(into_sqlx(error)))?
     else {
-        return Ok(String::new());
+        return Ok((String::new(), PauseEffects::default()));
     };
+    let mut effects = PauseEffects::default();
     if fresh.engine_auto_pause_reason == PAUSE_ENGINE_DISABLED {
         // The instance switched the engine off. That is the profile
         // endpoint's to set and clear; a daemon report never replaces it,
@@ -370,14 +358,16 @@ pub async fn record_engine_state_report(
         // `keep` is re-checked by the conditional update, since the
         // instance may switch the engine off between the read above and
         // the write.
-        apply_reason(db, &fresh, &reason_code, NEVER_REPLACED_BY_A_REPORT, now).await?;
+        let (_changed, inner) =
+            apply_reason(db, &fresh, &reason_code, NEVER_REPLACED_BY_A_REPORT, now).await?;
+        effects = inner;
     } else if state == "signed_out"
         || stored
             .get("sign_in_state")
             .and_then(Value::as_str)
             .is_some_and(|sign_in| SIGNED_OUT_STATES.contains(&sign_in))
     {
-        apply_reason(
+        let (_changed, inner) = apply_reason(
             db,
             &fresh,
             PAUSE_ENGINE_SIGN_IN_REQUIRED,
@@ -385,16 +375,19 @@ pub async fn record_engine_state_report(
             now,
         )
         .await?;
+        effects = inner;
     } else if HEALTHY_STATES.contains(&state.as_str()) && reason_code.is_empty() {
-        clear_reason(db, &fresh, CLEARED_BY_HEALTHY_REPORT, now).await?;
+        let (_changed, inner) = clear_reason(db, &fresh, CLEARED_BY_HEALTHY_REPORT, now).await?;
+        effects = inner;
     }
-    Ok(fresh_after(db, machine_id)
+    let reason_after = fresh_after(db, machine_id)
         .await
         .map(|row| {
             row.map(|machine| machine.engine_auto_pause_reason)
                 .unwrap_or_default()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok((reason_after, effects))
 }
 
 /// Re-read the machine row after a write (Django re-reads `fresh` the
@@ -412,7 +405,8 @@ async fn fresh_after(
 /// `pause_engines_with_expired_credentials()`: pause the engine of every
 /// new-path machine whose engine credential ran out, with
 /// `engine_sign_in_required` (§4.3 "Expiry"), so pods route elsewhere
-/// even while the daemon is offline. Returns the number paused.
+/// even while the daemon is offline. Returns the number paused and the
+/// post-commit drains to fire for the flips.
 ///
 /// Candidates are `active`, expired, unpaused and not revoked, excluding
 /// legacy machines. Each is re-checked on the row just read: a renewal
@@ -420,7 +414,7 @@ async fn fresh_after(
 pub async fn pause_engines_with_expired_credentials(
     db: &impl ConnectionTrait,
     now: DateTime<Utc>,
-) -> Result<u64, PauseError> {
+) -> Result<(u64, PauseEffects), PauseError> {
     let candidates: Vec<(Uuid,)> = dev_machine::Entity::find()
         .select_only()
         .columns([dev_machine::Column::Id])
@@ -434,6 +428,7 @@ pub async fn pause_engines_with_expired_credentials(
         .await
         .map_err(|error| PauseError::Database(into_sqlx(error)))?;
     let mut paused = 0;
+    let mut merged = PauseEffects::default();
     for (machine_id,) in candidates {
         let Some(machine) = dev_machine::Entity::find_by_id(machine_id)
             .one(db)
@@ -457,28 +452,33 @@ pub async fn pause_engines_with_expired_credentials(
         if !machine.engine_auto_pause_reason.is_empty() || machine.revoked_at.is_some() {
             continue;
         }
-        if apply_reason(db, &machine, PAUSE_ENGINE_SIGN_IN_REQUIRED, &[], now).await? {
+        let (changed, inner) =
+            apply_reason(db, &machine, PAUSE_ENGINE_SIGN_IN_REQUIRED, &[], now).await?;
+        if changed {
             paused += 1;
+            merged.drain_pod_ids.extend(inner.drain_pod_ids);
+            merged.drain_runner_ids.extend(inner.drain_runner_ids);
         }
     }
-    Ok(paused)
+    Ok((paused, merged))
 }
 
 /// `apply_model_token_outcome(machine, reason)`: map a model-token
 /// outcome onto the machine (`""` = success). A reason applies; success
-/// clears what it disproves (never `wallet_empty`).
+/// clears what it disproves (never `wallet_empty`). Returns whether the
+/// reason changed and the post-commit drains to fire.
 pub async fn apply_model_token_outcome(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     reason: &str,
     now: DateTime<Utc>,
-) -> Result<bool, PauseError> {
+) -> Result<(bool, PauseEffects), PauseError> {
     let Some(machine) = dev_machine::Entity::find_by_id(machine_id)
         .one(db)
         .await
         .map_err(|error| PauseError::Database(into_sqlx(error)))?
     else {
-        return Ok(false);
+        return Ok((false, PauseEffects::default()));
     };
     if !reason.is_empty() {
         apply_reason(db, &machine, reason, &[], now).await
@@ -491,19 +491,19 @@ pub async fn apply_model_token_outcome(
 /// machine: `engine_disabled` / `profile_unavailable`, or `""` when the
 /// profile is available. A sharper reason already set (sign-in, wallet,
 /// gateway) stays: the engine is paused either way, and that one says
-/// what to fix.
+/// what to fix. Returns whether the reason changed and the drains to fire.
 pub async fn apply_profile_outcome(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     reason: &str,
     now: DateTime<Utc>,
-) -> Result<bool, PauseError> {
+) -> Result<(bool, PauseEffects), PauseError> {
     let Some(machine) = dev_machine::Entity::find_by_id(machine_id)
         .one(db)
         .await
         .map_err(|error| PauseError::Database(into_sqlx(error)))?
     else {
-        return Ok(false);
+        return Ok((false, PauseEffects::default()));
     };
     if !reason.is_empty() {
         if machine.engine_auto_pause_reason.is_empty()
@@ -511,7 +511,7 @@ pub async fn apply_profile_outcome(
         {
             apply_reason(db, &machine, reason, &[], now).await
         } else {
-            Ok(false)
+            Ok((false, PauseEffects::default()))
         }
     } else {
         clear_reason(db, &machine, CLEARED_BY_PROFILE, now).await
@@ -524,13 +524,14 @@ pub async fn apply_profile_outcome(
 /// endpoints' failures. The endpoints are per user, not per machine, so
 /// the outcome applies to all of the user's live legacy machines. Never
 /// fails the request: each machine's failure is logged and skipped
-/// (Django's try/except per machine).
+/// (Django's try/except per machine). Returns the aggregated post-commit
+/// drains for the flips to drain.
 pub async fn apply_profile_outcome_to_legacy_machines(
     db: &impl ConnectionTrait,
     user_id: Uuid,
     reason: &str,
     now: DateTime<Utc>,
-) {
+) -> PauseEffects {
     let machines = dev_machine::Entity::find()
         .filter(dev_machine::Column::OwnerId.eq(user_id))
         .filter(dev_machine::Column::Provisioning.eq("desktop_bundled"))
@@ -539,8 +540,9 @@ pub async fn apply_profile_outcome_to_legacy_machines(
         .await;
     let Ok(machines) = machines else {
         tracing::error!(user_id = %user_id, "legacy engine pause update failed: read");
-        return;
+        return PauseEffects::default();
     };
+    let mut merged = PauseEffects::default();
     for machine in machines {
         let outcome = if matches!(
             reason,
@@ -550,16 +552,25 @@ pub async fn apply_profile_outcome_to_legacy_machines(
         } else if reason == PAUSE_WALLET_EMPTY {
             apply_reason(db, &machine, reason, &[], now).await
         } else {
-            Ok(false)
+            Ok((false, PauseEffects::default()))
         };
-        if let Err(error) = outcome {
-            tracing::error!(
-                dev_machine_id = %machine.id,
-                error = %error,
-                "legacy engine pause update failed",
-            );
+        match outcome {
+            Ok((changed, inner)) => {
+                if changed {
+                    merged.drain_pod_ids.extend(inner.drain_pod_ids);
+                    merged.drain_runner_ids.extend(inner.drain_runner_ids);
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    dev_machine_id = %machine.id,
+                    error = %error,
+                    "legacy engine pause update failed",
+                );
+            }
         }
     }
+    merged
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use pidash_db::redis::client_from_settings;
 use pidash_services::extensions::CredentialError;
 
 use crate::desktop_gate::header_value;
@@ -38,6 +39,36 @@ use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
 use super::{error_response, json_body, pool_of, request_actor, Denial};
+
+/// Fire post-commit drains for legacy pause flips.
+async fn drain_legacy_effects(
+    pool: &sqlx::PgPool,
+    state: &AppState,
+    effects: &pidash_services::runner_enroll::dispatch_rules::PauseEffects,
+) {
+    if effects.drain_pod_ids.is_empty() && effects.drain_runner_ids.is_empty() {
+        return;
+    }
+    let redis = client_from_settings(state.settings());
+    for pod_id in &effects.drain_pod_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *pod_id,
+        )
+        .await;
+    }
+    for runner_id in &effects.drain_runner_ids {
+        let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+            pool,
+            redis.as_ref(),
+            &state.settings().runner,
+            *runner_id,
+        )
+        .await;
+    }
+}
 
 /// `users/me/ai-assistant/agent-profile/` (under the `api/` include).
 pub const PROFILE_PATH: &str = "/api/users/me/ai-assistant/agent-profile/";
@@ -154,19 +185,21 @@ async fn get_profile(
     // never fails the request.
     {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
-        pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
-            &sea,
-            actor.id,
-            if available {
-                ""
-            } else if !enabled {
-                "engine_disabled"
-            } else {
-                "profile_unavailable"
-            },
-            chrono::Utc::now(),
-        )
-        .await;
+        let effects =
+            pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+                &sea,
+                actor.id,
+                if available {
+                    ""
+                } else if !enabled {
+                    "engine_disabled"
+                } else {
+                    "profile_unavailable"
+                },
+                chrono::Utc::now(),
+            )
+            .await;
+        drain_legacy_effects(&pool, &state, &effects).await;
     }
     // `""` exactly when available, else the seam's reason (or the
     // operator-switch code when the seam has none).
@@ -238,13 +271,15 @@ async fn post_token(
         Err(CredentialError::Classified { .. }) => None,
     } {
         let sea = pidash_db::pool::sea_orm_connection(&pool);
-        pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
-            &sea,
-            actor.id,
-            legacy_reason,
-            chrono::Utc::now(),
-        )
-        .await;
+        let effects =
+            pidash_services::domain::engine_state::apply_profile_outcome_to_legacy_machines(
+                &sea,
+                actor.id,
+                legacy_reason,
+                chrono::Utc::now(),
+            )
+            .await;
+        drain_legacy_effects(&pool, &state, &effects).await;
     }
     match result {
         Ok((token, expires_at)) => {
