@@ -56,6 +56,28 @@ pub use guards::{
     OAUTH_VIEW_METHOD,
 };
 
+/// Bounded S3 client for the avatar flow (`PIDASHCONV-1728`).
+///
+/// `S3Storage` via boto3 carries botocore's defaults — 60s connect and 60s
+/// read, plus retries — and the avatar adapters swallow any failure to the
+/// provider-URL fallback (`adapter/base.py:198-215,236-254`). `Client::new()`
+/// has no connect/read timeout, so a stalled S3/MinIO (including a hung
+/// reverse proxy on the public MinIO host, `is_server=False`) hangs the OAuth
+/// callback forever. This helper mirrors `build_s3_client` in
+/// `crates/jobs/src/tasks_cleanup/expiry.rs:205-210` (PIDASHCONV-1291): the
+/// same 60s/60s pair bounds PUT/HEAD/DELETE while the provider image
+/// download keeps its tighter 10s per-request timeout. Construction never
+/// fails in practice (no custom TLS config); on the unreachable build error
+/// we fall back to `Client::new()` rather than panic — the call then hangs
+/// instead of 500ing, which the fallback contract treats as a failure.
+pub(crate) fn avatar_s3_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(60))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// Routes for the ported device families (PIDASHCONV-342 + PIDASHCONV-343).
 pub fn routes() -> axum::Router<crate::state::AppState> {
     device_flow::routes().merge(device_session::routes())
@@ -503,4 +525,20 @@ pub(crate) async fn delete_old_avatar(
         }
     }
     soft_delete_avatar_asset(pool, user_id, asset_id, now).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::avatar_s3_client;
+
+    /// The avatar S3 client must be bounded like botocore (60s/60s,
+    /// PIDASHCONV-1728): construction is infallible and the client is
+    /// usable for S3 without hanging forever on a stalled store. This
+    /// pins the helper's existence; the contract suite's static test
+    /// pins the exact timeout values and wiring (a unit test cannot read
+    /// `reqwest`'s private timeout fields).
+    #[test]
+    fn avatar_s3_client_is_constructible() {
+        let _client = avatar_s3_client();
+    }
 }

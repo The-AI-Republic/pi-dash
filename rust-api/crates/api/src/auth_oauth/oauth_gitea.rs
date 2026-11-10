@@ -2061,7 +2061,11 @@ pub async fn authenticate_user(
     with_callback: bool,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AuthenticatedUser, AuthError> {
+    // Token/userinfo client stays unbounded (Django's `requests` has no
+    // timeout there); the avatar S3 client is bounded separately
+    // (PIDASHCONV-1728) so S3 PUT/HEAD/DELETE cannot hang the callback.
     let client = reqwest::Client::new();
+    let s3_client = crate::auth_oauth::avatar_s3_client();
     let config = gitea_config(pool, secret_key)
         .await
         .map_err(AuthError::Provider)?;
@@ -2171,7 +2175,7 @@ pub async fn authenticate_user(
             (String::new(), None)
         } else {
             match download_and_upload_avatar(
-                &client,
+                &s3_client,
                 pool,
                 storage,
                 if inputs.is_secure { "https" } else { "http" },
@@ -2202,7 +2206,7 @@ pub async fn authenticate_user(
         .unwrap_or(false);
         if sync_enabled && !is_signup {
             delete_old_avatar(
-                &client,
+                &s3_client,
                 pool,
                 storage,
                 if inputs.is_secure { "https" } else { "http" },
@@ -2213,7 +2217,7 @@ pub async fn authenticate_user(
             )
             .await;
             (avatar, asset) = match download_and_upload_avatar(
-                &client,
+                &s3_client,
                 pool,
                 storage,
                 if inputs.is_secure { "https" } else { "http" },
