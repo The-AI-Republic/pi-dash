@@ -58,9 +58,11 @@ async function renderPage(options: {
   listFails?: boolean;
   listGate?: Promise<void>;
   expectReady?: boolean;
+  postErrorCode?: string;
 }): Promise<ModelsHarness> {
   const requests: Array<{ method: string; url: string; body: unknown }> = [];
   let listFails = options.listFails ?? false;
+  const postErrorCode = options.postErrorCode;
   const listGate = options.listGate ?? Promise.resolve();
   const stored: Record<string, ModelRow[]> = { ...(options.agents ?? {}) };
   const transport: Transport = async (url, init) => {
@@ -89,6 +91,14 @@ async function renderPage(options: {
       if (method === "POST") {
         const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
         requests.push({ method, url, body });
+        if (postErrorCode !== undefined) {
+          return {
+            status: 400,
+            url,
+            headers: { get: () => null },
+            text: () => Promise.resolve(JSON.stringify({ error: postErrorCode })),
+          };
+        }
         const created = modelRow({
           id: "22222222-2222-4222-8222-222222222222",
           agent: String(body["agent"]),
@@ -316,5 +326,20 @@ describe("AdminRunnerModelsPage", () => {
     harness.allowList();
     await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }));
     await screen.findByTestId("runner-models-table-grok");
+  });
+
+  it("keeps the dialog open and shows a danger-colored form error when the save fails", async () => {
+    const user = userEvent.setup();
+    await renderPage({ agents: { grok: [] }, postErrorCode: "duplicate_model" });
+    await user.click(screen.getByTestId("runner-models-add-grok"));
+    await screen.findByTestId("runner-models-dialog");
+    await user.type(screen.getByTestId("runner-models-model"), "grok-new-1");
+    await user.type(screen.getByTestId("runner-models-label"), "Grok New 1");
+    await user.click(screen.getByTestId("runner-models-save"));
+    const alert = await screen.findByTestId("runner-models-form-error");
+    expect(alert).toHaveTextContent("This agent already has a model with that name.");
+    expect(alert.className).toContain("text-(--danger)");
+    expect(alert.className.split(" ")).toEqual(["text-body", "text-(--danger)"]);
+    expect(screen.getByTestId("runner-models-dialog")).toBeInTheDocument();
   });
 });
