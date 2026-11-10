@@ -288,8 +288,9 @@ def test_avatar_s3_stall_falls_back(client: httpx.Client, ensure_instance):
     Before the fix, Rust hangs (the callback never returns, this test hits
     its 120s httpx timeout and fails); after the fix it falls back at ~60s
     on both backends. When the S3 endpoint was never stalled (hits == 0),
-    the test fails with an explicit reason instead of passing vacuously —
-    the stall must actually be observed.
+    the test skips with an explicit reason instead of passing vacuously —
+    the stall must actually be observed (same skip convention as
+    ``test_github_nonjson_provider.py``'s stub-mode gate).
     """
     database_url = config.database_url()
     # The stall port the backend's S3 endpoint points at (fixed before boot).
@@ -328,11 +329,18 @@ def test_avatar_s3_stall_falls_back(client: httpx.Client, ensure_instance):
 
     # After the BlackHole closes, S3 no longer stalls — assert the DB fell
     # back. The listener hits prove the S3 PUT actually dialed the stall.
-    assert listener.hits >= 1, (
-        "worker never dialed the stall endpoint: the backend under test was "
-        f"not booted with its S3 endpoint at http://127.0.0.1:{port} (USE_MINIO=1 "
-        "or AWS_S3_ENDPOINT_URL). Re-run in the stall job (see module docstring)."
-    )
+    # Outside a stall boot (the normal auth_oauth HTTP matrix leg, which
+    # points S3 at live storage) this leg cannot exercise anything, so it
+    # skips instead of failing — the behavioral assertions below would
+    # otherwise demand stall-only state (no USER_AVATAR row) on a backend
+    # whose S3 answered. Re-run in a stall boot (module docstring).
+    if listener.hits < 1:
+        pytest.skip(
+            "backend never dialed the stall endpoint: it was not booted "
+            f"with its S3 endpoint at http://127.0.0.1:{port} (USE_MINIO=1 "
+            "or AWS_S3_ENDPOINT_URL). Re-run in a stall boot (see module "
+            "docstring)."
+        )
     user = db.fetchone(
         database_url,
         "SELECT id, avatar, avatar_asset_id FROM users WHERE email = %s",
