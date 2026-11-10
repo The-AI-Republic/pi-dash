@@ -122,6 +122,25 @@ pub fn redirect_found_html(location: HeaderValue) -> Response {
         .expect("redirect response")
 }
 
+/// Django's stock 400 page: `ERROR_PAGE_TEMPLATE % {"title": "Bad
+/// Request (400)", "details": ""}` (`django/views/defaults.py`; the
+/// project ships no `400.html` and no `handler400` override).
+/// Byte-pinned against Django 4.2.30 with `DEBUG=False`
+/// (PIDASHCONV-1707); under `settings.test` (`DEBUG=True`) Django
+/// renders the technical traceback page instead, which no port
+/// reproduces: contract suites pin the status only there.
+pub const DJANGO_BAD_REQUEST_400_BODY: &str = "\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n";
+
+/// 400 with the Django HTML content-type and the stock 400 page body
+/// ([`DJANGO_BAD_REQUEST_400_BODY`]).
+pub fn bad_request_page() -> Response {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(axum::body::Body::from(DJANGO_BAD_REQUEST_400_BODY))
+        .expect("bad request page")
+}
+
 /// 302 with a `Location`, the Django HTML content-type, `Vary: Cookie`
 /// and `Set-Cookie` headers (the session/admin redirect core).
 pub fn redirect_found_cookies(location: HeaderValue, set_cookies: Vec<String>) -> Response {
@@ -277,6 +296,20 @@ mod tests {
         );
         assert_eq!(escape_u2028("a\u{2028}b\u{2029}c"), "a\\u2028b\\u2029c");
         assert_eq!(escape_u2028("plain"), "plain");
+    }
+
+    #[tokio::test]
+    async fn bad_request_page_matches_django_production_400() {
+        let response = bad_request_page();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(content_type(&response), Some("text/html; charset=utf-8"));
+        // `ERROR_PAGE_TEMPLATE % {"title": "Bad Request (400)",
+        // "details": ""}` (`django/views/defaults.py`), 143 bytes.
+        assert_eq!(
+            body_text(response).await,
+            "\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n"
+        );
+        assert_eq!(DJANGO_BAD_REQUEST_400_BODY.len(), 143);
     }
 
     #[tokio::test]

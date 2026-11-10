@@ -81,10 +81,9 @@ use rand::Rng;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use uuid::Uuid;
 
-use super::Denial;
+use super::{access, Denial};
 use crate::middleware::body_limit::read_request_bytes;
 use crate::middleware::SessionHandle;
 use crate::permissions::DefaultPermissionDenied;
@@ -97,12 +96,21 @@ use crate::v1_cycles_modules::json::{
 
 use pidash_compat::py::py_json_string;
 use pidash_compat::response::{json_created, json_ok, no_content};
+use pidash_db::entity::{
+    draft_issues, file_assets, issue_comments, labels, pages, project_members, users, workspaces,
+};
+use pidash_db::orm_tx::{is_integrity_violation, TxConn};
 use pidash_db::redis::RedisHandle;
 use pidash_services::app_issues::serializers_label::{
-    app_label_to_representation, AppLabelRow, LABEL_NAME_CONFLICT_BODY,
-    LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL, LABEL_NAME_CONFLICT_PROBE_SQL,
+    app_label_to_representation, label_name_conflict, AppLabelRow, LABEL_NAME_CONFLICT_BODY,
 };
 use pidash_services::read;
+use sea_orm::sea_query::{Expr, InsertStatement, OnConflict, Query, SimpleExpr};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr,
+    EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    Select, Set,
+};
 
 // ---- owned paths ------------------------------------------------------------
 
@@ -125,16 +133,6 @@ pub const V2_ATTACHMENTS_PATH: &str =
 /// v2 detail (`app/urls/issue.py:165-169`).
 pub const V2_ATTACHMENT_PATH: &str =
     "/api/assets/v2/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/attachments/{pk}/";
-
-/// `PUT` validate arm (`serializers/issue.py:564-575` with `project_id=None`):
-/// same iexact probe as [`LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL`]
-/// over the null-project scope (DRF's default serializer context carries no
-/// `project_id`, so `filter(project_id=None)` renders `IS NULL`).
-const LABEL_NAME_CONFLICT_NULL_PROJECT_PROBE_SQL: &str = "SELECT 1 FROM labels WHERE project_id IS NULL AND UPPER(name::text) = UPPER($1) AND deleted_at IS NULL AND NOT (id = $2) LIMIT 1";
-
-/// `partial_update` exact-match pre-check (`label.py:61-65`): case-sensitive
-/// `name=` within the project, excluding self, under the default manager.
-const LABEL_NAME_PRECHECK_SQL: &str = "SELECT 1 FROM labels WHERE project_id = $1 AND name = $2 AND NOT (id = $3) AND deleted_at IS NULL LIMIT 1";
 
 /// `get_object` miss body (`generics.py` via `get_object_or_404`, probed).
 const LABEL_NOT_FOUND_BODY: &str = r#"{"detail":"No Label matches the given query."}"#;
@@ -894,21 +892,30 @@ fn validate_label_fields(
         }
     }
 
-    // `name` (`CharField(255)`, required, no blank).
+    // `name` (`CharField(255)`, required, no blank): DRF
+    // `trim_whitespace=True` strips before the blank check, the
+    // max-length validator, and storage (`validate_name` dedupes the
+    // stripped value via `write.name`).
     if data_has_file(&data.files, "name") {
         errors.push("name", "Not a valid string.".to_owned());
     } else if let Some(raw) = object.get("name") {
         match raw {
             Value::Null => errors.push("name", "This field may not be null.".to_owned()),
-            Value::String(text) if text.is_empty() => {
+            Value::String(text) if text.trim_matches(super::is_py_strip_ws).is_empty() => {
                 errors.push("name", "This field may not be blank.".to_owned());
             }
             _ => match drf_str_of_value(raw) {
-                Some(text) if text.chars().count() > 255 => errors.push(
-                    "name",
-                    "Ensure this field has no more than 255 characters.".to_owned(),
-                ),
-                Some(text) => write.name = Some(text),
+                Some(text) => {
+                    let trimmed = text.trim_matches(super::is_py_strip_ws);
+                    if trimmed.chars().count() > 255 {
+                        errors.push(
+                            "name",
+                            "Ensure this field has no more than 255 characters.".to_owned(),
+                        );
+                    } else {
+                        write.name = Some(trimmed.to_owned());
+                    }
+                }
                 None => errors.push("name", "Not a valid string.".to_owned()),
             },
         }
@@ -916,18 +923,25 @@ fn validate_label_fields(
         errors.push("name", "This field is required.".to_owned());
     }
 
-    // `color` (`CharField(255)`, blank: optional everywhere, `""` kept).
+    // `color` (`CharField(255)`, blank: optional everywhere, `""` kept):
+    // same trim as `name` (whitespace-only validates as `""`).
     if data_has_file(&data.files, "color") {
         errors.push("color", "Not a valid string.".to_owned());
     } else if let Some(raw) = object.get("color") {
         match raw {
             Value::Null => errors.push("color", "This field may not be null.".to_owned()),
             _ => match drf_str_of_value(raw) {
-                Some(text) if text.chars().count() > 255 => errors.push(
-                    "color",
-                    "Ensure this field has no more than 255 characters.".to_owned(),
-                ),
-                Some(text) => write.color = Some(text),
+                Some(text) => {
+                    let trimmed = text.trim_matches(super::is_py_strip_ws);
+                    if trimmed.chars().count() > 255 {
+                        errors.push(
+                            "color",
+                            "Ensure this field has no more than 255 characters.".to_owned(),
+                        );
+                    } else {
+                        write.color = Some(trimmed.to_owned());
+                    }
+                }
                 None => errors.push("color", "Not a valid string.".to_owned()),
             },
         }
@@ -986,16 +1000,9 @@ pub(crate) fn object_or_errors(value: &Value) -> Result<&Map<String, Value>, Fie
 
 // ---- attachment validation (v1 write subset) ----------------------------------
 
-/// FK targets for the v1 write validation: the queryset each
-/// `PrimaryKeyRelatedField` checks (`Target._default_manager`). Only `users`
-/// is unscoped (plain `UserManager`); the rest inherit
-/// `SoftDeletionManager` from `BaseModel`.
-const ATTACHMENT_FK_TABLES: &[(&str, &str, bool)] = &[
-    ("user", "users", false),
-    ("draft_issue", "draft_issues", true),
-    ("comment", "issue_comments", true),
-    ("page", "pages", true),
-];
+/// FK fields for the v1 write validation, in field order; [`fk_exists`]
+/// holds the queryset each `PrimaryKeyRelatedField` checks.
+const ATTACHMENT_FK_FIELDS: &[&str] = &["user", "draft_issue", "comment", "page"];
 
 /// Pure half of `IssueAttachmentSerializer` write validation
 /// (`issue.py:867-882`) for the v1 `POST`: field errors in wire order over
@@ -1110,7 +1117,7 @@ fn validate_attachment_fields(data: &RequestData, object: &Map<String, Value>) -
 
     // Nullable FKs: `""`/`null` validate to `None`; UUID parsing here,
     // existence in the caller.
-    for (field, _, _) in ATTACHMENT_FK_TABLES {
+    for field in ATTACHMENT_FK_FIELDS {
         if data_has_file(&data.files, field) {
             let filename = data_file_name(&data.files, field).unwrap_or_default();
             errors.push(
@@ -1161,21 +1168,28 @@ fn actor_user_id(extension: Option<axum::Extension<SessionHandle>>) -> Result<Uu
     Ok(user_id)
 }
 
+/// A SeaORM connection over the request pool (no I/O).
+fn orm(pool: &sqlx::PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// Any database failure is the generic 500.
+fn db_denial(_: DbErr) -> Denial {
+    Denial::ServerError
+}
+
 /// `ProjectBasePermission` safe-method arm (`permissions/project.py:18-22`):
 /// any active workspace membership; else the DRF-default 403.
 #[allow(clippy::result_large_err)]
-async fn gate_class_safe(pool: &sqlx::PgPool, slug: &str, user_id: &Uuid) -> Result<(), Response> {
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if member.is_some() {
+async fn gate_class_safe(
+    db: &DatabaseConnection,
+    slug: &str,
+    user_id: &Uuid,
+) -> Result<(), Response> {
+    let role = access::workspace_role(db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    if role.is_some() {
         Ok(())
     } else {
         Err(DefaultPermissionDenied.into_response())
@@ -1185,19 +1199,15 @@ async fn gate_class_safe(pool: &sqlx::PgPool, slug: &str, user_id: &Uuid) -> Res
 /// `ProjectBasePermission` POST arm (`:25-31`): an active workspace
 /// ADMIN/MEMBER membership; guests fail here with the DRF-default 403.
 #[allow(clippy::result_large_err)]
-async fn gate_class_post(pool: &sqlx::PgPool, slug: &str, user_id: &Uuid) -> Result<(), Response> {
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role IN (20, 15)
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if member.is_some() {
+async fn gate_class_post(
+    db: &DatabaseConnection,
+    slug: &str,
+    user_id: &Uuid,
+) -> Result<(), Response> {
+    let role = access::workspace_role(db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    if role.is_some_and(|role| role == 20 || role == 15) {
         Ok(())
     } else {
         Err(DefaultPermissionDenied.into_response())
@@ -1209,50 +1219,15 @@ async fn gate_class_post(pool: &sqlx::PgPool, slug: &str, user_id: &Uuid) -> Res
 /// else the DRF-default 403.
 #[allow(clippy::result_large_err)]
 async fn gate_class_unsafe(
-    pool: &sqlx::PgPool,
+    db: &DatabaseConnection,
     slug: &str,
     project_id: &Uuid,
     user_id: &Uuid,
 ) -> Result<(), Response> {
-    let admin: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-           AND pm.role = 20 AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if admin.is_some() {
-        return Ok(());
-    }
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    let ws_admin: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if member.is_some() && ws_admin.is_some() {
+    let allowed = access::allows(db, slug, *project_id, *user_id, &[20])
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    if allowed {
         Ok(())
     } else {
         Err(DefaultPermissionDenied.into_response())
@@ -1273,88 +1248,59 @@ pub(crate) async fn gate_decorator(
     roles: &[i16],
     creator_pk: Option<Uuid>,
 ) -> Result<(), Denial> {
+    let db = orm(pool);
     if let Some(pk) = creator_pk {
-        let member: Option<(i32,)> = sqlx::query_as(
-            r#"SELECT 1 FROM workspace_members wm
-               JOIN workspaces w ON w.id = wm.workspace_id
-               WHERE wm.member_id = $1 AND w.slug = $2 AND wm.is_active AND wm.deleted_at IS NULL"#,
-        )
-        .bind(user_id)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+        let member = access::workspace_role(&db, slug, *user_id)
+            .await
+            .map_err(db_denial)?;
         if member.is_none() {
             return Err(Denial::Forbidden);
         }
-        let created: Option<(i32,)> = sqlx::query_as(
-            r#"SELECT 1 FROM file_assets WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
-        )
-        .bind(pk)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if created.is_some() {
+        if asset_created_by(&db, pk, *user_id)
+            .await
+            .map_err(db_denial)?
+        {
             return Ok(());
         }
     }
-    let role: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND w.slug = $2 AND pm.project_id = $3
-           AND pm.role = ANY($4) AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .bind(project_id)
-    .bind(roles)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if role.is_some() {
-        return Ok(());
-    }
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND w.slug = $2 AND pm.project_id = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let admin: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role = 20
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if member.is_some() && admin.is_some() {
+    let roles: Vec<i32> = roles.iter().copied().map(i32::from).collect();
+    if access::allows(&db, slug, *project_id, *user_id, &roles)
+        .await
+        .map_err(db_denial)?
+    {
         Ok(())
     } else {
         Err(Denial::Forbidden)
     }
 }
 
+/// The creator arm's `FileAsset.objects.filter(id=pk, created_by=user)`
+/// (`SoftDeletionManager`), as an `.exists()`.
+async fn asset_created_by(
+    db: &impl ConnectionTrait,
+    pk: Uuid,
+    user_id: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = file_assets::Entity::find()
+        .select_only()
+        .column(file_assets::Column::Id)
+        .filter(file_assets::Column::Id.eq(pk))
+        .filter(file_assets::Column::CreatedById.eq(user_id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
 /// The actor's `user_timezone` for attachment datetime rendering
 /// (`TimezoneMixin.initial` activates it per request). A missing row or an
 /// unparsable zone is a 500, like the list family's tenant context.
-async fn actor_timezone(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+async fn actor_timezone(db: &DatabaseConnection, user_id: &Uuid) -> Result<Tz, Denial> {
+    let name = access::user_timezone(db, *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
     name.parse::<Tz>().map_err(|_| Denial::ServerError)
 }
 
@@ -1369,17 +1315,14 @@ async fn workspace_row(pool: &sqlx::PgPool, slug: &str) -> Result<(Uuid, String)
         })
 }
 
-/// `Project.objects.get(pk=...)`: 404 `{"error": ...}` on a miss
-/// (default-manager scoped).
-async fn project_row(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<(Uuid, Uuid), Denial> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.ok_or(Denial::NotFound)
+/// `Project.objects.get(pk=...)`: the project's workspace, 404
+/// `{"error": ...}` on a miss (default-manager scoped).
+async fn project_workspace_id(db: &DatabaseConnection, project_id: &Uuid) -> Result<Uuid, Denial> {
+    access::project_tenant(db, *project_id)
+        .await
+        .map_err(db_denial)?
+        .map(|(workspace_id, _)| workspace_id)
+        .ok_or(Denial::NotFound)
 }
 
 // ---- cache invalidation -------------------------------------------------------
@@ -1893,7 +1836,7 @@ fn base64_encode(input: &[u8]) -> String {
 // ---- rows --------------------------------------------------------------------
 
 /// The seven label read columns (`LabelSerializer.Meta.fields`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 struct LabelRow {
     parent_id: Option<Uuid>,
     name: String,
@@ -1904,103 +1847,98 @@ struct LabelRow {
     sort_order: f64,
 }
 
-/// The 23 `file_assets` columns the read shape needs.
-#[derive(Debug, Clone)]
-struct AssetRow {
-    id: Uuid,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    deleted_at: Option<DateTime<Utc>>,
-    attributes: Value,
-    asset: String,
-    user_id: Option<Uuid>,
-    workspace_id: Option<Uuid>,
-    draft_issue_id: Option<Uuid>,
-    project_id: Option<Uuid>,
-    issue_id: Option<Uuid>,
-    comment_id: Option<Uuid>,
-    page_id: Option<Uuid>,
-    entity_type: Option<String>,
-    entity_identifier: Option<String>,
-    is_deleted: bool,
-    is_archived: bool,
-    external_id: Option<String>,
-    external_source: Option<String>,
-    size: f64,
-    is_uploaded: bool,
-    storage_metadata: Option<Value>,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
+impl From<labels::Model> for LabelRow {
+    fn from(model: labels::Model) -> Self {
+        Self {
+            parent_id: model.parent_id,
+            name: model.name,
+            color: model.color,
+            id: model.id,
+            project_id: model.project_id,
+            workspace_id: model.workspace_id,
+            sort_order: model.sort_order,
+        }
+    }
 }
 
-const LABEL_READ_COLUMNS: &str =
-    "l.parent_id, l.name, l.color, l.id, l.project_id, l.workspace_id, l.sort_order";
+/// A `file_assets` row: the read shape renders every column.
+type AssetRow = file_assets::Model;
 
-const ASSET_READ_COLUMNS: &str = "fa.id, fa.created_at, fa.updated_at, fa.deleted_at, fa.attributes, fa.asset, fa.user_id, fa.workspace_id, fa.draft_issue_id, fa.project_id, fa.issue_id, fa.comment_id, fa.page_id, fa.entity_type, fa.entity_identifier, fa.is_deleted, fa.is_archived, fa.external_id, fa.external_source, fa.size, fa.is_uploaded, fa.storage_metadata, fa.created_by_id, fa.updated_by_id";
-
-fn label_row_of(row: &sqlx::postgres::PgRow) -> Result<LabelRow, Denial> {
-    Ok(LabelRow {
-        parent_id: row.try_get("parent_id").map_err(|_| Denial::ServerError)?,
-        name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-        color: row.try_get("color").map_err(|_| Denial::ServerError)?,
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(|_| Denial::ServerError)?,
-        sort_order: row.try_get("sort_order").map_err(|_| Denial::ServerError)?,
-    })
+/// The `LabelViewSet` queryset (`label.py:28-40`): workspace slug +
+/// project, the `SoftDeletionManager` scope, and any project membership of
+/// the actor (`project__project_projectmember__member=user`: no
+/// `is_active` or tombstone filter on the membership, as coded), as a
+/// correlated `EXISTS` so the label rows never fan out.
+fn label_queryset(slug: &str, project_id: Uuid, user_id: Uuid) -> Select<labels::Entity> {
+    labels::Entity::find()
+        .select_only()
+        .columns([
+            labels::Column::ParentId,
+            labels::Column::Name,
+            labels::Column::Color,
+            labels::Column::Id,
+            labels::Column::ProjectId,
+            labels::Column::WorkspaceId,
+            labels::Column::SortOrder,
+        ])
+        .join(JoinType::InnerJoin, labels::Relation::Workspaces.def())
+        .filter(labels::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(labels::Column::DeletedAt.is_null())
+        .filter(Expr::exists(
+            Query::select()
+                .column((project_members::Entity, project_members::Column::Id))
+                .from(project_members::Entity)
+                .and_where(
+                    Expr::col((project_members::Entity, project_members::Column::ProjectId))
+                        .equals((labels::Entity, labels::Column::ProjectId)),
+                )
+                .and_where(
+                    Expr::col((project_members::Entity, project_members::Column::MemberId))
+                        .eq(user_id),
+                )
+                .to_owned(),
+        ))
 }
 
-fn asset_row_of(row: &sqlx::postgres::PgRow) -> Result<AssetRow, Denial> {
-    Ok(AssetRow {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-        deleted_at: row.try_get("deleted_at").map_err(|_| Denial::ServerError)?,
-        attributes: row.try_get("attributes").map_err(|_| Denial::ServerError)?,
-        asset: row.try_get("asset").map_err(|_| Denial::ServerError)?,
-        user_id: row.try_get("user_id").map_err(|_| Denial::ServerError)?,
-        workspace_id: row
-            .try_get("workspace_id")
-            .map_err(|_| Denial::ServerError)?,
-        draft_issue_id: row
-            .try_get("draft_issue_id")
-            .map_err(|_| Denial::ServerError)?,
-        project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-        issue_id: row.try_get("issue_id").map_err(|_| Denial::ServerError)?,
-        comment_id: row.try_get("comment_id").map_err(|_| Denial::ServerError)?,
-        page_id: row.try_get("page_id").map_err(|_| Denial::ServerError)?,
-        entity_type: row
-            .try_get("entity_type")
-            .map_err(|_| Denial::ServerError)?,
-        entity_identifier: row
-            .try_get("entity_identifier")
-            .map_err(|_| Denial::ServerError)?,
-        is_deleted: row.try_get("is_deleted").map_err(|_| Denial::ServerError)?,
-        is_archived: row
-            .try_get("is_archived")
-            .map_err(|_| Denial::ServerError)?,
-        external_id: row
-            .try_get("external_id")
-            .map_err(|_| Denial::ServerError)?,
-        external_source: row
-            .try_get("external_source")
-            .map_err(|_| Denial::ServerError)?,
-        size: row.try_get("size").map_err(|_| Denial::ServerError)?,
-        is_uploaded: row
-            .try_get("is_uploaded")
-            .map_err(|_| Denial::ServerError)?,
-        storage_metadata: row
-            .try_get("storage_metadata")
-            .map_err(|_| Denial::ServerError)?,
-        created_by_id: row
-            .try_get("created_by_id")
-            .map_err(|_| Denial::ServerError)?,
-        updated_by_id: row
-            .try_get("updated_by_id")
-            .map_err(|_| Denial::ServerError)?,
-    })
+/// The list: the queryset, `.distinct()`, ordered by `sort_order`.
+async fn label_list_rows(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    project_id: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<LabelRow>, DbErr> {
+    label_queryset(slug, project_id, user_id)
+        .distinct()
+        .order_by_asc(labels::Column::SortOrder)
+        .into_model::<LabelRow>()
+        .all(db)
+        .await
+}
+
+/// Fetch one label through the viewset queryset + pk (`get_object`).
+async fn label_object(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    project_id: Uuid,
+    user_id: Uuid,
+    pk: Uuid,
+) -> Result<Option<LabelRow>, DbErr> {
+    label_queryset(slug, project_id, user_id)
+        .filter(labels::Column::Id.eq(pk))
+        .into_model::<LabelRow>()
+        .one(db)
+        .await
+}
+
+/// The attachment querysets' shared base: `file_assets` (every column) in
+/// this workspace slug and project, under the `SoftDeletionManager` scope.
+fn asset_queryset(slug: &str, project_id: Uuid) -> Select<file_assets::Entity> {
+    file_assets::Entity::find()
+        .join(JoinType::InnerJoin, file_assets::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(file_assets::Column::ProjectId.eq(project_id))
+        .filter(file_assets::Column::DeletedAt.is_null())
 }
 
 /// Render one label row through the merged app serializer port.
@@ -2040,12 +1978,12 @@ fn render_asset(row: &AssetRow, slug: &str, timezone: &Tz) -> Result<String, Den
     let view = app_attachment_to_representation(&AppAttachmentRow {
         id: row.id,
         asset_url,
-        created_at: render_datetime_in(&row.created_at, timezone),
-        updated_at: render_datetime_in(&row.updated_at, timezone),
+        created_at: render_datetime_in(&row.created_at.with_timezone(&Utc), timezone),
+        updated_at: render_datetime_in(&row.updated_at.with_timezone(&Utc), timezone),
         deleted_at: row
             .deleted_at
             .as_ref()
-            .map(|dt| render_datetime_in(dt, timezone)),
+            .map(|dt| render_datetime_in(&dt.with_timezone(&Utc), timezone)),
         attributes: row.attributes.clone(),
         asset: if row.asset.is_empty() {
             None
@@ -2072,16 +2010,6 @@ fn render_asset(row: &AssetRow, slug: &str, timezone: &Tz) -> Result<String, Den
         page: row.page_id,
     });
     serde_json::to_string(&view).map_err(|_| Denial::ServerError)
-}
-
-/// Whether a `sqlx` failure is an integrity-constraint violation (SQLSTATE
-/// class 23: unique / not-null / FK — what Django surfaces as
-/// `IntegrityError`).
-pub(crate) fn is_integrity_violation(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db.code().is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
 }
 
 // ---- responses -----------------------------------------------------------------
@@ -2149,57 +2077,22 @@ pub async fn label_list(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
-    if let Err(response) = gate_class_safe(&pool, &slug, &user_id).await {
+    let db = orm(&pool);
+    if let Err(response) = gate_class_safe(&db, &slug, &user_id).await {
         return Ok(response);
     }
-    let rows = sqlx::query(&format!(
-        r#"SELECT DISTINCT {LABEL_READ_COLUMNS} FROM labels l
-               JOIN workspaces w ON w.id = l.workspace_id
-               WHERE l.project_id = $1 AND w.slug = $2 AND l.deleted_at IS NULL
-               AND EXISTS (SELECT 1 FROM project_members pm
-                           WHERE pm.project_id = l.project_id AND pm.member_id = $3)
-               ORDER BY l.sort_order"#
-    ))
-    .bind(project_id)
-    .bind(&slug)
-    .bind(user_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows = label_list_rows(&db, &slug, project_id, user_id)
+        .await
+        .map_err(db_denial)?;
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&render_label(&label_row_of(row)?)?);
+        out.push_str(&render_label(row)?);
     }
     out.push(']');
     Ok(json_ok(out))
-}
-
-/// Fetch one label through the viewset queryset + pk (`get_object`).
-async fn label_object(
-    pool: &sqlx::PgPool,
-    slug: &str,
-    project_id: &Uuid,
-    user_id: &Uuid,
-    pk: &Uuid,
-) -> Result<Option<LabelRow>, Denial> {
-    let row = sqlx::query(&format!(
-        r#"SELECT {LABEL_READ_COLUMNS} FROM labels l
-               JOIN workspaces w ON w.id = l.workspace_id
-               WHERE l.id = $1 AND l.project_id = $2 AND w.slug = $3 AND l.deleted_at IS NULL
-               AND EXISTS (SELECT 1 FROM project_members pm
-                           WHERE pm.project_id = l.project_id AND pm.member_id = $4)"#
-    ))
-    .bind(pk)
-    .bind(project_id)
-    .bind(slug)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| label_row_of(&row)).transpose()
 }
 
 /// `GET .../issue-labels/{pk}/`: DRF default retrieve (no custom code).
@@ -2216,10 +2109,14 @@ pub async fn label_retrieve(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
-    if let Err(response) = gate_class_safe(&pool, &slug, &user_id).await {
+    let db = orm(&pool);
+    if let Err(response) = gate_class_safe(&db, &slug, &user_id).await {
         return Ok(response);
     }
-    match label_object(&pool, &slug, &project_id, &user_id, &pk).await? {
+    match label_object(&db, &slug, project_id, user_id, pk)
+        .await
+        .map_err(db_denial)?
+    {
         Some(row) => Ok(json_ok(render_label(&row)?)),
         None => Ok(json_not_found(LABEL_NOT_FOUND_BODY)),
     }
@@ -2227,61 +2124,20 @@ pub async fn label_retrieve(
 
 // ---- label writes ------------------------------------------------------------------
 
-/// `validate_name` create arm (`issue.py:564-575`): iexact same-name label
-/// in this project (non-deleted) → `{"name": ["LABEL_NAME_ALREADY_EXISTS"]}`.
-async fn validate_name_create(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
+/// `validate_name` (`issue.py:564-575`): an iexact same-name live label
+/// in the context project (`None`: the `PUT` path's null-project scope),
+/// excluding the instance under edit →
+/// `{"name": ["LABEL_NAME_ALREADY_EXISTS"]}`.
+async fn validate_name(
+    db: &DatabaseConnection,
+    project_id: Option<Uuid>,
     name: &str,
+    exclude: Option<Uuid>,
 ) -> Result<Result<(), String>, Denial> {
-    let hit: Option<(i32,)> = sqlx::query_as(LABEL_NAME_CONFLICT_PROBE_SQL)
-        .bind(project_id)
-        .bind(name)
-        .fetch_optional(pool)
+    let conflict = label_name_conflict(db, project_id, name, exclude)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(if hit.is_some() {
-        Err(LABEL_NAME_CONFLICT_BODY.to_owned())
-    } else {
-        Ok(())
-    })
-}
-
-/// `validate_name` update arm, excluding the instance under edit.
-async fn validate_name_update(
-    pool: &sqlx::PgPool,
-    project_id: &Uuid,
-    name: &str,
-    exclude: &Uuid,
-) -> Result<Result<(), String>, Denial> {
-    let hit: Option<(i32,)> = sqlx::query_as(LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL)
-        .bind(project_id)
-        .bind(name)
-        .bind(exclude)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(if hit.is_some() {
-        Err(LABEL_NAME_CONFLICT_BODY.to_owned())
-    } else {
-        Ok(())
-    })
-}
-
-/// `validate_name` `PUT` arm: same probe over the null-project scope (the
-/// serializer context carries no `project_id` on the default update path).
-async fn validate_name_put(
-    pool: &sqlx::PgPool,
-    name: &str,
-    exclude: &Uuid,
-) -> Result<Result<(), String>, Denial> {
-    let hit: Option<(i32,)> = sqlx::query_as(LABEL_NAME_CONFLICT_NULL_PROJECT_PROBE_SQL)
-        .bind(name)
-        .bind(exclude)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(if hit.is_some() {
+        .map_err(db_denial)?;
+    Ok(if conflict {
         Err(LABEL_NAME_CONFLICT_BODY.to_owned())
     } else {
         Ok(())
@@ -2290,14 +2146,91 @@ async fn validate_name_put(
 
 /// Parent existence for a validated parent id: any non-deleted label
 /// (`Label.objects`, unscoped by project).
-async fn parent_exists(pool: &sqlx::PgPool, parent: &Uuid) -> Result<bool, Denial> {
-    let hit: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM labels WHERE id = $1 AND deleted_at IS NULL")
-            .bind(parent)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+async fn parent_exists(db: &impl ConnectionTrait, parent: Uuid) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(labels::Column::Id.eq(parent))
+        .filter(labels::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
     Ok(hit.is_some())
+}
+
+/// `Label.save()`'s `Label.objects.filter(project=...).aggregate(
+/// Max("sort_order"))` (`db/models/label.py:46-54`).
+async fn max_sort_order(db: &impl ConnectionTrait, project_id: Uuid) -> Result<Option<f64>, DbErr> {
+    let largest: Option<Option<f64>> = labels::Entity::find()
+        .select_only()
+        .column_as(labels::Column::SortOrder.max(), "largest")
+        .filter(labels::Column::ProjectId.eq(project_id))
+        .filter(labels::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(largest.flatten())
+}
+
+/// The `PUT`/`PATCH` save: absent optional fields keep their columns
+/// (DRF excludes them from `validated_data`); only explicit `null` clears
+/// `parent`. The update matches the pk alone (`Model.save`), and returns
+/// the saved row (`None` if it vanished).
+#[allow(clippy::too_many_arguments)]
+async fn update_label(
+    db: &impl ConnectionTrait,
+    pk: Uuid,
+    parent_id: Option<Uuid>,
+    name: &str,
+    color: &str,
+    sort_order: f64,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<Option<LabelRow>, DbErr> {
+    let rows = labels::Entity::update_many()
+        .col_expr(labels::Column::ParentId, Expr::value(parent_id))
+        .col_expr(labels::Column::Name, Expr::value(name))
+        .col_expr(labels::Column::Color, Expr::value(color))
+        .col_expr(labels::Column::SortOrder, Expr::value(sort_order))
+        .col_expr(labels::Column::UpdatedById, Expr::value(Some(user_id)))
+        .col_expr(labels::Column::UpdatedAt, Expr::value(now))
+        .filter(labels::Column::Id.eq(pk))
+        .exec_with_returning(db)
+        .await?;
+    Ok(rows.into_iter().next().map(LabelRow::from))
+}
+
+/// The `PUT`/`PATCH` response: the saved row, or the generic payload 400
+/// on `IntegrityError`.
+fn update_response(updated: Result<Option<LabelRow>, DbErr>) -> Result<Response, Denial> {
+    match updated {
+        Ok(Some(row)) => Ok(json_ok(render_label(&row)?)),
+        Ok(None) => Err(Denial::ServerError),
+        Err(error) if is_integrity_violation(&error) => {
+            Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY))
+        }
+        Err(_) => Err(Denial::ServerError),
+    }
+}
+
+/// The parent field's existence error, when a validated parent id has no
+/// live label.
+async fn parent_error(
+    db: &DatabaseConnection,
+    parent: Option<Option<Uuid>>,
+) -> Result<Option<Response>, Denial> {
+    let Some(Some(parent)) = parent else {
+        return Ok(None);
+    };
+    if parent_exists(db, parent).await.map_err(db_denial)? {
+        return Ok(None);
+    }
+    let mut errors = FieldErrors::default();
+    errors.push(
+        "parent",
+        format!("Invalid pk \"{parent}\" - object does not exist."),
+    );
+    Ok(Some(json_bad_request(&errors.body())))
 }
 
 /// `POST .../issue-labels/` (`label.py:42-55`): class POST gate, cache
@@ -2317,7 +2250,8 @@ pub async fn label_create(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
-    if let Err(response) = gate_class_post(&pool, &slug, &user_id).await {
+    let db = orm(&pool);
+    if let Err(response) = gate_class_post(&db, &slug, &user_id).await {
         return Ok(response);
     }
     invalidate_workspace_labels(state.redis(), &slug, true).await?;
@@ -2335,56 +2269,41 @@ pub async fn label_create(
         Ok(write) => write,
         Err(errors) => return Ok(json_bad_request(&errors.body())),
     };
-    if let Some(Some(parent)) = write.parent {
-        if !parent_exists(&pool, &parent).await? {
-            let mut errors = FieldErrors::default();
-            errors.push(
-                "parent",
-                format!("Invalid pk \"{parent}\" - object does not exist."),
-            );
-            return Ok(json_bad_request(&errors.body()));
-        }
+    if let Some(response) = parent_error(&db, write.parent).await? {
+        return Ok(response);
     }
     let name = write.name.clone().expect("validated name");
-    let conflict = validate_name_create(&pool, &project_id, &name).await?;
+    let conflict = validate_name(&db, Some(project_id), &name, None).await?;
     if let Err(body) = conflict {
         return Ok(json_bad_request(&body));
     }
 
-    let (_, workspace_id) = project_row(&pool, &project_id).await?;
-    let largest: (Option<f64>,) = sqlx::query_as(
-        "SELECT MAX(sort_order) FROM labels WHERE project_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let sort_order = pidash_db::app_issues::models_core::label::new_sort_order(largest.0)
+    let workspace_id = project_workspace_id(&db, &project_id).await?;
+    let largest = max_sort_order(&db, project_id).await.map_err(db_denial)?;
+    let sort_order = pidash_db::app_issues::models_core::label::new_sort_order(largest)
         .unwrap_or_else(|| write.sort_order.unwrap_or(65535.0));
     let now = Utc::now();
-    let id = Uuid::new_v4();
-    let color = write.color.clone().unwrap_or_default();
-    let inserted = sqlx::query(
-        r#"INSERT INTO labels (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, project_id, parent_id, name, description, color, sort_order,
-            external_source, external_id)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, '', $9, $10, NULL, NULL)
-           RETURNING parent_id, name, color, id, project_id, workspace_id, sort_order"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(write.parent.flatten())
-    .bind(&name)
-    .bind(&color)
-    .bind(sort_order)
-    .fetch_one(&pool)
+    let inserted = labels::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(workspace_id),
+        project_id: Set(Some(project_id)),
+        parent_id: Set(write.parent.flatten()),
+        name: Set(name),
+        description: Set(String::new()),
+        color: Set(write.color.clone().unwrap_or_default()),
+        sort_order: Set(sort_order),
+        external_source: Set(None),
+        external_id: Set(None),
+    }
+    .insert(&db)
     .await;
     match inserted {
-        Ok(row) => Ok(json_created(render_label(&label_row_of(&row)?)?)),
+        Ok(model) => Ok(json_created(render_label(&LabelRow::from(model))?)),
         Err(error) if is_integrity_violation(&error) => Ok(json_bad_request(LABEL_DUPLICATE_BODY)),
         Err(_) => Err(Denial::ServerError),
     }
@@ -2406,10 +2325,14 @@ pub async fn label_update(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
-    if let Err(response) = gate_class_unsafe(&pool, &slug, &project_id, &user_id).await {
+    let db = orm(&pool);
+    if let Err(response) = gate_class_unsafe(&db, &slug, &project_id, &user_id).await {
         return Ok(response);
     }
-    let Some(current) = label_object(&pool, &slug, &project_id, &user_id, &pk).await? else {
+    let Some(current) = label_object(&db, &slug, project_id, user_id, pk)
+        .await
+        .map_err(db_denial)?
+    else {
         return Ok(json_not_found(LABEL_NOT_FOUND_BODY));
     };
     let (parts, bytes) = split_parts(req).await?;
@@ -2425,48 +2348,29 @@ pub async fn label_update(
         Ok(write) => write,
         Err(errors) => return Ok(json_bad_request(&errors.body())),
     };
-    if let Some(Some(parent)) = write.parent {
-        if !parent_exists(&pool, &parent).await? {
-            let mut errors = FieldErrors::default();
-            errors.push(
-                "parent",
-                format!("Invalid pk \"{parent}\" - object does not exist."),
-            );
-            return Ok(json_bad_request(&errors.body()));
-        }
+    if let Some(response) = parent_error(&db, write.parent).await? {
+        return Ok(response);
     }
     let name = write.name.clone().expect("validated name");
-    let conflict = validate_name_put(&pool, &name, &pk).await?;
+    let conflict = validate_name(&db, None, &name, Some(pk)).await?;
     if let Err(body) = conflict {
         return Ok(json_bad_request(&body));
     }
     // `save()` re-fills `workspace` from the project (a no-op fetch that
     // 404s only when the project row vanished under a surviving label).
-    project_row(&pool, &project_id).await?;
-    let now = Utc::now();
-    // Absent optional fields keep their columns (DRF excludes them from
-    // `validated_data`); only explicit `null` clears `parent`.
-    let updated = sqlx::query(
-        r#"UPDATE labels SET parent_id = $1, name = $2, color = $3, sort_order = $4,
-           updated_by_id = $5, updated_at = $6 WHERE id = $7
-           RETURNING parent_id, name, color, id, project_id, workspace_id, sort_order"#,
+    project_workspace_id(&db, &project_id).await?;
+    let updated = update_label(
+        &db,
+        pk,
+        write.parent.unwrap_or(current.parent_id),
+        &name,
+        &write.color.unwrap_or_else(|| current.color.clone()),
+        write.sort_order.unwrap_or(current.sort_order),
+        user_id,
+        Utc::now(),
     )
-    .bind(write.parent.unwrap_or(current.parent_id))
-    .bind(&name)
-    .bind(write.color.unwrap_or_else(|| current.color.clone()))
-    .bind(write.sort_order.unwrap_or(current.sort_order))
-    .bind(user_id)
-    .bind(now)
-    .bind(pk)
-    .fetch_one(&pool)
     .await;
-    match updated {
-        Ok(row) => Ok(json_ok(render_label(&label_row_of(&row)?)?)),
-        Err(error) if is_integrity_violation(&error) => {
-            Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY))
-        }
-        Err(_) => Err(Denial::ServerError),
-    }
+    update_response(updated)
 }
 
 /// `PATCH .../issue-labels/{pk}/` (`label.py:57-82`): class unsafe gate,
@@ -2486,7 +2390,8 @@ pub async fn label_partial_update(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
-    if let Err(response) = gate_class_unsafe(&pool, &slug, &project_id, &user_id).await {
+    let db = orm(&pool);
+    if let Err(response) = gate_class_unsafe(&db, &slug, &project_id, &user_id).await {
         return Ok(response);
     }
     invalidate_workspace_labels(state.redis(), &slug, false).await?;
@@ -2509,65 +2414,55 @@ pub async fn label_partial_update(
         object.get("name").and_then(py_str_scalar)
     };
     if let Some(candidate) = precheck_name {
-        let hit: Option<(i32,)> = sqlx::query_as(LABEL_NAME_PRECHECK_SQL)
-            .bind(project_id)
-            .bind(&candidate)
-            .bind(pk)
-            .fetch_optional(&pool)
+        let hit: Option<Uuid> = labels::Entity::find()
+            .select_only()
+            .column(labels::Column::Id)
+            .filter(labels::Column::ProjectId.eq(project_id))
+            .filter(labels::Column::Name.eq(candidate.as_str()))
+            .filter(labels::Column::Id.ne(pk))
+            .filter(labels::Column::DeletedAt.is_null())
+            .into_tuple()
+            .one(&db)
             .await
-            .map_err(|_| Denial::ServerError)?;
+            .map_err(db_denial)?;
         if hit.is_some() {
             return Ok(json_bad_request(LABEL_DUPLICATE_BODY));
         }
     }
 
-    let Some(current) = label_object(&pool, &slug, &project_id, &user_id, &pk).await? else {
+    let Some(current) = label_object(&db, &slug, project_id, user_id, pk)
+        .await
+        .map_err(db_denial)?
+    else {
         return Ok(json_not_found(LABEL_NOT_FOUND_BODY));
     };
     let write = match validate_label_fields(&data, object, true) {
         Ok(write) => write,
         Err(errors) => return Ok(json_bad_request(&errors.body())),
     };
-    if let Some(Some(parent)) = write.parent {
-        if !parent_exists(&pool, &parent).await? {
-            let mut errors = FieldErrors::default();
-            errors.push(
-                "parent",
-                format!("Invalid pk \"{parent}\" - object does not exist."),
-            );
-            return Ok(json_bad_request(&errors.body()));
-        }
+    if let Some(response) = parent_error(&db, write.parent).await? {
+        return Ok(response);
     }
     let name = write.name.clone().unwrap_or_else(|| current.name.clone());
     if write.name.is_some() {
-        let conflict = validate_name_update(&pool, &project_id, &name, &pk).await?;
+        let conflict = validate_name(&db, Some(project_id), &name, Some(pk)).await?;
         if let Err(body) = conflict {
             return Ok(json_bad_request(&body));
         }
     }
-    project_row(&pool, &project_id).await?;
-    let now = Utc::now();
-    let updated = sqlx::query(
-        r#"UPDATE labels SET parent_id = $1, name = $2, color = $3, sort_order = $4,
-           updated_by_id = $5, updated_at = $6 WHERE id = $7
-           RETURNING parent_id, name, color, id, project_id, workspace_id, sort_order"#,
+    project_workspace_id(&db, &project_id).await?;
+    let updated = update_label(
+        &db,
+        pk,
+        write.parent.unwrap_or(current.parent_id),
+        &name,
+        &write.color.unwrap_or_else(|| current.color.clone()),
+        write.sort_order.unwrap_or(current.sort_order),
+        user_id,
+        Utc::now(),
     )
-    .bind(write.parent.unwrap_or(current.parent_id))
-    .bind(&name)
-    .bind(write.color.unwrap_or_else(|| current.color.clone()))
-    .bind(write.sort_order.unwrap_or(current.sort_order))
-    .bind(user_id)
-    .bind(now)
-    .bind(pk)
-    .fetch_one(&pool)
     .await;
-    match updated {
-        Ok(row) => Ok(json_ok(render_label(&label_row_of(&row)?)?)),
-        Err(error) if is_integrity_violation(&error) => {
-            Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY))
-        }
-        Err(_) => Err(Denial::ServerError),
-    }
+    update_response(updated)
 }
 
 /// `DELETE .../issue-labels/{pk}/` (`label.py:84-88` + DRF default destroy):
@@ -2585,35 +2480,94 @@ pub async fn label_destroy(
     let pool = pool_of(&state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
-    if let Err(response) = gate_class_unsafe(&pool, &slug, &project_id, &user_id).await {
+    let db = orm(&pool);
+    if let Err(response) = gate_class_unsafe(&db, &slug, &project_id, &user_id).await {
         return Ok(response);
     }
     invalidate_workspace_labels(state.redis(), &slug, false).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20], None).await?;
-    if label_object(&pool, &slug, &project_id, &user_id, &pk)
-        .await?
+    if label_object(&db, &slug, project_id, user_id, pk)
+        .await
+        .map_err(db_denial)?
         .is_none()
     {
         return Ok(json_not_found(LABEL_NOT_FOUND_BODY));
     }
     // `delete()` → `save()` re-fills `workspace` from the project first.
-    project_row(&pool, &project_id).await?;
+    project_workspace_id(&db, &project_id).await?;
     let now = Utc::now();
-    sqlx::query(
-        "UPDATE labels SET deleted_at = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(now)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    labels::Entity::update_many()
+        .col_expr(labels::Column::DeletedAt, Expr::value(now))
+        .col_expr(labels::Column::UpdatedById, Expr::value(Some(user_id)))
+        .col_expr(labels::Column::UpdatedAt, Expr::value(now))
+        .filter(labels::Column::Id.eq(pk))
+        .exec(&db)
+        .await
+        .map_err(db_denial)?;
     enqueue_message(&pool, label_soft_delete_message(&pk)).await;
     Ok(no_content())
 }
 
 // ---- bulk create -------------------------------------------------------------------
+
+/// The per-request values every bulk row shares.
+struct BulkLabelShared {
+    now: DateTime<Utc>,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    project_id: Uuid,
+}
+
+/// One `bulk_create` batch: `INSERT ... ON CONFLICT DO NOTHING` over the
+/// rows `(id, name, description, color)`. Built with the sea-query
+/// builder rather than `ActiveModel`s because a JSON `null` name or
+/// description must reach Postgres as SQL `NULL` (tripping `NOT NULL`, as
+/// Django's flush does), which the non-optional entity fields cannot
+/// carry. `created_by` and `updated_by` are both the actor;
+/// `sort_order` is the field default (`bulk_create` skips `save()`).
+fn bulk_label_insert(
+    batch: &[(Uuid, Option<String>, Option<String>, String)],
+    shared: &BulkLabelShared,
+) -> InsertStatement {
+    let mut insert = Query::insert();
+    insert.into_table(labels::Entity).columns([
+        labels::Column::Id,
+        labels::Column::CreatedAt,
+        labels::Column::UpdatedAt,
+        labels::Column::CreatedById,
+        labels::Column::UpdatedById,
+        labels::Column::WorkspaceId,
+        labels::Column::ProjectId,
+        labels::Column::ParentId,
+        labels::Column::Name,
+        labels::Column::Description,
+        labels::Column::Color,
+        labels::Column::SortOrder,
+        labels::Column::ExternalSource,
+        labels::Column::ExternalId,
+    ]);
+    for (id, name, description, color) in batch {
+        let row: [SimpleExpr; 14] = [
+            (*id).into(),
+            shared.now.into(),
+            shared.now.into(),
+            Some(shared.user_id).into(),
+            Some(shared.user_id).into(),
+            shared.workspace_id.into(),
+            Some(shared.project_id).into(),
+            Option::<Uuid>::None.into(),
+            name.clone().into(),
+            description.clone().into(),
+            color.clone().into(),
+            65535.0f64.into(),
+            Option::<String>::None.into(),
+            Option::<String>::None.into(),
+        ];
+        insert.values_panic(row);
+    }
+    insert.on_conflict(OnConflict::new().do_nothing().to_owned());
+    insert
+}
 
 /// `POST .../bulk-create-labels/` (`label.py:91-117`): ADMIN-only, no
 /// invalidation, no validation at all. `label_data` must be an array of
@@ -2685,7 +2639,7 @@ pub async fn bulk_create_labels(
         rows.push((Uuid::new_v4(), name, description, color));
     }
 
-    let (_, workspace_id) = project_row(&pool, &project_id).await?;
+    let workspace_id = project_workspace_id(&orm(&pool), &project_id).await?;
     let now = Utc::now();
     // `bulk_create(..., batch_size=50, ignore_conflicts=True)`: one
     // multi-row `INSERT ... ON CONFLICT DO NOTHING` per batch (Django
@@ -2695,47 +2649,25 @@ pub async fn bulk_create_labels(
     // transaction. Dropping `tx` uncommitted on any early `return` below
     // rolls back, preserving the all-or-nothing semantics.
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    for batch in rows.chunks(50) {
-        let mut sql = String::from(
-            "INSERT INTO labels (id, created_at, updated_at, created_by_id, updated_by_id, workspace_id, project_id, parent_id, name, description, color, sort_order, external_source, external_id) VALUES ",
-        );
-        for (index, _) in batch.iter().enumerate() {
-            if index > 0 {
-                sql.push_str(", ");
+    {
+        let conn = TxConn::new(&mut tx);
+        let shared = BulkLabelShared {
+            now,
+            user_id,
+            workspace_id,
+            project_id,
+        };
+        for batch in rows.chunks(50) {
+            // A `NULL` name/description trips `NOT NULL` for its batch (the
+            // whole batch fails, like the single Django statement); unique
+            // conflicts are swallowed per row by `DO NOTHING`.
+            let insert = bulk_label_insert(batch, &shared);
+            if let Err(error) = conn.execute(DbBackend::Postgres.build(&insert)).await {
+                if is_integrity_violation(&error) {
+                    return Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY));
+                }
+                return Err(Denial::ServerError);
             }
-            // The six shared binds occupy $1..$6; each row adds four.
-            let base = index * 4;
-            sql.push_str(&format!(
-                "(${}, $1, $2, $3, $4, $5, $6, NULL, ${}, ${}, ${}, 65535, NULL, NULL)",
-                base + 7,
-                base + 8,
-                base + 9,
-                base + 10,
-            ));
-        }
-        sql.push_str(" ON CONFLICT DO NOTHING");
-        let mut insert = sqlx::query(&sql)
-            .bind(now)
-            .bind(now)
-            .bind(user_id)
-            .bind(user_id)
-            .bind(workspace_id)
-            .bind(project_id);
-        for (id, name, description, color) in batch {
-            insert = insert
-                .bind(id)
-                .bind(name.as_deref())
-                .bind(description.as_deref())
-                .bind(color);
-        }
-        // A `NULL` name/description trips `NOT NULL` for its batch (the
-        // whole batch fails, like the single Django statement); unique
-        // conflicts are swallowed per row by `DO NOTHING`.
-        if let Err(error) = insert.execute(&mut *tx).await {
-            if is_integrity_violation(&error) {
-                return Ok(json_bad_request(PAYLOAD_NOT_VALID_BODY));
-            }
-            return Err(Denial::ServerError);
         }
     }
     tx.commit().await.map_err(|_| Denial::ServerError)?;
@@ -2773,24 +2705,114 @@ pub async fn bulk_create_labels(
 /// v1 list query rows for an issue: no entity-type/uploaded filter (as
 /// coded), `-created_at` from `Meta.ordering`.
 async fn v1_list_rows(
-    pool: &sqlx::PgPool,
+    db: &impl ConnectionTrait,
     slug: &str,
-    project_id: &Uuid,
-    issue_id: &Uuid,
-) -> Result<Vec<AssetRow>, Denial> {
-    let rows = sqlx::query(&format!(
-        r#"SELECT {ASSET_READ_COLUMNS} FROM file_assets fa
-           JOIN workspaces w ON w.id = fa.workspace_id
-           WHERE fa.issue_id = $1 AND w.slug = $2 AND fa.project_id = $3 AND fa.deleted_at IS NULL
-           ORDER BY fa.created_at DESC"#
-    ))
-    .bind(issue_id)
-    .bind(slug)
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(asset_row_of).collect()
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> Result<Vec<AssetRow>, DbErr> {
+    asset_queryset(slug, project_id)
+        .filter(file_assets::Column::IssueId.eq(issue_id))
+        .order_by_desc(file_assets::Column::CreatedAt)
+        .all(db)
+        .await
+}
+
+/// v2 list query rows: uploaded issue attachments only, `-created_at`.
+async fn v2_list_rows(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> Result<Vec<AssetRow>, DbErr> {
+    asset_queryset(slug, project_id)
+        .filter(file_assets::Column::IssueId.eq(issue_id))
+        .filter(file_assets::Column::EntityType.eq("ISSUE_ATTACHMENT"))
+        .filter(file_assets::Column::IsUploaded.eq(true))
+        .order_by_desc(file_assets::Column::CreatedAt)
+        .all(db)
+        .await
+}
+
+/// One v2-scoped asset row (no issue scoping on the `.get` calls, as coded).
+async fn v2_object(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    project_id: Uuid,
+    pk: Uuid,
+) -> Result<Option<AssetRow>, DbErr> {
+    asset_queryset(slug, project_id)
+        .filter(file_assets::Column::Id.eq(pk))
+        .one(db)
+        .await
+}
+
+/// The v1 delete lookup (`attachment.py:64-70`): the issue-scoped row's
+/// existence.
+async fn v1_delete_target(
+    db: &impl ConnectionTrait,
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    pk: Uuid,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = asset_queryset(slug, project_id)
+        .select_only()
+        .column(file_assets::Column::Id)
+        .filter(file_assets::Column::Id.eq(pk))
+        .filter(file_assets::Column::IssueId.eq(issue_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// FK existence for a v1 write field over `Target._default_manager`: only
+/// `users` is unscoped (plain `UserManager`); the rest inherit
+/// `SoftDeletionManager` from `BaseModel`.
+async fn fk_exists(db: &impl ConnectionTrait, field: &str, id: Uuid) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = match field {
+        "user" => {
+            users::Entity::find()
+                .select_only()
+                .column(users::Column::Id)
+                .filter(users::Column::Id.eq(id))
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        "draft_issue" => {
+            draft_issues::Entity::find()
+                .select_only()
+                .column(draft_issues::Column::Id)
+                .filter(draft_issues::Column::Id.eq(id))
+                .filter(draft_issues::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        "comment" => {
+            issue_comments::Entity::find()
+                .select_only()
+                .column(issue_comments::Column::Id)
+                .filter(issue_comments::Column::Id.eq(id))
+                .filter(issue_comments::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        "page" => {
+            pages::Entity::find()
+                .select_only()
+                .column(pages::Column::Id)
+                .filter(pages::Column::Id.eq(id))
+                .filter(pages::Column::DeletedAt.is_null())
+                .into_tuple()
+                .one(db)
+                .await?
+        }
+        other => unreachable!("not an attachment FK field: {other}"),
+    };
+    Ok(hit.is_some())
 }
 
 /// `GET .../issue-attachments/`: ADMIN/MEMBER/GUEST list.
@@ -2807,8 +2829,11 @@ pub async fn v1_list(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
-    let timezone = actor_timezone(&pool, &user_id).await?;
-    let rows = v1_list_rows(&pool, &slug, &project_id, &issue_id).await?;
+    let db = orm(&pool);
+    let timezone = actor_timezone(&db, &user_id).await?;
+    let rows = v1_list_rows(&db, &slug, project_id, issue_id)
+        .await
+        .map_err(db_denial)?;
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
@@ -2855,7 +2880,7 @@ pub async fn v1_create(
     // otherwise clean — DRF collects all field errors first either way,
     // and existence failures append per field in the same order).
     if errors.is_empty() {
-        for (field, table, scoped) in ATTACHMENT_FK_TABLES {
+        for field in ATTACHMENT_FK_FIELDS {
             let raw = match object.get(*field) {
                 None => continue,
                 Some(Value::Null) => continue,
@@ -2866,17 +2891,8 @@ pub async fn v1_create(
             let Some(id) = py_uuid_of_value(raw) else {
                 continue;
             };
-            let sql = if *scoped {
-                format!("SELECT 1 FROM {table} WHERE id = $1 AND deleted_at IS NULL")
-            } else {
-                format!("SELECT 1 FROM {table} WHERE id = $1")
-            };
-            let hit: Option<(i32,)> = sqlx::query_as(&sql)
-                .bind(id)
-                .fetch_optional(&pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
-            if hit.is_none() {
+            let exists = fk_exists(&orm(&pool), field, id).await.map_err(db_denial)?;
+            if !exists {
                 let rendered = match raw {
                     Value::String(text) => text.clone(),
                     Value::Number(number) => py_str_of_number(number),
@@ -2915,20 +2931,10 @@ pub async fn v1_delete(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20], Some(pk)).await?;
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT fa.id FROM file_assets fa
-           JOIN workspaces w ON w.id = fa.workspace_id
-           WHERE fa.id = $1 AND w.slug = $2 AND fa.project_id = $3 AND fa.issue_id = $4
-           AND fa.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(pk)
-    .bind(&slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if row.is_none() {
+    let found = v1_delete_target(&orm(&pool), &slug, project_id, issue_id, pk)
+        .await
+        .map_err(db_denial)?;
+    if !found {
         return Ok(json_not_found(ATTACHMENT_NOT_FOUND_BODY));
     }
     Err(Denial::ServerError)
@@ -3069,50 +3075,20 @@ pub async fn v2_list(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
-    let timezone = actor_timezone(&pool, &user_id).await?;
-    let rows = sqlx::query(&format!(
-        r#"SELECT {ASSET_READ_COLUMNS} FROM file_assets fa
-           JOIN workspaces w ON w.id = fa.workspace_id
-           WHERE fa.issue_id = $1 AND fa.entity_type = 'ISSUE_ATTACHMENT' AND w.slug = $2
-           AND fa.project_id = $3 AND fa.is_uploaded AND fa.deleted_at IS NULL
-           ORDER BY fa.created_at DESC"#
-    ))
-    .bind(issue_id)
-    .bind(&slug)
-    .bind(project_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = orm(&pool);
+    let timezone = actor_timezone(&db, &user_id).await?;
+    let rows = v2_list_rows(&db, &slug, project_id, issue_id)
+        .await
+        .map_err(db_denial)?;
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&render_asset(&asset_row_of(row)?, &slug, &timezone)?);
+        out.push_str(&render_asset(row, &slug, &timezone)?);
     }
     out.push(']');
     Ok(json_ok(out))
-}
-
-/// One v2-scoped asset row (no issue scoping on the `.get` calls, as coded).
-async fn v2_object(
-    pool: &sqlx::PgPool,
-    slug: &str,
-    project_id: &Uuid,
-    pk: &Uuid,
-) -> Result<Option<AssetRow>, Denial> {
-    let row = sqlx::query(&format!(
-        r#"SELECT {ASSET_READ_COLUMNS} FROM file_assets fa
-           JOIN workspaces w ON w.id = fa.workspace_id
-           WHERE fa.id = $1 AND w.slug = $2 AND fa.project_id = $3 AND fa.deleted_at IS NULL"#
-    ))
-    .bind(pk)
-    .bind(slug)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| asset_row_of(&row)).transpose()
 }
 
 /// `POST .../assets/v2/.../attachments/` (`attachment.py:92-146`): the
@@ -3190,26 +3166,34 @@ pub async fn v2_create(
     attributes.insert("size".to_owned(), Value::Number(size_number));
     let now = Utc::now();
     let id = Uuid::new_v4();
-    let inserted = sqlx::query(
-        r#"INSERT INTO file_assets (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            attributes, asset, user_id, workspace_id, draft_issue_id, project_id, issue_id,
-            comment_id, page_id, entity_type, entity_identifier, is_deleted, is_archived,
-            external_id, external_source, size, is_uploaded, storage_metadata)
-           VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, NULL, $7, NULL, $8, $9,
-            NULL, NULL, 'ISSUE_ATTACHMENT', NULL, FALSE, FALSE, NULL, NULL, $10, FALSE, '{}')
-           RETURNING id"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(now)
-    .bind(user_id)
-    .bind(Value::Object(attributes))
-    .bind(&asset_key)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(size_float)
-    .fetch_one(&pool)
+    let db = orm(&pool);
+    let inserted = file_assets::Entity::insert(file_assets::ActiveModel {
+        id: Set(id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        attributes: Set(Value::Object(attributes)),
+        asset: Set(asset_key.clone()),
+        user_id: Set(None),
+        workspace_id: Set(Some(workspace_id)),
+        draft_issue_id: Set(None),
+        project_id: Set(Some(project_id)),
+        issue_id: Set(Some(issue_id)),
+        comment_id: Set(None),
+        page_id: Set(None),
+        entity_type: Set(Some("ISSUE_ATTACHMENT".to_owned())),
+        entity_identifier: Set(None),
+        is_deleted: Set(false),
+        is_archived: Set(false),
+        external_id: Set(None),
+        external_source: Set(None),
+        size: Set(size_float),
+        is_uploaded: Set(false),
+        storage_metadata: Set(Some(Value::Object(Map::new()))),
+    })
+    .exec_without_returning(&db)
     .await;
     if let Err(error) = inserted {
         if is_integrity_violation(&error) {
@@ -3217,10 +3201,11 @@ pub async fn v2_create(
         }
         return Err(Denial::ServerError);
     }
-    let row = v2_object(&pool, &slug, &project_id, &id)
-        .await?
+    let row = v2_object(&db, &slug, project_id, id)
+        .await
+        .map_err(db_denial)?
         .ok_or(Denial::ServerError)?;
-    let timezone = actor_timezone(&pool, &user_id).await?;
+    let timezone = actor_timezone(&db, &user_id).await?;
     let attachment = render_asset(&row, &workspace_slug, &timezone)?;
     let host = host_of(&parts.headers).ok_or(Denial::ServerError)?;
     let upload_data = presigned_post(
@@ -3272,7 +3257,10 @@ pub async fn v2_detail(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
-    let Some(row) = v2_object(&pool, &slug, &project_id, &pk).await? else {
+    let Some(row) = v2_object(&orm(&pool), &slug, project_id, pk)
+        .await
+        .map_err(db_denial)?
+    else {
         return Ok(Denial::NotFound.into_response());
     };
     if !row.is_uploaded {
@@ -3323,10 +3311,14 @@ pub async fn v2_patch(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
-    let Some(row) = v2_object(&pool, &slug, &project_id, &pk).await? else {
+    let db = orm(&pool);
+    let Some(row) = v2_object(&db, &slug, project_id, pk)
+        .await
+        .map_err(db_denial)?
+    else {
         return Ok(Denial::NotFound.into_response());
     };
-    let timezone = actor_timezone(&pool, &user_id).await?;
+    let timezone = actor_timezone(&db, &user_id).await?;
     let origin = request_origin(&state)?;
     let now = Utc::now();
     if !row.is_uploaded {
@@ -3347,24 +3339,23 @@ pub async fn v2_patch(
             ),
         )
         .await;
-        sqlx::query(
-            "UPDATE file_assets SET is_uploaded = TRUE, created_by_id = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4",
-        )
-        .bind(user_id)
-        .bind(user_id)
-        .bind(now)
-        .bind(pk)
-        .execute(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    } else {
-        sqlx::query("UPDATE file_assets SET updated_by_id = $1, updated_at = $2 WHERE id = $3")
-            .bind(user_id)
-            .bind(now)
-            .bind(pk)
-            .execute(&pool)
+        file_assets::Entity::update_many()
+            .col_expr(file_assets::Column::IsUploaded, Expr::value(true))
+            .col_expr(file_assets::Column::CreatedById, Expr::value(Some(user_id)))
+            .col_expr(file_assets::Column::UpdatedById, Expr::value(Some(user_id)))
+            .col_expr(file_assets::Column::UpdatedAt, Expr::value(now))
+            .filter(file_assets::Column::Id.eq(pk))
+            .exec(&db)
             .await
-            .map_err(|_| Denial::ServerError)?;
+            .map_err(db_denial)?;
+    } else {
+        file_assets::Entity::update_many()
+            .col_expr(file_assets::Column::UpdatedById, Expr::value(Some(user_id)))
+            .col_expr(file_assets::Column::UpdatedAt, Expr::value(now))
+            .filter(file_assets::Column::Id.eq(pk))
+            .exec(&db)
+            .await
+            .map_err(db_denial)?;
     }
     let metadata_empty = row
         .storage_metadata
@@ -3392,21 +3383,25 @@ pub async fn v2_delete(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20], Some(pk)).await?;
-    if v2_object(&pool, &slug, &project_id, &pk).await?.is_none() {
+    let db = orm(&pool);
+    if v2_object(&db, &slug, project_id, pk)
+        .await
+        .map_err(db_denial)?
+        .is_none()
+    {
         return Ok(Denial::NotFound.into_response());
     }
     let origin = request_origin(&state)?;
     let now = Utc::now();
-    sqlx::query(
-        "UPDATE file_assets SET is_deleted = TRUE, deleted_at = $1, updated_by_id = $2, updated_at = $3 WHERE id = $4",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(now)
-    .bind(pk)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    file_assets::Entity::update_many()
+        .col_expr(file_assets::Column::IsDeleted, Expr::value(true))
+        .col_expr(file_assets::Column::DeletedAt, Expr::value(now))
+        .col_expr(file_assets::Column::UpdatedById, Expr::value(Some(user_id)))
+        .col_expr(file_assets::Column::UpdatedAt, Expr::value(now))
+        .filter(file_assets::Column::Id.eq(pk))
+        .exec(&db)
+        .await
+        .map_err(db_denial)?;
     enqueue_message(
         &pool,
         issue_activity_message(
@@ -3775,6 +3770,53 @@ mod tests {
         let object = object_or_errors(&data.value).expect("object");
         let write = validate_label_fields(&data, object, false).expect("valid");
         assert_eq!(write.sort_order, Some(2.5));
+    }
+
+    #[test]
+    fn label_name_and_color_are_trimmed() {
+        // NEWPIDASH-139: DRF `CharField(trim_whitespace=True)` strips
+        // before the blank/max-length checks and storage; the dedupe
+        // (`validate_name` over `write.name`) sees the stripped value.
+        let data = json_data(r#"{"name":"  Padded probe  ","color":"  #aabbcc  "}"#);
+        let object = object_or_errors(&data.value).expect("object");
+        let write = validate_label_fields(&data, object, false).expect("valid");
+        assert_eq!(write.name.as_deref(), Some("Padded probe"));
+        assert_eq!(write.color.as_deref(), Some("#aabbcc"));
+        // Whitespace-only names are blank (incl. the Python strip set
+        // U+001C-U+001F, which `str::trim` would miss).
+        assert_eq!(
+            label_errors(r#"{"name":"   "}"#, false),
+            r#"{"name":["This field may not be blank."]}"#
+        );
+        assert_eq!(
+            label_errors(r#"{"name":"\u001c\u001f "}"#, false),
+            r#"{"name":["This field may not be blank."]}"#
+        );
+        // Whitespace-only color validates as `""` (`allow_blank`).
+        let data = json_data(r#"{"name":"x","color":"   "}"#);
+        let object = object_or_errors(&data.value).expect("object");
+        let write = validate_label_fields(&data, object, false).expect("valid");
+        assert_eq!(write.color.as_deref(), Some(""));
+        // Max-length runs on the stripped value: padded 255-core passes,
+        // padded 256-core fails, over-long whitespace is blank alone.
+        let padded_core = format!(" {} ", "n".repeat(255));
+        let data = json_data(&format!(r#"{{"name":"{}"}}"#, padded_core));
+        let object = object_or_errors(&data.value).expect("object");
+        let write = validate_label_fields(&data, object, false).expect("valid");
+        assert_eq!(write.name.as_deref(), Some("n".repeat(255).as_str()));
+        assert_eq!(
+            label_errors(&format!(r#"{{"name":" {} "}}"#, "n".repeat(256)), false),
+            r#"{"name":["Ensure this field has no more than 255 characters."]}"#
+        );
+        let long_ws = " ".repeat(300);
+        let data = json_data(&format!(r#"{{"name":"{}"}}"#, long_ws));
+        let object = object_or_errors(&data.value).expect("object");
+        assert_eq!(
+            validate_label_fields(&data, object, false)
+                .expect_err("blank alone")
+                .body(),
+            r#"{"name":["This field may not be blank."]}"#
+        );
     }
 
     #[test]
@@ -4400,5 +4442,416 @@ mod tests {
         }
         assert!(!ATTACHMENT_MIME_TYPES.contains(&"application/x-empty"));
         assert!(!ATTACHMENT_MIME_TYPES.contains(&""));
+    }
+
+    #[test]
+    fn label_and_asset_queries_pin_shape() {
+        use sea_orm::QueryTrait;
+        let id = Uuid::nil();
+        let list = label_queryset("acme", id, id)
+            .distinct()
+            .order_by_asc(labels::Column::SortOrder)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            list.starts_with(r#"SELECT DISTINCT "labels"."parent_id", "labels"."name", "labels"."color", "labels"."id", "labels"."project_id", "labels"."workspace_id", "labels"."sort_order" FROM "labels" INNER JOIN "workspaces""#),
+            "{list}"
+        );
+        assert!(
+            list.contains(r#"EXISTS(SELECT "project_members"."id" FROM "project_members" WHERE "project_members"."project_id" = "labels"."project_id" AND "project_members"."member_id" = '00000000-0000-0000-0000-000000000000')"#),
+            "{list}"
+        );
+        assert!(
+            list.ends_with(r#"ORDER BY "labels"."sort_order" ASC"#),
+            "{list}"
+        );
+        let assets = asset_queryset("acme", id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            assets.contains(r#"FROM "file_assets" INNER JOIN "workspaces" ON "file_assets"."workspace_id" = "workspaces"."id""#),
+            "{assets}"
+        );
+        assert!(
+            assets.ends_with(r#"AND "file_assets"."deleted_at" IS NULL"#),
+            "{assets}"
+        );
+        let batch = bulk_label_insert(
+            &[(id, None, Some("d".to_owned()), "#000000".to_owned())],
+            &BulkLabelShared {
+                now: Utc::now(),
+                user_id: id,
+                workspace_id: id,
+                project_id: id,
+            },
+        );
+        let sql = DbBackend::Postgres.build(&batch).to_string();
+        assert!(sql.contains("NULL, 'd', '#000000', 65535"), "{sql}");
+        // sea-query spells the arbiter-less form `ON CONFLICT  DO NOTHING`.
+        assert!(
+            sql.contains(" ON CONFLICT ") && sql.ends_with(" DO NOTHING"),
+            "{sql}"
+        );
+    }
+
+    /// The label and attachment reads/writes against constraint-free temp
+    /// tables on a one-connection pool.
+    #[tokio::test]
+    async fn live_label_and_attachment_queries() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "project_members",
+            "labels",
+            "file_assets",
+            "users",
+            "draft_issues",
+            "issue_comments",
+            "pages",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        sqlx::query("ALTER TABLE labels ADD PRIMARY KEY (id), ALTER COLUMN name SET NOT NULL")
+            .execute(&pool)
+            .await
+            .expect("labels pk");
+        sqlx::query("ALTER TABLE file_assets ADD PRIMARY KEY (id)")
+            .execute(&pool)
+            .await
+            .expect("assets pk");
+        let ws = Uuid::new_v4();
+        let (project, other_project) = (Uuid::new_v4(), Uuid::new_v4());
+        let (member, stranger) = (Uuid::new_v4(), Uuid::new_v4());
+        let (first, second, gone, elsewhere) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (old_asset, new_asset, pending, deleted_asset, issue) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (draft, dead_draft, comment, page) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let label_cols = "id, created_at, updated_at, name, description, color, workspace_id, project_id, parent_id, sort_order, deleted_at";
+        let asset_cols = "id, created_at, updated_at, attributes, asset, is_deleted, is_archived, is_uploaded, size, workspace_id, project_id, issue_id, entity_type, created_by_id, deleted_at";
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            // Two membership rows (one tombstoned) for the member: the
+            // EXISTS never fans the labels out, and tombstones still count.
+            format!(
+                "INSERT INTO project_members (id, project_id, member_id, deleted_at) VALUES \
+                 (gen_random_uuid(), '{project}', '{member}', NULL), \
+                 (gen_random_uuid(), '{project}', '{member}', now()), \
+                 (gen_random_uuid(), '{other_project}', '{stranger}', NULL)"
+            ),
+            format!(
+                "INSERT INTO labels ({label_cols}) VALUES \
+                 ('{first}', now(), now(), 'Bug', '', '#f00', '{ws}', '{project}', NULL, 2, NULL), \
+                 ('{second}', now(), now(), 'Docs', '', '#0f0', '{ws}', '{project}', '{first}', 1, NULL), \
+                 ('{gone}', now(), now(), 'Gone', '', '#00f', '{ws}', '{project}', NULL, 9, now()), \
+                 ('{elsewhere}', now(), now(), 'Bug', '', '#00f', '{ws}', '{other_project}', NULL, 0, NULL)"
+            ),
+            format!(
+                "INSERT INTO file_assets ({asset_cols}) VALUES \
+                 ('{old_asset}', now() - interval '1 hour', now(), '{{\"name\":\"a.png\"}}', 'k/a', false, false, true, 1, '{ws}', '{project}', '{issue}', 'ISSUE_ATTACHMENT', '{member}', NULL), \
+                 ('{new_asset}', now(), now(), '{{}}', '', false, false, true, 2, '{ws}', '{project}', '{issue}', 'ISSUE_DESCRIPTION', NULL, NULL), \
+                 ('{pending}', now() - interval '2 hours', now(), '{{}}', 'k/p', false, false, false, 3, '{ws}', '{project}', '{issue}', 'ISSUE_ATTACHMENT', NULL, NULL), \
+                 ('{deleted_asset}', now(), now(), '{{}}', 'k/d', true, false, true, 4, '{ws}', '{project}', '{issue}', 'ISSUE_ATTACHMENT', '{member}', now())"
+            ),
+            format!("INSERT INTO users (id) VALUES ('{member}')"),
+            format!(
+                "INSERT INTO draft_issues (id, deleted_at) VALUES ('{draft}', NULL), ('{dead_draft}', now())"
+            ),
+            format!("INSERT INTO issue_comments (id, deleted_at) VALUES ('{comment}', NULL)"),
+            format!("INSERT INTO pages (id, deleted_at) VALUES ('{page}', now())"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+
+        // Label reads.
+        let listed = label_list_rows(&db, "acme", project, member)
+            .await
+            .expect("list");
+        assert_eq!(
+            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second, first]
+        );
+        assert_eq!(listed[0].parent_id, Some(first));
+        assert_eq!(listed[0].sort_order, 1.0);
+        assert!(label_list_rows(&db, "acme", project, stranger)
+            .await
+            .expect("list")
+            .is_empty());
+        assert!(label_list_rows(&db, "other", project, member)
+            .await
+            .expect("list")
+            .is_empty());
+        let one = label_object(&db, "acme", project, member, first)
+            .await
+            .expect("object")
+            .expect("found");
+        assert_eq!((one.name.as_str(), one.color.as_str()), ("Bug", "#f00"));
+        assert_eq!(one.workspace_id, ws);
+        assert!(label_object(&db, "acme", project, member, gone)
+            .await
+            .expect("object")
+            .is_none());
+        assert!(label_object(&db, "acme", project, member, elsewhere)
+            .await
+            .expect("object")
+            .is_none());
+        assert!(parent_exists(&db, first).await.expect("parent"));
+        assert!(!parent_exists(&db, gone).await.expect("parent"));
+        assert_eq!(max_sort_order(&db, project).await.expect("max"), Some(2.0));
+        assert_eq!(
+            max_sort_order(&db, Uuid::new_v4()).await.expect("max"),
+            None
+        );
+
+        // Label writes: create (and its IntegrityError arm), update, delete.
+        let now = Utc::now();
+        let created = labels::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(Some(member)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            workspace_id: Set(ws),
+            project_id: Set(Some(project)),
+            parent_id: Set(None),
+            name: Set("New".to_owned()),
+            description: Set(String::new()),
+            color: Set("#123456".to_owned()),
+            sort_order: Set(10002.0),
+            external_source: Set(None),
+            external_id: Set(None),
+        };
+        let model = created.clone().insert(&db).await.expect("insert");
+        assert_eq!(LabelRow::from(model).sort_order, 10002.0);
+        let duplicate = created.insert(&db).await.expect_err("duplicate pk");
+        assert!(is_integrity_violation(&duplicate));
+        let updated = update_label(&db, second, None, "Docs!", "#abc", 7.5, member, now)
+            .await
+            .expect("update")
+            .expect("row");
+        assert_eq!(
+            (
+                updated.parent_id,
+                updated.name.as_str(),
+                updated.color.as_str(),
+                updated.sort_order
+            ),
+            (None, "Docs!", "#abc", 7.5)
+        );
+        assert!(
+            update_label(&db, Uuid::new_v4(), None, "x", "", 0.0, member, now)
+                .await
+                .expect("update")
+                .is_none()
+        );
+        let (updated_by,): (Option<Uuid>,) =
+            sqlx::query_as("SELECT updated_by_id FROM labels WHERE id = $1")
+                .bind(second)
+                .fetch_one(&pool)
+                .await
+                .expect("updated_by");
+        assert_eq!(updated_by, Some(member));
+
+        // Bulk: conflicts are skipped per row; a NULL name fails the batch.
+        let shared = BulkLabelShared {
+            now,
+            user_id: member,
+            workspace_id: ws,
+            project_id: project,
+        };
+        let fresh = Uuid::new_v4();
+        let mut tx = pool.begin().await.expect("begin");
+        {
+            let conn = TxConn::new(&mut tx);
+            let batch = vec![
+                (
+                    first,
+                    Some("Clash".to_owned()),
+                    Some("d".to_owned()),
+                    "#1".to_owned(),
+                ),
+                (fresh, Some("Fresh".to_owned()), None, "#2".to_owned()),
+            ];
+            // `description` NULL is fine on the constraint-free temp table.
+            conn.execute(DbBackend::Postgres.build(&bulk_label_insert(&batch, &shared)))
+                .await
+                .expect("bulk insert");
+            let bad = vec![(Uuid::new_v4(), None, Some("d".to_owned()), "#3".to_owned())];
+            let error = conn
+                .execute(DbBackend::Postgres.build(&bulk_label_insert(&bad, &shared)))
+                .await
+                .expect_err("null name");
+            assert!(is_integrity_violation(&error));
+        }
+        tx.rollback().await.expect("rollback");
+        let mut tx = pool.begin().await.expect("begin");
+        {
+            let conn = TxConn::new(&mut tx);
+            let batch = vec![(
+                fresh,
+                Some("Fresh".to_owned()),
+                Some(String::new()),
+                "#2".to_owned(),
+            )];
+            conn.execute(DbBackend::Postgres.build(&bulk_label_insert(&batch, &shared)))
+                .await
+                .expect("bulk insert");
+        }
+        tx.commit().await.expect("commit");
+        let (name, sort_order, created_by, updated_by): (String, f64, Option<Uuid>, Option<Uuid>) =
+            sqlx::query_as(
+                "SELECT name, sort_order, created_by_id, updated_by_id FROM labels WHERE id = $1",
+            )
+            .bind(fresh)
+            .fetch_one(&pool)
+            .await
+            .expect("bulk row");
+        assert_eq!(
+            (name.as_str(), sort_order, created_by, updated_by),
+            ("Fresh", 65535.0, Some(member), Some(member))
+        );
+        let (clash,): (String,) = sqlx::query_as("SELECT name FROM labels WHERE id = $1")
+            .bind(first)
+            .fetch_one(&pool)
+            .await
+            .expect("kept");
+        assert_eq!(clash, "Bug");
+
+        // Attachment reads.
+        let v1 = v1_list_rows(&db, "acme", project, issue).await.expect("v1");
+        assert_eq!(
+            v1.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![new_asset, old_asset, pending]
+        );
+        let v2 = v2_list_rows(&db, "acme", project, issue).await.expect("v2");
+        assert_eq!(
+            v2.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![old_asset]
+        );
+        assert!(v2_list_rows(&db, "other", project, issue)
+            .await
+            .expect("v2")
+            .is_empty());
+        let row = v2_object(&db, "acme", project, old_asset)
+            .await
+            .expect("object")
+            .expect("found");
+        assert_eq!(row.attributes, serde_json::json!({"name": "a.png"}));
+        assert_eq!((row.size, row.is_uploaded), (1.0, true));
+        let rendered = render_asset(&row, "acme", &chrono_tz::UTC).expect("render");
+        assert!(rendered.starts_with(&format!("{{\"id\":\"{old_asset}\",\"asset_url\":")));
+        assert!(v2_object(&db, "acme", project, deleted_asset)
+            .await
+            .expect("object")
+            .is_none());
+        assert!(v1_delete_target(&db, "acme", project, issue, old_asset)
+            .await
+            .expect("target"));
+        assert!(
+            !v1_delete_target(&db, "acme", project, Uuid::new_v4(), old_asset)
+                .await
+                .expect("target")
+        );
+        assert!(asset_created_by(&db, old_asset, member)
+            .await
+            .expect("creator"));
+        assert!(!asset_created_by(&db, deleted_asset, member)
+            .await
+            .expect("creator"));
+        assert!(!asset_created_by(&db, new_asset, member)
+            .await
+            .expect("creator"));
+        for (field, id, expected) in [
+            ("user", member, true),
+            ("user", stranger, false),
+            ("draft_issue", draft, true),
+            ("draft_issue", dead_draft, false),
+            ("comment", comment, true),
+            ("page", page, false),
+        ] {
+            assert_eq!(
+                fk_exists(&db, field, id).await.expect("fk"),
+                expected,
+                "{field} {id}"
+            );
+        }
+
+        // Attachment writes: the v2 insert decodes back through the read.
+        let fresh_asset = Uuid::new_v4();
+        file_assets::Entity::insert(file_assets::ActiveModel {
+            id: Set(fresh_asset),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(Some(member)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            attributes: Set(serde_json::json!({"name": "b.pdf", "size": 5})),
+            asset: Set(format!("{ws}/x-b.pdf")),
+            user_id: Set(None),
+            workspace_id: Set(Some(ws)),
+            draft_issue_id: Set(None),
+            project_id: Set(Some(project)),
+            issue_id: Set(Some(issue)),
+            comment_id: Set(None),
+            page_id: Set(None),
+            entity_type: Set(Some("ISSUE_ATTACHMENT".to_owned())),
+            entity_identifier: Set(None),
+            is_deleted: Set(false),
+            is_archived: Set(false),
+            external_id: Set(None),
+            external_source: Set(None),
+            size: Set(5.0),
+            is_uploaded: Set(false),
+            storage_metadata: Set(Some(Value::Object(Map::new()))),
+        })
+        .exec_without_returning(&db)
+        .await
+        .expect("asset insert");
+        let stored = v2_object(&db, "acme", project, fresh_asset)
+            .await
+            .expect("object")
+            .expect("found");
+        assert_eq!(stored.storage_metadata, Some(serde_json::json!({})));
+        assert!(!stored.is_uploaded);
+        file_assets::Entity::update_many()
+            .col_expr(file_assets::Column::IsDeleted, Expr::value(true))
+            .col_expr(file_assets::Column::DeletedAt, Expr::value(now))
+            .filter(file_assets::Column::Id.eq(fresh_asset))
+            .exec(&db)
+            .await
+            .expect("soft delete");
+        assert!(v2_object(&db, "acme", project, fresh_asset)
+            .await
+            .expect("object")
+            .is_none());
     }
 }

@@ -11,7 +11,6 @@
 // (NEWFRONT-285/286/287) extend this content without touching the
 // shell contract.
 
-import { Kbd } from "@pidash/kit";
 import { Blocks, FileText, House } from "lucide-react";
 import * as React from "react";
 
@@ -67,6 +66,11 @@ export interface SidebarProps {
    * shell owns only the mount point beside the account area.
    */
   updateControl?: React.ReactNode;
+  /**
+   * Desktop About control mount (DESK-028): the About area renders its
+   * button here, beside the update control; absent on web.
+   */
+  aboutControl?: React.ReactNode;
   /** Personal entries above projects, already filtered and ordered. */
   personalEntries?: SidebarPersonalEntry[];
   /**
@@ -105,6 +109,7 @@ export function Sidebar({
   onSignOut,
   onDeactivateAccount,
   updateControl,
+  aboutControl,
   personalEntries = [],
   editionEntries = [],
   currentPath = null,
@@ -149,6 +154,7 @@ export function Sidebar({
             />
           </div>
           {updateControl}
+          {aboutControl}
         </>
       }
     >
@@ -213,9 +219,6 @@ export function Sidebar({
       {projectsGroup}
       {moreGroup}
       {favoritesGroup}
-      <p className="text-caption flex items-center gap-(--space-2) px-(--space-2) text-(--text-muted)">
-        Commands <Kbd keys={["mod", "K"]} />
-      </p>
     </SidebarShell>
   );
 }

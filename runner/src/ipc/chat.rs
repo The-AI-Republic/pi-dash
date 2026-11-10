@@ -30,6 +30,18 @@
 //! observed by the assign path) plus a read of `state.rx_in_flight` (set while
 //! a managed run holds the working copy). [`try_begin_local_turn`] claims the
 //! working copy for a chat turn or refuses when a run holds it.
+//!
+//! ## Two hosts (design §12.1, PO-8)
+//!
+//! A request is served by a [`ChatHost`]:
+//!
+//! - **A project runner** — the request names one (`runner`), or carries no
+//!   absolute `cwd`: the runner's agent, its folder and the AC6 guard above.
+//! - **The daemon's engine profile** ([`super::engine_chat::EngineChatProfile`])
+//!   — no `runner` selector and an absolute `cwd`: the machine-level built-in
+//!   engine, with no project runner and no shared busy flag, so it works with
+//!   zero or many runners and is never blocked by a run. Its folder must not
+//!   be inside any runner's working dir.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,11 +50,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
+use super::engine_chat::EngineChatProfile;
 use super::protocol::Response;
 use crate::agent::{AgentBridge, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
@@ -50,9 +63,20 @@ use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, De
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, ApprovalMode};
 use crate::config::schema::RunnerConfig;
 use crate::daemon::runner_instance::RunnerInstance;
+use crate::util::fs::create_dir_all_private;
 
 /// How long a resolved approval / cancel wait is allowed to hold a turn.
 const APPROVAL_TTL_MINUTES: i64 = 10;
+
+/// Upper bound on live local chat sessions per registry. Each live session
+/// holds a long-lived engine process, so the set is capped: viewing more
+/// sessions than this evicts the least-recently-used ones (their bridges
+/// torn down) and the next warm/send respawns them.
+const MAX_LIVE_CHAT_SESSIONS: usize = 8;
+
+/// How long a local chat session may sit without a warm/turn before its
+/// engine process is shut down and the session dropped.
+const CHAT_IDLE_TTL_MINUTES: i64 = 10;
 
 // ---------------------------------------------------------------------------
 // Sink abstraction — lets the turn driver stream to the live IPC socket in
@@ -85,9 +109,9 @@ where
 
 // ---------------------------------------------------------------------------
 // Per-runner session registry. Sessions persist across requests (and across
-// connections) so a Codex thread survives between turns — the concrete Codex
-// bridge has no resume-by-id, so continuity depends on keeping the same live
-// bridge process for the session's lifetime.
+// connections) so a Codex thread survives between turns. When the in-memory
+// bridge is gone (restart, Close, failed turn), a fresh bridge resumes the
+// saved thread via `thread/resume`; unknown threads fall back to `thread/start`.
 // ---------------------------------------------------------------------------
 
 /// A single live chat session: its engine bridge plus an out-of-band cancel
@@ -110,6 +134,10 @@ struct SessionRuntime {
     /// life of the thread so a mode change mid-session cannot retune a turn
     /// already in flight — it takes effect on the next thread instead.
     approval_mode: ApprovalMode,
+    /// When this session was last warmed or sent a turn. Stamped on
+    /// creation and on every completed warm/turn; read by the registry
+    /// reaper to evict idle sessions.
+    last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Per-`RunnerInstance` registry of live chat sessions, keyed by
@@ -126,15 +154,93 @@ impl ChatRegistry {
     }
 
     async fn get_or_create(&self, id: Uuid) -> Arc<ChatSession> {
+        if let Some(existing) = self.get(id).await {
+            if let Ok(mut rt) = existing.rt.try_lock() {
+                rt.last_used_at = Some(Utc::now());
+            }
+            self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS).await;
+            return existing;
+        }
+        // Leave room for the session about to be inserted.
+        self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS - 1).await;
         let mut map = self.sessions.lock().await;
         map.entry(id)
             .or_insert_with(|| {
                 Arc::new(ChatSession {
-                    rt: Mutex::new(SessionRuntime::default()),
+                    rt: Mutex::new(SessionRuntime {
+                        last_used_at: Some(Utc::now()),
+                        ..SessionRuntime::default()
+                    }),
                     cancel: Notify::new(),
                 })
             })
             .clone()
+    }
+
+    /// Evict idle sessions: those past their idle TTL first, then the
+    /// least-recently-used ones while the registry exceeds `target`. The
+    /// session being requested (`except`) and any session with a turn in
+    /// flight (its runtime is locked) are never touched. Evicted bridges
+    /// are shut down, tearing down their engine processes; the next
+    /// warm/send for a dropped session respawns it.
+    async fn reap_idle(&self, except: Uuid, target: usize) {
+        let now = Utc::now();
+        let idle_limit = chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES);
+        // Snapshot the eviction candidates under the map lock. `try_lock`
+        // only — a locked runtime means a warm/turn is in flight and the
+        // session must survive.
+        let candidates: Vec<(Uuid, Arc<ChatSession>)> = {
+            let map = self.sessions.lock().await;
+            let mut candidates = Vec::new();
+            let mut by_age: Vec<(Option<DateTime<Utc>>, Uuid, Arc<ChatSession>)> = Vec::new();
+            for (id, session) in map.iter() {
+                if *id == except {
+                    continue;
+                }
+                let Ok(rt) = session.rt.try_lock() else {
+                    continue;
+                };
+                if rt.last_used_at.is_none_or(|t| now - t > idle_limit) {
+                    candidates.push((*id, session.clone()));
+                } else {
+                    by_age.push((rt.last_used_at, *id, session.clone()));
+                }
+            }
+            let excess = map.len().saturating_sub(target);
+            if excess > 0 {
+                by_age.sort_by_key(|(at, _, _)| *at);
+                by_age.truncate(excess);
+                candidates.extend(by_age.into_iter().map(|(_, id, s)| (id, s)));
+            }
+            candidates
+        };
+        for (id, expected) in candidates {
+            // Re-check under the map lock: only evict the exact session
+            // snapshotted. If a concurrent `get_or_create` for the same id
+            // already created a fresh entry, `expected` is stale and must be
+            // left alone — removing/replacing the new entry would orphan the
+            // caller's Arc (two live runtimes for one chat_session_id). A
+            // busy runtime at this point means a turn started after the
+            // snapshot: leave the session entirely untouched, no reinsert.
+            let bridge = {
+                let mut map = self.sessions.lock().await;
+                let Some(current) = map.get(&id) else {
+                    continue;
+                };
+                if !Arc::ptr_eq(current, &expected) {
+                    continue;
+                }
+                let Ok(mut rt) = expected.rt.try_lock() else {
+                    continue;
+                };
+                let session = map.remove(&id).expect("entry checked present");
+                let _ = session;
+                rt.bridge.take()
+            };
+            if let Some(bridge) = bridge {
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
+            }
+        }
     }
 
     async fn get(&self, id: Uuid) -> Option<Arc<ChatSession>> {
@@ -143,6 +249,108 @@ impl ChatRegistry {
 
     async fn remove(&self, id: Uuid) -> Option<Arc<ChatSession>> {
         self.sessions.lock().await.remove(&id)
+    }
+
+    /// Whether `id` is a live session of this registry.
+    pub(crate) async fn contains(&self, id: Uuid) -> bool {
+        self.sessions.lock().await.contains_key(&id)
+    }
+}
+
+// (reap_one removed: eviction is now atomic under the map lock in
+// `reap_idle`, eliminating the blind-reinsert race where a busy session
+// was re-inserted over a concurrently created entry for the same id.)
+
+// ---------------------------------------------------------------------------
+// Chat hosts.
+// ---------------------------------------------------------------------------
+
+/// What serves a local chat request: a project runner or the daemon's own
+/// engine profile. See the module docs.
+pub(crate) struct ChatHost<'a> {
+    sessions: &'a ChatRegistry,
+    approvals: &'a ApprovalRouter,
+    lane: Lane<'a>,
+}
+
+enum Lane<'a> {
+    Runner(&'a RunnerInstance),
+    Engine {
+        profile: &'a EngineChatProfile,
+        /// `(runner name, working dir)` of every configured runner: a chat
+        /// folder may not be inside one.
+        runner_dirs: Vec<(String, PathBuf)>,
+    },
+}
+
+impl<'a> ChatHost<'a> {
+    pub(crate) fn runner(inst: &'a RunnerInstance) -> Self {
+        Self {
+            sessions: &inst.chat_sessions,
+            approvals: &inst.approvals,
+            lane: Lane::Runner(inst),
+        }
+    }
+
+    pub(crate) fn engine(
+        profile: &'a EngineChatProfile,
+        runner_dirs: Vec<(String, PathBuf)>,
+    ) -> Self {
+        Self {
+            sessions: &profile.sessions,
+            approvals: &profile.approvals,
+            lane: Lane::Engine {
+                profile,
+                runner_dirs,
+            },
+        }
+    }
+
+    fn config(&self) -> &RunnerConfig {
+        match &self.lane {
+            Lane::Runner(inst) => &inst.config,
+            Lane::Engine { profile, .. } => profile.config(),
+        }
+    }
+
+    /// Claim the working copy for one turn. Only a project runner has one
+    /// to share with its runs; the engine profile has no busy flag.
+    fn begin_turn(&self) -> std::result::Result<Option<LocalTurnGuard>, String> {
+        match &self.lane {
+            Lane::Runner(inst) => try_begin_local_turn(inst).map(Some),
+            Lane::Engine { .. } => Ok(None),
+        }
+    }
+
+    fn resolve_workspace(&self, cwd: Option<&str>) -> Result<PathBuf> {
+        match &self.lane {
+            Lane::Runner(inst) => resolve_chat_workspace(&inst.config, cwd),
+            Lane::Engine { runner_dirs, .. } => {
+                super::engine_chat::resolve_engine_chat_folder(cwd, runner_dirs)
+            }
+        }
+    }
+
+    async fn spawn(
+        &self,
+        workspace: &Path,
+        model: Option<String>,
+        resume_id: Option<&str>,
+        mode: ApprovalMode,
+    ) -> Result<AgentBridge> {
+        match &self.lane {
+            Lane::Runner(inst) => {
+                AgentBridge::spawn_from_config_with_resume(
+                    &inst.config,
+                    workspace,
+                    model,
+                    resume_id,
+                    Some(mode),
+                )
+                .await
+            }
+            Lane::Engine { profile, .. } => profile.spawn(workspace, mode, resume_id).await,
+        }
     }
 }
 
@@ -170,7 +378,9 @@ impl Drop for LocalTurnGuard {
 /// assign lane's mirror check of `chat_active` (supervisor.rs) closes the
 /// other direction. This is best-effort advisory exclusion, consistent with
 /// the cloud loop's own `current_chat`/`current_run` checks.
-pub(crate) fn try_begin_local_turn(inst: &RunnerInstance) -> std::result::Result<LocalTurnGuard, String> {
+pub(crate) fn try_begin_local_turn(
+    inst: &RunnerInstance,
+) -> std::result::Result<LocalTurnGuard, String> {
     if inst.state.rx_in_flight.borrow().is_some() {
         return Err("a managed issue run is using this runner's working copy".to_string());
     }
@@ -218,11 +428,11 @@ pub(crate) struct SendArgs {
 /// `ChatWarm`: spawn/reuse+warm the engine without submitting a turn. Streams
 /// a `ChatEvent{kind:"chat_warmed"}` (or `"chat_warm_failed"`), then `Ack`.
 pub(crate) async fn handle_warm<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     args: WarmArgs,
     sink: &mut S,
 ) -> Result<Response> {
-    let session = inst.chat_sessions.get_or_create(args.chat_session_id).await;
+    let session = host.sessions.get_or_create(args.chat_session_id).await;
     let mut rt = session.rt.lock().await;
     let chat_session_id = args.chat_session_id;
 
@@ -231,7 +441,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         args.local_thread_id.as_deref(),
     );
     let workspace = match ensure_bridge(
-        inst,
+        host,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -303,6 +513,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         payload: serde_json::json!({ "local_session_id": warmed_thread_id }),
     })
     .await?;
+    rt.last_used_at = Some(Utc::now());
     Ok(Response::Ack)
 }
 
@@ -310,14 +521,15 @@ pub(crate) async fn handle_warm<S: ChatSink>(
 /// turn's `ChatEvent`/`ChatApprovalRequest` frames, and returns the terminal
 /// `ChatMessageCompleted` (or `ChatFailed`) as the connection's final frame.
 pub(crate) async fn handle_send<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     args: SendArgs,
     sink: &mut S,
 ) -> Result<Response> {
     let chat_session_id = args.chat_session_id;
 
-    // AC6: claim the working copy, or refuse cleanly.
-    let _guard = match try_begin_local_turn(inst) {
+    // AC6: claim a project runner's working copy, or refuse cleanly. The
+    // engine profile shares no folder with a run, so it claims nothing.
+    let _guard = match host.begin_turn() {
         Ok(g) => g,
         Err(detail) => {
             return Ok(Response::ChatFailed {
@@ -329,7 +541,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         }
     };
 
-    let session = inst.chat_sessions.get_or_create(chat_session_id).await;
+    let session = host.sessions.get_or_create(chat_session_id).await;
     let mut rt = session.rt.lock().await;
 
     let resume_id = chat_resume_id(
@@ -337,7 +549,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         args.local_thread_id.as_deref(),
     );
     let workspace = match ensure_bridge(
-        inst,
+        host,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -375,9 +587,9 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 content: args.content,
                 model: args.model,
                 mode: approval_mode,
-                runner_id: inst.config.runner_id,
-                config: &inst.config,
-                approvals: &inst.approvals,
+                runner_id: host.config().runner_id,
+                config: host.config(),
+                approvals: host.approvals,
                 workspace: &workspace,
                 cancel: &session.cancel,
             },
@@ -390,6 +602,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
     };
     rt.bridge_seq = bridge_seq;
     rt.started_sent = started_sent;
+    rt.last_used_at = Some(Utc::now());
 
     // A failed turn tears the bridge down so the next send respawns cleanly.
     let terminal = match outcome {
@@ -423,8 +636,8 @@ pub(crate) async fn handle_send<S: ChatSink>(
 
 /// `ChatCancel`: interrupt the in-flight turn (if any). Best-effort — trips
 /// the session's cancel signal, which the active turn observes.
-pub(crate) async fn handle_cancel(inst: &RunnerInstance, chat_session_id: Uuid) -> Result<Response> {
-    if let Some(session) = inst.chat_sessions.get(chat_session_id).await {
+pub(crate) async fn handle_cancel(host: &ChatHost<'_>, chat_session_id: Uuid) -> Result<Response> {
+    if let Some(session) = host.sessions.get(chat_session_id).await {
         session.cancel.notify_waiters();
     }
     Ok(Response::Ack)
@@ -433,11 +646,11 @@ pub(crate) async fn handle_cancel(inst: &RunnerInstance, chat_session_id: Uuid) 
 /// `ChatClose`: interrupt any in-flight turn, tear the engine down, drop the
 /// session, and emit a terminal `ChatClosed`.
 pub(crate) async fn handle_close<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     chat_session_id: Uuid,
     sink: &mut S,
 ) -> Result<Response> {
-    if let Some(session) = inst.chat_sessions.get(chat_session_id).await {
+    if let Some(session) = host.sessions.get(chat_session_id).await {
         // Interrupt a streaming turn so it releases the runtime lock, then
         // acquire it to tear the bridge down.
         session.cancel.notify_waiters();
@@ -447,7 +660,7 @@ pub(crate) async fn handle_close<S: ChatSink>(
         }
         rt.started_sent = false;
     }
-    inst.chat_sessions.remove(chat_session_id).await;
+    host.sessions.remove(chat_session_id).await;
     sink.emit(Response::ChatClosed {
         chat_session_id,
         closed_at: Utc::now(),
@@ -460,11 +673,11 @@ pub(crate) async fn handle_close<S: ChatSink>(
 /// shared approval router as `DecisionSource::Local`, unblocking the turn that
 /// is parked on `approvals.subscribe()`.
 pub(crate) async fn handle_decide(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     local_approval_id: &str,
     decision: ApprovalDecision,
 ) -> Result<Response> {
-    let resolved = inst
+    let resolved = host
         .approvals
         .decide(local_approval_id, decision, DecisionSource::Local)
         .await;
@@ -483,7 +696,7 @@ pub(crate) async fn handle_decide(
 /// once and respawning if a prior bridge process exited. Returns the resolved
 /// workspace path.
 async fn ensure_bridge(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     rt: &mut SessionRuntime,
     cwd: Option<&str>,
     model: Option<String>,
@@ -491,7 +704,7 @@ async fn ensure_bridge(
     mode: Option<ApprovalMode>,
 ) -> Result<PathBuf> {
     if rt.workspace.is_none() {
-        rt.workspace = Some(resolve_chat_workspace(&inst.config, cwd)?);
+        rt.workspace = Some(host.resolve_workspace(cwd)?);
     }
     let workspace = rt
         .workspace
@@ -511,14 +724,8 @@ async fn ensure_bridge(
         // fresh session spawns its own bridge.
         rt.approval_mode = mode.unwrap_or_default();
         rt.bridge = Some(
-            AgentBridge::spawn_from_config_with_resume(
-                &inst.config,
-                &workspace,
-                model,
-                resume_id,
-                Some(rt.approval_mode),
-            )
-            .await?,
+            host.spawn(&workspace, model, resume_id, rt.approval_mode)
+                .await?,
         );
     }
     Ok(workspace)
@@ -929,14 +1136,14 @@ fn resolve_chat_workspace(config: &RunnerConfig, cwd: Option<&str>) -> Result<Pa
             }
             return Ok(requested_rel);
         }
-        std::fs::create_dir_all(&workspace_path)?;
+        create_dir_all_private(&workspace_path)?;
         let requested = workspace_path.join(requested_rel);
         if !requested.starts_with(&workspace_path) {
             anyhow::bail!("chat cwd is outside runner workspace");
         }
         return Ok(requested);
     }
-    std::fs::create_dir_all(&workspace_path)?;
+    create_dir_all_private(&workspace_path)?;
     Ok(workspace_path)
 }
 
@@ -1000,12 +1207,10 @@ fn gateway_refusal_code(status: u64) -> Option<&'static str> {
 
 /// Split the engine's `unexpected status 402 Payment Required: <text>, url:
 /// <endpoint>, request id: <id>` into the status and the gateway's text.
+/// Delegates to the shared `codex::gateway` helper so both lanes parse the
+/// same wire shape.
 fn gateway_status_text(raw: &str) -> Option<(u64, String)> {
-    let rest = raw.split_once("unexpected status ")?.1;
-    let status = rest.get(..3)?.parse().ok()?;
-    let text = rest.split_once(": ").map_or("", |(_, text)| text);
-    let text = text.rsplit_once(", url: ").map_or(text, |(text, _)| text);
-    Some((status, text.trim().to_string()))
+    crate::codex::gateway::gateway_status_text(raw)
 }
 
 /// Recognise the engine's "I will retry" notice for a gateway answer that no
@@ -1015,22 +1220,8 @@ fn gateway_status_text(raw: &str) -> Option<(u64, String)> {
 /// `{"responseStreamDisconnected": {"httpStatusCode": 402}}`) and the body in
 /// `additionalDetails`; `message` is only `Reconnecting... 1/5`.
 fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(&'static str, String)> {
-    if method != "error" || params.get("willRetry").and_then(|v| v.as_bool()) != Some(true) {
-        return None;
-    }
-    let error = params.get("error")?;
-    let status = error
-        .get("codexErrorInfo")?
-        .as_object()?
-        .values()
-        .find_map(|info| info.get("httpStatusCode")?.as_u64())?;
+    let (status, text) = crate::codex::gateway::gateway_refusal(method, params)?;
     let code = gateway_refusal_code(status)?;
-    let text = error
-        .get("additionalDetails")
-        .and_then(|v| v.as_str())
-        .and_then(gateway_status_text)
-        .map(|(_, text)| text)
-        .unwrap_or_default();
     Some((code, text))
 }
 
@@ -1783,5 +1974,162 @@ mod tests {
         // otherwise accept `<workspace>/../escape`, which resolves outside.
         assert!(resolve_chat_workspace(&cfg, Some("../escape")).is_err());
         assert!(resolve_chat_workspace(&cfg, Some("sub/../../escape")).is_err());
+    }
+
+    #[tokio::test]
+    async fn warmed_chat_sessions_are_reaped_once_the_registry_grows() {
+        // PIDESKAPP-75: every local chat the user views calls `chat_warm`,
+        // which spawns a long-lived engine process keyed by `chat_session_id`
+        // and nothing ever reaped the entries. N distinct warms must not
+        // leave N live sessions: the least-recently-used ones are evicted
+        // (their bridges torn down) once the registry passes its cap, and
+        // the next warm/send respawns them.
+        let registry = ChatRegistry::new();
+        let first = Uuid::new_v4();
+        registry.get_or_create(first).await;
+        // View more chats than the live cap allows.
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        assert!(
+            !registry.contains(first).await,
+            "the least-recently-warmed chat session must be evicted once the registry exceeds its cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_a_turn_in_flight_is_never_reaped() {
+        // A warm/turn holds the session's runtime lock; the reaper must
+        // leave that session alone no matter how far past the cap the
+        // registry grows.
+        let registry = ChatRegistry::new();
+        let busy = Uuid::new_v4();
+        let busy_session = registry.get_or_create(busy).await;
+        // Simulate an in-flight warm/turn holding the runtime lock.
+        let _in_flight = busy_session.rt.lock().await;
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        drop(_in_flight);
+        assert!(
+            registry.contains(busy).await,
+            "a session with a turn in flight must never be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_is_reaped_on_the_next_warm() {
+        // A session left untouched past the idle TTL must go on the next
+        // registry access, even before the cap is reached.
+        let registry = ChatRegistry::new();
+        let stale = Uuid::new_v4();
+        let stale_session = registry.get_or_create(stale).await;
+        {
+            let mut rt = stale_session.rt.lock().await;
+            rt.last_used_at =
+                Some(Utc::now() - chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES + 1));
+        }
+        registry.get_or_create(Uuid::new_v4()).await;
+        assert!(
+            !registry.contains(stale).await,
+            "a session idle past its TTL must be reaped"
+        );
+    }
+
+    /// After the reaper drops a session, the next warm/send respawns a
+    /// fresh bridge that resumes the saved Codex thread (PIDESKAPP-74 path),
+    /// so the conversation continues on the same thread id. This is the
+    /// thread-continuity half of PIDESKAPP-75's acceptance: without
+    /// `thread/resume` the respawned bridge minted a new id and the engine
+    /// lost all prior turns.
+    #[tokio::test]
+    async fn reaped_session_respawn_resumes_saved_thread() {
+        // Fake app-server: expects thread/resume with the saved id, not
+        // thread/start.
+        let script = r#"
+            set -e
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _
+            read resume
+            case "$resume" in *'"method":"thread/resume"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected thread/resume"}}'; exit 0;; esac
+            case "$resume" in *'"threadId":"th_saved"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected th_saved"}}'; exit 0;; esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"th_saved"}}}'
+            sleep 0.1
+        "#;
+        // Simulate a reaped session: the registry entry is gone, the next
+        // warm for the same chat_session_id spawns a fresh bridge carrying
+        // the saved thread id from the desktop. The bridge must resume it.
+        let registry = ChatRegistry::new();
+        let chat_id = Uuid::new_v4();
+        let old = registry.get_or_create(chat_id).await;
+        {
+            let mut rt = old.rt.lock().await;
+            rt.last_used_at =
+                Some(Utc::now() - chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES + 1));
+        }
+        // Trigger reap on a different id so `chat_id` is dropped.
+        registry.get_or_create(Uuid::new_v4()).await;
+        assert!(
+            !registry.contains(chat_id).await,
+            "stale session must be reaped before respawn"
+        );
+        // Respawn: fresh registry entry with a new Arc (old was dropped).
+        let fresh = registry.get_or_create(chat_id).await;
+        assert!(
+            registry.contains(chat_id).await,
+            "respawned session must be live"
+        );
+        assert!(
+            !Arc::ptr_eq(&old, &fresh),
+            "respawn must allocate a fresh runtime, not resurrect the reaped one"
+        );
+        // Fresh bridge carrying the saved thread must resume it.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        let server = AppServer::spawn_command(cmd)
+            .await
+            .expect("spawn fake codex");
+        let mut bridge = Bridge::from_server(server, None);
+        bridge.set_resume_thread_id(Some("th_saved"));
+        let cwd = std::env::temp_dir();
+        let thread_id = bridge.warm(&cwd).await.expect("respawn must resume");
+        assert_eq!(
+            thread_id, "th_saved",
+            "post-reap warm must resume, not restart"
+        );
+    }
+
+    /// Concurrent `get_or_create` for the same `chat_session_id` must share
+    /// a single `ChatSession` Arc — the reaper's blind-reinsert race
+    /// produced two live runtimes for one chat when a reap overlapped a
+    /// warm. The atomic ptr_eq removal keeps the registry single-sourced.
+    #[tokio::test]
+    async fn concurrent_get_or_create_shares_single_runtime() {
+        let registry = ChatRegistry::new();
+        let id = Uuid::new_v4();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = registry.clone();
+            handles.push(tokio::spawn(async move { r.get_or_create(id).await }));
+        }
+        let mut arcs = Vec::new();
+        for h in handles {
+            arcs.push(h.await.expect("spawned get_or_create"));
+        }
+        for a in arcs.iter().skip(1) {
+            assert!(
+                Arc::ptr_eq(&arcs[0], a),
+                "concurrent get_or_create must share one runtime"
+            );
+        }
+        // And the concurrently obtained Arc must match a fresh lookup.
+        let c = registry.get(id).await.expect("concurrent session present");
+        assert!(
+            Arc::ptr_eq(&arcs[0], &c),
+            "concurrent get_or_create must not duplicate the runtime"
+        );
     }
 }

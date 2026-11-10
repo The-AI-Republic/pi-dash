@@ -1,6 +1,6 @@
-# pidash-sdk public surface: one `pidash_sdk::module::Name` per line, sorted.
 # Seeded by OVL-02 (PIDASHCONV-1540); see crate docs for provenance.
 # The surface test (tests/surface.rs) fails when this file drifts from the
+# pidash-sdk public surface: one `pidash_sdk::module::Name` per line, sorted.
 # re-exports. Add/remove lines only together with the matching lib.rs +
 # surface.rs edits, so every change is a reviewed diff.
 pidash_sdk::assistant::AgentError
@@ -223,6 +223,7 @@ pidash_sdk::compat::csrf
 pidash_sdk::compat::datetime
 pidash_sdk::compat::db
 pidash_sdk::compat::dict_repr
+pidash_sdk::compat::dispatch_deps_for_ids
 pidash_sdk::compat::drain_lifecycle_effects
 pidash_sdk::compat::filter
 pidash_sdk::compat::gate_fn
@@ -285,6 +286,7 @@ pidash_sdk::db::Settings
 pidash_sdk::db::SettingsOverlay
 pidash_sdk::db::TABLE
 pidash_sdk::db::Transaction
+pidash_sdk::db::TxConn
 pidash_sdk::db::active_run_for
 pidash_sdk::db::admin_get_by_instance_user_sql
 pidash_sdk::db::client_from_settings
@@ -317,6 +319,9 @@ pidash_sdk::domain::NewApiToken
 pidash_sdk::domain::NewMemberWithActive
 pidash_sdk::domain::NewWorkspace
 pidash_sdk::domain::ProvisionedUser
+pidash_sdk::domain::ResolveError
+pidash_sdk::domain::RunnerListParams
+pidash_sdk::domain::RunnerListRow
 pidash_sdk::domain::TokenFields
 pidash_sdk::domain::UserFieldUpdates
 pidash_sdk::domain::WriteActor
@@ -335,11 +340,15 @@ pidash_sdk::domain::insert_llm_config
 pidash_sdk::domain::insert_provisioned_user
 pidash_sdk::domain::insert_user_notification_preference
 pidash_sdk::domain::issue_token
+pidash_sdk::domain::list_project_runners
 pidash_sdk::domain::make_unusable_password
 pidash_sdk::domain::overwrite
+pidash_sdk::domain::resolve_pod_ref
+pidash_sdk::domain::resolve_runner_ref
 pidash_sdk::domain::revoke_machine_token_by_hash
 pidash_sdk::domain::revoke_machine_tokens_by_workspace
 pidash_sdk::domain::revoke_runner_sessions_by_workspace
+pidash_sdk::domain::runner_list_row_to_value
 pidash_sdk::domain::save_llm_config_full
 pidash_sdk::domain::set_name
 pidash_sdk::domain::set_profile_last_workspace
@@ -403,10 +412,12 @@ pidash_sdk::jobs::TRACK_EVENT_TASK
 pidash_sdk::jobs::TaskMessage
 pidash_sdk::jobs::Verdict
 pidash_sdk::jobs::WorkerConfig
+pidash_sdk::jobs::bounce_issue_no_eligible_runner
 pidash_sdk::jobs::complete_project_move_handoff_live
 pidash_sdk::jobs::create_and_dispatch_run
 pidash_sdk::jobs::default_schedule
 pidash_sdk::jobs::dispatch_completion_comment
+pidash_sdk::jobs::dispatch_continuation_run
 pidash_sdk::jobs::dispatch_job
 pidash_sdk::jobs::django_dumps
 pidash_sdk::jobs::enqueue
@@ -426,6 +437,7 @@ pidash_sdk::operations::pull_requests
 pidash_sdk::operations::relations
 pidash_sdk::operations::requested_data_text
 pidash_sdk::operations::requested_data_value
+pidash_sdk::operations::schedulers
 pidash_sdk::operations::workpad
 pidash_sdk::ops::AgentRunStatus
 pidash_sdk::ops::AgentRunTrigger
@@ -503,6 +515,7 @@ pidash_sdk::ops::agent_system_user_id
 pidash_sdk::ops::apply_user_save
 pidash_sdk::ops::base_settings_schema
 pidash_sdk::ops::blockers
+pidash_sdk::ops::bounce_issue_for_revoke
 pidash_sdk::ops::builtins
 pidash_sdk::ops::complete_project_move_handoff_inline
 pidash_sdk::ops::connect_primary
@@ -534,6 +547,7 @@ pidash_sdk::ops::move_to_project
 pidash_sdk::ops::new_user_token
 pidash_sdk::ops::next_event_seq
 pidash_sdk::ops::next_message_seq
+pidash_sdk::ops::overlay_store_deps
 pidash_sdk::ops::paginate_with
 pidash_sdk::ops::pending_entry_ticker_for
 pidash_sdk::ops::post_run_orchestration
@@ -541,6 +555,7 @@ pidash_sdk::ops::post_run_orchestration_in_tx
 pidash_sdk::ops::py_stripped
 pidash_sdk::ops::random_color
 pidash_sdk::ops::reconcile
+pidash_sdk::ops::recreate_issue_for_revoke
 pidash_sdk::ops::revoke
 pidash_sdk::ops::run
 pidash_sdk::ops::run_select_sql
@@ -566,6 +581,7 @@ pidash_sdk::read::CHILDREN_DETACH_SQL
 pidash_sdk::read::COMMENT_COLUMNS
 pidash_sdk::read::COMMENT_IDS_SQL
 pidash_sdk::read::CYCLE_DELETE_SQL
+pidash_sdk::read::CommentDbRow
 pidash_sdk::read::CommentReactionView
 pidash_sdk::read::CommentRow
 pidash_sdk::read::CommentView
@@ -579,7 +595,6 @@ pidash_sdk::read::DecodedIssue
 pidash_sdk::read::Denial
 pidash_sdk::read::DescriptionHtmlFacts
 pidash_sdk::read::Error
-pidash_sdk::read::FULL_ROW_COLUMNS
 pidash_sdk::read::HostSettings
 pidash_sdk::read::HtmlCheck
 pidash_sdk::read::HtmlOutcome
@@ -593,6 +608,7 @@ pidash_sdk::read::IssueFlatView
 pidash_sdk::read::IssueNotFound
 pidash_sdk::read::IssueRow
 pidash_sdk::read::IssueSearchParams
+pidash_sdk::read::IssueSearchRow
 pidash_sdk::read::IssueSearchSort
 pidash_sdk::read::IssueSearchStatus
 pidash_sdk::read::LABEL_DELETE_SQL
@@ -602,13 +618,10 @@ pidash_sdk::read::NewPrLink
 pidash_sdk::read::NewReviewLink
 pidash_sdk::read::OwnedAssigneeRow
 pidash_sdk::read::OwnedRelationItem
-pidash_sdk::read::PR_DETAIL_SQL
-pidash_sdk::read::PR_LINK_BY_ID_SQL
 pidash_sdk::read::PR_LINK_INSERT_SQL
-pidash_sdk::read::PR_LINK_LIST_SQL
 pidash_sdk::read::PR_LINK_LOOKUP_SQL
 pidash_sdk::read::PR_LINK_SOFT_DELETE_SQL
-pidash_sdk::read::PR_LIST_SQL
+pidash_sdk::read::PrLinkDbRow
 pidash_sdk::read::PrLinkRow
 pidash_sdk::read::PrLinksStore
 pidash_sdk::read::ProfileRow
@@ -627,6 +640,7 @@ pidash_sdk::read::RepointTarget
 pidash_sdk::read::RepresentationInput
 pidash_sdk::read::ReviewLinkRow
 pidash_sdk::read::ReviewMirrorFields
+pidash_sdk::read::RunWaitInputs
 pidash_sdk::read::SEQUENCE_CREATE_SQL
 pidash_sdk::read::SEQUENCE_DETACH_SQL
 pidash_sdk::read::SOURCE_ISSUE_LOCK_SQL
@@ -640,6 +654,7 @@ pidash_sdk::read::UserShape
 pidash_sdk::read::ValidateError
 pidash_sdk::read::ValidateInput
 pidash_sdk::read::WORKSPACE_SEED_TASK
+pidash_sdk::read::WorkpadDbRow
 pidash_sdk::read::WorkpadRow
 pidash_sdk::read::WorkpadWriteInput
 pidash_sdk::read::WorkspaceLiteView
@@ -647,9 +662,11 @@ pidash_sdk::read::WriteProject
 pidash_sdk::read::asset_url
 pidash_sdk::read::attach_pull_request
 pidash_sdk::read::base_host
+pidash_sdk::read::build_dispatch_wait
 pidash_sdk::read::comment_is_synced
 pidash_sdk::read::comment_url
 pidash_sdk::read::decode_issue
+pidash_sdk::read::dedicated_refusal_body
 pidash_sdk::read::drf_datetime
 pidash_sdk::read::expand_estimate_point
 pidash_sdk::read::expand_parent
@@ -657,6 +674,7 @@ pidash_sdk::read::expand_project
 pidash_sdk::read::expand_state
 pidash_sdk::read::expand_user
 pidash_sdk::read::expand_workspace
+pidash_sdk::read::fetch_active_dispatch_run
 pidash_sdk::read::fetch_asset
 pidash_sdk::read::fetch_assignee_ids
 pidash_sdk::read::fetch_assignee_rows
@@ -700,7 +718,7 @@ pidash_sdk::read::requested_names
 pidash_sdk::read::resolve_workpad_state
 pidash_sdk::read::run_validate
 pidash_sdk::read::search_issues
-pidash_sdk::read::search_issues_sql
+pidash_sdk::read::search_issues_statement
 pidash_sdk::read::serialize_drf_datetime
 pidash_sdk::read::serialize_iso_datetime
 pidash_sdk::read::shape_issue

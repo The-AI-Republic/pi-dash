@@ -366,6 +366,19 @@ mod tests {
     }
 
     #[test]
+    fn unit_body_leaves_the_umask_alone() {
+        // The daemon's own folders are made owner-only where it creates them
+        // (`util::fs::create_dir_all_private`). A unit-wide `Umask=` would
+        // also be inherited by git and the agent, changing the mode of every
+        // file they create inside a user's existing repo.
+        let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
+        assert!(
+            !body.contains("Umask="),
+            "unit must not set Umask; got:\n{body}"
+        );
+    }
+
+    #[test]
     fn unit_body_omits_path_when_not_captured() {
         let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
         assert!(
@@ -383,9 +396,7 @@ mod tests {
             Some("/home/user/.local/bin:/usr/local/bin:/usr/bin"),
         );
         assert!(
-            body.contains(
-                "Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""
-            ),
+            body.contains("Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""),
             "unit body must include captured PATH; got:\n{body}"
         );
     }

@@ -1,0 +1,13 @@
+# raw_sql_guard.py allowlist: `path count` per production file.
+# Counts only go down: lower an entry (or delete it at 0) in the PR
+# that migrates sites to SeaORM. Never raise one; mark a justified
+# exception with `// raw-sql: <reason>` instead.
+
+[dup]
+# SELECTs with two output columns of one name (fix, don't add).
+crates/jobs/src/tasks_mail/notifications.rs | c6d50deb8e37
+crates/services/src/app_scheduler/queries.rs | b962acd7acf6
+crates/services/src/dispatch/tools.rs | a0222fd82904
+crates/services/src/dispatch/tools.rs | cff6c3ac1988
+crates/services/src/orchestration/creation.rs | d83ad2c2db97
+crates/services/src/orchestration/creation.rs | e6ca9f0c88d3

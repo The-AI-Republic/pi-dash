@@ -10,9 +10,16 @@
 
 import * as React from "react";
 
+import { platform } from "../../../core/platform/index.js";
 import { useCloudAssistantActions, type CloudAssistantActions } from "../api/mutations.js";
 import { finishNotice, startFailureNotice } from "../lib/report.js";
-import { beginProviderSignIn, pollProviderLogin, type PollClock, type PopupOpener } from "../lib/signIn.js";
+import {
+  beginProviderSignIn,
+  beginProviderSignInExternal,
+  pollProviderLogin,
+  type PollClock,
+  type PopupOpener,
+} from "../lib/signIn.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
 export interface ProviderSignIn {
@@ -43,8 +50,16 @@ export function useProviderSignIn(options: ProviderSignInOptions = {}): Provider
 
   const signIn = React.useCallback(async (): Promise<void> => {
     setPending(true);
-    const open = options.open ?? (() => window.open("", "_blank"));
-    const started = await beginProviderSignIn(open, () => actions.startSignIn());
+    // The desktop shell denies every reserved blank tab (PIDESKAPP-186),
+    // so the desktop leg starts first and hands the authorize address to
+    // the system browser instead of steering a tab that never exists.
+    const started =
+      platform.kind === "desktop"
+        ? await beginProviderSignInExternal(
+            (url) => platform.openExternal(url),
+            () => actions.startSignIn()
+          )
+        : await beginProviderSignIn(options.open ?? (() => window.open("", "_blank")), () => actions.startSignIn());
     if (started.failure !== null) {
       setPending(false);
       const notice = startFailureNotice(started.failure);

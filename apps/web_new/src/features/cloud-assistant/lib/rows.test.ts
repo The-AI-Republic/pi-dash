@@ -10,8 +10,11 @@ import type { AssistantConnectionList, AssistantConnectionListItem } from "@pida
 
 import {
   BUILTIN_CODEX_MODELS,
+  annotateChoices,
   connectionModelFlags,
   connectionTitle,
+  creditForModel,
+  isBlockedCommit,
   isDisconnected,
   isStaleHostedRow,
   modelChoices,
@@ -90,31 +93,58 @@ describe("isDisconnected", () => {
 describe("modelChoices", () => {
   it("keeps the stored model selectable even when the catalog dropped it", () => {
     expect(modelChoices(["a", "b"], {}, {}, "c")).toEqual([
-      { value: "a", label: "a" },
-      { value: "b", label: "b" },
-      { value: "c", label: "c" },
+      { value: "a", label: "a", credit: null, badge: null, selectable: true },
+      { value: "b", label: "b", credit: null, badge: null, selectable: true },
+      { value: "c", label: "c", credit: null, badge: null, selectable: true },
     ]);
   });
 
   it("prefers provider labels over descriptions, and descriptions over values", () => {
     expect(modelChoices(["a"], { a: "Provider name" }, { a: "Description", b: "B desc" }, "b")).toEqual([
-      { value: "a", label: "Provider name" },
-      { value: "b", label: "B desc" },
+      { value: "a", label: "Provider name", credit: null, badge: null, selectable: true },
+      { value: "b", label: "B desc", credit: null, badge: null, selectable: true },
     ]);
   });
 
   it("does not duplicate a stored model that is already offered, or an empty one", () => {
-    expect(modelChoices(["a"], {}, {}, "a")).toEqual([{ value: "a", label: "a" }]);
-    expect(modelChoices(["a"], {}, {}, "")).toEqual([{ value: "a", label: "a" }]);
+    expect(modelChoices(["a"], {}, {}, "a")).toEqual([
+      { value: "a", label: "a", credit: null, badge: null, selectable: true },
+    ]);
+    expect(modelChoices(["a"], {}, {}, "")).toEqual([
+      { value: "a", label: "a", credit: null, badge: null, selectable: true },
+    ]);
   });
 });
 
 describe("connection flags", () => {
+  it("defaults a missing model-labels map to empty", () => {
+    const flags = connectionModelFlags(list({ codex_model_labels: undefined }));
+    expect(flags.codexModelLabels).toEqual({});
+  });
+
   it("copies the managed options the list answered", () => {
     const flags = connectionModelFlags(
       list({ codex_model_options: ["x"], codex_model_labels: { x: "X" }, openhub_model_options: ["y"] })
     );
-    expect(flags).toEqual({ codexModels: ["x"], codexModelLabels: { x: "X" }, openhubModels: ["y"] });
+    expect(flags).toEqual({
+      codexModels: ["x"],
+      codexModelLabels: { x: "X" },
+      openhubModels: ["y"],
+      freeModels: [],
+      quotaPlan: null,
+    });
+  });
+
+  it("carries the free quota through when the meter has answered", () => {
+    const flags = connectionModelFlags(list(), {
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+      plan: "free",
+      freeTokensUsed: 10,
+      freeTokensLimit: 2_000_000,
+      resetsAt: "2026-11-10T00:00:00Z",
+    });
+    expect(flags.freeModels).toEqual(["deepseek/deepseek-v4.1-flash-1017"]);
+    expect(flags.quotaPlan).toBe("free");
   });
 });
 
@@ -172,7 +202,9 @@ describe("toConnectionRow", () => {
     });
     const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
     expect(target.modelControl).toBe("select");
-    expect(target.modelChoices).toEqual([{ value: "moonshotai/kimi-k3", label: "Balanced hosted model" }]);
+    expect(target.modelChoices).toEqual([
+      { value: "moonshotai/kimi-k3", label: "Balanced hosted model", credit: null, badge: null, selectable: true },
+    ]);
     expect(target.markers).toContain("Included in your plan");
     expect(target.selectable).toBe(true);
   });
@@ -217,5 +249,114 @@ describe("toConnectionRow", () => {
     });
     const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
     expect(target.markers).toEqual(["Included in your plan"]);
+  });
+
+  it("badges hosted models for a free-plan user and blocks paid models", () => {
+    const answer = list({
+      connections: [row({ kind: "openhub", base_url: "", model_name: "deepseek/deepseek-v4.1-flash-1017" })],
+      openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+    });
+    const flags = connectionModelFlags(answer, {
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+      plan: "free",
+      freeTokensUsed: null,
+      freeTokensLimit: null,
+      resetsAt: null,
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, flags);
+    expect(target.quotaPlan).toBe("free");
+    expect(target.modelCredit).toBe("free");
+    expect(target.modelChoices).toEqual([
+      {
+        value: "deepseek/deepseek-v4.1-flash-1017",
+        label: "Lowest cost",
+        credit: "free",
+        badge: "Free",
+        selectable: true,
+      },
+      {
+        value: "moonshotai/kimi-k3",
+        label: "Balanced hosted model",
+        credit: "blocked",
+        badge: "Needs credit",
+        selectable: false,
+      },
+    ]);
+  });
+
+  it("lets paid plans select every hosted model with Free vs Uses-credit hints", () => {
+    for (const plan of ["payg", "member"]) {
+      const answer = list({
+        connections: [row({ kind: "openhub", base_url: "", model_name: "moonshotai/kimi-k3" })],
+        openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+      });
+      const flags = connectionModelFlags(answer, {
+        freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+        plan,
+        freeTokensUsed: null,
+        freeTokensLimit: null,
+        resetsAt: null,
+      });
+      const target = toConnectionRow(answer.connections[0]!, answer, flags);
+      expect(target.quotaPlan).toBe(plan);
+      expect(target.modelCredit).toBe("uses-credit");
+      expect(target.modelChoices.map((choice) => [choice.credit, choice.badge, choice.selectable])).toEqual([
+        ["free", "Free", true],
+        ["uses-credit", "Uses credit", true],
+      ]);
+    }
+  });
+
+  it("leaves the codex lane unbadged under a free quota", () => {
+    const answer = list({
+      connections: [row({ kind: "codex", base_url: "", model_name: "gpt-5.5" })],
+      has_codex_credential: true,
+    });
+    const flags = connectionModelFlags(answer, {
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+      plan: "free",
+      freeTokensUsed: null,
+      freeTokensLimit: null,
+      resetsAt: null,
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, flags);
+    expect(target.quotaPlan).toBeNull();
+    expect(target.modelCredit).toBeNull();
+    expect(target.modelChoices.every((choice) => choice.badge === null && choice.selectable)).toBe(true);
+  });
+});
+
+describe("quota annotation", () => {
+  const baseFlags = connectionModelFlags(list(), {
+    freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+    plan: "free",
+    freeTokensUsed: null,
+    freeTokensLimit: null,
+    resetsAt: null,
+  });
+
+  it("returns choices unchanged without a quota answer", () => {
+    const choices = modelChoices(["a"], {}, {}, "a");
+    expect(annotateChoices(choices, connectionModelFlags(list()))).toEqual(choices);
+    expect(creditForModel("a", connectionModelFlags(list()))).toBeNull();
+    expect(isBlockedCommit("a", connectionModelFlags(list()))).toBe(false);
+  });
+
+  it("never hardcodes the free list", () => {
+    const otherFree = { ...baseFlags, freeModels: ["other/model" as const], quotaPlan: "free" };
+    expect(creditForModel("other/model", otherFree)).toBe("free");
+    expect(creditForModel("deepseek/deepseek-v4.1-flash-1017", otherFree)).toBe("blocked");
+  });
+
+  it("blocks only paid models on the free plan", () => {
+    expect(isBlockedCommit("deepseek/deepseek-v4.1-flash-1017", baseFlags)).toBe(false);
+    expect(isBlockedCommit("moonshotai/kimi-k3", baseFlags)).toBe(true);
+    expect(isBlockedCommit("  deepseek/deepseek-v4.1-flash-1017  ", baseFlags)).toBe(false);
+  });
+
+  it("treats unknown plans as paid (never blocks)", () => {
+    const unknown = { ...baseFlags, quotaPlan: ".enterprise" };
+    expect(creditForModel("moonshotai/kimi-k3", unknown)).toBe("uses-credit");
+    expect(isBlockedCommit("moonshotai/kimi-k3", unknown)).toBe(false);
   });
 });

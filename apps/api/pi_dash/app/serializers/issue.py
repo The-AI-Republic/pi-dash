@@ -45,7 +45,7 @@ from pi_dash.db.models import (
     ProjectMember,
     EstimatePoint,
 )
-from pi_dash.runner.models import Pod
+from pi_dash.runner.models import Pod, Runner
 from pi_dash.runner.diagnostics import classify_run_error
 from pi_dash.utils.content_validator import (
     validate_html_content,
@@ -153,6 +153,15 @@ class IssueCreateSerializer(BaseSerializer):
     assigned_pod_id = serializers.PrimaryKeyRelatedField(
         source="assigned_pod", queryset=Pod.all_objects.all(), required=False, allow_null=True
     )
+    # Dedicated runner (design §14.1, §7.1): writable with E1-E8
+    # validation in ``validate`` below; ``apply_execution_target``
+    # persists + re-points on successful save (H-5).
+    assigned_runner_id = serializers.PrimaryKeyRelatedField(
+        source="assigned_runner",
+        queryset=Runner.objects.all(),
+        required=False,
+        allow_null=True,
+    )
     label_ids = serializers.ListField(
         child=serializers.PrimaryKeyRelatedField(queryset=Label.objects.all()),
         write_only=True,
@@ -170,9 +179,9 @@ class IssueCreateSerializer(BaseSerializer):
         model = Issue
         # Exclude the agent workpad — it's read/written via the dedicated
         # workpad endpoint and would bloat every web-tier issue payload if
-        # included here. ``assigned_pod`` is excluded too because it's surfaced
-        # explicitly as ``assigned_pod_id`` above (the *_id FK convention).
-        exclude = ["workpad", "assigned_pod"]
+        # included here. ``assigned_pod`` / ``assigned_runner`` are excluded
+        # too because they are surfaced explicitly as ``*_id`` above.
+        exclude = ["workpad", "assigned_pod", "assigned_runner"]
         read_only_fields = [
             "workspace",
             "project",
@@ -269,56 +278,25 @@ class IssueCreateSerializer(BaseSerializer):
                     )
 
         # ``agent_executor`` is the per-issue execution-target override; NULL
-        # inherits the project default. Cloud Agent and pods are mutually
-        # exclusive targets, so the UI presents them as one "Runs on" choice
-        # and this is the matching server-side guard.
-        if "agent_executor" in attrs:
-            executor = attrs["agent_executor"]  # None clears the override
-            if executor is not None:
-                from pi_dash.core.agent_execution import AgentExecutorKind, cloud_agent_is_configured
+        # inherits the project default. Runner is the only executor
+        # (built_engine_as_runner §6): older clients' ``managed_runner`` /
+        # ``cloud_agent`` are stored as ``local_runner``, pod-level, and a
+        # change of executor under a live run is refused.
+        from pi_dash.runner.services.issue_assignment import (
+            normalize_issue_executor,
+            validate_execution_target,
+        )
 
-                if executor not in AgentExecutorKind.values:
-                    raise serializers.ValidationError({"agent_executor": "unknown agent executor"})
-                # Refuse a target that could never dispatch, rather than
-                # accepting it and failing invisibly at run creation.
-                if executor == AgentExecutorKind.CLOUD_AGENT and not cloud_agent_is_configured():
-                    raise serializers.ValidationError(
-                        {"agent_executor": "Pi Dash Cloud Agent is not available on this instance"}
-                    )
-                if executor == AgentExecutorKind.MANAGED_RUNNER:
-                    # Pinning to the desktop is viewer-specific: the check is
-                    # "can the person making this request run it on their own
-                    # machine", which is exactly what the picker showed them.
-                    from pi_dash.managed_runner.errors import ManagedRunnerReason
-                    from pi_dash.managed_runner.policy import managed_runner_availability
-
-                    project = self.instance.project if self.instance is not None else attrs.get("project")
-                    if project is None:
-                        from pi_dash.db.models import Project
-
-                        project = Project.objects.filter(pk=self.context.get("project_id")).first()
-                    if project is None:
-                        raise serializers.ValidationError({"agent_executor": "A project is required for desktop runs"})
-                    viewer = getattr(self.context.get("request"), "user", None)
-                    available, reason = managed_runner_availability(project, viewer)
-                    # A desktop that has not enrolled this project yet fixes
-                    # itself the moment the app opens it, so accept the pin
-                    # rather than blocking on a race the client will resolve.
-                    if not available and reason != ManagedRunnerReason.NO_RUNNER_FOR_PROJECT:
-                        raise serializers.ValidationError(
-                            {"agent_executor": _MANAGED_UNAVAILABLE_DETAIL.get(reason, reason)}
-                        )
-            # Same mid-flight rule as the pod: ``AgentRun.executor_kind`` is
-            # snapshotted at creation, so switching targets under a live run
-            # would silently apply only to the next dispatch.
-            if (
-                self.instance is not None
-                and str(executor) != str(self.instance.agent_executor)
-                and self.instance.has_active_run
-            ):
-                raise serializers.ValidationError(
-                    {"agent_executor": "cannot change the execution target while the issue has an active run"}
-                )
+        # Requester for the E1/E7 checks (design §7.1).
+        user = self.context.get("user")
+        if user is None and self.context.get("request") is not None:
+            user = getattr(self.context["request"], "user", None)
+        if user is None:
+            user = getattr(self.instance, "created_by", None) if self.instance else None
+        # E2 on create reads the context project (no issue yet).
+        project_id = self.instance.project_id if self.instance is not None else self.context.get("project_id")
+        validate_execution_target(attrs, issue=self.instance, user=user, project_id=project_id)
+        normalize_issue_executor(attrs, instance=self.instance)
 
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
@@ -459,6 +437,23 @@ class IssueCreateSerializer(BaseSerializer):
             except IntegrityError:
                 pass
 
+        # Dedicated assignment accepted: persist + write activity (no
+        # queued run can exist on a just-created issue, so no re-point).
+        if "assigned_runner" in validated_data:
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+            actor = self.context.get("user")
+            if actor is None and self.context.get("request") is not None:
+                actor = getattr(self.context["request"], "user", None)
+            apply_execution_target(
+                issue,
+                new_runner=issue.assigned_runner,
+                actor=actor or issue.created_by,
+                decided_by=dj_timezone.now(),
+            )
+
         return issue
 
     def update(self, instance, validated_data):
@@ -515,7 +510,35 @@ class IssueCreateSerializer(BaseSerializer):
 
         # Time updation occues even when other related models are updated
         instance.updated_at = timezone.now()
-        return super().update(instance, validated_data)
+        result = super().update(instance, validated_data)
+        if "assigned_runner" in validated_data:
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+            actor = self.context.get("user")
+            if actor is None and self.context.get("request") is not None:
+                actor = getattr(self.context["request"], "user", None)
+            apply_execution_target(
+                result,
+                new_runner=result.assigned_runner,
+                actor=actor or result.created_by,
+                decided_by=dj_timezone.now(),
+            )
+        elif "assigned_pod" in validated_data:
+            # §13.1: the issue's pod changed with no runner in the request —
+            # the dedicated assignment clears (the old pod's runner can no
+            # longer serve it).
+            if result.assigned_runner_id is not None:
+                from pi_dash.runner.services.issue_assignment import clear_dedicated_runner
+
+                clear_dedicated_runner(
+                    result,
+                    reason="pod changed",
+                    actor=self.context.get("user") or result.created_by,
+                    decided_by=None,
+                )
+        return result
 
 
 class IssueActivitySerializer(BaseSerializer):
@@ -1046,6 +1069,9 @@ class IssueSerializer(DynamicBaseSerializer):
     # round-trip the issue's current pod. Reassignment while a run is active is
     # rejected server-side in IssueCreateSerializer.validate.
     assigned_pod_id = serializers.PrimaryKeyRelatedField(source="assigned_pod", read_only=True)
+    # Dedicated runner id (design §14.1): list/board/spreadsheet render it
+    # alongside the pod.
+    assigned_runner_id = serializers.PrimaryKeyRelatedField(source="assigned_runner", read_only=True)
     module_ids = serializers.ListField(child=serializers.UUIDField(), required=False)
 
     # Many to many
@@ -1086,6 +1112,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "type_id",
             "is_epic",
             "assigned_pod_id",
+            "assigned_runner_id",
             "agent_executor",
             "module_ids",
             "label_ids",
@@ -1246,6 +1273,9 @@ class IssueDetailSerializer(IssueSerializer):
     agent_status = serializers.SerializerMethodField()
     relations_summary = serializers.SerializerMethodField()
     has_open_blockers = serializers.SerializerMethodField()
+    # Dedicated runner detail (design §14.1, H-6): shown to everyone who
+    # can see the issue, even though the runner list is owner-only.
+    assigned_runner_detail = serializers.SerializerMethodField()
 
     class Meta(IssueSerializer.Meta):
         fields = IssueSerializer.Meta.fields + [
@@ -1256,8 +1286,21 @@ class IssueDetailSerializer(IssueSerializer):
             "agent_status",
             "relations_summary",
             "has_open_blockers",
+            "assigned_runner_detail",
         ]
         read_only_fields = fields
+
+    def get_assigned_runner_detail(self, obj):
+        from pi_dash.runner.services.issue_assignment import assigned_runner_detail
+
+        # ``assigned_runner`` may be stale on list-optimized querysets; fall
+        # back to the FK id so detail reads never raise.
+        runner = getattr(obj, "assigned_runner", None)
+        if runner is None and getattr(obj, "assigned_runner_id", None):
+            from pi_dash.runner.models import Runner
+
+            runner = Runner.objects.filter(pk=obj.assigned_runner_id).first()
+        return assigned_runner_detail(runner)
 
     def _serialize_datetime(self, value):
         return value.isoformat() if value else None
@@ -1365,12 +1408,36 @@ class IssueDetailSerializer(IssueSerializer):
                 and str(live_state.observed_run_id) != str(run.id)
             ):
                 live_state = None
+        # Pin + waiting state (design §14.3). ``pinned_runner`` /
+        # ``pinned_runner_name`` / ``pin_kind`` ride on every run;
+        # ``dispatch_wait`` is computed only for QUEUED pinned runs.
+        pinned_name = None
+        pinned_id = getattr(run, "pinned_runner_id", None)
+        if pinned_id:
+            pinned_runner = getattr(run, "pinned_runner", None)
+            if pinned_runner is not None:
+                pinned_name = pinned_runner.name
+            else:
+                from pi_dash.runner.models import Runner
+
+                row = Runner.objects.filter(pk=pinned_id).first()
+                pinned_name = row.name if row else None
+        viewer = None
+        request = self.context.get("request") if isinstance(self.context, dict) else None
+        if request is not None:
+            viewer = getattr(request, "user", None)
+        from pi_dash.runner.services.issue_assignment import build_dispatch_wait
+
         return {
             "id": str(run.id),
             "status": run.status,
             "executor_kind": run.executor_kind,
             "runner": str(run.runner_id) if run.runner_id else None,
             "runner_name": run.runner.name if run.runner_id and run.runner else None,
+            "pinned_runner": str(pinned_id) if pinned_id else None,
+            "pinned_runner_name": pinned_name,
+            "pin_kind": getattr(run, "pin_kind", "locality"),
+            "dispatch_wait": build_dispatch_wait(run, viewer=viewer),
             "created_at": self._serialize_datetime(run.created_at),
             "assigned_at": self._serialize_datetime(run.assigned_at),
             "started_at": self._serialize_datetime(run.started_at),

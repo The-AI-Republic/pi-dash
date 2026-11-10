@@ -67,6 +67,7 @@ import {
 } from "../../helpers/api";
 import { specTags, specTitle } from "../../helpers/tags";
 import { desktopChatSessions, desktopEmit, desktopInvocations, installDesktopMock } from "../tauri-mock";
+import { appendedTurns, invocationCount, sessionToSendInto } from "../../helpers/desktop-chat";
 
 /** Synthetic chat id the desktop build serves over local IPC. */
 const BUILTIN_CHAT_ID = "pidash-builtin";
@@ -285,7 +286,11 @@ test(
       );
     });
 
-    await test.step("pinning the desktop target is refused with its reason", async () => {
+    await test.step("an old client's desktop pin is translated to the runner executor", async () => {
+      // Runner is the only executor (built-in engine design §6): the server
+      // accepts `managed_runner` from older desktop builds and stores
+      // `local_runner` (pinned to the caller's online engine when one exists;
+      // the scratch stack has none, so the issue stays pod-level).
       const issue = await ownIssueId(seed, session, `Oracle desk pin ${Date.now()}`);
       try {
         const outcome = await serverDeskRuntimePinIssueExecutorStatus(
@@ -295,8 +300,10 @@ test(
           "managed_runner",
           session
         );
-        expect(outcome.status).toBe(400);
-        expect(outcome.body).toContain("agent_executor");
+        expect(outcome.status).toBeLessThan(400);
+        expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(
+          "local_runner"
+        );
       } finally {
         await deleteIssue(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => undefined);
       }
@@ -657,7 +664,6 @@ test(
 // ---------------------------------------------------------------------------
 
 const RUNTIME_POLL = { timeout: 60_000 };
-const NEW_DAMAGED_TEXT = "The desktop app's bundled agent is damaged. Reinstall the app to repair it.";
 const NEW_NO_MODEL_TEXT = "No model is configured for AI runs yet. Set one up in the AI settings.";
 
 /** Install the mock bridge, then plant a signed-in session for desktop legs. */
@@ -668,7 +674,11 @@ async function enterRuntimeSignedIn(
   mock: Parameters<typeof installDesktopMock>[1] = {},
   desktopMarked = true
 ): Promise<string> {
-  await installDesktopMock(driver.page, mock);
+  // The scratch stack ships the CE model seam, which never offers a model
+  // lane: the mocked daemon reports its engine unavailable for the same
+  // reason, so local chat refuses with that sentence unless a leg says
+  // otherwise.
+  await installDesktopMock(driver.page, { engineUnavailableReason: "llm_config_missing", ...mock });
   const session = await signInSession(email, password);
   await serverSetTourCompleted(session, true);
   if (desktopMarked) await serverDesktopRuntimeMarkSessionDesktop(session);
@@ -705,14 +715,21 @@ function shownChatSession(driver: ParityDriver): string | null {
  * the chat auto-creates a session through warm-up without selecting it,
  * and a "New chat" click races that create (the control is busy while it
  * runs), so legs wait for the auto-created row and click it instead of
- * pressing New chat into an empty state.
+ * pressing New chat into an empty state. An address left over from a
+ * conversation the store no longer carries (a clear removes every row) is
+ * stale, not a pick: the row is clicked so the leg always sends into a
+ * session the on-machine store holds.
  */
 async function ensureChatSelected(driver: ParityDriver): Promise<string> {
   await expect
     .poll(async () => (await desktopChatSessions(driver.page)).length, RUNTIME_POLL)
     .toBeGreaterThanOrEqual(1);
-  const current = shownChatSession(driver);
-  if (current !== null) return current;
+  const stored = await desktopChatSessions(driver.page);
+  const kept = sessionToSendInto(
+    shownChatSession(driver),
+    stored.map((session) => session.id)
+  );
+  if (kept !== null) return kept;
   const history = driver.page.getByTestId("runner-chat-history");
   await history.getByText("Mocked chat", { exact: true }).first().click();
   await expect.poll(() => shownChatSession(driver), RUNTIME_POLL).not.toBeNull();
@@ -729,8 +746,17 @@ async function sendChatMessage(driver: ParityDriver, text: string): Promise<void
  * the draft is restored beside it, the user turn reaches the on-machine
  * store but no send does — and the stored turn renders once the
  * transcript refetches (a failed send invalidates nothing, so reload).
+ *
+ * The proof is this leg's own append: a cumulative count lets an earlier
+ * leg's append stand in for a send that stored nothing, so the helper
+ * compares the count before the send and requires the exact turn to be
+ * recorded for the session the leg is sending into.
  */
 async function sendChatMessageStored(driver: ParityDriver, text: string): Promise<void> {
+  const sessionId = shownChatSession(driver);
+  expect(sessionId).not.toBeNull();
+  const before = await desktopInvocations(driver.page, "chat_append_event");
+  const sendsBefore = invocationCount(await desktopInvocations(driver.page, "chat_send"), "chat_send");
   await sendChatMessage(driver, text);
   await expect.poll(() => driver.pageText(), RUNTIME_POLL).toContain(NEW_NO_MODEL_TEXT);
   await expect
@@ -738,8 +764,10 @@ async function sendChatMessageStored(driver: ParityDriver, text: string): Promis
     .toContain(text);
   await expect
     .poll(async () => (await desktopInvocations(driver.page, "chat_append_event")).length, RUNTIME_POLL)
-    .toBeGreaterThanOrEqual(1);
-  expect(await desktopInvocations(driver.page, "chat_send")).toEqual([]);
+    .toBeGreaterThan(before.length);
+  const after = await desktopInvocations(driver.page, "chat_append_event");
+  expect(appendedTurns(after, sessionId as string, text)).toBe(appendedTurns(before, sessionId as string, text) + 1);
+  expect(invocationCount(await desktopInvocations(driver.page, "chat_send"), "chat_send")).toBe(sendsBefore);
   await driver.page.reload();
   await expect
     .poll(async () => (await driver.desktopRuntimeChatBubbles()).map((bubble) => bubble.text).join("\n"), RUNTIME_POLL)
@@ -752,35 +780,28 @@ async function desk001Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   try {
     await driver.desktopRuntimeStartRequestSpy();
     try {
-      await test.step("opening the project consults the engine profile and names its refusal", async () => {
+      await test.step("opening the project finds the daemon but shows no notice", async () => {
         await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
-        await expect.poll(() => driver.desktopRuntimeRuntimeBannerVisible(), RUNTIME_POLL).toBe(true);
-        // The scratch stack ships the CE model seam, which never offers the
-        // desktop a model lane: the profile answers unavailable and the
-        // notice carries its sentence instead of a preparing state.
         await expect
-          .poll(() => driver.page.getByTestId("runtime-notice").innerText(), RUNTIME_POLL)
-          .toContain(NEW_NO_MODEL_TEXT);
+          .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
+          .toBeGreaterThanOrEqual(1);
+        // Sit through a re-check window and confirm nothing mounts.
+        await driver.page.waitForTimeout(6_000);
+        expect(await driver.desktopRuntimeRuntimeBannerVisible()).toBe(false);
       });
 
-      await test.step("the host self-check runs but nothing enrolls or starts without an engine", async () => {
-        await expect
-          .poll(async () => (await desktopInvocations(driver.page, "managed_doctor")).length, RUNTIME_POLL)
-          .toBeGreaterThanOrEqual(1);
-        await expect
-          .poll(async () => (await desktopInvocations(driver.page, "managed_stop_daemon")).length, RUNTIME_POLL)
-          .toBeGreaterThanOrEqual(1);
+      await test.step("nothing enrolls or is set up on project open", async () => {
         expect(enrollPosts(await driver.desktopRuntimeSpyUrls())).toEqual([]);
-        for (const command of ["managed_bootstrap", "managed_enroll", "managed_start_daemon"]) {
+        for (const command of ["daemon_engine_runner_add", "daemon_install_service", "install_pidash_cli"]) {
           expect(await desktopInvocations(driver.page, command)).toEqual([]);
         }
         const keys = await driver.desktopRuntimeStorageKeys();
         expect(keys.session.filter((key) => key.startsWith("pidash-managed-workspaces:"))).toEqual([]);
       });
 
-      await test.step("leaving the project unmounts the project-scoped notice", async () => {
+      await test.step("leaving the project stays quiet", async () => {
         await driver.desktopRuntimeOpenRunners(seed.workspaceSlug);
-        await expect.poll(() => driver.desktopRuntimeRuntimeBannerVisible(), RUNTIME_POLL).toBe(false);
+        expect(await driver.desktopRuntimeRuntimeBannerVisible()).toBe(false);
       });
     } finally {
       await driver.desktopRuntimeStopRequestSpy().catch(() => undefined);
@@ -800,9 +821,8 @@ async function desk002Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   try {
     await test.step("open the issue so the supervisor settles first", async () => {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
-      await expect.poll(() => driver.desktopRuntimeRuntimeBannerVisible(), RUNTIME_POLL).toBe(true);
       await expect
-        .poll(async () => (await desktopInvocations(driver.page, "managed_doctor")).length, RUNTIME_POLL)
+        .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
         .toBeGreaterThanOrEqual(1);
     });
 
@@ -816,13 +836,15 @@ async function desk002Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
       await driver.desktopRuntimeStartRequestSpy();
       try {
         await driver.page.reload();
-        await expect.poll(() => driver.desktopRuntimeRuntimeBannerVisible(), RUNTIME_POLL).toBe(true);
+        await expect
+          .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
+          .toBeGreaterThanOrEqual(1);
         expect(enrollPosts(await driver.desktopRuntimeSpyUrls())).toEqual([]);
       } finally {
         await driver.desktopRuntimeStopRequestSpy().catch(() => undefined);
       }
-      expect(await desktopInvocations(driver.page, "managed_enroll")).toEqual([]);
-      expect(await desktopInvocations(driver.page, "managed_start_daemon")).toEqual([]);
+      expect(await driver.desktopRuntimeRuntimeBannerVisible()).toBe(false);
+      expect(await desktopInvocations(driver.page, "daemon_engine_runner_add")).toEqual([]);
       expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toEqual(
         selectionBefore
       );
@@ -830,16 +852,48 @@ async function desk002Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
       expect(keys.session.filter((key) => key.startsWith("pidash-managed-workspaces:"))).toEqual([]);
     });
 
-    await test.step("no Run control exists yet to press (tripwire for the RUN area)", async () => {
-      // The readiness gate itself (prepareAgentRun's early return and its
-      // project connection) is unit-covered; the press half of this row
-      // needs a Run control on the issue detail, which this build has not
-      // got. This pins the gap so the day the control lands the leg fails
-      // and grows the press proof instead of silently staying partial.
-      await expect.poll(() => driver.page.getByTestId("issue-run-ai").count(), RUNTIME_POLL).toBe(0);
+    await test.step("pressing Run dispatches through the cloud path with no local traffic", async () => {
+      // The work item carries the project default (no managed pin — the
+      // server refuses one on this stack, DESK-004), so preparation reads
+      // the issue and project and returns early; the run then posts
+      // through the cloud dispatch like on a plain browser (RUN-046).
+      const selectionBefore = await serverDeskRuntimeIssueExecutor(
+        seed.workspaceSlug,
+        seed.projectId,
+        issue.id,
+        session
+      );
+      const dispatch = await driver.issueRunAiDispatch();
+      const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
+      // Each app keeps its own dispatch copy (NEWFRONT-557); the new app
+      // names the queued outcome, which still attaches exactly one run.
+      if (dispatch.toast !== null && /run started/i.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else if (dispatch.toast !== null && /run queued/i.test(dispatch.toast)) {
+        expect(attached).toHaveLength(1);
+      } else {
+        expect(dispatch.toast).toMatch(/couldn't start the run/i);
+        expect(attached).toHaveLength(0);
+      }
+      expect(dispatch.requestUrls.some((url) => url.includes("/api/runners/runs/"))).toBe(true);
+      // The press prepared nothing locally: no enrollment post, no daemon
+      // set-up verb, and the executor selection is left untouched.
+      expect(dispatch.requestUrls.filter((url) => url.includes("/desktop-enroll/"))).toEqual([]);
+      for (const command of ["daemon_engine_runner_add", "daemon_install_service", "install_pidash_cli"]) {
+        expect(await desktopInvocations(driver.page, command)).toEqual([]);
+      }
+      expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toEqual(
+        selectionBefore
+      );
     });
   } finally {
-    await runsDeleteRuns(seed.workspaceSlug, seed.projectId, issue.id, session).catch(() => undefined);
+    // deleteIssue nulls work_item instead of cascading, so attached runs
+    // from the press are captured and deleted first — or the success path
+    // leaks one run per attempt.
+    const leftovers = (await recentRuns(session))
+      .filter((row) => row["work_item"] === issue.id)
+      .map((row) => row["id"] as string);
+    await runsDeleteRuns(leftovers);
     await deleteIssue(seed.workspaceSlug, seed.projectId, issue.id, session);
   }
 
@@ -849,39 +903,40 @@ async function desk002Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
 }
 
 async function desk003Positive(driver: ParityDriver, seed: ParitySeedFacts): Promise<void> {
-  const session = await enterRuntimeSignedIn(
-    driver,
-    seed.email,
-    seed.password,
-    {
-      doctor: { runnerPresent: false, enginePresent: true, hostLabel: "parity-host" },
-    },
-    false
-  );
+  // No Pi Dash on this computer yet: the app stays a cloud client. Opening
+  // a project shows no notice and sets nothing up — set-up is offered only
+  // from local chat or a run, and only behind the consent screen.
+  const session = await enterRuntimeSignedIn(driver, seed.email, seed.password, { daemon: "no_daemon" }, false);
   const issue = await runtimeIssue(seed, session, deskTag("repair"));
   try {
     await driver.desktopRuntimeStartRequestSpy();
     try {
-      await test.step("the missing binary surfaces its repair notice", async () => {
+      await test.step("no daemon surfaces no notice on the project page", async () => {
         await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
         await expect
-          .poll(() => driver.page.getByTestId("runtime-notice").innerText(), RUNTIME_POLL)
-          .toContain(NEW_DAMAGED_TEXT);
+          .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
+          .toBeGreaterThanOrEqual(1);
+        expect(await driver.desktopRuntimeRuntimeBannerVisible()).toBe(false);
       });
 
-      await test.step("nothing enrolls or starts behind the damaged agent", async () => {
+      await test.step("nothing is installed or enrolled without consent", async () => {
         expect(enrollPosts(await driver.desktopRuntimeSpyUrls())).toEqual([]);
-        for (const command of ["managed_bootstrap", "managed_enroll", "managed_start_daemon"]) {
+        for (const command of [
+          "install_pidash_cli",
+          "pidash_cli_login",
+          "daemon_install_service",
+          "daemon_ensure_engine",
+          "daemon_engine_runner_add",
+        ]) {
           expect(await desktopInvocations(driver.page, command)).toEqual([]);
         }
-        expect((await desktopInvocations(driver.page, "managed_doctor")).length).toBeGreaterThanOrEqual(1);
       });
 
-      await test.step("refocusing retries the host check", async () => {
-        const before = (await desktopInvocations(driver.page, "managed_doctor")).length;
+      await test.step("refocusing looks for the daemon again", async () => {
+        const before = (await desktopInvocations(driver.page, "daemon_discover")).length;
         await driver.deskRuntimeDispatchWindowFocus();
         await expect
-          .poll(async () => (await desktopInvocations(driver.page, "managed_doctor")).length, RUNTIME_POLL)
+          .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
           .toBeGreaterThan(before);
       });
     } finally {
@@ -909,7 +964,9 @@ async function desk004Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     );
   });
 
-  await test.step("pinning the refusal stays impossible", async () => {
+  await test.step("an old client's desktop pin is translated to the runner executor", async () => {
+    // Runner is the only executor (built-in engine design §6): `managed_runner`
+    // from older builds is stored as `local_runner`.
     const outcome = await serverDeskRuntimePinIssueExecutorStatus(
       seed.workspaceSlug,
       seed.projectId,
@@ -917,26 +974,21 @@ async function desk004Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
       "managed_runner",
       session
     );
-    expect(outcome.status).toBe(400);
-    expect(outcome.body).toContain("agent_executor");
+    expect(outcome.status).toBeLessThan(400);
+    expect(await serverDeskRuntimeIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(
+      "local_runner"
+    );
   });
 
-  await test.step("the execution picker shows the managed row disabled with its reason", async () => {
+  await test.step("the execution picker offers no desktop executor row", async () => {
     await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
     await expect.poll(() => driver.issueDetailTitle(), RUNTIME_POLL).not.toBeNull();
     // The trigger carries the current selection, not a fixed label.
     await driver.page.getByRole("group", { name: "Runs on" }).getByRole("button").first().click();
     const list = driver.page.getByRole("listbox", { name: "Execution targets" });
     await expect.poll(() => list.count(), RUNTIME_POLL).toBe(1);
-    const row = list.getByRole("option", { name: /Pi Dash Agent \(desktop\)/ });
-    await expect.poll(() => row.count(), RUNTIME_POLL).toBe(1);
-    await expect.poll(() => row.first().isDisabled(), RUNTIME_POLL).toBe(true);
-    expect(
-      ((await row
-        .first()
-        .innerText()
-        .catch(() => "")) ?? "") as string
-    ).toContain("The built-in agent is switched off on this server.");
+    // The deprecated entry is hidden; the engine is picked as a runner.
+    expect(await list.getByRole("option", { name: /Pi Dash Agent \(desktop\)/ }).count()).toBe(0);
     await driver.page.keyboard.press("Escape").catch(() => undefined);
   });
 
@@ -1025,7 +1077,7 @@ async function desk006Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     await driver.desktopRuntimeOpenChat(seed.workspaceSlug, BUILTIN_CHAT_ID);
     await ensureChatSelected(driver);
     await expect
-      .poll(async () => (await desktopInvocations(driver.page, "managed_doctor")).length, RUNTIME_POLL)
+      .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
       .toBeGreaterThanOrEqual(1);
     expect(await desktopInvocations(driver.page, "chat_warm")).toEqual([]);
     await driver.page.getByRole("textbox", { name: "Message" }).fill("a draft stays sendable");
@@ -1269,8 +1321,16 @@ async function desk009Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   });
 
   await test.step("history survives a reload from the on-machine store", async () => {
-    await ensureChatSelected(driver);
+    // The clear left no row and the address points at a conversation the
+    // store no longer has; the leg sends into the freshly auto-created one
+    // and proves that exact turn survives the reload.
+    const sessionId = await ensureChatSelected(driver);
     await sendChatMessageStored(driver, "surviving turn");
+    // The on-machine store still holds the conversation the leg sent into,
+    // and the history lists it once — with the turn on it (the helper above
+    // proved the append and the reloaded transcript).
+    const stored = await desktopChatSessions(driver.page);
+    expect(stored.map((session) => session.id)).toContain(sessionId);
     await expect
       .poll(
         () => driver.page.getByTestId("runner-chat-history").getByText("Mocked chat", { exact: true }).count(),
@@ -1316,29 +1376,23 @@ async function desk010Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     await sendChatMessageStored(driver, "kept local turn");
   });
 
-  await test.step("the supervisor connects on the issue page first", async () => {
-    // Server enrollment revocation rides dispose, which only sends it when
-    // this page checked the host: connect the supervisor the way opening
-    // a project does before signing out.
+  await test.step("the supervisor finds the daemon on the issue page first", async () => {
     await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
-    await expect.poll(() => driver.desktopRuntimeRuntimeBannerVisible(), RUNTIME_POLL).toBe(true);
     await expect
-      .poll(async () => (await desktopInvocations(driver.page, "managed_doctor")).length, RUNTIME_POLL)
+      .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
       .toBeGreaterThanOrEqual(1);
   });
 
-  await test.step("signing out keeps history by default and tears the daemon down", async () => {
+  await test.step("signing out keeps history by default and leaves the daemon signed in", async () => {
     await driver.desktopRuntimeStartRequestSpy();
     try {
       await signOutDesktop(false);
-      const signOuts = await desktopInvocations(driver.page, "managed_sign_out");
-      expect(signOuts.length).toBeGreaterThanOrEqual(1);
-      expect(JSON.stringify(signOuts[signOuts.length - 1]?.args ?? null)).not.toContain("clearChatHistory");
       expect(await desktopInvocations(driver.page, "chat_clear_history")).toEqual([]);
       expect(await desktopInvocations(driver.page, "desktop_clear_web_data")).not.toEqual([]);
-      await expect
-        .poll(async () => enrollPosts(await driver.desktopRuntimeSpyUrls()).length, RUNTIME_POLL)
-        .toBeGreaterThanOrEqual(1);
+      // The daemon is the computer's, not the app's: the default sign-out
+      // signs out only the app (design §4.6).
+      expect(await desktopInvocations(driver.page, "pidash_cli_logout")).toEqual([]);
+      expect(enrollPosts(await driver.desktopRuntimeSpyUrls())).toEqual([]);
       const keys = await driver.desktopRuntimeStorageKeys();
       expect(keys.session.filter((key) => key.startsWith("pidash-managed-workspaces:"))).toEqual([]);
     } finally {
@@ -1360,11 +1414,11 @@ async function desk010Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
 
   await test.step("signing out with deletion wipes the on-machine history", async () => {
     await signOutDesktop(true);
-    // The page never calls chat_clear_history itself: it names the account
-    // on managed_sign_out and the native side wipes. Assert the call that
-    // carries the choice, then the wiped store after signing back in.
-    const signOuts = await desktopInvocations(driver.page, "managed_sign_out");
-    expect(JSON.stringify(signOuts.map((call) => call.args))).toContain("clearChatHistory");
+    // The choice deletes this account's on-machine history; assert the
+    // call that carries it, then the wiped store after signing back in.
+    const clears = await desktopInvocations(driver.page, "chat_clear_history");
+    expect(clears.length).toBe(1);
+    expect(JSON.stringify(clears[0]?.args ?? null)).toContain("account");
     const again = await signInSession(seed.email, seed.password);
     await driver.page.context().addCookies(sessionBrowserCookies(again));
     await driver.desktopRuntimeOpenChat(seed.workspaceSlug, BUILTIN_CHAT_ID);
@@ -1393,30 +1447,28 @@ async function desk026Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   const session = await enterRuntimeSignedIn(driver, seed.email, seed.password);
   const issue = await runtimeIssue(seed, session, deskTag("focus"));
   try {
-    await test.step("open the issue so the supervisor settles on the refusal", async () => {
+    await test.step("open the issue so the supervisor settles", async () => {
       await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
       await expect
-        .poll(() => driver.page.getByTestId("runtime-notice").innerText(), RUNTIME_POLL)
-        .toContain(NEW_NO_MODEL_TEXT);
+        .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
+        .toBeGreaterThanOrEqual(1);
     });
 
-    await test.step("refocusing re-reads the profile without rewriting any engine setup", async () => {
-      // The live refresh re-polls the profile on focus; with no available
-      // engine the notice keeps its sentence and no config or credential
-      // write fires. The rewrite/rotate path needs the cloud model lane
-      // (DESK-001 row note).
-      const stopsBefore = (await desktopInvocations(driver.page, "managed_stop_daemon")).length;
+    await test.step("refocusing re-checks the daemon without writing any engine setup", async () => {
+      // The live refresh re-discovers the daemon on focus. The daemon owns
+      // engine config and model credentials, so nothing is written, and an
+      // active engine sign-in is not renewed.
+      const before = (await desktopInvocations(driver.page, "daemon_discover")).length;
       await driver.desktopRuntimeStartRequestSpy();
       try {
         await driver.deskRuntimeDispatchWindowFocus();
         await expect
-          .poll(async () => (await desktopInvocations(driver.page, "managed_stop_daemon")).length, RUNTIME_POLL)
-          .toBeGreaterThan(stopsBefore);
+          .poll(async () => (await desktopInvocations(driver.page, "daemon_discover")).length, RUNTIME_POLL)
+          .toBeGreaterThan(before);
         const urls = await driver.desktopRuntimeSpyUrls();
-        expect(urls.some((url) => url.includes("agent-profile"))).toBe(true);
-        expect(await desktopInvocations(driver.page, "managed_write_engine_config")).toEqual([]);
-        expect(await desktopInvocations(driver.page, "managed_write_model_token")).toEqual([]);
-        expect(await driver.page.getByTestId("runtime-notice").innerText()).toContain(NEW_NO_MODEL_TEXT);
+        expect(urls.some((url) => url.includes("agent-profile") || url.includes("agent-token"))).toBe(false);
+        expect(await desktopInvocations(driver.page, "pidash_cli_engine_login")).toEqual([]);
+        expect(await driver.desktopRuntimeRuntimeBannerVisible()).toBe(false);
       } finally {
         await driver.desktopRuntimeStopRequestSpy().catch(() => undefined);
       }

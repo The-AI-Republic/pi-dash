@@ -30,6 +30,7 @@ export type {
 } from "./client.js";
 export { InstanceConfig, deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
 export type { SignOutResult } from "./contracts/auth.js";
+export type { DeviceApproveOptions, DeviceStartOptions } from "./contracts/auth-entry.js";
 export {
   CsrfTokenResponse,
   DeviceApproveResponse,
@@ -915,20 +916,32 @@ export {
   OpenhubMarketplacePage,
   OpenhubOAuthStart,
   OpenhubStatus,
+  OpenhubUsageQuota,
+  OpenhubUsageQuotaApps,
+  OpenhubUsageQuotaLlm,
   appIconUrl,
   appOAuthBeginUrl,
   getAppAuthStatus,
   getAppManifest,
+  getFreeQuota,
   getOpenhubStatus,
+  getUsageQuota,
   installApp,
+  isFreeModel,
+  isFreePlan,
+  isModelSelectableForPlan,
   listInstalledApps,
   listMarketplaceApps,
+  normalizeFreeQuota,
+  normalizePlanId,
   setAppActivation,
   startAppOAuth,
   submitAppApiKey,
   uninstallApp,
 } from "./contracts/openhub.js";
 export type { AppApiKeyInput, MarketplaceQuery } from "./contracts/openhub.js";
+export { FREE_QUOTA_PATH, FREE_QUOTA_STALE_TIME_MS } from "./contracts/openhub.js";
+export type { FreeQuota } from "./contracts/openhub.js";
 export {
   ARCHIVABLE_MODULE_STATUSES,
   MODULE_STATUSES,
@@ -1224,6 +1237,16 @@ export type {
 export { InstanceRunner, InstanceRunnerListResponse, listInstanceRunners } from "./contracts/admin-runners.js";
 export type { InstanceRunnerListQuery } from "./contracts/admin-runners.js";
 export {
+  RunnerModelCatalogResponse,
+  RunnerModelRow,
+  createRunnerModel,
+  deleteRunnerModel,
+  getModelCatalog,
+  listAdminRunnerModels,
+  updateRunnerModel,
+} from "./contracts/runner-models.js";
+export type { RunnerModelCreateInput, RunnerModelPatchInput } from "./contracts/runner-models.js";
+export {
   AdminMe,
   CloudAuthUser,
   EmailCredentialCheckResult,
@@ -1263,27 +1286,50 @@ export {
   DevMachine,
   DevMachineList,
   DevMachineMini,
+  ENGINE_AUTO_PAUSE_REASONS,
+  ENGINE_SIGN_IN_STATES,
+  MergeResult,
+  ReplaceCandidate,
+  ReplaceCandidates,
   createRunnerOnMachine,
   deleteDevMachine,
   getCreateRunnerStatus,
   listDevMachines,
+  listReplaceCandidates,
+  mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
+  signOutDevMachineEngine,
+  updateDevMachine,
 } from "./contracts/dev-machines.js";
-export type { CreateRunnerOnMachineInput, CreateRunnerStatusValue } from "./contracts/dev-machines.js";
+export type {
+  CreateRunnerOnMachineInput,
+  CreateRunnerStatusValue,
+  DevMachinePatch,
+  EngineAutoPauseReason,
+  EngineSignInState,
+} from "./contracts/dev-machines.js";
 export {
   Runner,
   RunnerDevMetadata,
   RunnerList,
   RunnerLiveState,
+  RUNNER_POD_DISPATCHES,
   RUNNER_PROVISIONINGS,
   RUNNER_STATUSES,
   deleteRunner,
   getRunner,
   listRunners,
   revokeRunner,
+  updateRunner,
 } from "./contracts/runners.js";
-export type { RunnerListScope, RunnerProvisioning, RunnerStatus } from "./contracts/runners.js";
+export type {
+  RunnerListScope,
+  RunnerPatch,
+  RunnerPodDispatch,
+  RunnerProvisioning,
+  RunnerStatus,
+} from "./contracts/runners.js";
 export {
   AgentRun,
   AgentRunCreateResult,

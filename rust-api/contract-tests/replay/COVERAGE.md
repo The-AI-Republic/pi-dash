@@ -1,15 +1,15 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
+Write ``(route, method)`` pairs: **593** total, **497** covered by the corpus.
 
 | bucket | pairs |
 | --- | --- |
-| covered | 474 |
-| proxied by design | 93 |
-| debug toolbar (dev-only) | 28 |
+| covered | 497 |
+| proxied by design | 94 |
+| debug toolbar (dev-only) | 0 |
 | missing with fix issue | 0 |
 | excluded with reason | 0 |
-| owned, no session yet | 0 |
+| owned, no session yet | 2 |
 
 ## Covered
 
@@ -69,7 +69,9 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/runners/chat/sessions/{}/messages/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/chat/sessions/{}/warm/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `DELETE /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle (owned)
+- `PATCH /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/create-runner/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `POST /api/runners/dev-machines/{}/engine-sign-out/` (runner_web) — runner_web_engine_sign_out, runner_web_engine_sign_out, runner_web_engine_sign_out (owned)
 - `POST /api/runners/dev-machines/{}/revoke/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/rotate/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/invites/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
@@ -82,7 +84,9 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/runners/runs/{}/cancel/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/runs/{}/release-pin/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `DELETE /api/runners/{}/` (runner_web) — runner_web_lifecycle (owned)
-- `PATCH /api/runners/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `PATCH /api/runners/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `POST /api/runners/{}/pause/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
+- `POST /api/runners/{}/resume/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/{}/revive/` (runner_web) — runner_web_lifecycle (owned)
 - `POST /api/runners/{}/revoke/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/users/api-tokens/` (app) — app_misc_lifecycle, app_misc_lifecycle, app_misc_lifecycle (owned)
@@ -124,11 +128,11 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `PATCH /api/v1/assets/user-assets/{}/` (api_v1) — v1_assets_lifecycle, v1_assets_lifecycle, v1_assets_lifecycle (owned)
 - `DELETE /api/v1/assets/user-assets/{}/server/` (api_v1) — v1_assets_lifecycle (owned)
 - `PATCH /api/v1/assets/user-assets/{}/server/` (api_v1) — v1_assets_lifecycle (owned)
-- `POST /api/v1/auth/device/approve/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/device/start/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/device/token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/machine-token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle (owned)
-- `POST /api/v1/auth/revoke/` (api_v1) — auth_device_lifecycle (owned)
+- `POST /api/v1/auth/device/approve/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant, auth_engine_grant (owned)
+- `POST /api/v1/auth/device/start/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant, auth_engine_grant, auth_engine_grant (owned)
+- `POST /api/v1/auth/device/token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant, auth_engine_grant (owned)
+- `POST /api/v1/auth/machine-token/` (api_v1) — auth_device_lifecycle, auth_device_lifecycle, auth_engine_grant (owned)
+- `POST /api/v1/auth/revoke/` (api_v1) — auth_device_lifecycle, auth_engine_grant (owned)
 - `POST /api/v1/runner/chat/sessions/{}/approvals/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/v1/runner/chat/sessions/{}/closed/` (runner) — runner_daemon_lifecycle (owned)
 - `POST /api/v1/runner/chat/sessions/{}/events/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle (owned)
@@ -142,6 +146,8 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/v1/runner/dev-machines/{}/sessions/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle (owned)
 - `DELETE /api/v1/runner/dev-machines/{}/sessions/{}/` (runner) — runner_daemon_lifecycle (owned)
 - `POST /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner) — runner_daemon_lifecycle (owned)
+- `POST /api/v1/runner/engine/credential/revoke/` (runner) — runner_engine_credentials, runner_engine_credentials (owned)
+- `POST /api/v1/runner/engine/model-token/` (runner) — runner_engine_credentials, runner_engine_credentials (owned)
 - `POST /api/v1/runner/machine-tokens/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/v1/runner/runners/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/v1/runner/runners/enroll/` (runner) — runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle, runner_daemon_lifecycle (owned)
@@ -217,6 +223,10 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/v1/workspaces/{}/projects/{}/project-members/` (api_v1) — v1_projects_lifecycle (owned)
 - `DELETE /api/v1/workspaces/{}/projects/{}/project-members/{}/` (api_v1) — v1_projects_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/projects/{}/project-members/{}/` (api_v1) — v1_projects_lifecycle (owned)
+- `POST /api/v1/workspaces/{}/projects/{}/schedulers/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `DELETE /api/v1/workspaces/{}/projects/{}/schedulers/{}/binding/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `PATCH /api/v1/workspaces/{}/projects/{}/schedulers/{}/binding/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `POST /api/v1/workspaces/{}/projects/{}/schedulers/{}/run-now/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
 - `POST /api/v1/workspaces/{}/projects/{}/states/` (api_v1) — v1_projects_lifecycle, v1_projects_lifecycle, v1_projects_lifecycle (owned)
 - `DELETE /api/v1/workspaces/{}/projects/{}/states/{}/` (api_v1) — v1_projects_lifecycle, v1_projects_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/projects/{}/states/{}/` (api_v1) — v1_projects_lifecycle (owned)
@@ -244,6 +254,9 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/v1/workspaces/{}/projects/{}/work-items/{}/run-ai/` (api_v1) — v1_work_items_lifecycle (owned)
 - `POST /api/v1/workspaces/{}/projects/{}/work-items/{}/wait/` (api_v1) — v1_work_items_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/projects/{}/work-items/{}/workpad/` (api_v1) — v1_work_items_lifecycle (owned)
+- `POST /api/v1/workspaces/{}/schedulers/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `DELETE /api/v1/workspaces/{}/schedulers/{}/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
+- `PATCH /api/v1/workspaces/{}/schedulers/{}/` (api_v1) — v1_schedulers_lifecycle, v1_schedulers_lifecycle, v1_schedulers_lifecycle (owned)
 - `POST /api/v1/workspaces/{}/stickies/` (api_v1) — v1_assets_lifecycle (owned)
 - `DELETE /api/v1/workspaces/{}/stickies/{}/` (api_v1) — v1_assets_lifecycle, v1_assets_lifecycle, v1_assets_lifecycle (owned)
 - `PATCH /api/v1/workspaces/{}/stickies/{}/` (api_v1) — v1_assets_lifecycle, v1_assets_lifecycle, v1_assets_lifecycle (owned)
@@ -296,6 +309,8 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/workspaces/{}/projects/{}/bulk-archive-issues/` (app) — app_issues_followup, app_issues_followup, app_issues_followup (owned)
 - `POST /api/workspaces/{}/projects/{}/bulk-create-labels/` (app) — app_issues_followup (owned)
 - `DELETE /api/workspaces/{}/projects/{}/bulk-delete-issues/` (app) — app_issues_followup, app_issues_followup, app_issues_followup (owned)
+- `POST /api/workspaces/{}/projects/{}/bulk-operation-issues/` (app) — app_issues_drift, app_issues_drift (owned)
+- `POST /api/workspaces/{}/projects/{}/bulk-subscribe-issues/` (app) — app_issues_drift, app_issues_drift (owned)
 - `POST /api/workspaces/{}/projects/{}/comments/{}/reactions/` (app) — app_issues_lifecycle (owned)
 - `DELETE /api/workspaces/{}/projects/{}/comments/{}/reactions/{}/` (app) — app_issues_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/cycles/` (app) — app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle (owned)
@@ -311,6 +326,10 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `PUT /api/workspaces/{}/projects/{}/cycles/{}/cycle-issues/{}/` (app) — app_cycles_lifecycle (proxied)
 - `POST /api/workspaces/{}/projects/{}/cycles/{}/transfer-issues/` (app) — app_cycles_lifecycle, app_cycles_lifecycle, app_cycles_lifecycle (owned)
 - `PATCH /api/workspaces/{}/projects/{}/cycles/{}/user-properties/` (app) — app_cycles_lifecycle (owned)
+- `POST /api/workspaces/{}/projects/{}/epics/` (app) — app_issues_drift (owned)
+- `DELETE /api/workspaces/{}/projects/{}/epics/{}/` (app) — app_issues_drift (owned)
+- `PATCH /api/workspaces/{}/projects/{}/epics/{}/` (app) — app_issues_drift (owned)
+- `POST /api/workspaces/{}/projects/{}/epics/{}/issues/` (app) — app_issues_drift (owned)
 - `POST /api/workspaces/{}/projects/{}/estimates/` (app) — app_project_lifecycle, app_project_followup (owned)
 - `DELETE /api/workspaces/{}/projects/{}/estimates/{}/` (app) — app_project_lifecycle, app_project_followup (owned)
 - `PATCH /api/workspaces/{}/projects/{}/estimates/{}/` (app) — app_project_lifecycle (owned)
@@ -341,7 +360,8 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `DELETE /api/workspaces/{}/projects/{}/issue-labels/{}/` (app) — app_issues_followup, app_issues_followup, app_issues_followup (owned)
 - `PATCH /api/workspaces/{}/projects/{}/issue-labels/{}/` (app) — app_issues_followup, app_issues_followup (owned)
 - `PUT /api/workspaces/{}/projects/{}/issue-labels/{}/` (app) — app_issues_followup (owned)
-- `POST /api/workspaces/{}/projects/{}/issues/` (app) — app_cycles_lifecycle, app_issues_lifecycle, app_issues_lifecycle, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_modules_lifecycle, app_modules_lifecycle (owned)
+- `POST /api/workspaces/{}/projects/{}/issue-types/` (app) — app_issues_drift, app_issues_drift (owned)
+- `POST /api/workspaces/{}/projects/{}/issues/` (app) — app_cycles_lifecycle, app_issues_lifecycle, app_issues_lifecycle, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_drift, app_issues_drift, app_issues_drift, app_issues_drift, app_modules_lifecycle, app_modules_lifecycle (owned)
 - `DELETE /api/workspaces/{}/projects/{}/issues/{}/` (app) — app_cycles_lifecycle, app_issues_lifecycle, app_issues_lifecycle, app_issues_followup, app_issues_followup, app_issues_followup, app_issues_followup, app_modules_lifecycle, app_modules_lifecycle (owned)
 - `PATCH /api/workspaces/{}/projects/{}/issues/{}/` (app) — app_issues_lifecycle, app_issues_lifecycle, app_issues_followup, app_issues_followup (owned)
 - `PUT /api/workspaces/{}/projects/{}/issues/{}/` (app) — app_issues_lifecycle (owned)
@@ -371,6 +391,9 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `POST /api/workspaces/{}/projects/{}/issues/{}/sub-issues/` (app) — app_issues_lifecycle (owned)
 - `DELETE /api/workspaces/{}/projects/{}/issues/{}/subscribe/` (app) — app_issues_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/issues/{}/subscribe/` (app) — app_issues_lifecycle (owned)
+- `POST /api/workspaces/{}/projects/{}/issues/{}/worklogs/` (app) — app_issues_drift (owned)
+- `DELETE /api/workspaces/{}/projects/{}/issues/{}/worklogs/{}/` (app) — app_issues_drift (owned)
+- `PATCH /api/workspaces/{}/projects/{}/issues/{}/worklogs/{}/` (app) — app_issues_drift (owned)
 - `POST /api/workspaces/{}/projects/{}/join/{}/` (app) — app_project_followup, app_project_followup, app_project_followup (owned)
 - `POST /api/workspaces/{}/projects/{}/members/` (app) — app_project_lifecycle (owned)
 - `POST /api/workspaces/{}/projects/{}/members/leave/` (app) — app_project_lifecycle (owned)
@@ -529,6 +552,7 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 - `DELETE /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner)
 - `PATCH /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner)
 - `PUT /api/v1/runner/dev-machines/{}/sessions/{}/poll` (runner)
+- `POST /api/v1/runner/runners/{}/` (runner)
 - `DELETE /api/v1/runner/runners/{}/sessions/{}/poll` (runner)
 - `PATCH /api/v1/runner/runners/{}/sessions/{}/poll` (runner)
 - `PUT /api/v1/runner/runners/{}/sessions/{}/poll` (runner)
@@ -586,34 +610,7 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 
 ## Debug toolbar
 
-- `DELETE /__debug__/history_refresh/` (web)
-- `PATCH /__debug__/history_refresh/` (web)
-- `POST /__debug__/history_refresh/` (web)
-- `PUT /__debug__/history_refresh/` (web)
-- `DELETE /__debug__/history_sidebar/` (web)
-- `PATCH /__debug__/history_sidebar/` (web)
-- `POST /__debug__/history_sidebar/` (web)
-- `PUT /__debug__/history_sidebar/` (web)
-- `DELETE /__debug__/render_panel/` (web)
-- `PATCH /__debug__/render_panel/` (web)
-- `POST /__debug__/render_panel/` (web)
-- `PUT /__debug__/render_panel/` (web)
-- `DELETE /__debug__/sql_explain/` (web)
-- `PATCH /__debug__/sql_explain/` (web)
-- `POST /__debug__/sql_explain/` (web)
-- `PUT /__debug__/sql_explain/` (web)
-- `DELETE /__debug__/sql_profile/` (web)
-- `PATCH /__debug__/sql_profile/` (web)
-- `POST /__debug__/sql_profile/` (web)
-- `PUT /__debug__/sql_profile/` (web)
-- `DELETE /__debug__/sql_select/` (web)
-- `PATCH /__debug__/sql_select/` (web)
-- `POST /__debug__/sql_select/` (web)
-- `PUT /__debug__/sql_select/` (web)
-- `DELETE /__debug__/template_source/` (web)
-- `PATCH /__debug__/template_source/` (web)
-- `POST /__debug__/template_source/` (web)
-- `PUT /__debug__/template_source/` (web)
+(none)
 
 ## Missing with fix issue
 
@@ -625,4 +622,5 @@ Write ``(route, method)`` pairs: **595** total, **474** covered by the corpus.
 
 ## Owned, no session yet
 
-(none)
+- `PATCH /api/v1/runner/dev-machines/{}/` (runner) — NEWPIDASH-52: daemon machine PATCH landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.
+- `POST /api/v1/runner/dev-machines/{}/merge-into/` (runner) — NEWPIDASH-52: daemon merge-into landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.

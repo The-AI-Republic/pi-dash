@@ -573,8 +573,7 @@ def test_create_tool_in_ticking_default_arms_ticker_and_dispatches_entry_run(
         assert entry["runner_id"] is None
         assert entry["pinned_runner_id"] is None
         assert entry["scheduler_binding_id"] is None
-        assert entry["error"] == ""
-        assert entry["error_code"] == ""
+        assert entry["error_details"] == {}  # agent_run has no error/error_code columns
         assert entry["dispatch_attempts"] == 0
         base_branch = db.fetchone(
             "SELECT base_branch FROM projects WHERE id = %s", (project["id"],)
@@ -718,6 +717,72 @@ def test_create_tool_with_online_runner_assigns_entry_run(db, broker, seeder, wo
         assert str(entry["pod_id"]) == str(pod["id"])
         assert str(entry["work_item_id"]) == str(issue["id"])
         assert _comment_rows(db, issue["id"]) == []
+    finally:
+        stub.stop()
+
+
+def test_create_tool_with_managed_default_creates_local_issue(
+    db, broker, seeder, world
+):
+    """#2903: a project whose ``default_agent_executor`` is managed_runner
+    still files pod-level work — the entry run is a local one and the
+    tool leaves the issue's ``agent_executor`` unset (no managed
+    refusal, no managed run)."""
+    owner, ws, project = world["owner"], world["workspace"], world["project"]
+    seeder.db.execute(
+        "UPDATE projects SET default_agent_executor = 'managed_runner' WHERE id = %s",
+        (project["id"],),
+    )
+    _seed_ticking_project(seeder, project["id"])
+    ticking = seeder.create_state(
+        ws["id"], project["id"], name=TICKING_STATE, group=TICKING_GROUP
+    )
+    seeder.db.execute(
+        'UPDATE states SET "default" = true WHERE id = %s', (ticking["id"],)
+    )
+    pod = _seed_default_pod(seeder, ws["id"], project["id"], owner["id"])
+    _seed_runner(seeder, owner["id"], ws["id"], pod["id"], online=True)
+    binding = _seed_scheduler_binding(seeder, ws["id"], project["id"], owner["id"])
+
+    title = f"Scheduler-filed {uuid.uuid4().hex[:8]}"
+    stub = _CreateStub(title)
+    base = stub.start()
+    try:
+        _seed_llm_config(seeder, owner["id"], base)
+        run = _seed_scheduler_run(seeder, world, binding["id"], pod["id"])
+
+        _publish(broker, run["id"])
+        after = wait_for_run(db, run["id"], status=COMPLETED, timeout=RUN_TIMEOUT)
+        assert after["status"] == COMPLETED, (
+            f"run ended {after['status']}/{after['error_code']}: {after['error']}"
+        )
+
+        ledger = _create_ledger_rows(db, run["id"])
+        assert [row["status"] for row in ledger] == ["succeeded"], (
+            f"the create tool must run exactly once: {ledger!r}; "
+            f"stub saw {stub.create_emitted} create emission(s) "
+            f"in {len(stub.requests)} request(s): {stub.requests!r}"
+        )
+
+        issue = _issue_by_name(db, project["id"], title)
+        assert issue is not None, "the tool call must create the issue"
+        assert issue["agent_executor"] is None, (
+            "the create tool leaves agent_executor unset (Django tools.py:345-371)"
+        )
+        _track_side_effects(seeder, db, run["id"], issue["id"])
+
+        def _runs_present():
+            rows = _entry_runs(db, issue["id"])
+            return rows or None
+
+        runs = wait_for(
+            _runs_present, timeout=EFFECT_TIMEOUT, what="entry run created"
+        )
+        assert len(runs) == 1, "the immediate dispatch creates exactly one entry run"
+        entry = runs[0]
+        assert entry["executor_kind"] == "local_runner", (
+            "no managed run may be created for new work"
+        )
     finally:
         stub.stop()
 

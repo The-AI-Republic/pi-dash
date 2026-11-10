@@ -289,6 +289,8 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "type_id",
     "url",
     "description_markdown",
+    "assigned_runner_detail",
+    "dispatch_wait",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -319,6 +321,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Write-only fields (`issue.py:118-151`): accepted on write, absent from the
@@ -352,6 +355,8 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "id",
     "type_id",
     "url",
+    "assigned_runner_detail",
+    "dispatch_wait",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -382,6 +387,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Read-only blocker keys `to_representation` appends for single-item
@@ -446,6 +452,26 @@ pub const POD_WRONG_PROJECT_BODY: &str = r#"{"assigned_pod":["pod is in a differ
 /// `validate()` pod-reassign guard (`:211-216`).
 pub const POD_REASSIGN_ACTIVE_RUN_BODY: &str =
     r#"{"assigned_pod":["cannot reassign pod while the issue has an active run"]}"#;
+/// The dedicated-runner E-checks (`validate_execution_target`, design
+/// §7.1): one variant per code, each Django's `ErrorDetail` — every
+/// one keyed on `assigned_runner` (both serializers carry the runner
+/// in attrs under that key, even though the app surface posts
+/// `assigned_runner_id`).
+pub const RUNNER_NOT_FOUND_BODY: &str = r#"{"assigned_runner":["runner not found"]}"#;
+pub const RUNNER_WRONG_PROJECT_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different project"]}"#;
+pub const RUNNER_POD_MISMATCH_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different pod"]}"#;
+pub const RUNNER_REVOKED_BODY: &str = r#"{"assigned_runner":["runner has been revoked"]}"#;
+pub const RUNNER_OWNER_NOT_ON_ISSUE_BODY: &str =
+    r#"{"assigned_runner":["the runner's owner is not on this issue"]}"#;
+pub const ACTIVE_RUN_IN_PROGRESS_BODY: &str =
+    r#"{"assigned_runner":["the issue has an active run; changes take effect on the next run"]}"#;
+/// `normalize_issue_executor` unknown value
+/// (`runner/services/issue_assignment.py:37-38`).
+pub const EXECUTOR_UNKNOWN_BODY: &str = r#"{"agent_executor":["unknown agent executor"]}"#;
+/// `normalize_issue_executor` mid-flight guard (`:40-47`).
+pub const EXECUTOR_MID_FLIGHT_BODY: &str = r#"{"agent_executor":["cannot change the execution target while the issue has an active run"]}"#;
 /// `normalize_description_input` non-string markdown (`:100-101`).
 pub const MARKDOWN_NON_STRING_BODY: &str = r#"{"description_markdown":["Must be a string."]}"#;
 
@@ -577,10 +603,28 @@ pub enum ValidateError {
     BinaryInvalid,
     /// `state` is not a state of this project (`:261-265`).
     StateWrongProject,
+    /// `normalize_issue_executor` unknown value
+    /// (`issue_assignment.py:37-38`).
+    ExecutorUnknown,
+    /// `normalize_issue_executor` mid-flight guard (`:40-47`).
+    ExecutorMidFlight,
     /// `parent` is not an issue of this workspace+project (`:267-276`).
     ParentWrongProject,
     /// `estimate_point` is not one of this workspace+project (`:278-286`).
     EstimatePointWrongProject,
+    /// The dedicated-runner E-checks (`validate_execution_target`):
+    /// E1 `runner_not_found`.
+    RunnerNotFound,
+    /// E2 `runner_wrong_project`.
+    RunnerWrongProject,
+    /// E3 `runner_pod_mismatch`.
+    RunnerPodMismatch,
+    /// E4 `runner_revoked`.
+    RunnerRevoked,
+    /// E7 `runner_owner_not_on_issue`.
+    RunnerOwnerNotOnIssue,
+    /// E8 `active_run_in_progress`.
+    ActiveRunInProgress,
 }
 
 impl ValidateError {
@@ -599,8 +643,31 @@ impl ValidateError {
             ValidateError::HtmlContentInvalid => HTML_CONTENT_INVALID_BODY,
             ValidateError::BinaryInvalid => BINARY_INVALID_BODY,
             ValidateError::StateWrongProject => STATE_WRONG_PROJECT_BODY,
+            ValidateError::ExecutorUnknown => EXECUTOR_UNKNOWN_BODY,
+            ValidateError::ExecutorMidFlight => EXECUTOR_MID_FLIGHT_BODY,
             ValidateError::ParentWrongProject => PARENT_WRONG_PROJECT_BODY,
             ValidateError::EstimatePointWrongProject => ESTIMATE_POINT_WRONG_PROJECT_BODY,
+            ValidateError::RunnerNotFound => RUNNER_NOT_FOUND_BODY,
+            ValidateError::RunnerWrongProject => RUNNER_WRONG_PROJECT_BODY,
+            ValidateError::RunnerPodMismatch => RUNNER_POD_MISMATCH_BODY,
+            ValidateError::RunnerRevoked => RUNNER_REVOKED_BODY,
+            ValidateError::RunnerOwnerNotOnIssue => RUNNER_OWNER_NOT_ON_ISSUE_BODY,
+            ValidateError::ActiveRunInProgress => ACTIVE_RUN_IN_PROGRESS_BODY,
+        }
+    }
+
+    /// Map a domain E-check code (design §7.1, `validate_execution_target`)
+    /// to its variant. The fallthrough is E8 — the only code left after
+    /// E1-E4/E7 (`""` = assignable never reaches this helper, and the
+    /// domain's other failures carry a DB error instead).
+    pub fn from_runner_code(code: &str) -> Self {
+        match code {
+            "runner_not_found" => ValidateError::RunnerNotFound,
+            "runner_wrong_project" => ValidateError::RunnerWrongProject,
+            "runner_pod_mismatch" => ValidateError::RunnerPodMismatch,
+            "runner_revoked" => ValidateError::RunnerRevoked,
+            "runner_owner_not_on_issue" => ValidateError::RunnerOwnerNotOnIssue,
+            _ => ValidateError::ActiveRunInProgress,
         }
     }
 }
@@ -1201,6 +1268,16 @@ pub struct IssueRow<'a> {
     pub state: Option<&'a str>,
     pub estimate_point: Option<&'a str>,
     pub assigned_pod: Option<&'a str>,
+    /// Bare `assigned_runner` FK (model field, renders the PK or null —
+    /// same convention as `assigned_pod`).
+    pub assigned_runner: Option<&'a str>,
+    /// The `assigned_runner_detail` object (design §14.1), `None` when
+    /// the issue is pod-assigned or the runner is gone — renders `null`.
+    pub assigned_runner_detail: Option<&'a Value>,
+    /// The `dispatch_wait` object (design §14.3), `None` on list rows or
+    /// when no QUEUED pinned run exists — renders `null` (Django
+    /// `get_dispatch_wait` returns `None` for list parents).
+    pub dispatch_wait: Option<&'a Value>,
 }
 
 /// Failure modes of [`render_issue`]: caller-contract violations and the two
@@ -1395,6 +1472,15 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             "state" => opt_str(row.state),
             "estimate_point" => opt_str(row.estimate_point),
             "assigned_pod" => opt_str(row.assigned_pod),
+            "assigned_runner" => opt_str(row.assigned_runner),
+            "assigned_runner_detail" => match row.assigned_runner_detail {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
+            "dispatch_wait" => match row.dispatch_wait {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
             // `filter_fields` only ever yields `FIELDS_IN_ORDER` names, and
             // every non-write-only one is matched above.
             _ => unreachable!("render_issue matched every kept readable field"),
@@ -1635,11 +1721,15 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 36);
+        assert_eq!(FIELDS_IN_ORDER.len(), 39);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
         assert!(FIELDS_IN_ORDER.contains(&"type"));
+        // dispatch_wait sits immediately after assigned_runner_detail
+        // (Django `serializers/issue.py:156,165` declared order).
+        let pos = |name: &str| FIELDS_IN_ORDER.iter().position(|f| *f == name).unwrap();
+        assert_eq!(pos("dispatch_wait"), pos("assigned_runner_detail") + 1);
     }
 
     #[test]
@@ -1649,8 +1739,9 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 33);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 36);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
+        assert!(READABLE_FIELDS_IN_ORDER.contains(&"dispatch_wait"));
         assert_eq!(
             WRITE_ONLY_FIELDS,
             ["assignees", "labels", "description_markdown"]
@@ -2553,6 +2644,9 @@ mod tests {
             state: Some("97b22834-b823-4109-a527-b39aa310ceae"),
             estimate_point: None,
             assigned_pod: None,
+            assigned_runner: None,
+            assigned_runner_detail: None,
+            dispatch_wait: None,
         }
     }
 
@@ -2620,7 +2714,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 37);
+        assert_eq!(keys.len(), 40);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(
@@ -2697,6 +2791,47 @@ mod tests {
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::MissingBlockers));
+    }
+
+    #[test]
+    fn render_dispatch_wait_null_and_value() {
+        // `dispatch_wait` renders the supplied object; `None` renders
+        // explicit `null` (Django `get_dispatch_wait` returns `None`
+        // for list parents and when there is no QUEUED pinned run).
+        let mut row = full_row();
+        let blockers = empty_blockers();
+        let out = render_with(&row, None, &[], false, &[], &[], &[], Some(&blockers), None);
+        assert_eq!(out["dispatch_wait"], Value::Null);
+
+        let wait: &'static Value = Box::leak(Box::new(serde_json::json!({
+            "reason": "offline",
+            "pin_kind": "dedicated",
+            "runner": "r-1",
+            "runner_name": "runner-1",
+            "queued_at": "2026-10-02T23:17:12.023611Z",
+            "runner_last_seen_at": null,
+            "runs_ahead": 0,
+            "pause_reason": null,
+            "expires_at": "2026-10-09T23:17:12.023611Z",
+            "releasable": false
+        })));
+        row.dispatch_wait = Some(wait);
+        let out = render_with(&row, None, &[], false, &[], &[], &[], Some(&blockers), None);
+        assert_eq!(out["dispatch_wait"], *wait);
+        // `fields=` filtering gates the key like any other field.
+        let fields = includes(&["id"]);
+        let out = render_with(
+            &row,
+            Some(&fields),
+            &[],
+            false,
+            &[],
+            &[],
+            &[],
+            Some(&blockers),
+            None,
+        );
+        assert!(!out.contains_key("dispatch_wait"));
     }
 
     #[test]

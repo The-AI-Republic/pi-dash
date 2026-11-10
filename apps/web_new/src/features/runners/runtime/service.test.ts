@@ -2,1181 +2,692 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const editionFlags = vi.hoisted(() => ({ current: {} as Record<string, boolean> }));
-
-vi.mock("../../../core/edition/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../../core/edition/index.js")>();
-  const { edition: _edition, ...rest } = original;
-  return {
-    ...rest,
-    edition: {
-      id: "test",
-      get flags(): Record<string, boolean> {
-        return editionFlags.current;
-      },
-    },
-  };
-});
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
   return {
     ...original,
-    getAgentProfile: vi.fn(),
-    getCloudCsrfToken: vi.fn(),
-    postAgentToken: vi.fn(),
-    createDesktopEnroll: vi.fn(),
-    deleteDesktopEnroll: vi.fn(),
+    startDeviceGrant: vi.fn(),
+    approveDeviceCode: vi.fn(),
     getProject: vi.fn(),
-    listProjects: vi.fn(),
     getIssue: vi.fn(),
+    getAgentProfile: vi.fn(),
   };
 });
 
 import {
-  ApiError,
-  createDesktopEnroll,
-  deleteDesktopEnroll,
+  approveDeviceCode,
   getAgentProfile,
-  getCloudCsrfToken,
   getIssue,
   getProject,
-  listProjects,
-  postAgentToken,
+  startDeviceGrant,
   type AgentProfile,
-  type AgentToken,
   type ApiClient,
-  type DesktopEnrollResult,
+  type DeviceStartResponse,
   type Issue,
-  type Project,
   type ProjectDetail,
 } from "@pidash/api-client";
 
-import type { AgentRuntimeApi } from "../../../core/platform/index.js";
+import type {
+  AgentRuntimeApi,
+  CliSetupApi,
+  DaemonDiscovery,
+  DaemonEngineSignInState,
+  DaemonHello,
+  DaemonLocalRunner,
+} from "../../../core/platform/index.js";
 import {
-  connectProject,
+  canSignOutComputer,
+  compatibleHello,
+  daemonAccountKey,
+  discoverDaemon,
+  discoveryProblem,
   disposeRuntimeForSignOut,
+  ENGINE_SIGNED_OUT_TEXT,
+  ENGINE_STILL_CONNECTING_TEXT,
+  ENGINE_TURN_ON_TEXT,
   EngineUnavailableError,
+  engineActionFor,
   ensureChatRuntime,
+  getModelTopUpUrl,
   getRuntimeAccount,
   prepareAgentRun,
+  refreshModelCredential,
   refreshRuntime,
+  renewEngineIfAllowed,
   resetRuntimeServiceForTests,
   resumeRuntime,
+  setUpDaemon,
+  signInWorkspace,
+  SILENT_RENEW_RETRY_MS,
+  turnOnEngineForProject,
+  type DaemonSetUpStep,
 } from "./service.js";
+import { registerSetUpPrompt } from "./setupPrompt.js";
 
-const FAR_FUTURE = "2999-01-01T00:00:00Z";
-const CACHE_KEY = "pidash-managed-workspaces:u1";
+const CLOUD = "https://cloud.test";
+const client = { baseUrl: CLOUD } as unknown as ApiClient;
+const CLI_INFO = { installed: true, path: "/bin/pidash", version: "1.0.0", updatable: false };
 
-const client = { baseUrl: "https://cloud.test" } as unknown as ApiClient;
-
-function fakeRuntime(): AgentRuntimeApi {
+function hello(signIn: DaemonEngineSignInState = "active", overrides: Partial<DaemonHello> = {}): DaemonHello {
   return {
-    isAvailable: vi.fn(async () => true),
-    checkHost: vi.fn(async () => ({ runnerPresent: true, enginePresent: true, hostLabel: "h" })),
-    writeEngineConfig: vi.fn(async () => undefined),
-    writeModelToken: vi.fn(async () => undefined),
-    bootstrapMachine: vi.fn(async () => undefined),
-    enrollProject: vi.fn(async () => undefined),
-    startDaemon: vi.fn(async () => undefined),
-    stopDaemon: vi.fn(async () => undefined),
-    signOutNative: vi.fn(async () => undefined),
-    saveApprovalModes: vi.fn(async () => undefined),
-    loadApprovalModes: vi.fn(async () => ({})),
+    daemon_version: "1.0.0",
+    ipc_version: 3,
+    cloud_url: CLOUD,
+    account: { user_id: "u1", email: "u1@test", cloud_url: CLOUD },
+    workspaces: [{ slug: "ws", signed_in: true, runners: 1 }],
+    engine: "available",
+    engine_detail: { state: "available", sign_in_state: signIn },
+    ...overrides,
   };
 }
 
-function profile(overrides: Partial<AgentProfile> = {}): AgentProfile {
+function compatible(signIn: DaemonEngineSignInState = "active", overrides: Partial<DaemonHello> = {}): DaemonDiscovery {
+  return { kind: "compatible", hello: hello(signIn, overrides) };
+}
+
+const NO_DAEMON: DaemonDiscovery = { kind: "no_daemon", cli: { ...CLI_INFO, installed: false } };
+
+type FakeRuntime = { [K in keyof AgentRuntimeApi]: ReturnType<typeof vi.fn> & AgentRuntimeApi[K] };
+
+function fakeRuntime(discovery: DaemonDiscovery = compatible()): FakeRuntime {
+  return {
+    discover: vi.fn(async () => discovery),
+    localRunners: vi.fn(async (): Promise<DaemonLocalRunner[]> => []),
+    addEngineRunner: vi.fn(async (input: { workspace: string; project: string }) => ({
+      runner: `engine-${input.project}`,
+      runner_id: "r-new",
+      workspace: input.workspace,
+      project: input.project,
+      working_dir: "/tasks",
+    })),
+    installService: vi.fn(async () => undefined),
+    ensureEngine: vi.fn(async () => undefined),
+    engineLogin: vi.fn(async () => undefined),
+    reloadCredentials: vi.fn(async () => undefined),
+    saveApprovalModes: vi.fn(async () => undefined),
+    loadApprovalModes: vi.fn(async () => ({})),
+    scanLegacyTrees: vi.fn(async () => []),
+    finishLegacyTree: vi.fn(async () => undefined),
+    restoreLegacyFolder: vi.fn(async () => undefined),
+    loadNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    recordNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    dismissNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
+    signOutComputer: vi.fn(async () => undefined),
+  } as unknown as FakeRuntime;
+}
+
+function fakeCli(installed = true): CliSetupApi & { [K in keyof CliSetupApi]: ReturnType<typeof vi.fn> } {
+  return {
+    detect: vi.fn(async () => ({ installed, path: installed ? "/bin/pidash" : null, version: null })),
+    install: vi.fn(async () => ({ installed: true, path: "/bin/pidash", version: "1.0.0" })),
+    onInstallLog: vi.fn(() => () => undefined),
+    login: vi.fn(async () => undefined),
+  } as unknown as CliSetupApi & { [K in keyof CliSetupApi]: ReturnType<typeof vi.fn> };
+}
+
+function grant(code: string): DeviceStartResponse {
+  return {
+    device_code: `device-${code}`,
+    user_code: `USER-${code}`,
+    verification_uri: "",
+    expires_in: 600,
+    interval: 5,
+  };
+}
+
+function resume(runtime: AgentRuntimeApi, id = "u1"): void {
+  resumeRuntime({ id, email: `${id}@test`, cloudUrl: CLOUD }, { client, runtime });
+}
+
+function project(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
+  return {
+    identifier: "PROJ",
+    default_agent_executor: "local_runner",
+    agent_executor_options: [],
+    ...overrides,
+  } as unknown as ProjectDetail;
+}
+
+function issue(executor: string | null): Issue {
+  return { agent_executor: executor } as unknown as Issue;
+}
+
+function agentProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
   return {
     managed_runner_enabled: true,
-    lane: "lane",
-    base_url: "https://models.test",
+    lane: "test",
+    base_url: "https://gateway.test",
     model: "model",
     available: true,
     reason_code: "",
     graceful_stop_seconds: 5,
+    top_up_url: "",
     ...overrides,
-  };
-}
-
-function token(expiresAt: string = FAR_FUTURE): AgentToken {
-  return { token: "tok", expires_at: expiresAt };
-}
-
-function enrollResult(): DesktopEnrollResult {
-  return {
-    dev_machine_id: "dm-1",
-    machine_token: "mt",
-    workspace_slug: "ws",
-    managed_runner_enabled: true,
-    graceful_stop_seconds: 5,
-  };
-}
-
-function projectDetail(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
-  return {
-    id: "223e4567-e89b-12d3-a456-426614174001",
-    name: "Acme",
-    identifier: "ACME",
-    sort_order: null,
-    logo_props: {},
-    member_role: 15,
-    archived_at: null,
-    workspace: "323e4567-e89b-12d3-a456-426614174002",
-    cycle_view: true,
-    issue_views_view: true,
-    module_view: true,
-    page_view: true,
-    inbox_view: true,
-    is_default: false,
-    guest_view_all_features: false,
-    project_lead: null,
-    network: 0,
-    created_at: "2024-01-02T03:04:05Z",
-    updated_at: "2024-02-03T04:05:06Z",
-    created_by: null,
-    updated_by: null,
-    agent_executor_options: [],
-    default_agent_executor: "local_runner",
-    ...overrides,
-  };
-}
-
-function projectRow(overrides: Partial<Project> = {}): Project {
-  return { ...projectDetail(overrides), intake_count: 0 };
-}
-
-function issue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    id: "123e4567-e89b-12d3-a456-426614174000",
-    name: "Fix login",
-    state_id: null,
-    sort_order: 1,
-    completed_at: null,
-    estimate_point: null,
-    priority: "high",
-    sequence_id: 42,
-    project_id: "223e4567-e89b-12d3-a456-426614174001",
-    parent_id: null,
-    cycle_id: null,
-    module_ids: [],
-    label_ids: [],
-    assignee_ids: [],
-    sub_issues_count: null,
-    attachment_count: null,
-    link_count: null,
-    created_at: "2024-01-02T03:04:05Z",
-    updated_at: "2024-02-03T04:05:06Z",
-    created_by: null,
-    updated_by: null,
-    is_draft: false,
-    archived_at: null,
-    complexity_score: 0,
-    agent_executor: null,
-    is_synced: false,
-    description_html: "",
-    is_subscribed: false,
-    agent_ticker: null,
-    agent_status: null,
-    relations_summary: { blocked_by: [], blocking: [] },
-    has_open_blockers: false,
-    ...overrides,
-  };
-}
-
-function apiError(status: number): ApiError {
-  return new ApiError({ status, code: "http", message: `status ${status}` });
-}
-
-function resume(runtime: AgentRuntimeApi, userId = "u1"): void {
-  resumeRuntime(userId, { client, runtime });
-}
-
-/** Working local-storage double (this jsdom setup exposes none). */
-function memoryStorage(): Storage {
-  const entries = new Map<string, string>();
-  return {
-    get length() {
-      return entries.size;
-    },
-    key: (index: number) => [...entries.keys()][index] ?? null,
-    getItem: (key: string) => entries.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      entries.set(key, value);
-    },
-    removeItem: (key: string) => {
-      entries.delete(key);
-    },
-    clear: () => {
-      entries.clear();
-    },
-  } as Storage;
+  } as AgentProfile;
 }
 
 beforeEach(() => {
   resetRuntimeServiceForTests();
-  vi.stubGlobal("localStorage", memoryStorage());
-  globalThis.sessionStorage.clear();
-  editionFlags.current = {};
-  vi.clearAllMocks();
-  vi.mocked(getAgentProfile).mockResolvedValue(profile());
-  vi.mocked(postAgentToken).mockResolvedValue(token());
-  vi.mocked(getCloudCsrfToken).mockResolvedValue({ csrf_token: "cloud-csrf" });
-  vi.mocked(createDesktopEnroll).mockResolvedValue(enrollResult());
-  vi.mocked(deleteDesktopEnroll).mockResolvedValue(undefined);
-  vi.mocked(getProject).mockResolvedValue(projectDetail());
-  vi.mocked(listProjects).mockResolvedValue([]);
-  vi.mocked(getIssue).mockResolvedValue(issue());
+  registerSetUpPrompt(null);
+  vi.mocked(startDeviceGrant).mockReset();
+  vi.mocked(approveDeviceCode).mockReset();
+  vi.mocked(getProject).mockReset();
+  vi.mocked(getIssue).mockReset();
+  vi.mocked(getAgentProfile).mockReset();
+  vi.mocked(startDeviceGrant).mockResolvedValue(grant("1"));
+  vi.mocked(approveDeviceCode).mockResolvedValue({ ok: true, user_email: "u1@test.dev", workspace_slug: "ws" });
+  vi.mocked(getAgentProfile).mockResolvedValue(agentProfile());
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  registerSetUpPrompt(null);
 });
 
-describe("resumeRuntime", () => {
-  it("is inert without the desktop capability", () => {
-    resumeRuntime("u1", { client });
+describe("engineActionFor", () => {
+  it("maps each engine sign-in state to what the app may do", () => {
+    expect(engineActionFor("expiring")).toBe("renew_silently");
+    expect(engineActionFor("expired")).toBe("renew_silently");
+    expect(engineActionFor("never")).toBe("turn_on");
+    expect(engineActionFor("signed_out")).toBe("sign_in");
+    expect(engineActionFor("revoked")).toBe("sign_in");
+    expect(engineActionFor("active")).toBe("none");
+    expect(engineActionFor(undefined)).toBe("none");
+  });
+});
+
+describe("discoveryProblem", () => {
+  it("names every non-compatible case and nothing for compatible", () => {
+    expect(discoveryProblem(null)).toContain("Looking for Pi Dash");
+    expect(discoveryProblem(compatible())).toBeNull();
+    expect(discoveryProblem(NO_DAEMON)).toBe("Pi Dash is not set up on this computer yet.");
+    expect(discoveryProblem({ kind: "too_old", cli: CLI_INFO })).toContain("too old");
+    expect(discoveryProblem({ kind: "app_too_old", daemon_version: "9.0.0", ipc_version: 9 })).toContain("9.0.0");
+    expect(discoveryProblem({ kind: "not_answering", reason: "busy" })).toContain("not answering");
+    expect(discoveryProblem({ kind: "signed_out", hello: hello() })).toContain("signed out");
+    expect(
+      discoveryProblem({
+        kind: "account_mismatch",
+        daemon_account: "x@y",
+        daemon_cloud_url: CLOUD,
+        hosts_runners: true,
+      })
+    ).toContain("x@y");
+  });
+});
+
+describe("resume and discovery", () => {
+  it("is inert without the desktop capability", async () => {
+    resumeRuntime({ id: "u1", cloudUrl: CLOUD }, { client });
     expect(getRuntimeAccount()).toBe("");
+    await expect(discoverDaemon(undefined)).resolves.toBeNull();
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client })).resolves.toBeUndefined();
+    await expect(
+      prepareAgentRun({ client, target: { workspaceSlug: "ws", projectId: "p", issueId: "i" } })
+    ).resolves.toBeUndefined();
+    await expect(
+      disposeRuntimeForSignOut({ client, choice: { deleteChatHistory: true, signOutComputer: false } })
+    ).resolves.toBeUndefined();
+    expect(getProject).not.toHaveBeenCalled();
   });
 
-  it("resumes for a new account and restores its approval modes", () => {
+  it("classifies the daemon for the resumed account", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
     expect(getRuntimeAccount()).toBe("u1");
-    expect(runtime.loadApprovalModes).toHaveBeenCalledWith("u1");
+    await discoverDaemon(runtime);
+    expect(runtime.discover).toHaveBeenCalledWith({ userId: "u1", email: "u1@test", cloudUrl: CLOUD });
+    expect(compatibleHello()).not.toBeNull();
   });
 
-  it("ignores a repeat resume for the same account", () => {
+  it("restores the account's approval modes once per account", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
     resume(runtime);
     expect(runtime.loadApprovalModes).toHaveBeenCalledTimes(1);
+    resume(runtime, "u2");
+    expect(runtime.loadApprovalModes).toHaveBeenCalledTimes(2);
+    expect(runtime.loadApprovalModes).toHaveBeenLastCalledWith("u2");
   });
 
-  it("clears the stopped flag without an account", async () => {
+  it("drops a discovery that answers after an account switch", async () => {
+    let answer: (value: DaemonDiscovery) => void = () => undefined;
     const runtime = fakeRuntime();
+    runtime.discover.mockImplementationOnce(() => new Promise<DaemonDiscovery>((resolve) => (answer = resolve)));
     resume(runtime);
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    resumeRuntime(undefined, { client, runtime });
-    expect(getRuntimeAccount()).toBe("u1");
+    const stale = discoverDaemon(runtime);
+    resume(runtime, "u2");
+    answer(compatible());
+    await expect(stale).resolves.toBeNull();
+    expect(compatibleHello()).toBeNull();
   });
 
-  it("restores the enrollment cache so a reload reuses the daemon", async () => {
+  it("never calls a removed managed_* surface", () => {
     const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(1);
-    resetRuntimeServiceForTests();
-    const reloaded = fakeRuntime();
-    resume(reloaded);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime: reloaded });
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(1);
-    expect(getRuntimeAccount()).toBe("u1");
-  });
-
-  it("swallows a failing mode restore", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(runtime.loadApprovalModes).mockRejectedValue(new Error("host gone"));
-    resume(runtime);
-    expect(getRuntimeAccount()).toBe("u1");
-    await Promise.resolve();
-  });
-
-  it("drops a corrupt enrollment cache", async () => {
-    const runtime = fakeRuntime();
-    globalThis.sessionStorage.setItem(CACHE_KEY, "{nope");
-    resume(runtime);
-    expect(globalThis.sessionStorage.getItem(CACHE_KEY)).toBeNull();
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(1);
-  });
-
-  it("ignores a cache with a non-string host label", async () => {
-    const runtime = fakeRuntime();
-    globalThis.sessionStorage.setItem(CACHE_KEY, JSON.stringify({ hostLabel: 42, workspaces: ["ws"] }));
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(1);
-  });
-
-  it("ignores a cache with a non-list workspace set", async () => {
-    const runtime = fakeRuntime();
-    globalThis.sessionStorage.setItem(CACHE_KEY, JSON.stringify({ hostLabel: "h", workspaces: "ws" }));
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps workspaces while skipping a null chat-project map", async () => {
-    const runtime = fakeRuntime();
-    globalThis.sessionStorage.setItem(
-      CACHE_KEY,
-      JSON.stringify({ hostLabel: "h", workspaces: ["ws"], chatProjects: null })
-    );
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).not.toHaveBeenCalled();
-  });
-
-  it("keeps workspaces while skipping a malformed chat-project map", async () => {
-    const runtime = fakeRuntime();
-    globalThis.sessionStorage.setItem(
-      CACHE_KEY,
-      JSON.stringify({ hostLabel: "h", workspaces: ["ws"], chatProjects: "ACME" })
-    );
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).not.toHaveBeenCalled();
-  });
-
-  it("skips non-string entries while restoring", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([projectRow({ identifier: "OTHER" })]);
-    globalThis.sessionStorage.setItem(
-      CACHE_KEY,
-      JSON.stringify({ hostLabel: "h", workspaces: ["ws", 42], chatProjects: { ws: "ACME", other: 7 } })
-    );
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).not.toHaveBeenCalled();
-    await ensureChatRuntime({ workspaceSlug: "other", client, runtime });
-    expect(listProjects).toHaveBeenCalled();
-    expect(runtime.enrollProject).toHaveBeenLastCalledWith(expect.objectContaining({ project: "OTHER" }));
-  });
-
-  it("survives an unreadable store", () => {
-    const runtime = fakeRuntime();
-    const spy = vi.spyOn(globalThis.sessionStorage, "getItem").mockImplementation(() => {
-      throw new Error("denied");
-    });
-    try {
-      resume(runtime);
-    } finally {
-      spy.mockRestore();
-    }
-    expect(getRuntimeAccount()).toBe("u1");
+    for (const key of Object.keys(runtime)) expect(key).not.toMatch(/managed|doctor|daemonStart|signOutNative/i);
   });
 });
 
-describe("connectProject", () => {
-  it("is inert without the desktop capability", async () => {
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client });
-    expect(getAgentProfile).not.toHaveBeenCalled();
-  });
-
-  it("connects a project end to end", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(getAgentProfile).toHaveBeenCalledWith(client);
-    expect(runtime.writeEngineConfig).toHaveBeenCalledWith({
-      account: "u1",
-      profile: { available: true, base_url: "https://models.test", model: "model", reason_code: "" },
-    });
-    expect(postAgentToken).toHaveBeenCalledWith(client);
-    expect(runtime.writeModelToken).toHaveBeenCalledWith("tok");
-    expect(createDesktopEnroll).toHaveBeenCalledWith(client, { workspaceSlug: "ws", hostLabel: "h" });
-    expect(runtime.bootstrapMachine).toHaveBeenCalledWith({
-      cloudUrl: "https://cloud.test",
-      workspace: "ws",
-      machineToken: "mt",
-      devMachineId: "dm-1",
-    });
-    expect(getProject).toHaveBeenCalledWith(client, "ws", "p");
-    expect(runtime.enrollProject).toHaveBeenCalledWith({
-      account: "u1",
-      workspace: "ws",
-      project: "ACME",
-      hostLabel: "h",
-    });
-    expect(runtime.startDaemon).toHaveBeenCalledWith({ account: "u1", workspace: "ws" });
-    expect(JSON.parse(globalThis.sessionStorage.getItem(CACHE_KEY) ?? "null")).toEqual({
-      hostLabel: "h",
-      workspaces: ["ws"],
-      chatProjects: { ws: "ACME" },
-    });
-  });
-
-  it("enrolls each workspace once per session", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(1);
-    expect(runtime.bootstrapMachine).toHaveBeenCalledTimes(1);
-    expect(runtime.startDaemon).toHaveBeenCalledTimes(2);
-  });
-
-  it("forgets enrollments when the host label changes", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    vi.mocked(runtime.checkHost).mockResolvedValue({ runnerPresent: true, enginePresent: true, hostLabel: "h2" });
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(2);
-    expect(createDesktopEnroll).toHaveBeenLastCalledWith(client, { workspaceSlug: "ws", hostLabel: "h2" });
-  });
-
-  it.each([[{ runnerPresent: false, enginePresent: true }], [{ runnerPresent: true, enginePresent: false }]])(
-    "asks for a reinstall when binaries are missing (%o)",
-    async (missing) => {
-      const runtime = fakeRuntime();
-      vi.mocked(runtime.checkHost).mockResolvedValue({ ...missing, hostLabel: "h" });
+describe("silent engine renewal", () => {
+  it("renews only when the daemon reports expiring or expired", async () => {
+    for (const signIn of ["active", "never", "signed_out", "revoked"] as const) {
+      resetRuntimeServiceForTests();
+      const runtime = fakeRuntime(compatible(signIn));
       resume(runtime);
-      await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow(
-        "Reinstall"
-      );
+      await refreshRuntime({ client, runtime });
+      expect(runtime.engineLogin).not.toHaveBeenCalled();
     }
-  );
-
-  it("stops the daemon and reports the plain-language reason when the server refuses the agent", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(getAgentProfile).mockResolvedValue(profile({ available: false, reason_code: "managed_runner_disabled" }));
-    resume(runtime);
-    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
-      (error: unknown) => error
-    );
-    expect(failure).toBeInstanceOf(EngineUnavailableError);
-    expect((failure as EngineUnavailableError).code).toBe("managed_runner_disabled");
-    expect((failure as Error).message).toContain("switched off");
-    expect((failure as Error).message).not.toContain("managed_runner_disabled");
-    expect(runtime.stopDaemon).toHaveBeenCalledWith();
-    expect(runtime.writeModelToken).not.toHaveBeenCalled();
-  });
-
-  it("surfaces an unmapped refusal code unchanged", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(getAgentProfile).mockResolvedValue(profile({ available: false, reason_code: "future_refusal" }));
-    resume(runtime);
-    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
-      (error: unknown) => error
-    );
-    expect((failure as Error).message).toBe("future_refusal");
-  });
-
-  it.each([
-    ["empty token", { token: "", expires_at: FAR_FUTURE }],
-    ["malformed expiry", { token: "tok", expires_at: "not-a-date" }],
-    ["past expiry", { token: "tok", expires_at: "2000-01-01T00:00:00Z" }],
-  ])("rejects an unusable credential (%s)", async (_label, credential) => {
-    const runtime = fakeRuntime();
-    vi.mocked(postAgentToken).mockResolvedValue(credential);
-    resume(runtime);
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow(
-      "session expired"
-    );
-    expect(runtime.writeModelToken).not.toHaveBeenCalled();
-  });
-
-  it("skips renewal while the credential has life left", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await connectProject({ workspaceSlug: "ws", projectId: "other", client, runtime });
-    expect(postAgentToken).toHaveBeenCalledTimes(1);
-  });
-
-  it("refuses to connect while signed out", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow(
-      "signed out"
-    );
-  });
-
-  it("abandons a connection superseded by a newer sign-in", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    const pending = connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    const disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    resume(runtime);
-    await expect(pending).rejects.toThrow("signed out");
-    await disposal;
-  });
-
-  it("stops quietly when signed out mid-connection", async () => {
-    const runtime = fakeRuntime();
-    let disposal: Promise<void> | undefined;
-    vi.mocked(runtime.writeModelToken).mockImplementation(() => {
-      disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-      return Promise.resolve();
-    });
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await disposal;
-    expect(runtime.startDaemon).not.toHaveBeenCalled();
-  });
-
-  it("stops quietly when signed out before the daemon start", async () => {
-    const runtime = fakeRuntime();
-    let disposal: Promise<void> | undefined;
-    vi.mocked(runtime.enrollProject).mockImplementation(() => {
-      disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-      return Promise.resolve();
-    });
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await disposal;
-    expect(runtime.startDaemon).not.toHaveBeenCalled();
-  });
-
-  it("needs a resumed account for engine commands", async () => {
-    const runtime = fakeRuntime();
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow(
-      "signed out"
-    );
-  });
-
-  it("tears the runtime down on a 401 and rethrows", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    vi.mocked(getAgentProfile).mockRejectedValue(apiError(401));
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toMatchObject({
-      status: 401,
-    });
-    expect(runtime.signOutNative).toHaveBeenCalledWith();
-    expect(globalThis.sessionStorage.getItem(CACHE_KEY)).toBeNull();
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow(
-      "signed out"
-    );
-  });
-
-  it("still reports the 401 when the native sign-out fails", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(runtime.signOutNative).mockRejectedValue(new Error("host gone"));
-    resume(runtime);
-    vi.mocked(getAgentProfile).mockRejectedValue(apiError(401));
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toMatchObject({
-      status: 401,
-    });
-  });
-
-  it("leaves the runtime alone on other API failures", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    vi.mocked(getAgentProfile).mockRejectedValue(apiError(500));
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toMatchObject({
-      status: 500,
-    });
-    expect(runtime.signOutNative).not.toHaveBeenCalled();
-  });
-
-  it("leaves the runtime alone on transport failures", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    vi.mocked(getAgentProfile).mockRejectedValue(new TypeError("down"));
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow("down");
-    expect(runtime.signOutNative).not.toHaveBeenCalled();
-  });
-
-  it("survives an unwritable store", async () => {
-    const runtime = fakeRuntime();
-    const setItem = vi.fn(() => {
-      throw new Error("denied");
-    });
-    vi.stubGlobal("sessionStorage", { getItem: () => null, setItem, removeItem: () => undefined });
-    try {
+    for (const signIn of ["expiring", "expired"] as const) {
+      resetRuntimeServiceForTests();
+      const runtime = fakeRuntime(compatible(signIn));
       resume(runtime);
-      await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    } finally {
-      vi.unstubAllGlobals();
+      await refreshRuntime({ client, runtime });
+      expect(startDeviceGrant).toHaveBeenLastCalledWith(client, { scope: "engine" });
+      expect(approveDeviceCode).toHaveBeenLastCalledWith(client, "USER-1", { interactive: false });
+      expect(runtime.engineLogin).toHaveBeenCalledWith("device-1");
     }
-    expect(setItem).toHaveBeenCalled();
-    expect(runtime.startDaemon).toHaveBeenCalled();
+  });
+
+  it("does not renew for a daemon that is not the app's", async () => {
+    const runtime = fakeRuntime({ kind: "signed_out", hello: hello("expired") });
+    resume(runtime);
+    await refreshRuntime({ client, runtime });
+    expect(runtime.engineLogin).not.toHaveBeenCalled();
+  });
+
+  it("waits before retrying a failed renewal and never throws", async () => {
+    const runtime = fakeRuntime(compatible("expired"));
+    runtime.engineLogin.mockRejectedValue(new Error("cli failed"));
+    resume(runtime);
+    await discoverDaemon(runtime);
+    const start = Date.now();
+    await expect(renewEngineIfAllowed({ client, runtime }, start)).resolves.toBe(false);
+    await expect(renewEngineIfAllowed({ client, runtime }, start + 1_000)).resolves.toBe(false);
+    expect(runtime.engineLogin).toHaveBeenCalledTimes(1);
+    await renewEngineIfAllowed({ client, runtime }, start + SILENT_RENEW_RETRY_MS);
+    expect(runtime.engineLogin).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the last discovery when the shell call fails", async () => {
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await refreshRuntime({ client, runtime });
+    runtime.discover.mockRejectedValueOnce(new Error("socket gone"));
+    await expect(refreshRuntime({ client, runtime })).resolves.toBeUndefined();
+    expect(compatibleHello()).not.toBeNull();
   });
 });
 
 describe("ensureChatRuntime", () => {
+  it("passes for a compatible daemon with an active engine, setting nothing up", async () => {
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).resolves.toBeUndefined();
+    expect(runtime.installService).not.toHaveBeenCalled();
+    expect(runtime.addEngineRunner).not.toHaveBeenCalled();
+  });
+
+  it("refuses with the explicit sign-in the engine state needs", async () => {
+    const turnOn = fakeRuntime(compatible("never"));
+    resume(turnOn);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: turnOn })).rejects.toThrow(
+      ENGINE_TURN_ON_TEXT
+    );
+    resetRuntimeServiceForTests();
+    const signedOut = fakeRuntime(compatible("signed_out"));
+    resume(signedOut);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: signedOut })).rejects.toThrow(
+      ENGINE_SIGNED_OUT_TEXT
+    );
+    expect(signedOut.engineLogin).not.toHaveBeenCalled();
+  });
+
+  it("names the engine's unavailability reason", async () => {
+    const runtime = fakeRuntime(
+      compatible("active", {
+        engine: "unavailable",
+        engine_detail: { state: "unavailable", sign_in_state: "active", reason_code: "managed_runner_disabled" },
+      })
+    );
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toBeInstanceOf(
+      EngineUnavailableError
+    );
+  });
+
+  it("refuses a daemon signed in as someone else without offering set-up", async () => {
+    const prompt = vi.fn();
+    registerSetUpPrompt(prompt);
+    const runtime = fakeRuntime({
+      kind: "account_mismatch",
+      daemon_account: "other@test",
+      daemon_cloud_url: CLOUD,
+      hosts_runners: false,
+    });
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("other@test");
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("asks for set-up when there is no daemon and refuses when declined", async () => {
+    const prompt = vi.fn((_request: unknown, done: (ok: boolean) => void) => done(false));
+    registerSetUpPrompt(prompt);
+    const runtime = fakeRuntime(NO_DAEMON);
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow(
+      "Pi Dash is not set up on this computer yet."
+    );
+    expect(prompt).toHaveBeenCalledWith({ reason: "chat", workspaceSlug: "ws" }, expect.any(Function));
+    expect(runtime.installService).not.toHaveBeenCalled();
+  });
+
+  it("refuses without a consent dialog: nothing is set up silently", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("not set up");
+    expect(runtime.installService).not.toHaveBeenCalled();
+  });
+
+  it("continues once the user accepted set-up", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli();
+    registerSetUpPrompt((request, done) => {
+      runtime.discover.mockResolvedValue(compatible());
+      void setUpDaemon({ client, runtime, cli, workspaceSlug: request.workspaceSlug }).then(() => done(true));
+    });
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).resolves.toBeUndefined();
+    expect(runtime.installService).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("setUpDaemon", () => {
+  it("installs, signs in to the workspace, installs the service and the engine, in order", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
+    const steps: DaemonSetUpStep[] = [];
+    resume(runtime);
+    runtime.ensureEngine.mockImplementation(async () => {
+      runtime.discover.mockResolvedValue(compatible());
+    });
+    await setUpDaemon({ client, runtime, cli, workspaceSlug: "ws", onStep: (step) => steps.push(step) });
+    expect(steps).toEqual(["install_cli", "sign_in", "service", "engine", "done"]);
+    expect(cli.install).toHaveBeenCalledTimes(1);
+    expect(startDeviceGrant).toHaveBeenCalledWith(client);
+    expect(approveDeviceCode).toHaveBeenCalledWith(client, "USER-1", { interactive: false, workspaceSlug: "ws" });
+    expect(cli.login).toHaveBeenCalledWith({ deviceCode: "device-1", cloudUrl: CLOUD, workspace: "ws" });
+    expect(runtime.installService).toHaveBeenCalledTimes(1);
+    expect(runtime.ensureEngine).toHaveBeenCalledTimes(1);
+    expect(compatibleHello()).not.toBeNull();
+  });
+
+  it("skips installing and signing in when the daemon is already the account's", async () => {
+    const runtime = fakeRuntime(compatible());
+    const cli = fakeCli(true);
+    resume(runtime);
+    await setUpDaemon({ client, runtime, cli, workspaceSlug: "ws" });
+    expect(cli.install).not.toHaveBeenCalled();
+    expect(cli.login).not.toHaveBeenCalled();
+    expect(runtime.installService).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses without the command-line capability or before resume", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    await expect(setUpDaemon({ client, runtime, cli: fakeCli(), workspaceSlug: "ws" })).rejects.toThrow("signed out");
+    resume(runtime);
+    await expect(setUpDaemon({ client, runtime, cli: undefined, workspaceSlug: "ws" })).rejects.toThrow(
+      "cannot set up"
+    );
+  });
+});
+
+describe("turning the engine on for a project", () => {
+  it("reuses the engine runner the computer already has", async () => {
+    const runtime = fakeRuntime();
+    runtime.localRunners.mockResolvedValue([
+      { name: "own", runner_id: "a", workspace_slug: "ws", project_slug: "PROJ", working_dir: "/a", agent: "codex" },
+      { name: "eng", runner_id: "b", workspace_slug: "ws", project_slug: "PROJ", working_dir: "/b", agent: "engine" },
+    ]);
+    resume(runtime);
+    await expect(
+      turnOnEngineForProject({ client, runtime, workspaceSlug: "ws", project: "PROJ" })
+    ).resolves.toMatchObject({
+      runner_id: "b",
+    });
+    expect(runtime.addEngineRunner).not.toHaveBeenCalled();
+  });
+
+  it("adds an engine runner when the project has none", async () => {
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await turnOnEngineForProject({ client, runtime, workspaceSlug: "ws", project: "PROJ" });
+    expect(runtime.addEngineRunner).toHaveBeenCalledWith({ workspace: "ws", project: "PROJ", workingDir: undefined });
+  });
+});
+
+describe("refreshModelCredential", () => {
   it("is inert without the desktop capability", async () => {
-    await ensureChatRuntime({ workspaceSlug: "ws", client });
-    expect(listProjects).not.toHaveBeenCalled();
+    await refreshModelCredential({ client });
+    expect(startDeviceGrant).not.toHaveBeenCalled();
   });
 
-  it("enrolls chat against the workspace default project", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([
-      projectRow({ identifier: "OLD", created_at: "2024-01-01T00:00:00Z" }),
-      projectRow({ identifier: "NEW", created_at: "2025-01-01T00:00:00Z", is_default: true }),
-    ]);
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(runtime.enrollProject).toHaveBeenCalledWith({
-      account: "u1",
-      workspace: "ws",
-      project: "NEW",
-      hostLabel: "h",
-    });
+  it("renews the engine sign-in silently when the daemon reports expiring or expired", async () => {
+    for (const signIn of ["expiring", "expired"] as const) {
+      resetRuntimeServiceForTests();
+      const runtime = fakeRuntime(compatible(signIn));
+      resume(runtime);
+      await refreshModelCredential({ client, runtime });
+      expect(startDeviceGrant).toHaveBeenLastCalledWith(client, { scope: "engine" });
+      expect(runtime.engineLogin).toHaveBeenCalledWith("device-1");
+    }
   });
 
-  it("enrolls chat against the oldest project without a default", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([
-      projectRow({ identifier: "NEW", created_at: "2025-06-01T00:00:00Z" }),
-      projectRow({ identifier: "OLD", created_at: "2024-01-01T00:00:00Z" }),
-      projectRow({ identifier: "MID", created_at: "2024-06-01T00:00:00Z" }),
-    ]);
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(runtime.enrollProject).toHaveBeenCalledWith({
-      account: "u1",
-      workspace: "ws",
-      project: "OLD",
-      hostLabel: "h",
-    });
+  it("rejects with the sign-in reason when the daemon allows no renewal", async () => {
+    for (const signIn of ["active", "never", "signed_out", "revoked"] as const) {
+      resetRuntimeServiceForTests();
+      const runtime = fakeRuntime(compatible(signIn));
+      resume(runtime);
+      await expect(refreshModelCredential({ client, runtime })).rejects.toThrow(
+        "The built-in engine needs a new sign-in."
+      );
+      expect(runtime.engineLogin).not.toHaveBeenCalled();
+    }
   });
 
-  it("prefers live projects but accepts archived ones when alone", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([
-      projectRow({ identifier: "LIVE", created_at: "2025-01-01T00:00:00Z" }),
-      projectRow({ identifier: "OLD", created_at: "2024-01-01T00:00:00Z", archived_at: "2025-01-01T00:00:00Z" }),
-    ]);
+  it("rejects with the sign-in reason when the renewal itself fails", async () => {
+    const runtime = fakeRuntime(compatible("expired"));
+    runtime.engineLogin.mockRejectedValue(new Error("cli failed"));
     resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(runtime.enrollProject).toHaveBeenCalledWith(expect.objectContaining({ project: "LIVE" }));
-    vi.mocked(listProjects).mockResolvedValue([
-      projectRow({ identifier: "OLD", created_at: "2024-01-01T00:00:00Z", archived_at: "2025-01-01T00:00:00Z" }),
-    ]);
-    await ensureChatRuntime({ workspaceSlug: "ws2", client, runtime });
-    expect(runtime.enrollProject).toHaveBeenCalledWith(expect.objectContaining({ workspace: "ws2", project: "OLD" }));
+    await expect(refreshModelCredential({ client, runtime })).rejects.toThrow(
+      "The built-in engine needs a new sign-in."
+    );
+  });
+});
+
+describe("model top-up page", () => {
+  it("reads the top-up page off the agent profile on refresh", async () => {
+    const runtime = fakeRuntime();
+    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
+    resume(runtime);
+    expect(getModelTopUpUrl()).toBe("");
+    await refreshRuntime({ client, runtime });
+    expect(getModelTopUpUrl()).toBe("https://hub.test/credits");
   });
 
-  it("asks for a project when the workspace has none", async () => {
+  it("keeps the previous page when the profile read fails", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([]);
+    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
     resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("needs a project");
+    await refreshRuntime({ client, runtime });
+    vi.mocked(getAgentProfile).mockRejectedValue(new Error("offline"));
+    await refreshRuntime({ client, runtime });
+    expect(getModelTopUpUrl()).toBe("https://hub.test/credits");
   });
 
-  it("rides on a project the user connected themselves", async () => {
+  it("forgets the page on an account switch and on sign-out", async () => {
     const runtime = fakeRuntime();
+    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/credits" }));
     resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(listProjects).not.toHaveBeenCalled();
-    expect(runtime.enrollProject).toHaveBeenLastCalledWith(expect.objectContaining({ project: "ACME" }));
-  });
-
-  it("reuses a ready workspace without re-enrolling", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([projectRow()]);
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(runtime.checkHost).toHaveBeenCalledTimes(1);
-    expect(createDesktopEnroll).toHaveBeenCalledTimes(1);
-    expect(postAgentToken).toHaveBeenCalledTimes(1);
-    expect(runtime.startDaemon).toHaveBeenCalledTimes(2);
-  });
-
-  it("renews an expiring credential on the fast path", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([projectRow()]);
-    vi.mocked(postAgentToken).mockResolvedValue(token(new Date(Date.now() + 60_000).toISOString()));
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(postAgentToken).toHaveBeenCalledTimes(2);
-    expect(runtime.startDaemon).toHaveBeenCalledTimes(2);
-  });
-
-  it("refuses while signed out", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("signed out");
-  });
-
-  it("stops quietly when signed out mid-sequence", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([projectRow()]);
-    let disposal: Promise<void> | undefined;
-    vi.mocked(runtime.writeModelToken).mockImplementation(() => {
-      disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-      return Promise.resolve();
-    });
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    await disposal;
-    expect(listProjects).not.toHaveBeenCalled();
-    expect(runtime.startDaemon).not.toHaveBeenCalled();
-  });
-
-  it("stops quietly when signed out before the daemon start", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([projectRow()]);
-    let disposal: Promise<void> | undefined;
-    vi.mocked(runtime.enrollProject).mockImplementation(() => {
-      disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-      return Promise.resolve();
-    });
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    await disposal;
-    expect(runtime.startDaemon).not.toHaveBeenCalled();
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(runtime.checkHost).toHaveBeenCalledTimes(2);
-  });
-
-  it("stops quietly when signed out on the fast path", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([projectRow()]);
-    vi.mocked(postAgentToken).mockResolvedValue(token(new Date(Date.now() + 60_000).toISOString()));
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    let disposal: Promise<void> | undefined;
-    vi.mocked(runtime.writeModelToken).mockImplementation(() => {
-      disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-      return Promise.resolve();
-    });
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    await disposal;
-    expect(runtime.startDaemon).toHaveBeenCalledTimes(1);
+    await refreshRuntime({ client, runtime });
+    resume(runtime, "u2");
+    expect(getModelTopUpUrl()).toBe("");
+    vi.mocked(getAgentProfile).mockResolvedValue(agentProfile({ top_up_url: "https://hub.test/other" }));
+    await refreshRuntime({ client, runtime });
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    expect(getModelTopUpUrl()).toBe("");
   });
 });
 
 describe("prepareAgentRun", () => {
-  const fastPoll = { maxAttempts: 3, intervalMs: 0, sleep: vi.fn(async () => undefined) };
+  const target = { workspaceSlug: "ws", projectId: "p1", issueId: "i1" };
 
-  it("is inert without the desktop capability", async () => {
-    await prepareAgentRun({ target: { workspaceSlug: "ws", projectId: "p", issueId: "i" }, client });
-    expect(getIssue).not.toHaveBeenCalled();
-  });
-
-  it("does nothing when the issue pins another executor", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(getIssue).mockResolvedValue(issue({ agent_executor: "local_runner" }));
-    resume(runtime);
-    await prepareAgentRun({ target: { workspaceSlug: "ws", projectId: "p", issueId: "i" }, client, runtime });
-    expect(runtime.checkHost).not.toHaveBeenCalled();
-  });
-
-  it("prepares when the issue pins the bundled agent", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(getIssue).mockResolvedValue(issue({ agent_executor: "managed_runner" }));
-    vi.mocked(getProject).mockResolvedValue(
-      projectDetail({
-        agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
-      })
-    );
-    resume(runtime);
-    await prepareAgentRun({
-      target: { workspaceSlug: "ws", projectId: "p", issueId: "i" },
-      client,
-      runtime,
-      heartbeatPoll: fastPoll,
-    });
-    expect(runtime.startDaemon).toHaveBeenCalled();
-  });
-
-  it("falls back to the project default without a pin", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(getProject).mockResolvedValue(
-      projectDetail({
-        default_agent_executor: "managed_runner",
-        agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
-      })
-    );
-    resume(runtime);
-    await prepareAgentRun({
-      target: { workspaceSlug: "ws", projectId: "p", issueId: "i" },
-      client,
-      runtime,
-      heartbeatPoll: fastPoll,
-    });
-    expect(runtime.startDaemon).toHaveBeenCalled();
-  });
-
-  it("does nothing when neither pin nor default names the bundled agent", async () => {
+  it("leaves any other executor alone", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
-    await prepareAgentRun({ target: { workspaceSlug: "ws", projectId: "p", issueId: "i" }, client, runtime });
-    expect(runtime.checkHost).not.toHaveBeenCalled();
-    expect(vi.mocked(getIssue)).toHaveBeenCalled();
+    vi.mocked(getIssue).mockResolvedValue(issue(null));
+    vi.mocked(getProject).mockResolvedValue(project());
+    await prepareAgentRun({ client, runtime, target });
+    expect(runtime.discover).not.toHaveBeenCalled();
+    expect(runtime.addEngineRunner).not.toHaveBeenCalled();
   });
 
-  it("waits for the first heartbeat before returning", async () => {
+  it("enrols the engine on first use and waits for the server to see it", async () => {
     const runtime = fakeRuntime();
+    resume(runtime);
+    vi.mocked(getIssue).mockResolvedValue(issue("managed_runner"));
+    vi.mocked(getProject)
+      .mockResolvedValueOnce(project())
+      .mockResolvedValueOnce(
+        project({ agent_executor_options: [{ kind: "managed_runner", available: false }] } as never)
+      )
+      .mockResolvedValueOnce(
+        project({ agent_executor_options: [{ kind: "managed_runner", available: true }] } as never)
+      );
     const sleep = vi.fn(async () => undefined);
-    vi.mocked(getIssue).mockResolvedValue(issue({ agent_executor: "managed_runner" }));
-    vi.mocked(getProject)
-      .mockResolvedValueOnce(projectDetail())
-      .mockResolvedValueOnce(projectDetail())
-      .mockResolvedValueOnce(
-        projectDetail({ agent_executor_options: [{ kind: "local_runner", available: true, reason_code: "" }] })
-      )
-      .mockResolvedValueOnce(
-        projectDetail({ agent_executor_options: [{ kind: "managed_runner", available: false, reason_code: "x" }] })
-      )
-      .mockResolvedValue(
-        projectDetail({ agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }] })
-      );
-    resume(runtime);
-    await prepareAgentRun({
-      target: { workspaceSlug: "ws", projectId: "p", issueId: "i" },
-      client,
-      runtime,
-      heartbeatPoll: { maxAttempts: 5, intervalMs: 0, sleep },
-    });
-    expect(sleep).toHaveBeenCalledTimes(2);
+    await prepareAgentRun({ client, runtime, target, heartbeatPoll: { sleep, intervalMs: 1 } });
+    expect(runtime.addEngineRunner).toHaveBeenCalledWith({ workspace: "ws", project: "PROJ", workingDir: undefined });
+    expect(sleep).toHaveBeenCalledTimes(1);
   });
 
-  it("uses the default heartbeat wait when none is given", async () => {
+  it("follows the project default when the issue pins nothing", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(getIssue).mockResolvedValue(issue({ agent_executor: "managed_runner" }));
+    resume(runtime);
+    vi.mocked(getIssue).mockResolvedValue(issue(null));
     vi.mocked(getProject).mockResolvedValue(
-      projectDetail({
-        agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
-      })
+      project({
+        default_agent_executor: "managed_runner",
+        agent_executor_options: [{ kind: "managed_runner", available: true }],
+      } as never)
     );
-    resume(runtime);
-    await prepareAgentRun({ target: { workspaceSlug: "ws", projectId: "p", issueId: "i" }, client, runtime });
-    expect(runtime.startDaemon).toHaveBeenCalled();
+    await prepareAgentRun({ client, runtime, target });
+    expect(runtime.addEngineRunner).toHaveBeenCalledTimes(1);
   });
 
-  it("sleeps between heartbeat polls on the default wait", async () => {
+  it("gives up after the heartbeat wait", async () => {
     const runtime = fakeRuntime();
-    vi.mocked(getIssue).mockResolvedValue(issue({ agent_executor: "managed_runner" }));
-    vi.mocked(getProject)
-      .mockResolvedValueOnce(projectDetail())
-      .mockResolvedValueOnce(projectDetail())
-      .mockResolvedValueOnce(projectDetail())
-      .mockResolvedValue(
-        projectDetail({ agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }] })
-      );
     resume(runtime);
-    await prepareAgentRun({ target: { workspaceSlug: "ws", projectId: "p", issueId: "i" }, client, runtime });
-    expect(runtime.startDaemon).toHaveBeenCalled();
-  }, 10000);
-
-  it("asks for a retry when the daemon never appears", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(getIssue).mockResolvedValue(issue({ agent_executor: "managed_runner" }));
-    resume(runtime);
+    vi.mocked(getIssue).mockResolvedValue(issue("managed_runner"));
+    vi.mocked(getProject).mockResolvedValue(project());
     await expect(
-      prepareAgentRun({
-        target: { workspaceSlug: "ws", projectId: "p", issueId: "i" },
-        client,
-        runtime,
-        heartbeatPoll: fastPoll,
-      })
-    ).rejects.toThrow("still connecting");
-  });
-
-  it("aborts the wait when signed out", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(getIssue).mockResolvedValue(issue({ agent_executor: "managed_runner" }));
-    resume(runtime);
-    const sleep = vi.fn(async () => {
-      await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    });
-    await expect(
-      prepareAgentRun({
-        target: { workspaceSlug: "ws", projectId: "p", issueId: "i" },
-        client,
-        runtime,
-        heartbeatPoll: { maxAttempts: 3, intervalMs: 0, sleep },
-      })
-    ).rejects.toThrow("signed out");
+      prepareAgentRun({ client, runtime, target, heartbeatPoll: { maxAttempts: 2, sleep: async () => undefined } })
+    ).rejects.toThrow(ENGINE_STILL_CONNECTING_TEXT);
   });
 });
 
-describe("refreshRuntime", () => {
-  it("is inert without the desktop capability", async () => {
-    await refreshRuntime({ client });
-    expect(getAgentProfile).not.toHaveBeenCalled();
-  });
-
-  it("does nothing while signed out or without enrolled workspaces", async () => {
-    const runtime = fakeRuntime();
+describe("signInWorkspace and sign-out gating", () => {
+  it("signs the daemon in to one more workspace with an approved grant", async () => {
+    const runtime = fakeRuntime(compatible());
+    const cli = fakeCli();
     resume(runtime);
-    await refreshRuntime({ client, runtime });
-    expect(getAgentProfile).not.toHaveBeenCalled();
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    vi.mocked(getAgentProfile).mockClear();
-    await refreshRuntime({ client, runtime });
-    expect(getAgentProfile).not.toHaveBeenCalled();
-  });
-
-  it("refreshes the setup and restarts every workspace daemon", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await connectProject({ workspaceSlug: "ws2", projectId: "p", client, runtime });
-    vi.mocked(getAgentProfile).mockClear();
-    vi.mocked(runtime.startDaemon).mockClear();
-    await refreshRuntime({ client, runtime });
-    expect(getAgentProfile).toHaveBeenCalledTimes(1);
-    expect(postAgentToken).toHaveBeenCalledTimes(1);
-    expect(runtime.startDaemon).toHaveBeenCalledTimes(2);
-  });
-
-  it("renews an expiring credential on refresh", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(postAgentToken).mockResolvedValue(token(new Date(Date.now() + 60_000).toISOString()));
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await refreshRuntime({ client, runtime });
-    expect(postAgentToken).toHaveBeenCalledTimes(2);
-  });
-
-  it("drops readiness and rethrows when the refresh fails", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(listProjects).mockResolvedValue([projectRow()]);
-    resume(runtime);
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    vi.mocked(getAgentProfile).mockRejectedValue(apiError(500));
-    await expect(refreshRuntime({ client, runtime })).rejects.toMatchObject({ status: 500 });
-    expect(runtime.stopDaemon).not.toHaveBeenCalled();
-    vi.mocked(getAgentProfile).mockResolvedValue(profile());
-    await ensureChatRuntime({ workspaceSlug: "ws", client, runtime });
-    expect(runtime.checkHost).toHaveBeenCalledTimes(2);
-  });
-
-  it("stops the daemon when the credential expired mid-refresh", async () => {
-    const runtime = fakeRuntime();
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-      vi.mocked(postAgentToken).mockResolvedValue(token("2026-01-01T00:01:00Z"));
-      resume(runtime);
-      await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-      vi.setSystemTime(new Date("2026-01-01T00:02:00Z"));
-      vi.mocked(getAgentProfile).mockRejectedValue(apiError(500));
-      await expect(refreshRuntime({ client, runtime })).rejects.toMatchObject({ status: 500 });
-      expect(runtime.stopDaemon).toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("stops quietly when signed out before the refresh runs", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    vi.mocked(getAgentProfile).mockClear();
-    const pending = refreshRuntime({ client, runtime });
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    await pending;
-    expect(getAgentProfile).not.toHaveBeenCalled();
-  });
-
-  it("stops quietly when signed out mid-refresh", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(postAgentToken).mockResolvedValue(token(new Date(Date.now() + 60_000).toISOString()));
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    let disposal: Promise<void> | undefined;
-    vi.mocked(runtime.writeModelToken).mockImplementation(() => {
-      disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-      return Promise.resolve();
+    await discoverDaemon(runtime);
+    await signInWorkspace({ client, runtime, cli, workspaceSlug: "ws" });
+    expect(vi.mocked(startDeviceGrant)).toHaveBeenCalledWith(client);
+    expect(vi.mocked(approveDeviceCode)).toHaveBeenCalledWith(client, "USER-1", {
+      interactive: false,
+      workspaceSlug: "ws",
     });
-    vi.mocked(runtime.startDaemon).mockClear();
-    vi.mocked(getAgentProfile).mockClear();
-    await refreshRuntime({ client, runtime });
-    await disposal;
-    expect(getAgentProfile).toHaveBeenCalled();
-    expect(runtime.startDaemon).not.toHaveBeenCalled();
+    expect(cli.login).toHaveBeenCalledWith({ deviceCode: "device-1", cloudUrl: CLOUD, workspace: "ws" });
+    expect(runtime.reloadCredentials).toHaveBeenCalledTimes(1);
+    expect(runtime.discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("keys the engine home by user id, else e-mail", async () => {
+    expect(daemonAccountKey(hello())).toBe("u1");
+    expect(daemonAccountKey({ ...hello(), account: { cloud_url: CLOUD, email: "e@test" } })).toBe("e@test");
+    expect(daemonAccountKey(null)).toBeUndefined();
+  });
+
+  it("offers computer sign-out only when the daemon is the account's", async () => {
+    const runtime = fakeRuntime(compatible());
+    resume(runtime);
+    await discoverDaemon(runtime);
+    expect(canSignOutComputer()).toBe(true);
+    resetRuntimeServiceForTests();
+    expect(canSignOutComputer()).toBe(false);
+    resume(runtime);
+    await discoverDaemon(fakeRuntime(NO_DAEMON));
+    expect(canSignOutComputer()).toBe(false);
   });
 });
 
 describe("disposeRuntimeForSignOut", () => {
-  it("is inert without the desktop capability", async () => {
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client });
-    expect(deleteDesktopEnroll).not.toHaveBeenCalled();
-  });
-
-  it("tears the runtime down in two passes", async () => {
+  it("deletes this account's chat history only when asked", async () => {
     const runtime = fakeRuntime();
+    const chat = { clearHistory: vi.fn(async () => undefined) };
     resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    expect(runtime.signOutNative).toHaveBeenNthCalledWith(1, undefined);
-    expect(deleteDesktopEnroll).toHaveBeenCalledWith(client, "h");
-    expect(runtime.signOutNative).toHaveBeenNthCalledWith(2);
-    expect(globalThis.sessionStorage.getItem(CACHE_KEY)).toBeNull();
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toThrow(
-      "signed out"
-    );
-  });
-
-  it("passes history deletion only when the dialog chose it", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: true }, client, runtime });
-    expect(runtime.signOutNative).toHaveBeenNthCalledWith(1, { deleteChatHistoryAccount: "u1" });
-  });
-
-  it("keeps history without a resumed account", async () => {
-    const runtime = fakeRuntime();
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: true }, client, runtime });
-    expect(runtime.signOutNative).toHaveBeenNthCalledWith(1, undefined);
-    expect(deleteDesktopEnroll).not.toHaveBeenCalled();
-  });
-
-  it("completes when the server revocation fails", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(deleteDesktopEnroll).mockRejectedValue(apiError(401));
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    expect(runtime.signOutNative).toHaveBeenCalledTimes(2);
-    expect(globalThis.sessionStorage.getItem(CACHE_KEY)).toBeNull();
-  });
-
-  it("retries the native teardown when the first pass fails", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(runtime.signOutNative).mockRejectedValueOnce(new Error("host busy")).mockResolvedValue(undefined);
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    expect(deleteDesktopEnroll).toHaveBeenCalledWith(client, "h");
-    expect(runtime.signOutNative).toHaveBeenCalledTimes(2);
-  });
-
-  it("completes when the second native pass fails", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(runtime.signOutNative).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("host busy"));
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    expect(globalThis.sessionStorage.getItem(CACHE_KEY)).toBeNull();
-  });
-
-  it("completes when the mode stash fails", async () => {
-    const runtime = fakeRuntime();
-    vi.mocked(runtime.saveApprovalModes).mockRejectedValue(new Error("host busy"));
-    globalThis.localStorage.setItem("pidash:chat-approval-mode:r1", "ask");
-    resume(runtime);
-    await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    expect(runtime.signOutNative).toHaveBeenCalled();
-  });
-
-  it("survives an unwritable store", async () => {
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    const removeItem = vi.fn(() => {
-      throw new Error("denied");
+    await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      chat,
+      choice: { deleteChatHistory: false, signOutComputer: false },
     });
-    vi.stubGlobal("sessionStorage", { getItem: () => null, setItem: () => undefined, removeItem });
-    try {
-      await disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    } finally {
-      vi.unstubAllGlobals();
-    }
-    expect(removeItem).toHaveBeenCalled();
-    expect(runtime.signOutNative).toHaveBeenCalled();
-  });
-
-  it("cleans up only after an in-flight enrollment settles", async () => {
-    const runtime = fakeRuntime();
-    let releaseProfile!: (value: AgentProfile) => void;
-    const profileGate = new Promise<AgentProfile>((resolve) => {
-      releaseProfile = resolve;
+    expect(chat.clearHistory).not.toHaveBeenCalled();
+    resume(runtime);
+    await disposeRuntimeForSignOut({
+      client,
+      runtime,
+      chat,
+      choice: { deleteChatHistory: true, signOutComputer: false },
     });
-    vi.mocked(getAgentProfile).mockReturnValue(profileGate);
-    resume(runtime);
-    const pending = connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    await waitFor(() => expect(getAgentProfile).toHaveBeenCalled());
-    const disposal = disposeRuntimeForSignOut({ choice: { deleteChatHistory: false }, client, runtime });
-    releaseProfile(profile());
-    await pending;
-    await disposal;
-    const tokenOrder = vi.mocked(runtime.writeModelToken).mock.invocationCallOrder[0] ?? 0;
-    const deleteOrder = vi.mocked(deleteDesktopEnroll).mock.invocationCallOrder[0] ?? 0;
-    expect(tokenOrder).toBeGreaterThan(0);
-    expect(deleteOrder).toBeGreaterThan(tokenOrder);
-  });
-});
-
-describe("cloud credential path", () => {
-  it("reads the cloud CSRF path before minting the desktop credential", async () => {
-    editionFlags.current = { "cloud-csrf": true };
-    const runtime = fakeRuntime();
-    resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(getCloudCsrfToken).toHaveBeenCalledWith(client);
-    expect(postAgentToken).toHaveBeenCalledWith(client, { csrfToken: "cloud-csrf" });
-    expect(vi.mocked(postAgentToken).mock.invocationCallOrder[0]).toBeGreaterThan(
-      vi.mocked(getCloudCsrfToken).mock.invocationCallOrder[0] ?? 0
-    );
-    expect(runtime.writeModelToken).toHaveBeenCalledWith("tok");
+    expect(chat.clearHistory).toHaveBeenCalledWith("u1");
   });
 
-  it("keeps the client's own CSRF plumbing off the cloud", async () => {
+  it("leaves the daemon and engine signed in and forgets discovery", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
-    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
-    expect(getCloudCsrfToken).not.toHaveBeenCalled();
-    expect(postAgentToken).toHaveBeenCalledWith(client);
-  });
-});
-
-describe("agent credential refusals", () => {
-  const refusal = (status: number, body: unknown) => new ApiError({ status, code: "http", message: "refused", body });
-
-  it("names the self-supplied-lane refusal when the mint answers with it", async () => {
-    vi.mocked(postAgentToken).mockRejectedValue(refusal(409, { error: "byok_not_supported_on_desktop" }));
-    const runtime = fakeRuntime();
-    resume(runtime);
-    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
-      (error: unknown) => error
-    );
-    expect(failure).toBeInstanceOf(EngineUnavailableError);
-    expect((failure as EngineUnavailableError).code).toBe("byok_not_supported_on_desktop");
-    expect((failure as Error).message).toMatch(/hosted model lane/i);
-    expect(runtime.writeModelToken).not.toHaveBeenCalled();
+    await discoverDaemon(runtime);
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    expect(runtime.engineLogin).not.toHaveBeenCalled();
+    expect(compatibleHello()).toBeNull();
+    await expect(discoverDaemon(runtime)).resolves.toBeNull();
+    // The account stays readable until the page navigates away.
+    expect(getRuntimeAccount()).toBe("u1");
   });
 
-  it("names a revoked gateway session", async () => {
-    vi.mocked(postAgentToken).mockRejectedValue(refusal(401, { error: "gateway_session_revoked" }));
+  it("never rejects when the history delete or the mode stash fails", async () => {
     const runtime = fakeRuntime();
+    runtime.saveApprovalModes.mockRejectedValue(new Error("stash failed"));
+    globalThis.localStorage?.setItem("pidash:chat-approval-mode:r1", "ask");
+    const chat = { clearHistory: vi.fn(async () => Promise.reject(new Error("io"))) };
     resume(runtime);
-    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
-      (error: unknown) => error
-    );
-    expect(failure).toBeInstanceOf(EngineUnavailableError);
-    expect((failure as EngineUnavailableError).message).toMatch(/sign in again/i);
-    // A 401 through the recovery path still signs the native side out.
-    expect(runtime.signOutNative).toHaveBeenCalledWith();
+    await expect(
+      disposeRuntimeForSignOut({ client, runtime, chat, choice: { deleteChatHistory: true, signOutComputer: false } })
+    ).resolves.toBeUndefined();
   });
 
-  it("names the browser-session refusal the profile gate answers", async () => {
-    vi.mocked(getAgentProfile).mockRejectedValue(refusal(403, { error: "desktop_session_required" }));
+  it("signs out the computer only when ticked, and never rejects when it fails", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
-    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
-      (error: unknown) => error
-    );
-    expect(failure).toBeInstanceOf(EngineUnavailableError);
-    expect((failure as EngineUnavailableError).message).toMatch(/desktop app/i);
-    expect(postAgentToken).not.toHaveBeenCalled();
-  });
-
-  it("keeps a refusal code this build does not name as the raw failure", async () => {
-    const refusalError = refusal(409, { error: "feature_off" });
-    vi.mocked(postAgentToken).mockRejectedValue(refusalError);
-    const runtime = fakeRuntime();
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    expect(runtime.signOutComputer).not.toHaveBeenCalled();
     resume(runtime);
-    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
-      (error: unknown) => error
-    );
-    expect(failure).toBe(refusalError);
-    expect(failure).not.toBeInstanceOf(EngineUnavailableError);
-  });
-
-  it("leaves transport failures alone", async () => {
-    const transport = new ApiError({ status: 0, code: "network", message: "offline" });
-    vi.mocked(postAgentToken).mockRejectedValue(transport);
-    const runtime = fakeRuntime();
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } });
+    expect(runtime.signOutComputer).toHaveBeenCalledTimes(1);
     resume(runtime);
-    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toBe(transport);
+    runtime.signOutComputer.mockRejectedValue(new Error("logout failed"));
+    await expect(
+      disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } })
+    ).resolves.toBeUndefined();
   });
 });

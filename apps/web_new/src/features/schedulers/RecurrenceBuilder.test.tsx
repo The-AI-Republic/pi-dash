@@ -64,6 +64,61 @@ describe("RecurrenceBuilder", () => {
     expect(onChange).toHaveBeenLastCalledWith("FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=19");
   });
 
+  it("offers Hour between None and Day and serializes it hourly", async () => {
+    const user = userEvent.setup();
+    const { onChange } = setup("FREQ=DAILY");
+    const unit = screen.getByLabelText("Repeat unit");
+    expect(Array.from(unit.querySelectorAll("option"), (option) => option.textContent)).toEqual([
+      "Does not repeat",
+      "Hour",
+      "Day",
+      "Week",
+      "Month",
+      "Year",
+    ]);
+
+    await user.selectOptions(unit, "hour");
+    expect(onChange).toHaveBeenLastCalledWith("FREQ=HOURLY");
+    fireEvent.change(screen.getByLabelText("Repeat interval"), { target: { value: "2" } });
+    expect(onChange).toHaveBeenLastCalledWith("FREQ=HOURLY;INTERVAL=2");
+  });
+
+  it("opens a stored hourly rule in the builder with its helper", () => {
+    const { onChange } = setup("FREQ=HOURLY;INTERVAL=2");
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Repeat unit")).toHaveValue("hour");
+    expect(screen.getByLabelText("Repeat interval")).toHaveValue(2);
+    expect(screen.getByText("Runs every 2 hours from the start time")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Monday" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Monthly pattern")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Recurrence (RRULE)")).not.toBeVisible();
+  });
+
+  it("keeps the end conditions for the hour unit", async () => {
+    const user = userEvent.setup();
+    const { onChange } = setup("FREQ=HOURLY");
+    expect(screen.getByText("Runs every hour from the start time")).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "After" }));
+    expect(onChange).toHaveBeenLastCalledWith("FREQ=HOURLY;COUNT=10");
+    await user.click(screen.getByRole("radio", { name: "On date" }));
+    expect(onChange).toHaveBeenLastCalledWith("FREQ=HOURLY;UNTIL=20271019T235959Z");
+  });
+
+  it("flags an hourly step outside 1 to 23 and clears it back in range", () => {
+    const { onChange } = setup("FREQ=HOURLY");
+    const interval = screen.getByLabelText("Repeat interval");
+    fireEvent.change(interval, { target: { value: "24" } });
+    expect(onChange).toHaveBeenLastCalledWith("FREQ=HOURLY;INTERVAL=24");
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Use a whole number from 1 to 23; longer steps fit the Day unit.");
+    expect(screen.getByLabelText("Repeat interval")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.queryByText(/Runs every/)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Repeat interval"), { target: { value: "6" } });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("Runs every 6 hours from the start time")).toBeInTheDocument();
+  });
+
   it("switches to the single-shot form and hides the repeat count", async () => {
     const user = userEvent.setup();
     const { onChange } = setup("FREQ=DAILY");
@@ -160,11 +215,11 @@ describe("RecurrenceBuilder", () => {
   });
 
   it("opens an inexpressible rule in raw mode and never rewrites it on open", () => {
-    const { onChange } = setup("FREQ=HOURLY");
+    const { onChange } = setup("FREQ=HOURLY;BYHOUR=9");
     expect(onChange).not.toHaveBeenCalled();
     const raw = screen.getByLabelText("Recurrence (RRULE)");
     expect(raw).toBeVisible();
-    expect(raw).toHaveValue("FREQ=HOURLY");
+    expect(raw).toHaveValue("FREQ=HOURLY;BYHOUR=9");
     expect(screen.getByText(/cannot show, so it is edited as text/)).toBeInTheDocument();
     // The rule cannot be hidden behind a disclosure, so there is no toggle.
     expect(screen.queryByRole("button", { name: "Advanced: rule text" })).not.toBeInTheDocument();
@@ -182,7 +237,7 @@ describe("RecurrenceBuilder", () => {
 
   it("submits raw text as typed and re-syncs the controls when it is expressible", async () => {
     const user = userEvent.setup();
-    const { onChange } = setup("FREQ=HOURLY");
+    const { onChange } = setup("FREQ=MINUTELY");
     const raw = screen.getByLabelText("Recurrence (RRULE)");
     await user.clear(raw);
     await user.type(raw, "FREQ=MONTHLY;BYMONTHDAY=3");

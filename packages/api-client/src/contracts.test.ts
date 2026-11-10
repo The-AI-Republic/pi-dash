@@ -154,14 +154,22 @@ import {
   updateConnectionModel,
 } from "./contracts/assistant.js";
 import {
+  FREE_QUOTA_PATH,
+  FREE_QUOTA_STALE_TIME_MS,
   appIconUrl,
   appOAuthBeginUrl,
   getAppAuthStatus,
   getAppManifest,
+  getFreeQuota,
   getOpenhubStatus,
   installApp,
+  isFreeModel,
+  isFreePlan,
+  isModelSelectableForPlan,
   listInstalledApps,
   listMarketplaceApps,
+  normalizeFreeQuota,
+  normalizePlanId,
   setAppActivation,
   startAppOAuth,
   submitAppApiKey,
@@ -341,6 +349,8 @@ import {
   deleteDevMachine,
   getCreateRunnerStatus,
   listDevMachines,
+  listReplaceCandidates,
+  mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
 } from "./contracts/dev-machines.js";
@@ -684,6 +694,9 @@ describe("auth contracts", () => {
     const startCall = transport.calls.find((call) => call.url.endsWith("/api/v1/auth/device/start/"));
     expect(startCall?.init.method).toBe("POST");
     expect(startCall?.init.body).toBe("{}");
+    await startDeviceGrant(client, { scope: "engine" });
+    const engineCall = transport.calls.filter((call) => call.url.endsWith("/api/v1/auth/device/start/")).at(-1);
+    expect(engineCall?.init.body).toBe(JSON.stringify({ scope: "engine" }));
   });
 
   it("rejects a device grant missing its polling facts", async () => {
@@ -4228,6 +4241,12 @@ describe("dev-machines contracts", () => {
     expect(params.searchParams.get("workspace")).toBe(UUID2);
   });
 
+  it("preserves legacy machine provisioning for engine availability", async () => {
+    const legacy = { ...machine, provisioning: "desktop_bundled", engine_sign_in_state: "never" };
+    const client = createClient({ baseUrl: "https://api.test", transport: json([legacy]) });
+    expect(await listDevMachines(client, UUID2)).toEqual([legacy]);
+  });
+
   it("rotates with the workspace in the body", async () => {
     const transport = mutating(machine);
     const client = createClient({ baseUrl: "https://api.test", transport });
@@ -4307,6 +4326,44 @@ describe("dev-machines contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...machine, id: 7 }]) });
     const error = await listDevMachines(client, UUID2).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("merges a machine into the computer that replaced it", async () => {
+    const result = {
+      source_dev_machine_id: UUID,
+      target_dev_machine_id: UUID2,
+      merged_at: "2026-10-17T04:00:00.000Z",
+      moved_runner_ids: [UUID],
+      collisions: [{ revoked_runner_id: UUID, survivor_runner_id: UUID2 }],
+    };
+    const transport = mutating(result);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(mergeDevMachineInto(client, UUID, UUID2)).resolves.toEqual(result);
+    const mergeCall = transport.calls.find((call) => call.url.endsWith(`/dev-machines/${UUID}/merge-into/`));
+    expect(mergeCall?.init.method).toBe("POST");
+    expect(mergeCall?.init.body).toBe(JSON.stringify({ target: UUID2 }));
+  });
+
+  it("lists replace candidates for a machine", async () => {
+    const candidates = {
+      candidates: [
+        {
+          id: UUID,
+          label: "rich-laptop",
+          host_label: "rich-laptop",
+          display_name: null,
+          last_seen_at: "2026-10-30T12:00:00.000Z",
+          created_at: "2026-10-01T04:00:00.000Z",
+          provisioning: "manual",
+          live_runner_count: 1,
+        },
+      ],
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(candidates) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(listReplaceCandidates(client, UUID2)).resolves.toEqual(candidates);
+    const call = transport.calls[0];
+    expect(call?.url.endsWith(`/dev-machines/${UUID2}/replace-candidates/`)).toBe(true);
   });
 });
 
@@ -4470,6 +4527,15 @@ describe("runs contracts", () => {
       },
     ],
   };
+
+  it("parses a run without queue_position (dropped by PDASHOSS01-156)", async () => {
+    const { queue_position: _dropped, ...current } = run;
+    const page = { results: [current], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 30 };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listRuns(client);
+    expect(parsed.results[0]?.id).toBe(UUID);
+  });
 
   it("lists runs with no query", async () => {
     const page = { results: [run], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 30 };
@@ -6691,6 +6757,89 @@ describe("openhub contracts", () => {
   });
 });
 
+describe("free-quota contracts", () => {
+  it("reads the nested hub shape through the proxy path", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          llm: { freeTokensUsed: 123, freeTokensLimit: 2_000_000, freeModels: ["deepseek/deepseek-v4.1-flash-1017"] },
+          resetsAt: "2026-11-10T00:00:00Z",
+          plan: "free",
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const quota = await getFreeQuota(client);
+    expect(quota).toEqual({
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+      plan: "free",
+      freeTokensUsed: 123,
+      freeTokensLimit: 2_000_000,
+      resetsAt: "2026-11-10T00:00:00Z",
+    });
+    expect(transport.calls[0]?.url).toBe(`https://api.test${FREE_QUOTA_PATH}`);
+    expect(FREE_QUOTA_STALE_TIME_MS).toBeGreaterThanOrEqual(30_000);
+    expect(FREE_QUOTA_STALE_TIME_MS).toBeLessThanOrEqual(60_000);
+  });
+
+  it("reads the flat snake-case dialect with no nested envelope", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        free_tokens_used: 7,
+        free_tokens_limit: 5_000_000,
+        free_models: ["other/model"],
+        resets_at: "2026-11-10T00:00:00Z",
+        plan: "Member",
+      }),
+    });
+    const quota = await getFreeQuota(client);
+    expect(quota.freeModels).toEqual(["other/model"]);
+    expect(quota.plan).toBe("member");
+    expect(quota.freeTokensUsed).toBe(7);
+    expect(quota.freeTokensLimit).toBe(5_000_000);
+    expect(quota.resetsAt).toBe("2026-11-10T00:00:00Z");
+  });
+
+  it("normalizes plan ids case-insensitively and keeps unknown plans usable", () => {
+    expect(normalizePlanId("Free")).toBe("free");
+    expect(normalizePlanId(" PAY_AS_YOU_GO ")).toBe("payg");
+    expect(normalizePlanId("Pay-as-you-go")).toBe("payg");
+    expect(normalizePlanId("Member")).toBe("member");
+    expect(normalizePlanId(0)).toBe("free");
+    expect(normalizePlanId(5)).toBe("payg");
+    expect(normalizePlanId(6)).toBe("member");
+    expect(normalizePlanId(null)).toBe("");
+    expect(isFreePlan("free")).toBe(true);
+    expect(isFreePlan("Free")).toBe(true);
+    expect(isFreePlan("payg")).toBe(false);
+    expect(isFreePlan("member")).toBe(false);
+    expect(isFreePlan("enterprise")).toBe(false);
+    expect(isFreePlan(null)).toBe(false);
+  });
+
+  it("classifies models from the server list, never a hardcoded one", () => {
+    const freeModels = ["deepseek/deepseek-v4.1-flash-1017"];
+    expect(isFreeModel("deepseek/deepseek-v4.1-flash-1017", freeModels)).toBe(true);
+    expect(isFreeModel("  deepseek/deepseek-v4.1-flash-1017  ", freeModels)).toBe(true);
+    expect(isFreeModel("moonshotai/kimi-k3", freeModels)).toBe(false);
+    expect(isModelSelectableForPlan("free", "deepseek/deepseek-v4.1-flash-1017", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("free", "moonshotai/kimi-k3", freeModels)).toBe(false);
+    expect(isModelSelectableForPlan("payg", "moonshotai/kimi-k3", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("member", "moonshotai/kimi-k3", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan(null, "moonshotai/kimi-k3", freeModels)).toBe(true);
+  });
+
+  it("rejects an unreadable quota answer instead of guessing", async () => {
+    for (const body of [{ plan: "free" }, { freeModels: [] }, null, "nope", { llm: {} }]) {
+      expect(normalizeFreeQuota(body)).toBeNull();
+    }
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ plan: "free" }) });
+    const error = await getFreeQuota(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
 describe("assistant connection contracts", () => {
   const row = {
     id: UUID,
@@ -6751,6 +6900,25 @@ describe("assistant connection contracts", () => {
     expect(list.connections).toEqual([]);
     expect(list.openhub_available).toBeUndefined();
     expect(resolveOpenhubAvailable(list)).toBe(true);
+  });
+
+  it("parses a cloud list that omits the model-labels map", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connections: [],
+        codex_model_options: ["gpt-5.6-sol"],
+        has_codex_credential: false,
+        openai_login_available: true,
+        openhub_model_options: [],
+        openhub_available: false,
+        openhub_wallet_url: "https://hub.airepublic.com/account/credits",
+      }),
+    });
+    const list = await listAssistantConnections(client);
+    expect(list.connections).toEqual([]);
+    expect(list.codex_model_labels).toBeUndefined();
+    expect(list.codex_model_options).toEqual(["gpt-5.6-sol"]);
   });
 
   it("keeps an explicit hosted-lane flag as-is", () => {

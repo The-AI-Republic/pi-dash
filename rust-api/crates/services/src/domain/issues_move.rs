@@ -17,27 +17,25 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DbBackend, DbErr, QueryResult, Statement};
+use sea_orm::sea_query::{
+    Condition, Expr, InsertStatement, Query, SelectStatement, UpdateStatement,
+};
+use sea_orm::{ConnectionTrait, DbBackend, DbErr, EntityTrait, QueryResult, StatementBuilder};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::app_issues::issue_move::{
-    move_work_item_to_project, repoint_sql, HandoffRunRow, MoveError, MoveOptions, MovePostCommit,
+    move_work_item_to_project, orm, HandoffRunRow, MoveError, MoveOptions, MovePostCommit,
     MoveResult, MoveStore, MovedIssueRow, PodRow, ProjectRow, RepointTarget, SourceIssueRow,
-    StateRow, StoreError, ASSIGNEE_IDS_SQL, COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL,
-    HANDOFF_PARENT_UPDATE_SQL, HANDOFF_RUNS_LOCK_SQL, INERT_RUN_UPDATE_SQL, LABEL_DELETE_SQL,
-    LABEL_IDS_SQL, MEMBER_EXISTS_SQL, MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL,
-    PROJECT_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL,
-    SOURCE_ISSUE_LOCK_SQL, SOURCE_ISSUE_SQL, WORKSPACE_SLUG_SQL,
+    StateRow, StoreError,
 };
-use crate::dispatch::tools::{
-    CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
-    CREATE_SEQ_SCAN_SQL,
-};
+use crate::dispatch::tools::{create_save_state_select, create_seq_scan_select};
 use crate::dispatch::DeferredConsume;
-use crate::orchestration::blockers::{has_open_blockers_sql, summary_sql, BlockerRow};
+use crate::orchestration::blockers::{has_open_blockers_statement, summary_statement, BlockerRow};
 use pidash_db::app_project::models::project::ProjectLookup;
-use pidash_db::runner_enroll::columns::pod::DEFAULT_FOR_PROJECT_ID_SQL;
+use pidash_db::entity::{
+    agent_run, issue_assignees, issue_relations, issue_sequences, issues, project_members,
+};
 
 use super::issues::{
     enqueue_hook, run_chain, transition_hook, ChainEffect, ChainOutcome, FireSpec,
@@ -50,17 +48,6 @@ use super::{issues_move_creation, DomainError, WriteCtx};
 // PIDASHCONV-1630): covered-table statements live in domain/ per
 // design D7. The old paths stay as aliases (sdk + pinned overlay).
 // ---------------------------------------------------------------------------
-
-/// Issue save (`:223-235`): exactly the `update_fields`, in list order.
-/// `$1` project, `$2` workspace, `$3` sequence, `$4` state, `$5`
-/// assigned pod (NULL when no handoff and no default), `$6`-`$8` NULL
-/// parent/estimate/type, `$9` updated stamp, `$10` id.
-pub(crate) const ISSUE_MOVE_UPDATE_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9 WHERE \"issues\".\"id\" = $10";
-
-/// Issue save with the actor stamped (`stamp_updated_by`; Django has no
-/// equivalent — `:223-235` never stamps `updated_by_id`): the same
-/// `update_fields` order plus `\"updated_by_id\" = $10`, `$11` the id.
-pub(crate) const ISSUE_MOVE_UPDATE_STAMP_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9, \"updated_by_id\" = $10 WHERE \"issues\".\"id\" = $11";
 
 /// Old sequence rows detached (`:310`): `issue=NULL` where the project
 /// is not the target. `$1` issue id, `$2` target project id.
@@ -258,139 +245,436 @@ fn store_error(error: DbErr) -> StoreError {
     StoreError(error.to_string())
 }
 
-/// Run raw SQL with bound values on the transaction, returning at most
-/// one row.
+/// Run one built statement on the transaction, returning at most one row.
 async fn query_one(
     conn: &TxnConn<'_>,
-    sql: &str,
-    values: Vec<sea_orm::Value>,
+    stmt: &impl StatementBuilder,
 ) -> Result<Option<QueryResult>, StoreError> {
-    conn.query_one(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        sql,
-        values,
-    ))
-    .await
-    .map_err(store_error)
+    conn.query_one(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(store_error)
 }
 
-/// Run raw SQL with bound values on the transaction, returning every row.
+/// Run one built statement on the transaction, returning every row.
 async fn query_all(
     conn: &TxnConn<'_>,
-    sql: &str,
-    values: Vec<sea_orm::Value>,
+    stmt: &impl StatementBuilder,
 ) -> Result<Vec<QueryResult>, StoreError> {
-    conn.query_all(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        sql,
-        values,
-    ))
-    .await
-    .map_err(store_error)
+    conn.query_all(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(store_error)
 }
 
-/// Run a write on the transaction, returning the affected count.
-async fn execute(
-    conn: &TxnConn<'_>,
-    sql: &str,
-    values: Vec<sea_orm::Value>,
-) -> Result<u64, StoreError> {
-    conn.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        sql,
-        values,
-    ))
-    .await
-    .map(|done| done.rows_affected())
-    .map_err(store_error)
+/// Run one built write on the transaction, returning the affected count.
+async fn execute(conn: &TxnConn<'_>, stmt: &impl StatementBuilder) -> Result<u64, StoreError> {
+    conn.execute(DbBackend::Postgres.build(stmt))
+        .await
+        .map(|done| done.rows_affected())
+        .map_err(store_error)
 }
 
-/// Rebind every `:issue_id` placeholder to `$1` (the blockers builders
-/// emit the named form, possibly more than once).
-fn issue_param(sql: String) -> String {
-    sql.replace(":issue_id", "$1")
+/// One column of a row, by name.
+fn get<T: sea_orm::TryGetable>(row: &QueryResult, column: &str) -> Result<T, StoreError> {
+    row.try_get("", column).map_err(store_error)
 }
 
-/// Map a full source-issue row: int4 widen to i64, the uuid `type_id`
-/// to its hyphenated text, the naive `archived_at` to a midnight UTC
-/// instant.
+/// Every row's single named column.
+fn column_of<T: sea_orm::TryGetable>(
+    rows: &[QueryResult],
+    column: &str,
+) -> Result<Vec<T>, StoreError> {
+    rows.iter().map(|row| get(row, column)).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Move write statements (the SeaORM forms of the SQL constants above)
+// ---------------------------------------------------------------------------
+
+/// Issue save (`:223-235`): exactly the `update_fields`, in list order
+/// (Django never stamps `updated_by_id`; `stamp_updated_by` adds it last).
+/// The `update_fields` in list order (parent/estimate/type NULL), plus
+/// `updated_by_id` when the actor is stamped.
+pub(crate) fn issue_move_update(
+    issue_id: Uuid,
+    fields: &crate::app_issues::issue_move::MovedIssueFields,
+    sequence: i32,
+    now: &DateTime<Utc>,
+) -> UpdateStatement {
+    use issues::Column as C;
+    let mut stmt = Query::update();
+    stmt.table(issues::Entity)
+        .value(C::ProjectId, fields.project_id)
+        .value(C::WorkspaceId, fields.workspace_id)
+        .value(C::SequenceId, sequence)
+        .value(C::StateId, fields.state_id)
+        .value(C::AssignedPodId, fields.assigned_pod_id)
+        .value(C::ParentId, None::<Uuid>)
+        .value(C::EstimatePointId, None::<Uuid>)
+        .value(C::TypeId, None::<Uuid>)
+        .value(C::UpdatedAt, *now);
+    if let Some(updated_by) = fields.updated_by_id {
+        stmt.value(C::UpdatedById, updated_by);
+    }
+    stmt.and_where(Expr::col((issues::Entity, C::Id)).eq(issue_id))
+        .to_owned()
+}
+
+/// The inert-run close (`:282-284`): `cancelled` plus the end stamp.
+pub(crate) fn inert_run_update(run_id: Uuid, now: &DateTime<Utc>) -> UpdateStatement {
+    Query::update()
+        .table(agent_run::Entity)
+        .value(agent_run::Column::Status, "cancelled")
+        .value(agent_run::Column::EndedAt, *now)
+        .and_where(Expr::col((agent_run::Entity, agent_run::Column::Id)).eq(run_id))
+        .to_owned()
+}
+
+/// The executing-parent barrier (`:302`): `cancel_requested` plus the
+/// marked `run_config`.
+pub(crate) fn handoff_parent_update(run_id: Uuid, run_config: &Value) -> UpdateStatement {
+    Query::update()
+        .table(agent_run::Entity)
+        .value(agent_run::Column::Status, "cancel_requested")
+        .value(agent_run::Column::RunConfig, run_config.clone())
+        .and_where(Expr::col((agent_run::Entity, agent_run::Column::Id)).eq(run_id))
+        .to_owned()
+}
+
+/// [`SEQUENCE_DETACH_SQL`]: live sequence rows of the issue outside the
+/// target project lose their `issue`.
+pub(crate) fn sequence_detach(issue_id: Uuid, target_project_id: Uuid) -> UpdateStatement {
+    use issue_sequences::Column as C;
+    let col = |column| Expr::col((issue_sequences::Entity, column));
+    Query::update()
+        .table(issue_sequences::Entity)
+        .value(C::IssueId, None::<Uuid>)
+        .and_where(col(C::DeletedAt).is_null())
+        .and_where(col(C::IssueId).eq(issue_id))
+        .and_where(col(C::ProjectId).eq(target_project_id).not())
+        .to_owned()
+}
+
+/// [`SEQUENCE_CREATE_SQL`]: the target sequence row, every column.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sequence_create(
+    sequence_id: Uuid,
+    issue_id: Uuid,
+    sequence: i64,
+    target_project_id: Uuid,
+    target_workspace_id: Uuid,
+    now: &DateTime<Utc>,
+    actor_id: Uuid,
+) -> InsertStatement {
+    use issue_sequences::Column as C;
+    Query::insert()
+        .into_table(issue_sequences::Entity)
+        .columns([
+            C::Id,
+            C::CreatedAt,
+            C::UpdatedAt,
+            C::CreatedById,
+            C::UpdatedById,
+            C::DeletedAt,
+            C::ProjectId,
+            C::WorkspaceId,
+            C::IssueId,
+            C::Sequence,
+            C::Deleted,
+        ])
+        .values_panic([
+            Expr::value(sequence_id),
+            Expr::value(*now),
+            Expr::value(*now),
+            Expr::value(actor_id),
+            Expr::value(None::<Uuid>),
+            Expr::value(None::<DateTime<Utc>>),
+            Expr::value(target_project_id),
+            Expr::value(target_workspace_id),
+            Expr::value(issue_id),
+            Expr::value(sequence),
+            Expr::value(false),
+        ])
+        .to_owned()
+}
+
+/// [`ASSIGNEE_PRUNE_SQL`]: soft-delete the live assignee rows whose
+/// assignee is not an active `role >= MEMBER` member of the target (the
+/// nested subquery kept).
+pub(crate) fn assignee_prune(
+    issue_id: Uuid,
+    target_project_id: Uuid,
+    now: &DateTime<Utc>,
+) -> UpdateStatement {
+    use issue_assignees::Column as A;
+    use project_members::Column as P;
+    let assignee = |column| Expr::col((issue_assignees::Entity, column));
+    let member = |column| Expr::col((project_members::Entity, column));
+    let current = Query::select()
+        .column((issue_assignees::Entity, A::AssigneeId))
+        .from(issue_assignees::Entity)
+        .and_where(assignee(A::DeletedAt).is_null())
+        .and_where(assignee(A::IssueId).eq(issue_id))
+        .to_owned();
+    let kept = Query::select()
+        .column((project_members::Entity, P::MemberId))
+        .from(project_members::Entity)
+        .and_where(member(P::DeletedAt).is_null())
+        .and_where(member(P::ProjectId).eq(target_project_id))
+        .and_where(member(P::MemberId).in_subquery(current))
+        .and_where(member(P::Role).gte(15))
+        .and_where(member(P::IsActive).into())
+        .to_owned();
+    Query::update()
+        .table(issue_assignees::Entity)
+        .value(A::DeletedAt, *now)
+        .and_where(assignee(A::DeletedAt).is_null())
+        .and_where(assignee(A::IssueId).eq(issue_id))
+        .and_where(assignee(A::AssigneeId).in_subquery(kept).not())
+        .to_owned()
+}
+
+/// [`ASSIGNEE_REPOINT_SQL`]: the surviving assignees follow the issue.
+pub(crate) fn assignee_repoint(
+    issue_id: Uuid,
+    target_project_id: Uuid,
+    target_workspace_id: Uuid,
+) -> UpdateStatement {
+    use issue_assignees::Column as A;
+    Query::update()
+        .table(issue_assignees::Entity)
+        .value(A::ProjectId, target_project_id)
+        .value(A::WorkspaceId, target_workspace_id)
+        .and_where(Expr::col((issue_assignees::Entity, A::DeletedAt)).is_null())
+        .and_where(Expr::col((issue_assignees::Entity, A::IssueId)).eq(issue_id))
+        .to_owned()
+}
+
+/// A soft wipe of one link table's live rows for the issue
+/// (`LABEL_DELETE_SQL`, `CYCLE_DELETE_SQL`, `MODULE_DELETE_SQL`).
+fn soft_wipe<E: EntityTrait>(
+    table: E,
+    deleted_at: E::Column,
+    issue: E::Column,
+    issue_id: Uuid,
+    now: &DateTime<Utc>,
+) -> UpdateStatement {
+    Query::update()
+        .table(table)
+        .value(deleted_at, *now)
+        .and_where(Expr::col((table, deleted_at)).is_null())
+        .and_where(Expr::col((table, issue)).eq(issue_id))
+        .to_owned()
+}
+
+/// [`RELATION_DELETE_SQL`]: both directions, soft.
+pub(crate) fn relation_delete(issue_id: Uuid, now: &DateTime<Utc>) -> UpdateStatement {
+    use issue_relations::Column as R;
+    let col = |column| Expr::col((issue_relations::Entity, column));
+    Query::update()
+        .table(issue_relations::Entity)
+        .value(R::DeletedAt, *now)
+        .and_where(col(R::DeletedAt).is_null())
+        .cond_where(
+            Condition::any()
+                .add(col(R::IssueId).eq(issue_id))
+                .add(col(R::RelatedIssueId).eq(issue_id)),
+        )
+        .to_owned()
+}
+
+/// [`CHILDREN_DETACH_SQL`]: live children in other projects detach.
+pub(crate) fn children_detach(issue_id: Uuid, target_project_id: Uuid) -> UpdateStatement {
+    use issues::Column as C;
+    let col = |column| Expr::col((issues::Entity, column));
+    Query::update()
+        .table(issues::Entity)
+        .value(C::ParentId, None::<Uuid>)
+        .and_where(col(C::DeletedAt).is_null())
+        .and_where(col(C::ParentId).eq(issue_id))
+        .and_where(col(C::ProjectId).eq(target_project_id).not())
+        .to_owned()
+}
+
+/// One repoint: `project_id`/`workspace_id` set on the live rows
+/// matching `cond`.
+fn repoint<E: EntityTrait>(
+    table: E,
+    project: E::Column,
+    workspace: E::Column,
+    deleted_at: E::Column,
+    cond: Condition,
+    target_project_id: Uuid,
+    target_workspace_id: Uuid,
+) -> UpdateStatement {
+    Query::update()
+        .table(table)
+        .value(project, target_project_id)
+        .value(workspace, target_workspace_id)
+        .and_where(Expr::col((table, deleted_at)).is_null())
+        .cond_where(cond)
+        .to_owned()
+}
+
+/// The UPDATE for one [`RepointTarget`] (SeaORM form of
+/// [`repoint_sql`]): the issue's rows, or the moved comment /
+/// description ids (an empty list matches nothing, as Django's empty
+/// `__in` does). Queryset updates never move `updated_at`.
+pub(crate) fn repoint_update(
+    target: RepointTarget,
+    issue_id: Uuid,
+    comment_ids: &[Uuid],
+    description_ids: &[Uuid],
+    target_project_id: Uuid,
+    target_workspace_id: Uuid,
+) -> UpdateStatement {
+    use pidash_db::entity::{
+        comment_reactions as cr, descriptions as d, file_assets as fa, issue_activities as ia,
+        issue_comments as ic, issue_description_versions as idv, issue_links as il,
+        issue_mentions as im, issue_reactions as ir, issue_subscribers as is, issue_versions as iv,
+        issue_votes as ivo,
+    };
+    let p = target_project_id;
+    let w = target_workspace_id;
+    let comments = || comment_ids.iter().copied();
+    macro_rules! by_issue {
+        ($m:ident) => {
+            repoint(
+                $m::Entity,
+                $m::Column::ProjectId,
+                $m::Column::WorkspaceId,
+                $m::Column::DeletedAt,
+                Condition::all().add(Expr::col(($m::Entity, $m::Column::IssueId)).eq(issue_id)),
+                p,
+                w,
+            )
+        };
+    }
+    match target {
+        RepointTarget::IssueLink => by_issue!(il),
+        RepointTarget::IssueMention => by_issue!(im),
+        RepointTarget::IssueSubscriber => by_issue!(is),
+        RepointTarget::IssueReaction => by_issue!(ir),
+        RepointTarget::IssueVote => by_issue!(ivo),
+        RepointTarget::IssueVersion => by_issue!(iv),
+        RepointTarget::IssueDescriptionVersion => by_issue!(idv),
+        RepointTarget::IssueComment => by_issue!(ic),
+        RepointTarget::IssueActivity => repoint(
+            ia::Entity,
+            ia::Column::ProjectId,
+            ia::Column::WorkspaceId,
+            ia::Column::DeletedAt,
+            Condition::any()
+                .add(Expr::col((ia::Entity, ia::Column::IssueId)).eq(issue_id))
+                .add(Expr::col((ia::Entity, ia::Column::IssueCommentId)).is_in(comments())),
+            p,
+            w,
+        ),
+        RepointTarget::CommentReaction => repoint(
+            cr::Entity,
+            cr::Column::ProjectId,
+            cr::Column::WorkspaceId,
+            cr::Column::DeletedAt,
+            Condition::all().add(Expr::col((cr::Entity, cr::Column::CommentId)).is_in(comments())),
+            p,
+            w,
+        ),
+        RepointTarget::Description => repoint(
+            d::Entity,
+            d::Column::ProjectId,
+            d::Column::WorkspaceId,
+            d::Column::DeletedAt,
+            Condition::all()
+                .add(Expr::col((d::Entity, d::Column::Id)).is_in(description_ids.iter().copied())),
+            p,
+            w,
+        ),
+        RepointTarget::FileAsset => repoint(
+            fa::Entity,
+            fa::Column::ProjectId,
+            fa::Column::WorkspaceId,
+            fa::Column::DeletedAt,
+            Condition::any()
+                .add(Expr::col((fa::Entity, fa::Column::IssueId)).eq(issue_id))
+                .add(Expr::col((fa::Entity, fa::Column::CommentId)).is_in(comments())),
+            p,
+            w,
+        ),
+    }
+}
+
+/// Map a source-issue row by name: int4 widen to i64, the uuid
+/// `type_id` to its hyphenated text, the naive `archived_at` to a
+/// midnight UTC instant.
 fn map_source_row(row: &QueryResult) -> Result<SourceIssueRow, StoreError> {
-    let point: Option<i32> = row.try_get("", "point").map_err(store_error)?;
-    let complexity: i32 = row.try_get("", "complexity_score").map_err(store_error)?;
-    let sequence: i32 = row.try_get("", "sequence_id").map_err(store_error)?;
-    let type_id: Option<Uuid> = row.try_get("", "type_id").map_err(store_error)?;
-    let archived_at: Option<chrono::NaiveDate> =
-        row.try_get("", "archived_at").map_err(store_error)?;
+    let point: Option<i32> = get(row, "point")?;
+    let complexity: i32 = get(row, "complexity_score")?;
+    let sequence: i32 = get(row, "sequence_id")?;
+    let type_id: Option<Uuid> = get(row, "type_id")?;
+    let archived_at: Option<chrono::NaiveDate> = get(row, "archived_at")?;
     Ok(SourceIssueRow {
-        id: row.try_get("", "id").map_err(store_error)?,
-        project_id: row.try_get("", "project_id").map_err(store_error)?,
-        workspace_id: row.try_get("", "workspace_id").map_err(store_error)?,
-        state_id: row.try_get("", "state_id").map_err(store_error)?,
-        parent_id: row.try_get("", "parent_id").map_err(store_error)?,
-        estimate_point_id: row.try_get("", "estimate_point_id").map_err(store_error)?,
-        assigned_pod_id: row.try_get("", "assigned_pod_id").map_err(store_error)?,
+        id: get(row, "id")?,
+        project_id: get(row, "project_id")?,
+        workspace_id: get(row, "workspace_id")?,
+        state_id: get(row, "state_id")?,
+        parent_id: get(row, "parent_id")?,
+        estimate_point_id: get(row, "estimate_point_id")?,
+        assigned_pod_id: get(row, "assigned_pod_id")?,
+        assigned_runner_id: get(row, "assigned_runner_id")?,
         type_id: type_id.map(|id| id.to_string()),
-        created_at: row.try_get("", "created_at").map_err(store_error)?,
-        updated_at: row.try_get("", "updated_at").map_err(store_error)?,
-        deleted_at: row.try_get("", "deleted_at").map_err(store_error)?,
+        created_at: get(row, "created_at")?,
+        updated_at: get(row, "updated_at")?,
+        deleted_at: get(row, "deleted_at")?,
         point: point.map(i64::from),
-        name: row.try_get("", "name").map_err(store_error)?,
-        description_html: row.try_get("", "description_html").map_err(store_error)?,
-        description_binary: row.try_get("", "description_binary").map_err(store_error)?,
-        priority: row.try_get("", "priority").map_err(store_error)?,
+        name: get(row, "name")?,
+        description_html: get(row, "description_html")?,
+        description_binary: get(row, "description_binary")?,
+        priority: get(row, "priority")?,
         complexity_score: i64::from(complexity),
-        start_date: row.try_get("", "start_date").map_err(store_error)?,
-        target_date: row.try_get("", "target_date").map_err(store_error)?,
+        start_date: get(row, "start_date")?,
+        target_date: get(row, "target_date")?,
         sequence_id: i64::from(sequence),
-        sort_order: row.try_get("", "sort_order").map_err(store_error)?,
-        completed_at: row.try_get("", "completed_at").map_err(store_error)?,
+        sort_order: get(row, "sort_order")?,
+        completed_at: get(row, "completed_at")?,
         archived_at: archived_at
             .and_then(|date| date.and_hms_opt(0, 0, 0))
             .map(|naive| naive.and_utc()),
-        is_draft: row.try_get("", "is_draft").map_err(store_error)?,
-        external_source: row.try_get("", "external_source").map_err(store_error)?,
-        external_id: row.try_get("", "external_id").map_err(store_error)?,
-        git_work_branch: row.try_get("", "git_work_branch").map_err(store_error)?,
-        created_via: row.try_get("", "created_via").map_err(store_error)?,
-        agent_executor: row.try_get("", "agent_executor").map_err(store_error)?,
-        created_by_id: row.try_get("", "created_by_id").map_err(store_error)?,
-        updated_by_id: row.try_get("", "updated_by_id").map_err(store_error)?,
+        is_draft: get(row, "is_draft")?,
+        external_source: get(row, "external_source")?,
+        external_id: get(row, "external_id")?,
+        git_work_branch: get(row, "git_work_branch")?,
+        created_via: get(row, "created_via")?,
+        agent_executor: get(row, "agent_executor")?,
+        created_by_id: get(row, "created_by_id")?,
+        updated_by_id: get(row, "updated_by_id")?,
     })
 }
 
 /// Map one locked handoff run: the trigger rides raw (the varchar is
 /// never parsed), a null `run_config` is `{}`.
 fn map_handoff_row(row: &QueryResult) -> Result<HandoffRunRow, StoreError> {
-    let status: String = row.try_get("", "status").map_err(store_error)?;
-    let run_config: Option<Value> = row.try_get("", "run_config").map_err(store_error)?;
+    let status: String = get(row, "status")?;
+    let run_config: Option<Value> = get(row, "run_config")?;
     Ok(HandoffRunRow {
-        id: row.try_get("", "id").map_err(store_error)?,
+        id: get(row, "id")?,
         status: pidash_db::dispatch::AgentRunStatus::from_value(&status).ok_or_else(|| {
             StoreError(format!("move store: unknown agent_run.status {status:?}"))
         })?,
-        runner_id: row.try_get("", "runner_id").map_err(store_error)?,
-        pod_id: row.try_get("", "pod_id").map_err(store_error)?,
-        created_by_id: row.try_get("", "created_by_id").map_err(store_error)?,
+        runner_id: get(row, "runner_id")?,
+        pod_id: get(row, "pod_id")?,
+        created_by_id: get(row, "created_by_id")?,
         run_config: run_config.unwrap_or(Value::Null),
-        trigger: row.try_get("", "trigger").map_err(store_error)?,
+        trigger: get(row, "trigger")?,
     })
 }
 
-/// Map one `blockers::summary_sql` row.
+/// Map one `blockers::summary_statement` row by name.
 fn map_blocker_row(row: &QueryResult) -> Result<BlockerRow, StoreError> {
-    let (issue_id, sequence_id, project_identifier, state_name, state_group): (
-        Uuid,
-        i32,
-        String,
-        Option<String>,
-        Option<String>,
-    ) = row.try_get_many_by_index().map_err(store_error)?;
     Ok(BlockerRow {
-        issue_id,
-        sequence_id,
-        project_identifier,
-        state_name,
-        state_group,
+        issue_id: get(row, "issue_id")?,
+        sequence_id: get(row, "sequence_id")?,
+        project_identifier: get(row, "project_identifier")?,
+        state_name: get(row, "state_name")?,
+        state_group: get(row, "state_group")?,
     })
 }
 
@@ -419,6 +703,16 @@ impl<'t> SeaMoveStore<'t> {
     fn take_outboxes(&self) -> Option<MoveCreationOutboxes> {
         self.outboxes.lock().expect("outbox slot").take()
     }
+
+    async fn state_id(&self, stmt: SelectStatement) -> Result<Option<StateRow>, StoreError> {
+        let row = query_one(&self.conn, &stmt).await?;
+        row.map(|row| {
+            Ok(StateRow {
+                id: get(&row, "id")?,
+            })
+        })
+        .transpose()
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -429,16 +723,7 @@ impl MoveStore for SeaMoveStore<'_> {
         project_id: Uuid,
         pk: Uuid,
     ) -> Result<Option<SourceIssueRow>, StoreError> {
-        let row = query_one(
-            &self.conn,
-            SOURCE_ISSUE_SQL,
-            vec![
-                sea_orm::Value::from(slug),
-                sea_orm::Value::from(project_id),
-                sea_orm::Value::from(pk),
-            ],
-        )
-        .await?;
+        let row = query_one(&self.conn, &orm::source_issue_select(slug, project_id, pk)).await?;
         row.map(|row| map_source_row(&row)).transpose()
     }
 
@@ -447,32 +732,15 @@ impl MoveStore for SeaMoveStore<'_> {
         slug: &str,
         lookup: &ProjectLookup,
     ) -> Result<Option<ProjectRow>, StoreError> {
-        let row: Option<(Uuid, Uuid, String)> = match lookup {
-            ProjectLookup::Pk(id) => query_one(
-                &self.conn,
-                PROJECT_RESOLVE_BY_PK_SQL,
-                vec![sea_orm::Value::from(*id), sea_orm::Value::from(slug)],
-            )
-            .await?
-            .map(|row| row.try_get_many_by_index().map_err(store_error))
-            .transpose()?,
-            ProjectLookup::Identifier(identifier) => query_one(
-                &self.conn,
-                PROJECT_RESOLVE_BY_IDENTIFIER_SQL,
-                vec![
-                    sea_orm::Value::from(identifier.as_str()),
-                    sea_orm::Value::from(slug),
-                ],
-            )
-            .await?
-            .map(|row| row.try_get_many_by_index().map_err(store_error))
-            .transpose()?,
-        };
-        Ok(row.map(|(id, workspace_id, identifier)| ProjectRow {
-            id,
-            workspace_id,
-            identifier,
-        }))
+        let row = query_one(&self.conn, &orm::project_resolve_select(slug, lookup)).await?;
+        row.map(|row| {
+            Ok(ProjectRow {
+                id: get(&row, "id")?,
+                workspace_id: get(&row, "workspace_id")?,
+                identifier: get(&row, "identifier")?,
+            })
+        })
+        .transpose()
     }
 
     async fn can_move_into_target(
@@ -483,12 +751,7 @@ impl MoveStore for SeaMoveStore<'_> {
     ) -> Result<bool, StoreError> {
         let hit = query_one(
             &self.conn,
-            MEMBER_EXISTS_SQL,
-            vec![
-                sea_orm::Value::from(slug),
-                sea_orm::Value::from(target_project_id),
-                sea_orm::Value::from(actor_id),
-            ],
+            &orm::member_exists_select(slug, target_project_id, actor_id),
         )
         .await?;
         Ok(hit.is_some())
@@ -502,12 +765,7 @@ impl MoveStore for SeaMoveStore<'_> {
     ) -> Result<bool, StoreError> {
         let hit = query_one(
             &self.conn,
-            MEMBER_EXISTS_SQL,
-            vec![
-                sea_orm::Value::from(slug),
-                sea_orm::Value::from(source_project_id),
-                sea_orm::Value::from(actor_id),
-            ],
+            &orm::member_exists_select(slug, source_project_id, actor_id),
         )
         .await?;
         Ok(hit.is_some())
@@ -517,131 +775,81 @@ impl MoveStore for SeaMoveStore<'_> {
         &self,
         workspace_id: Uuid,
     ) -> Result<Option<String>, StoreError> {
-        let row = query_one(
-            &self.conn,
-            WORKSPACE_SLUG_SQL,
-            vec![sea_orm::Value::from(workspace_id)],
-        )
-        .await?;
-        row.map(|row| {
-            let (slug,): (String,) = row.try_get_many_by_index().map_err(store_error)?;
-            Ok(slug)
-        })
-        .transpose()
+        let row = query_one(&self.conn, &orm::workspace_slug_select(workspace_id)).await?;
+        row.map(|row| get(&row, "slug")).transpose()
     }
 
     async fn representation_project_identifier(
         &self,
         project_id: Uuid,
     ) -> Result<Option<String>, StoreError> {
-        let row = query_one(
-            &self.conn,
-            PROJECT_IDENTIFIER_SQL,
-            vec![sea_orm::Value::from(project_id)],
-        )
-        .await?;
-        row.map(|row| {
-            let (identifier,): (String,) = row.try_get_many_by_index().map_err(store_error)?;
-            Ok(identifier)
-        })
-        .transpose()
+        let row = query_one(&self.conn, &orm::project_identifier_select(project_id)).await?;
+        row.map(|row| get(&row, "identifier")).transpose()
     }
 
     async fn representation_assignee_ids(&self, issue_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
-        let rows = query_all(
-            &self.conn,
-            ASSIGNEE_IDS_SQL,
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
-        rows.iter()
-            .map(|row| {
-                let (id,): (Uuid,) = row.try_get_many_by_index().map_err(store_error)?;
-                Ok(id)
-            })
-            .collect()
+        let rows = query_all(&self.conn, &orm::assignee_ids_select(issue_id)).await?;
+        column_of(&rows, "assignee_id")
     }
 
     async fn representation_label_ids(&self, issue_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
-        let rows = query_all(
-            &self.conn,
-            LABEL_IDS_SQL,
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
-        rows.iter()
-            .map(|row| {
-                let (id,): (Uuid,) = row.try_get_many_by_index().map_err(store_error)?;
-                Ok(id)
-            })
-            .collect()
+        let rows = query_all(&self.conn, &orm::label_ids_select(issue_id)).await?;
+        column_of(&rows, "label_id")
     }
 
     async fn representation_blocked_by(
         &self,
         issue_id: Uuid,
     ) -> Result<Vec<BlockerRow>, StoreError> {
-        let rows = query_all(
-            &self.conn,
-            &issue_param(summary_sql(false)),
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
+        let rows = query_all(&self.conn, &summary_statement(issue_id, false)).await?;
         rows.iter().map(map_blocker_row).collect()
     }
 
     async fn representation_blocking(&self, issue_id: Uuid) -> Result<Vec<BlockerRow>, StoreError> {
-        let rows = query_all(
-            &self.conn,
-            &issue_param(summary_sql(true)),
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
+        let rows = query_all(&self.conn, &summary_statement(issue_id, true)).await?;
         rows.iter().map(map_blocker_row).collect()
     }
 
     async fn representation_has_open_blockers(&self, issue_id: Uuid) -> Result<bool, StoreError> {
-        let hit = query_one(
-            &self.conn,
-            &issue_param(has_open_blockers_sql()),
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
+        let hit = query_one(&self.conn, &has_open_blockers_statement(issue_id)).await?;
         Ok(hit.is_some())
+    }
+
+    async fn representation_assigned_runner_detail(
+        &self,
+        runner_id: Option<Uuid>,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        use sea_orm::EntityTrait;
+        let Some(runner_id) = runner_id else {
+            return Ok(None);
+        };
+        let Some(runner) = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+            .one(&self.conn)
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        crate::domain::issue_assignment::assigned_runner_detail(&self.conn, &runner)
+            .await
+            .map(Some)
+            .map_err(store_error)
     }
 
     async fn target_default_state(
         &self,
         target_project_id: Uuid,
     ) -> Result<Option<StateRow>, StoreError> {
-        let row = query_one(
-            &self.conn,
-            CREATE_SAVE_DEFAULT_STATE_SQL,
-            vec![sea_orm::Value::from(target_project_id)],
-        )
-        .await?;
-        row.map(|row| {
-            let (id,): (Uuid,) = row.try_get_many_by_index().map_err(store_error)?;
-            Ok(StateRow { id })
-        })
-        .transpose()
+        self.state_id(create_save_state_select(target_project_id, true))
+            .await
     }
 
     async fn target_fallback_state(
         &self,
         target_project_id: Uuid,
     ) -> Result<Option<StateRow>, StoreError> {
-        let row = query_one(
-            &self.conn,
-            CREATE_SAVE_FALLBACK_STATE_SQL,
-            vec![sea_orm::Value::from(target_project_id)],
-        )
-        .await?;
-        row.map(|row| {
-            let (id,): (Uuid,) = row.try_get_many_by_index().map_err(store_error)?;
-            Ok(StateRow { id })
-        })
-        .transpose()
+        self.state_id(create_save_state_select(target_project_id, false))
+            .await
     }
 
     async fn lock_source_issue(
@@ -653,34 +861,19 @@ impl MoveStore for SeaMoveStore<'_> {
         // No span to open: the domain transaction is already held.
         let row = query_one(
             &self.conn,
-            SOURCE_ISSUE_LOCK_SQL,
-            vec![
-                sea_orm::Value::from(slug),
-                sea_orm::Value::from(project_id),
-                sea_orm::Value::from(pk),
-            ],
+            &orm::source_issue_lock_select(slug, project_id, pk),
         )
         .await?;
         row.map(|row| map_source_row(&row)).transpose()
     }
 
     async fn advisory_lock_project(&self, lock_key: i64) -> Result<(), StoreError> {
-        execute(
-            &self.conn,
-            CREATE_ADVISORY_LOCK_SQL,
-            vec![sea_orm::Value::from(lock_key)],
-        )
-        .await?;
+        execute(&self.conn, &super::txn::advisory_xact_lock_stmt(lock_key)).await?;
         Ok(())
     }
 
     async fn lock_handoff_runs(&self, issue_id: Uuid) -> Result<Vec<HandoffRunRow>, StoreError> {
-        let rows = query_all(
-            &self.conn,
-            HANDOFF_RUNS_LOCK_SQL,
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
+        let rows = query_all(&self.conn, &orm::handoff_runs_lock_select(issue_id)).await?;
         rows.iter().map(map_handoff_row).collect()
     }
 
@@ -688,35 +881,23 @@ impl MoveStore for SeaMoveStore<'_> {
         &self,
         target_project_id: Uuid,
     ) -> Result<Option<i64>, StoreError> {
-        let row = query_one(
-            &self.conn,
-            CREATE_SEQ_SCAN_SQL,
-            vec![sea_orm::Value::from(target_project_id)],
-        )
-        .await?;
-        row.map(|row| {
-            let (max,): (Option<i64>,) = row.try_get_many_by_index().map_err(store_error)?;
-            Ok(max)
-        })
-        .transpose()
-        .map(|hit| hit.flatten())
+        let row = query_one(&self.conn, &create_seq_scan_select(target_project_id)).await?;
+        row.map(|row| get::<Option<i64>>(&row, "max_sequence"))
+            .transpose()
+            .map(Option::flatten)
     }
 
     async fn target_default_pod(
         &self,
         target_project_id: Uuid,
     ) -> Result<Option<PodRow>, StoreError> {
-        let row = query_one(
+        let hit = crate::runner_enroll::queries::enroll_reads::default_pod_for_project(
             &self.conn,
-            DEFAULT_FOR_PROJECT_ID_SQL,
-            vec![sea_orm::Value::from(target_project_id)],
+            target_project_id,
         )
-        .await?;
-        row.map(|row| {
-            let id: Uuid = row.try_get("", "id").map_err(store_error)?;
-            Ok(PodRow { id })
-        })
-        .transpose()
+        .await
+        .map_err(store_error)?;
+        Ok(hit.map(|(id, _, _)| PodRow { id }))
     }
 
     async fn save_moved_issue(
@@ -727,37 +908,16 @@ impl MoveStore for SeaMoveStore<'_> {
     ) -> Result<(), StoreError> {
         let sequence = i32::try_from(fields.sequence_id)
             .map_err(|_| StoreError("move store: sequence_id overflows int4".to_owned()))?;
-        let sql = if fields.updated_by_id.is_some() {
-            ISSUE_MOVE_UPDATE_STAMP_SQL
-        } else {
-            ISSUE_MOVE_UPDATE_SQL
-        };
-        let mut values = vec![
-            sea_orm::Value::from(fields.project_id),
-            sea_orm::Value::from(fields.workspace_id),
-            sea_orm::Value::from(sequence),
-            sea_orm::Value::from(fields.state_id),
-            sea_orm::Value::from(fields.assigned_pod_id),
-            sea_orm::Value::from(None::<Uuid>),
-            sea_orm::Value::from(None::<Uuid>),
-            sea_orm::Value::from(None::<Uuid>),
-            sea_orm::Value::from(*now),
-        ];
-        if let Some(updated_by) = fields.updated_by_id {
-            values.push(sea_orm::Value::from(updated_by));
-        }
-        values.push(sea_orm::Value::from(issue_id));
-        execute(&self.conn, sql, values).await?;
+        execute(
+            &self.conn,
+            &issue_move_update(issue_id, fields, sequence, now),
+        )
+        .await?;
         Ok(())
     }
 
     async fn cancel_inert_run(&self, run_id: Uuid, now: &DateTime<Utc>) -> Result<(), StoreError> {
-        execute(
-            &self.conn,
-            INERT_RUN_UPDATE_SQL,
-            vec![sea_orm::Value::from(run_id), sea_orm::Value::from(*now)],
-        )
-        .await?;
+        execute(&self.conn, &inert_run_update(run_id, now)).await?;
         Ok(())
     }
 
@@ -766,15 +926,7 @@ impl MoveStore for SeaMoveStore<'_> {
         run_id: Uuid,
         run_config: &Value,
     ) -> Result<(), StoreError> {
-        execute(
-            &self.conn,
-            HANDOFF_PARENT_UPDATE_SQL,
-            vec![
-                sea_orm::Value::from(run_id),
-                sea_orm::Value::from(run_config.clone()),
-            ],
-        )
-        .await?;
+        execute(&self.conn, &handoff_parent_update(run_id, run_config)).await?;
         Ok(())
     }
 
@@ -783,15 +935,7 @@ impl MoveStore for SeaMoveStore<'_> {
         issue_id: Uuid,
         target_project_id: Uuid,
     ) -> Result<u64, StoreError> {
-        execute(
-            &self.conn,
-            SEQUENCE_DETACH_SQL,
-            vec![
-                sea_orm::Value::from(issue_id),
-                sea_orm::Value::from(target_project_id),
-            ],
-        )
-        .await
+        execute(&self.conn, &sequence_detach(issue_id, target_project_id)).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -807,17 +951,15 @@ impl MoveStore for SeaMoveStore<'_> {
     ) -> Result<(), StoreError> {
         execute(
             &self.conn,
-            SEQUENCE_CREATE_SQL,
-            vec![
-                sea_orm::Value::from(sequence_id),
-                sea_orm::Value::from(*now),
-                sea_orm::Value::from(*now),
-                sea_orm::Value::from(actor_id),
-                sea_orm::Value::from(issue_id),
-                sea_orm::Value::from(sequence),
-                sea_orm::Value::from(target_project_id),
-                sea_orm::Value::from(target_workspace_id),
-            ],
+            &sequence_create(
+                sequence_id,
+                issue_id,
+                sequence,
+                target_project_id,
+                target_workspace_id,
+                now,
+                actor_id,
+            ),
         )
         .await?;
         Ok(())
@@ -831,12 +973,7 @@ impl MoveStore for SeaMoveStore<'_> {
     ) -> Result<u64, StoreError> {
         execute(
             &self.conn,
-            ASSIGNEE_PRUNE_SQL,
-            vec![
-                sea_orm::Value::from(*now),
-                sea_orm::Value::from(issue_id),
-                sea_orm::Value::from(target_project_id),
-            ],
+            &assignee_prune(issue_id, target_project_id, now),
         )
         .await
     }
@@ -849,12 +986,7 @@ impl MoveStore for SeaMoveStore<'_> {
     ) -> Result<u64, StoreError> {
         execute(
             &self.conn,
-            ASSIGNEE_REPOINT_SQL,
-            vec![
-                sea_orm::Value::from(target_project_id),
-                sea_orm::Value::from(target_workspace_id),
-                sea_orm::Value::from(issue_id),
-            ],
+            &assignee_repoint(issue_id, target_project_id, target_workspace_id),
         )
         .await
     }
@@ -864,10 +996,16 @@ impl MoveStore for SeaMoveStore<'_> {
         issue_id: Uuid,
         now: &DateTime<Utc>,
     ) -> Result<u64, StoreError> {
+        use pidash_db::entity::issue_labels as l;
         execute(
             &self.conn,
-            LABEL_DELETE_SQL,
-            vec![sea_orm::Value::from(*now), sea_orm::Value::from(issue_id)],
+            &soft_wipe(
+                l::Entity,
+                l::Column::DeletedAt,
+                l::Column::IssueId,
+                issue_id,
+                now,
+            ),
         )
         .await
     }
@@ -877,10 +1015,16 @@ impl MoveStore for SeaMoveStore<'_> {
         issue_id: Uuid,
         now: &DateTime<Utc>,
     ) -> Result<u64, StoreError> {
+        use pidash_db::entity::cycle_issues as c;
         execute(
             &self.conn,
-            CYCLE_DELETE_SQL,
-            vec![sea_orm::Value::from(*now), sea_orm::Value::from(issue_id)],
+            &soft_wipe(
+                c::Entity,
+                c::Column::DeletedAt,
+                c::Column::IssueId,
+                issue_id,
+                now,
+            ),
         )
         .await
     }
@@ -890,10 +1034,16 @@ impl MoveStore for SeaMoveStore<'_> {
         issue_id: Uuid,
         now: &DateTime<Utc>,
     ) -> Result<u64, StoreError> {
+        use pidash_db::entity::module_issues as m;
         execute(
             &self.conn,
-            MODULE_DELETE_SQL,
-            vec![sea_orm::Value::from(*now), sea_orm::Value::from(issue_id)],
+            &soft_wipe(
+                m::Entity,
+                m::Column::DeletedAt,
+                m::Column::IssueId,
+                issue_id,
+                now,
+            ),
         )
         .await
     }
@@ -903,12 +1053,7 @@ impl MoveStore for SeaMoveStore<'_> {
         issue_id: Uuid,
         now: &DateTime<Utc>,
     ) -> Result<u64, StoreError> {
-        execute(
-            &self.conn,
-            RELATION_DELETE_SQL,
-            vec![sea_orm::Value::from(*now), sea_orm::Value::from(issue_id)],
-        )
-        .await
+        execute(&self.conn, &relation_delete(issue_id, now)).await
     }
 
     async fn detach_children(
@@ -916,45 +1061,17 @@ impl MoveStore for SeaMoveStore<'_> {
         issue_id: Uuid,
         target_project_id: Uuid,
     ) -> Result<u64, StoreError> {
-        execute(
-            &self.conn,
-            CHILDREN_DETACH_SQL,
-            vec![
-                sea_orm::Value::from(issue_id),
-                sea_orm::Value::from(target_project_id),
-            ],
-        )
-        .await
+        execute(&self.conn, &children_detach(issue_id, target_project_id)).await
     }
 
     async fn moved_comment_ids(&self, issue_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
-        let rows = query_all(
-            &self.conn,
-            COMMENT_IDS_SQL,
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
-        rows.iter()
-            .map(|row| {
-                let (id,): (Uuid,) = row.try_get_many_by_index().map_err(store_error)?;
-                Ok(id)
-            })
-            .collect()
+        let rows = query_all(&self.conn, &orm::comment_ids_select(issue_id)).await?;
+        column_of(&rows, "id")
     }
 
     async fn moved_description_ids(&self, issue_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
-        let rows = query_all(
-            &self.conn,
-            DESCRIPTION_IDS_SQL,
-            vec![sea_orm::Value::from(issue_id)],
-        )
-        .await?;
-        rows.iter()
-            .map(|row| {
-                let (id,): (Uuid,) = row.try_get_many_by_index().map_err(store_error)?;
-                Ok(id)
-            })
-            .collect()
+        let rows = query_all(&self.conn, &orm::description_ids_select(issue_id)).await?;
+        column_of(&rows, "description_id")
     }
 
     async fn repoint_related(
@@ -966,24 +1083,18 @@ impl MoveStore for SeaMoveStore<'_> {
         target_project_id: Uuid,
         target_workspace_id: Uuid,
     ) -> Result<u64, StoreError> {
-        let sql = repoint_sql(target);
-        let mut values = vec![
-            sea_orm::Value::from(target_project_id),
-            sea_orm::Value::from(target_workspace_id),
-            sea_orm::Value::from(issue_id),
-        ];
-        match target {
-            RepointTarget::IssueActivity
-            | RepointTarget::CommentReaction
-            | RepointTarget::FileAsset => {
-                values.push(sea_orm::Value::from(comment_ids.to_vec()));
-            }
-            RepointTarget::Description => {
-                values.push(sea_orm::Value::from(description_ids.to_vec()));
-            }
-            _ => {}
-        }
-        execute(&self.conn, sql, values).await
+        execute(
+            &self.conn,
+            &repoint_update(
+                target,
+                issue_id,
+                comment_ids,
+                description_ids,
+                target_project_id,
+                target_workspace_id,
+            ),
+        )
+        .await
     }
 
     async fn create_handoff_run(
@@ -1038,19 +1149,12 @@ impl MoveStore for SeaMoveStore<'_> {
     async fn moved_issue(&self, pk: Uuid) -> Result<Option<MovedIssueRow>, StoreError> {
         // No commit: the domain transaction commits after the chain is
         // queued. The refetch runs in-span, seeing the move's writes.
-        let row = query_one(
-            &self.conn,
-            MOVED_ISSUE_REFETCH_SQL,
-            vec![sea_orm::Value::from(pk)],
-        )
-        .await?;
+        let row = query_one(&self.conn, &orm::moved_issue_refetch_select(pk)).await?;
         row.map(|row| {
-            let workspace_slug: String = row.try_get("", "slug").map_err(store_error)?;
-            let project_identifier: String = row.try_get("", "identifier").map_err(store_error)?;
             Ok(MovedIssueRow {
                 row: map_source_row(&row)?,
-                workspace_slug,
-                project_identifier,
+                workspace_slug: get(&row, "slug")?,
+                project_identifier: get(&row, "identifier")?,
             })
         })
         .transpose()
@@ -1140,6 +1244,7 @@ pub async fn move_to_project(
                 actor_id,
                 spec: FireSpec {
                     dispatch_immediate: moved.dispatch_immediate,
+                    pod_once: false,
                     created_by: Some(actor_id),
                     moved_by_run: None,
                     now: input.now,
@@ -1211,6 +1316,130 @@ mod tests {
 
     fn uid(n: u128) -> Uuid {
         Uuid::from_u128(n)
+    }
+
+    /// The move write builders, rendered without a database: the
+    /// `update_fields` order, the stamp arm, the soft wipes, the prune
+    /// subquery and the twelve repoints' pair + scope.
+    #[test]
+    fn write_statement_shapes() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let now: DateTime<Utc> = "2026-06-01T12:00:00+00:00".parse().expect("T0");
+        let fields = crate::app_issues::issue_move::MovedIssueFields {
+            project_id: uid(0x20),
+            workspace_id: uid(0x10),
+            sequence_id: 9,
+            state_id: uid(0x30),
+            assigned_pod_id: None,
+            updated_by_id: None,
+        };
+        let plain = issue_move_update(uid(1), &fields, 9, &now).to_string(PostgresQueryBuilder);
+        let set = &plain[plain.find("SET ").unwrap()..plain.find(" WHERE").unwrap()];
+        assert_eq!(
+            set,
+            "SET \"project_id\" = '00000000-0000-0000-0000-000000000020', \"workspace_id\" = '00000000-0000-0000-0000-000000000010', \"sequence_id\" = 9, \"state_id\" = '00000000-0000-0000-0000-000000000030', \"assigned_pod_id\" = NULL, \"parent_id\" = NULL, \"estimate_point_id\" = NULL, \"type_id\" = NULL, \"updated_at\" = '2026-06-01 12:00:00.000000 +00:00'"
+        );
+        assert!(
+            plain.ends_with("WHERE \"issues\".\"id\" = '00000000-0000-0000-0000-000000000001'"),
+            "{plain}"
+        );
+        let stamped = issue_move_update(
+            uid(1),
+            &crate::app_issues::issue_move::MovedIssueFields {
+                updated_by_id: Some(uid(0x40)),
+                ..fields
+            },
+            9,
+            &now,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(stamped.contains("\"updated_at\" = '2026-06-01 12:00:00.000000 +00:00', \"updated_by_id\" = '00000000-0000-0000-0000-000000000040' WHERE"), "{stamped}");
+
+        let detach = sequence_detach(uid(1), uid(0x20)).to_string(PostgresQueryBuilder);
+        assert!(detach.contains("SET \"issue_id\" = NULL WHERE \"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = "), "{detach}");
+        assert!(
+            detach.contains("AND (NOT \"issue_sequences\".\"project_id\" = "),
+            "{detach}"
+        );
+        let create = sequence_create(uid(2), uid(1), 9, uid(0x20), uid(0x10), &now, uid(0x40))
+            .to_string(PostgresQueryBuilder);
+        assert!(create.starts_with("INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\")"), "{create}");
+        assert!(create.ends_with("9, FALSE)"), "{create}");
+
+        let prune = assignee_prune(uid(1), uid(0x20), &now).to_string(PostgresQueryBuilder);
+        assert!(
+            prune.contains(
+                "\"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\""
+            ),
+            "{prune}"
+        );
+        assert!(prune.contains("(NOT \"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\""), "{prune}");
+        assert!(
+            prune.contains(
+                "\"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\""
+            ),
+            "{prune}"
+        );
+        let repoint =
+            assignee_repoint(uid(1), uid(0x20), uid(0x10)).to_string(PostgresQueryBuilder);
+        assert!(repoint.contains("SET \"project_id\" = '00000000-0000-0000-0000-000000000020', \"workspace_id\" = '00000000-0000-0000-0000-000000000010' WHERE \"issue_assignees\".\"deleted_at\" IS NULL"), "{repoint}");
+        let relations = relation_delete(uid(1), &now).to_string(PostgresQueryBuilder);
+        assert!(relations.contains("\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = "), "{relations}");
+        assert!(
+            relations.contains("OR \"issue_relations\".\"related_issue_id\" = "),
+            "{relations}"
+        );
+        let children = children_detach(uid(1), uid(0x20)).to_string(PostgresQueryBuilder);
+        assert!(children.contains("SET \"parent_id\" = NULL WHERE \"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = "), "{children}");
+        assert!(
+            children.contains("AND (NOT \"issues\".\"project_id\" = "),
+            "{children}"
+        );
+        let inert = inert_run_update(uid(1), &now).to_string(PostgresQueryBuilder);
+        assert!(
+            inert.contains("SET \"status\" = 'cancelled', \"ended_at\" = "),
+            "{inert}"
+        );
+        let barrier = handoff_parent_update(uid(1), &serde_json::json!({"k": 1}))
+            .to_string(PostgresQueryBuilder);
+        assert!(
+            barrier.contains("SET \"status\" = 'cancel_requested', \"run_config\" = E'{"),
+            "{barrier}"
+        );
+
+        // Every repoint sets the same pair over live rows; the id-list
+        // arms render an empty list as a never-true predicate.
+        let comments = [uid(0x70)];
+        for target in crate::app_issues::issue_move::REPOINT_ORDER {
+            let sql = repoint_update(*target, uid(1), &comments, &[], uid(0x20), uid(0x10))
+                .to_string(PostgresQueryBuilder);
+            assert!(sql.contains("SET \"project_id\" = '00000000-0000-0000-0000-000000000020', \"workspace_id\" = '00000000-0000-0000-0000-000000000010' WHERE"), "{target:?}: {sql}");
+            assert!(sql.contains("\"deleted_at\" IS NULL"), "{target:?}: {sql}");
+            assert!(!sql.contains("updated_at"), "{target:?}: {sql}");
+        }
+        let activity = repoint_update(
+            RepointTarget::IssueActivity,
+            uid(1),
+            &comments,
+            &[],
+            uid(0x20),
+            uid(0x10),
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(activity.contains("(\"issue_activities\".\"issue_id\" = '00000000-0000-0000-0000-000000000001' OR \"issue_activities\".\"issue_comment_id\" IN ('00000000-0000-0000-0000-000000000070'))"), "{activity}");
+        let empty = repoint_update(
+            RepointTarget::Description,
+            uid(1),
+            &comments,
+            &[],
+            uid(0x20),
+            uid(0x10),
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(
+            empty.ends_with("WHERE \"descriptions\".\"deleted_at\" IS NULL AND 1 = 2"),
+            "{empty}"
+        );
     }
 
     fn lazy_pool() -> sqlx::PgPool {
@@ -1412,7 +1641,6 @@ mod tests {
             },
             managed: ManagedRunnerSettings {
                 enabled: false,
-                max_per_user_project: 0,
                 queued_max_age_secs: 0,
                 graceful_stop_secs: 0,
                 sweep_interval_secs: 0,
@@ -1498,6 +1726,8 @@ mod tests {
                     actor_id: uid(1),
                     spec: FireSpec {
                         dispatch_immediate: true,
+                        pod_once: false,
+
                         created_by: Some(uid(1)),
                         moved_by_run: None,
                         now: Utc::now(),

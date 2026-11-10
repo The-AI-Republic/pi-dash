@@ -94,12 +94,17 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Router};
 use serde_json::Value;
+
+use pidash_db::entity::{
+    accounts, file_assets, project_member_invites, users, workspace_member_invites,
+    workspace_members, workspaces,
+};
 
 use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
@@ -172,8 +177,8 @@ pub const GOOGLE_NOT_CONFIGURED_CODE: i32 = 5105;
 pub const GOOGLE_PROVIDER_ERROR_CODE: i32 = 5115;
 /// `AUTHENTICATION_ERROR_CODES["INVALID_EMAIL"]` (`error.py:9`).
 pub const INVALID_EMAIL_CODE: i32 = 5005;
-/// `AUTHENTICATION_ERROR_CODES["SIGNUP_DISABLED"]` (`error.py:12`).
-pub const SIGNUP_DISABLED_CODE: i32 = 5035;
+/// `AUTHENTICATION_ERROR_CODES["SIGNUP_DISABLED"]` (`error.py:10`).
+pub const SIGNUP_DISABLED_CODE: i32 = 5015;
 
 /// `get_configuration_value` keys the google provider reads
 /// (`provider/oauth/google.py:28-39`).
@@ -344,9 +349,9 @@ pub fn is_secure_request(headers: &HeaderMap, settings: &pidash_db::config::Sett
 
 /// `get_client_ip` (`utils/ip_address.py:8-14`): first `X-Forwarded-For`
 /// entry, unstripped, else `REMOTE_ADDR`, else `None` (which binds NULL
-/// downstream — the documented 500 hazard). Handlers pass `None` for the
-/// peer: axum handlers do not see it without `ConnectInfo` (same call as
-/// the admin port's sign-out stamps).
+/// downstream — the documented 500 hazard). The callbacks pass the
+/// `ConnectInfo` peer (NEWPIDASH-14), so live `REMOTE_ADDR` is always
+/// present exactly like Django; the initiates pass `None` (no stamps).
 pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> Option<String> {
     if let Some(forwarded) = headers
         .get("x-forwarded-for")
@@ -426,6 +431,7 @@ impl<'a> RequestContext<'a> {
         query: HashMap<String, String>,
         headers: HeaderMap,
         session: Option<Extension<SessionHandle>>,
+        peer: Option<SocketAddr>,
     ) -> Result<Self, Response> {
         // `request.get_host()`: a missing or non-ASCII `Host` header is
         // `DisallowedHost` (400) in Django.
@@ -449,7 +455,7 @@ impl<'a> RequestContext<'a> {
                 .get("user-agent")
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned),
-            ip: client_ip(&headers, None),
+            ip: client_ip(&headers, peer),
             headers,
             host,
             secure: false,
@@ -552,7 +558,8 @@ pub async fn app_initiate(
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // Initiate reads host/scheme only; no peer is threaded (no stamps).
+    let ctx = match RequestContext::build(&state, query, headers, session, None) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -609,7 +616,8 @@ pub async fn space_initiate(
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // Initiate reads host/scheme only; no peer is threaded (no stamps).
+    let ctx = match RequestContext::build(&state, query, headers, session, None) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -872,49 +880,34 @@ pub async fn find_user_by_email(
     pool: &sqlx::PgPool,
     email: &str,
 ) -> Result<Option<UserRow>, CallbackError> {
-    use pidash_services::auth_session::queries::user_by_email_sql;
-    let sql = format!("{} LIMIT 1", user_by_email_sql("users", "$1"));
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(email)
-        .fetch_optional(pool)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .order_by_desc(users::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
         .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
         .map_err(|_| CallbackError::Internal)?;
-    row.map(|row| {
-        use sqlx::Row;
-        Ok(UserRow {
-            id: row.try_get("id").map_err(|_| CallbackError::Internal)?,
-            password: row
-                .try_get("password")
-                .map_err(|_| CallbackError::Internal)?,
-            email: row.try_get("email").map_err(|_| CallbackError::Internal)?,
-            is_active: row
-                .try_get("is_active")
-                .map_err(|_| CallbackError::Internal)?,
-            is_superuser: row
-                .try_get("is_superuser")
-                .map_err(|_| CallbackError::Internal)?,
-            first_name: row
-                .try_get("first_name")
-                .map_err(|_| CallbackError::Internal)?,
-            last_name: row
-                .try_get("last_name")
-                .map_err(|_| CallbackError::Internal)?,
-            display_name: row
-                .try_get("display_name")
-                .map_err(|_| CallbackError::Internal)?,
-            avatar: row.try_get("avatar").map_err(|_| CallbackError::Internal)?,
-            avatar_asset_id: row
-                .try_get("avatar_asset_id")
-                .map_err(|_| CallbackError::Internal)?,
-        })
-    })
-    .transpose()
+    Ok(model.map(|user| UserRow {
+        id: user.id,
+        password: user.password,
+        email: user.email,
+        is_active: user.is_active,
+        is_superuser: user.is_superuser,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        display_name: user.display_name,
+        avatar: user.avatar,
+        avatar_asset_id: user.avatar_asset_id,
+    }))
 }
 
 /// `Adapter.__check_signup` (`adapter/base.py:95-119`): when
 /// `ENABLE_SIGNUP == "0"` (string compare) and no
 /// `WorkspaceMemberInvite` row carries the email, signup raises
-/// `SIGNUP_DISABLED` (5035) with the email as payload. Any invite row
+/// `SIGNUP_DISABLED` (5015) with the email as payload. Any invite row
 /// counts — accepted or not.
 pub async fn check_signup(
     pool: &sqlx::PgPool,
@@ -944,13 +937,19 @@ pub async fn check_signup(
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM \"workspace_member_invites\" WHERE \"email\" = $1 AND \"deleted_at\" IS NULL LIMIT 1",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let invited: Option<uuid::Uuid> = workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspace_member_invites::Column::Id)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackError::Internal)?;
     if invited.is_some() {
         return Ok(());
     }
@@ -1027,9 +1026,14 @@ pub async fn get_or_create_profile(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<ProfileState, CallbackError> {
     use pidash_services::domain::identity;
-    let path = identity::get_or_create_profile(pool, user_id, now, &random_color())
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+    let path = identity::get_or_create_profile(
+        &pidash_db::pool::sea_orm_connection(pool),
+        user_id,
+        now,
+        &random_color(),
+    )
+    .await
+    .map_err(|_| CallbackError::Internal)?;
     Ok(ProfileState {
         is_onboarded: path.is_onboarded,
         last_workspace_id: path.last_workspace_id,
@@ -1084,7 +1088,7 @@ pub async fn sync_user_data(
 ) -> Result<(), CallbackError> {
     use pidash_services::domain::identity;
     identity::sync_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &identity::SyncUpdate {
             first_name,
@@ -1116,14 +1120,22 @@ pub async fn sync_user_data(
     .await
     {
         Some(asset_id) => {
-            identity::stamp_avatar_asset(pool, user.id, asset_id)
-                .await
-                .map_err(|_| CallbackError::Internal)?;
+            identity::stamp_avatar_asset(
+                &pidash_db::pool::sea_orm_connection(pool),
+                user.id,
+                asset_id,
+            )
+            .await
+            .map_err(|_| CallbackError::Internal)?;
         }
         None => {
-            identity::stamp_avatar_url(pool, user.id, avatar_url)
-                .await
-                .map_err(|_| CallbackError::Internal)?;
+            identity::stamp_avatar_url(
+                &pidash_db::pool::sea_orm_connection(pool),
+                user.id,
+                avatar_url,
+            )
+            .await
+            .map_err(|_| CallbackError::Internal)?;
         }
     }
     Ok(())
@@ -1380,31 +1392,40 @@ pub async fn insert_file_asset(
     storage_metadata: Option<serde_json::Value>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
+    use sea_orm::{ActiveModelTrait, Set};
     let attributes =
         pidash_storage::avatar_attributes(PROVIDER, extension, content_type, file_size);
-    sqlx::query(
-        r#"INSERT INTO file_assets
-           (id, created_at, updated_at, attributes, asset,
-            created_by_id, updated_by_id, workspace_id,
-            is_deleted, deleted_at, is_archived,
-            comment_id, entity_type, external_id, external_source,
-            is_uploaded, issue_id, page_id, project_id,
-            size, storage_metadata, user_id, draft_issue_id, entity_identifier)
-           VALUES ($1,$2,$2,$3,$4,$5,NULL,NULL,
-                   FALSE,NULL,FALSE,
-                   NULL,'USER_AVATAR',NULL,NULL,
-                   TRUE,NULL,NULL,NULL,
-                   $6,$7,$5,NULL,NULL)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(attributes)
-    .bind(stored_key)
-    .bind(user_id)
-    .bind(file_size as f64)
-    .bind(storage_metadata)
-    .execute(pool)
-    .await?;
+    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    file_assets::ActiveModel {
+        id: Set(id),
+        created_at: Set(now_tz),
+        updated_at: Set(now_tz),
+        attributes: Set(attributes),
+        asset: Set(stored_key.to_owned()),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        workspace_id: Set(None),
+        is_deleted: Set(false),
+        deleted_at: Set(None),
+        is_archived: Set(false),
+        comment_id: Set(None),
+        entity_type: Set(Some("USER_AVATAR".to_owned())),
+        external_id: Set(None),
+        external_source: Set(None),
+        is_uploaded: Set(true),
+        issue_id: Set(None),
+        page_id: Set(None),
+        project_id: Set(None),
+        size: Set(file_size as f64),
+        storage_metadata: Set(storage_metadata),
+        user_id: Set(Some(user_id)),
+        draft_issue_id: Set(None),
+        entity_identifier: Set(None),
+    }
+    .insert(&db)
+    .await
+    .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(())
 }
 
@@ -1436,15 +1457,19 @@ pub async fn delete_old_avatar(
     avatar_asset_id: Option<uuid::Uuid>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     let Some(asset_id) = avatar_asset_id else {
         return;
     };
-    let row: Option<(String,)> = match sqlx::query_as(
-        "SELECT \"asset\" FROM \"file_assets\" WHERE \"id\" = $1 AND \"deleted_at\" IS NULL",
-    )
-    .bind(asset_id)
-    .fetch_optional(pool)
-    .await
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<String> = match file_assets::Entity::find_by_id(asset_id)
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .select_only()
+        .column(file_assets::Column::Asset)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
     {
         Ok(row) => row,
         Err(error) => {
@@ -1452,7 +1477,7 @@ pub async fn delete_old_avatar(
             return;
         }
     };
-    let Some((key,)) = row else {
+    let Some(key) = row else {
         return;
     };
     if pidash_storage::validate_storage(storage).is_err() {
@@ -1537,7 +1562,7 @@ pub async fn save_user_data(
     let token = format!("{}{}", new_state(), new_state());
     use pidash_services::domain::identity;
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user.id,
         &identity::LoginStamps {
             medium: Some(PROVIDER),
@@ -1586,17 +1611,31 @@ pub async fn fetch_workspace_invites(
     pool: &sqlx::PgPool,
     email: &str,
 ) -> Result<Vec<WorkspaceInvite>, CallbackError> {
-    let rows: Vec<(uuid::Uuid, i16, String, uuid::Uuid)> = sqlx::query_as(
-        "SELECT i.\"workspace_id\", i.\"role\", w.\"slug\", w.\"id\" \
-         FROM \"workspace_member_invites\" i \
-         JOIN \"workspaces\" w ON w.\"id\" = i.\"workspace_id\" \
-         WHERE i.\"email\" = $1 AND i.\"accepted\" = TRUE AND i.\"deleted_at\" IS NULL \
-         ORDER BY i.\"created_at\" DESC",
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<(uuid::Uuid, i16, String, uuid::Uuid)> = workspace_member_invites::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_member_invites::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .columns([
+            workspace_member_invites::Column::WorkspaceId,
+            workspace_member_invites::Column::Role,
+        ])
+        .column_as(workspaces::Column::Slug, "slug")
+        .column_as(workspaces::Column::Id, "db_workspace_id")
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::Accepted.eq(true))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_member_invites::Column::CreatedAt)
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackError::Internal)?;
     Ok(rows
         .into_iter()
         .map(
@@ -1615,16 +1654,26 @@ pub async fn fetch_project_invites(
     pool: &sqlx::PgPool,
     email: &str,
 ) -> Result<Vec<ProjectInvite>, CallbackError> {
-    let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT \"workspace_id\", \"project_id\", \"role\", \"created_by_id\" \
-         FROM \"project_member_invites\" \
-         WHERE \"email\" = $1 AND \"accepted\" = TRUE AND \"deleted_at\" IS NULL \
-         ORDER BY \"created_at\" DESC",
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<(uuid::Uuid, uuid::Uuid, i16, Option<uuid::Uuid>)> =
+        project_member_invites::Entity::find()
+            .select_only()
+            .columns([
+                project_member_invites::Column::WorkspaceId,
+                project_member_invites::Column::ProjectId,
+                project_member_invites::Column::Role,
+                project_member_invites::Column::CreatedById,
+            ])
+            .filter(project_member_invites::Column::Email.eq(email))
+            .filter(project_member_invites::Column::Accepted.eq(true))
+            .filter(project_member_invites::Column::DeletedAt.is_null())
+            .order_by_desc(project_member_invites::Column::CreatedAt)
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)
+            .map_err(|_| CallbackError::Internal)?;
     Ok(rows
         .into_iter()
         .map(
@@ -1696,9 +1745,15 @@ pub async fn insert_workspace_members(
             },
         )
         .collect();
-    members::bulk_add(pool, &bulk_rows, &props, &issues, now)
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+    members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk_rows,
+        &props,
+        &issues,
+        now,
+    )
+    .await
+    .map_err(|_| CallbackError::Internal)?;
     Ok(())
 }
 
@@ -1730,9 +1785,15 @@ pub async fn insert_project_members(
             }
         })
         .collect();
-    pidash_services::domain::projects::members::bulk_add(pool, &bulk, &props, &prefs, false)
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+    pidash_services::domain::projects::members::bulk_add(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &bulk,
+        &props,
+        &prefs,
+        false,
+    )
+    .await
+    .map_err(|_| CallbackError::Internal)?;
     Ok(())
 }
 
@@ -1838,24 +1899,32 @@ pub async fn process_invitations(
     insert_project_members(pool, &project_member_rows, now).await?;
     // Both invite sets soft-delete (queryset `.delete()` → `UPDATE
     // deleted_at`, `mixins.py:SoftDeletionQuerySet`).
-    sqlx::query(
-        r#"UPDATE "workspace_member_invites" SET "deleted_at" = $1
-           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
-    )
-    .bind(now)
-    .bind(email)
-    .execute(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
-    sqlx::query(
-        r#"UPDATE "project_member_invites" SET "deleted_at" = $1
-           WHERE "email" = $2 AND "accepted" = TRUE AND "deleted_at" IS NULL"#,
-    )
-    .bind(now)
-    .bind(email)
-    .execute(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::Accepted.eq(true))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackError::Internal)?;
+    project_member_invites::Entity::update_many()
+        .col_expr(
+            project_member_invites::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(project_member_invites::Column::Email.eq(email))
+        .filter(project_member_invites::Column::Accepted.eq(true))
+        .filter(project_member_invites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackError::Internal)?;
     Ok(())
 }
 
@@ -1880,16 +1949,19 @@ pub async fn upsert_account(
     let prior: Option<(chrono::DateTime<chrono::Utc>, Value)> = if provider_id.is_empty() {
         None
     } else {
-        sqlx::query_as(
-            "SELECT \"created_at\", \"metadata\" FROM \"accounts\" \
-             WHERE \"user_id\" = $1 AND \"provider\" = $2 AND \"provider_account_id\" = $3 LIMIT 1",
-        )
-        .bind(user_id)
-        .bind(PROVIDER)
-        .bind(provider_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| CallbackError::Internal)?
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let model = accounts::Entity::find()
+            .filter(accounts::Column::UserId.eq(user_id))
+            .filter(accounts::Column::Provider.eq(PROVIDER))
+            .filter(accounts::Column::ProviderAccountId.eq(provider_id))
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx);
+        model
+            .map_err(|_| CallbackError::Internal)?
+            .map(|m| (m.created_at.with_timezone(&chrono::Utc), m.metadata))
     };
     let mut conn = pool.acquire().await.map_err(|_| CallbackError::Internal)?;
     let existing = prior.map(|(created_at, metadata)| ExistingAccount {
@@ -1897,7 +1969,7 @@ pub async fn upsert_account(
         metadata,
     });
     create_update_account(
-        &mut conn,
+        &pidash_db::orm_tx::TxConn::new(&mut conn),
         user_id,
         PROVIDER,
         user_data,
@@ -1963,42 +2035,64 @@ pub async fn redirection_path(
     email: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<String, CallbackError> {
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let profile = get_or_create_profile(pool, user_id, now).await?;
     if !profile.is_onboarded {
         return Ok("onboarding".to_owned());
     }
     let mut last_slug: Option<String> = None;
     if let Some(last_id) = profile.last_workspace_id {
-        last_slug = sqlx::query_scalar(
-            "SELECT w.\"slug\" FROM \"workspaces\" w \
-             JOIN \"workspace_members\" m ON m.\"workspace_id\" = w.\"id\" \
-             WHERE w.\"id\" = $1 AND m.\"member_id\" = $2 AND m.\"is_active\" = TRUE \
-             AND m.\"deleted_at\" IS NULL AND w.\"deleted_at\" IS NULL LIMIT 1",
-        )
-        .bind(last_id)
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+        last_slug = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.eq(last_id))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)
+            .map_err(|_| CallbackError::Internal)?;
     }
-    let fallback_slug: Option<String> = sqlx::query_scalar(
-        "SELECT w.\"slug\" FROM \"workspaces\" w \
-         JOIN \"workspace_members\" m ON m.\"workspace_id\" = w.\"id\" \
-         WHERE m.\"member_id\" = $1 AND m.\"is_active\" = TRUE \
-         AND m.\"deleted_at\" IS NULL AND w.\"deleted_at\" IS NULL \
-         ORDER BY w.\"created_at\" ASC LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
-    let invited: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM \"workspace_member_invites\" WHERE \"email\" = $1 AND \"deleted_at\" IS NULL LIMIT 1",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| CallbackError::Internal)?;
+    let fallback_slug: Option<String> = workspaces::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Relation::WorkspaceMembers.def(),
+        )
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .order_by_asc(workspaces::Column::CreatedAt)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackError::Internal)?;
+    let invited: Option<uuid::Uuid> = workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .select_only()
+        .column(workspace_member_invites::Column::Id)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackError::Internal)?;
     let target = select_redirection_path(
         profile.is_onboarded,
         last_slug.as_deref(),
@@ -2017,7 +2111,7 @@ pub struct AuthedUser {
 }
 
 /// Full success pipeline for one `code`: config (5105), token exchange +
-/// userinfo (5115), sanitize (5005/5035), lookup, signup (profile +
+/// userinfo (5115), sanitize (5005), lookup, signup (profile +
 /// avatar upload attempt with provider-URL fallback, then IDP sync for
 /// the new user when enabled — `not is_signup`, never for existing
 /// users), stamps, post-auth workflow on the app side (`with_callback`),
@@ -2118,9 +2212,13 @@ pub async fn authenticate_google(
                 avatar_asset_id: None,
             };
             if !avatar_url.is_empty() {
-                identity::stamp_avatar_url(&ctx.pool, row.id, avatar_url)
-                    .await
-                    .map_err(|_| CallbackError::Internal)?;
+                identity::stamp_avatar_url(
+                    &pidash_db::pool::sea_orm_connection(&ctx.pool),
+                    row.id,
+                    avatar_url,
+                )
+                .await
+                .map_err(|_| CallbackError::Internal)?;
                 row.avatar = avatar_url.to_owned();
                 // `avatar_asset = download_and_upload_avatar(...)`;
                 // success sets the FK too, failure keeps the provider URL
@@ -2138,9 +2236,13 @@ pub async fn authenticate_google(
                 )
                 .await
                 {
-                    identity::stamp_avatar_asset(&ctx.pool, row.id, asset_id)
-                        .await
-                        .map_err(|_| CallbackError::Internal)?;
+                    identity::stamp_avatar_asset(
+                        &pidash_db::pool::sea_orm_connection(&ctx.pool),
+                        row.id,
+                        asset_id,
+                    )
+                    .await
+                    .map_err(|_| CallbackError::Internal)?;
                     row.avatar_asset_id = Some(asset_id);
                 }
             }
@@ -2196,8 +2298,11 @@ pub async fn app_callback(
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
+    peer: ConnectInfo<SocketAddr>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // `REMOTE_ADDR` (`get_client_ip` fallback; serve installs the peer via
+    // `into_make_service_with_connect_info`, so this is always present live).
+    let ctx = match RequestContext::build(&state, query, headers, session, Some(peer.0)) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -2298,8 +2403,11 @@ pub async fn space_callback(
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     session: Option<Extension<SessionHandle>>,
+    peer: ConnectInfo<SocketAddr>,
 ) -> Response {
-    let ctx = match RequestContext::build(&state, query, headers, session) {
+    // `REMOTE_ADDR` (`get_client_ip` fallback; serve installs the peer via
+    // `into_make_service_with_connect_info`, so this is always present live).
+    let ctx = match RequestContext::build(&state, query, headers, session, Some(peer.0)) {
         Ok(ctx) => ctx.finish_scheme(state.settings()),
         Err(response) => return response,
     };
@@ -2337,6 +2445,113 @@ pub async fn space_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The invite + redirection selects keep the raw-SQL shape: inner
+    /// joins, live rows only, newest-first invites, the same filters
+    /// and order (no database needed, orm-migration.md §3.2).
+    #[test]
+    fn invite_and_redirection_statement_shapes() {
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+            QueryTrait, RelationTrait,
+        };
+        let user_id = uuid::Uuid::nil();
+
+        // Accepted workspace invites with slugs + workspace ids, newest
+        // first.
+        let ws = workspace_member_invites::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspace_member_invites::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .columns([
+                workspace_member_invites::Column::WorkspaceId,
+                workspace_member_invites::Column::Role,
+            ])
+            .column_as(workspaces::Column::Slug, "slug")
+            .column_as(workspaces::Column::Id, "db_workspace_id")
+            .filter(workspace_member_invites::Column::Email.eq("a@b.test"))
+            .filter(workspace_member_invites::Column::Accepted.eq(true))
+            .filter(workspace_member_invites::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_member_invites::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(ws.contains("INNER JOIN"), "ws join: {ws}");
+        assert!(ws.contains("\"slug\""), "ws slug: {ws}");
+        assert!(
+            ws.contains("\"db_workspace_id\""),
+            "ws db_workspace_id aliased: {ws}"
+        );
+        assert!(
+            ws.contains("ORDER BY \"workspace_member_invites\".\"created_at\" DESC"),
+            "ws newest-first order: {ws}"
+        );
+
+        // Accepted project invites, newest first.
+        let pr = project_member_invites::Entity::find()
+            .select_only()
+            .columns([
+                project_member_invites::Column::WorkspaceId,
+                project_member_invites::Column::ProjectId,
+                project_member_invites::Column::Role,
+                project_member_invites::Column::CreatedById,
+            ])
+            .filter(project_member_invites::Column::Email.eq("a@b.test"))
+            .filter(project_member_invites::Column::Accepted.eq(true))
+            .filter(project_member_invites::Column::DeletedAt.is_null())
+            .order_by_desc(project_member_invites::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            pr.contains("ORDER BY \"project_member_invites\".\"created_at\" DESC"),
+            "pr newest-first order: {pr}"
+        );
+
+        // Redirection last-workspace lookup: joined, both live,
+        // LIMIT 1, no order.
+        let last_id = uuid::Uuid::nil();
+        let last = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspaces::Column::Id.eq(last_id))
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(last.contains("INNER JOIN"), "last join: {last}");
+        assert!(last.contains("LIMIT 1"), "last limit: {last}");
+        assert!(!last.contains("ORDER BY"), "last unordered: {last}");
+
+        // Redirection fallback: earliest-created workspace first.
+        let fallback = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_asc(workspaces::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            fallback.contains("ORDER BY \"workspaces\".\"created_at\" ASC"),
+            "fallback order: {fallback}"
+        );
+        assert!(fallback.contains("LIMIT 1"), "fallback limit: {fallback}");
+    }
 
     #[test]
     fn overlong_redirect_location_answers_400() {
@@ -2600,6 +2815,20 @@ mod tests {
         );
     }
 
+    /// `SIGNUP_DISABLED` catalog pin (NEWPIDASH-13): the google gate
+    /// must emit 5015 (`adapter/error.py:10`), not
+    /// `AUTHENTICATION_FAILED_SIGN_UP` (5035). Cross-pinned against
+    /// the shared table so the local const cannot drift again.
+    /// FAILS on the pre-fix code (5035).
+    #[test]
+    fn signup_disabled_code_matches_adapter_catalog() {
+        assert_eq!(SIGNUP_DISABLED_CODE, 5015);
+        assert_eq!(
+            pidash_services::auth_session::shapes::error_code("SIGNUP_DISABLED"),
+            Some(SIGNUP_DISABLED_CODE),
+        );
+    }
+
     // -- live kernel tests (env-gated, PIDASHCONV-1089) ------------------
     // Same convention as the github kernel harness (PIDASHCONV-1083):
     // unset DATABASE_URL (plain `cargo test`) skips these. REDIS_URL
@@ -2764,6 +2993,86 @@ mod tests {
             .await
             .ok();
         }
+    }
+
+    /// `Adapter.__check_signup` through the google gate (NEWPIDASH-13):
+    /// with `ENABLE_SIGNUP == "0"` and no live invite, the gate raises
+    /// `SIGNUP_DISABLED` with the catalog code 5015 (not
+    /// `AUTHENTICATION_FAILED_SIGN_UP` 5035) and the email as payload;
+    /// a live invite passes. The google HTTP callback is sealed
+    /// (hardcoded `https://oauth2.googleapis.com` URLs on both
+    /// backends, exchange before the gate), so this kernel test is the
+    /// live net — same convention as the invitation tests below.
+    /// FAILS on the pre-fix code (5035).
+    #[tokio::test]
+    async fn google_kernel_signup_disabled_answers_5015() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("go13-{tag}@example.test");
+        // Reap before sow: a crashed earlier run must not leak an
+        // ENABLE_SIGNUP row or invite rows into this one.
+        sqlx::query(r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1"#)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("reap invites");
+        sqlx::query(r#"DELETE FROM "instance_configurations" WHERE "key" = 'ENABLE_SIGNUP'"#)
+            .execute(&pool)
+            .await
+            .expect("reap config");
+        // Sow ENABLE_SIGNUP=0 (a db-sourced registry key; column list
+        // mirrors `_harness.db.Database.make_config`).
+        let now = chrono::Utc::now();
+        sqlx::query(
+            r#"INSERT INTO "instance_configurations"
+               ("created_at", "updated_at", "id", "key", "value", "category", "is_encrypted")
+               VALUES ($1, $1, $2, 'ENABLE_SIGNUP', '0', 'general', FALSE)"#,
+        )
+        .bind(now)
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed ENABLE_SIGNUP=0");
+
+        let err = check_signup(&pool, "contract-test-secret", &email)
+            .await
+            .expect_err("gate raises without an invite");
+
+        // A live invite satisfies the gate (seeded user + workspaces).
+        let invited_tag = format!("{tag}i");
+        let invited_email = format!("go13-{invited_tag}@example.test");
+        let slug = format!("go13-{invited_tag}");
+        let (_user_id, workspace_id, decoy_workspace_id) =
+            seed_invited_user(&pool, &invited_email, &slug).await;
+        let invited_outcome = check_signup(&pool, "contract-test-secret", &invited_email).await;
+
+        // Observe everything before cleanup so a failure still sweeps.
+        cleanup_kernel_world(&pool, &invited_email, &[workspace_id, decoy_workspace_id]).await;
+        sqlx::query(r#"DELETE FROM "instance_configurations" WHERE "key" = 'ENABLE_SIGNUP'"#)
+            .execute(&pool)
+            .await
+            .expect("sweep config");
+        sqlx::query(r#"DELETE FROM "workspace_member_invites" WHERE "email" = $1"#)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("sweep invites");
+
+        match err {
+            CallbackError::Auth(exception) => {
+                assert_eq!(exception.error_code, 5015, "catalog code");
+                assert_eq!(exception.error_message, "SIGNUP_DISABLED");
+                assert_eq!(
+                    exception.payload,
+                    vec![("email".to_owned(), Value::String(email.clone()))],
+                    "email payload"
+                );
+            }
+            CallbackError::Internal => panic!("expected SIGNUP_DISABLED, got Internal"),
+        }
+        assert!(invited_outcome.is_ok(), "live invite satisfies the gate");
     }
 
     /// `create_user` inserts the notification-preferences row
@@ -3630,5 +3939,90 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- hermetic tests: RequestContext client-IP resolution (NEWPIDASH-14)
+
+    fn full_test_settings() -> pidash_db::config::Settings {
+        let mut vars = HashMap::new();
+        vars.insert("APP_BASE_URL".to_owned(), "http://app.test".to_owned());
+        vars.insert("SPACE_BASE_URL".to_owned(), "http://space.test".to_owned());
+        pidash_db::config::Settings::from_map_with(
+            &vars,
+            pidash_db::config::Profile::Common,
+            &pidash_db::config::NoOverlay,
+        )
+        .expect("test settings")
+    }
+
+    /// Hermetic state: `RequestContext::build` only checks that a pool and
+    /// an ORM handle are installed, so a lazy pool to a never-bound port
+    /// suffices and these tests run without `DATABASE_URL` (the plain
+    /// `cargo test` CI job sets none).
+    fn ctx_test_state() -> AppState {
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/google_ctx_hermetic")
+            .expect("lazy pool");
+        let pools = pidash_db::Pools::primary_only(pool);
+        let orm = pidash_db::sea_orm_connection(pools.primary());
+        AppState::with_settings("test", full_test_settings())
+            .with_pools(pools)
+            .with_orm(orm)
+    }
+
+    fn ctx_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "app.test".parse().expect("host"));
+        headers
+    }
+
+    fn ctx_session() -> Option<Extension<SessionHandle>> {
+        Some(Extension(SessionHandle::new(
+            crate::middleware::RequestSession::empty(),
+        )))
+    }
+
+    /// `RequestContext` resolves the login IP like `get_client_ip`
+    /// (NEWPIDASH-14): without `X-Forwarded-For` it falls back to the
+    /// peer address (`REMOTE_ADDR`), never `None` — a `None` ip binds
+    /// NULL into NOT NULL `users.last_login_ip` and the returning-login
+    /// stamp 500s. Fails when `build` drops the peer; the pre-fix run
+    /// showed `None` here.
+    #[tokio::test]
+    async fn request_context_ip_falls_back_to_peer_without_xff() {
+        let state = ctx_test_state();
+        let peer: SocketAddr = "203.0.113.9:50831".parse().expect("peer addr");
+        let ctx = RequestContext::build(
+            &state,
+            HashMap::new(),
+            ctx_headers(),
+            ctx_session(),
+            Some(peer),
+        )
+        .expect("ctx builds");
+        assert_eq!(
+            ctx.ip.as_deref(),
+            Some("203.0.113.9"),
+            "without X-Forwarded-For the login IP is the peer address, not None"
+        );
+    }
+
+    /// `X-Forwarded-For` still wins over the peer (NEWPIDASH-14):
+    /// `get_client_ip` takes the first forwarded entry, unstripped.
+    #[tokio::test]
+    async fn request_context_ip_prefers_first_xff_entry() {
+        let state = ctx_test_state();
+        let peer: SocketAddr = "203.0.113.9:50831".parse().expect("peer addr");
+        let mut headers = ctx_headers();
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.7, 203.0.113.9".parse().expect("xff"),
+        );
+        let ctx = RequestContext::build(&state, HashMap::new(), headers, ctx_session(), Some(peer))
+            .expect("ctx builds");
+        assert_eq!(
+            ctx.ip.as_deref(),
+            Some("198.51.100.7"),
+            "the first X-Forwarded-For entry wins over the peer"
+        );
     }
 }

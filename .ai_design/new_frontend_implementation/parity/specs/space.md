@@ -1292,15 +1292,14 @@ continue action. Rules:
   on submit).
 - The email-check endpoint is anonymously rate limited (per minute, per
   client) and answers 429 with `{error_code: "RATE_LIMIT_EXCEEDED",
-  error_message: "RATE_LIMIT_EXCEEDED"}` (server code 5900). **Parity
-  behavior: no banner.** The old card's catalog has no 5900 entry, so the
-  response lands in the unknown-code branch: the email step stays as it was,
-  the address is preserved, no request is retried, and nothing explains the
-  delay. The oracle pins this (`banner: null` for 5900), so the new app keeps
-  it and SPC-063 and §5.4 list 5900 as **not modelled** (unknown branch). The
-  no-explanation outcome is a known old defect, filed as **NEWFRONT-822**;
-  when that issue is fixed, the banner becomes a new-app behavior with its
-  own re-tagged scenario — this spec does not pre-empt it.
+  error_message: "RATE_LIMIT_EXCEEDED"}` (server code 5900). The old card's
+  catalog has no 5900 entry, so on the old app the response lands in the
+  unknown-code branch (no banner, step unchanged, nothing explains the
+  delay); the oracle pins that (`banner: null` for 5900). The new app fixes
+  the defect (**NEWFRONT-822**): a throttled check renders the card's
+  dismissible banner with try-again-later wording on the email step, keeping
+  the address and mode, with no automatic retry. A throttled
+  magic-generate banners the same way on the code step (SPC-063).
 
 **SPC-059 — Known vs new routing and method selection.**
 Known address → sign-in mode; new → sign-up mode. Method selection:
@@ -1385,15 +1384,17 @@ each button carries a full, translated invitation naming the provider and
 following the mode (a provider-continue phrase; the design owns the words);
 beside the password step the same buttons render compact (icon-only, with an
 accessible name). Activating a button starts the provider flow at the
-**workspace provider path** `/auth/<provider>/` (`google`, `github`, `gitlab`,
-`gitea`), carrying the encoded `next_path` — this is parity: the old card
-navigates there (`apps/space/hooks/oauth/core.tsx`) and the green oracle
-asserts `/auth/google/`. The server also exposes spaces-specific initiate
-endpoints under `/auth/spaces/<provider>/`; the space card does **not** call
-them, and no slice switches to them without a new decision and a re-tagged
-scenario. Callback URLs are the server's own redirects. Completing a provider flow is unprovable on the
+space-scoped path `/auth/spaces/<provider>/` (`google`, `github`, `gitlab`,
+`gitea`), carrying the encoded `next_path`, so the callback returns the
+visitor to the public board position instead of the workspace app. The old
+card navigates to the workspace path `/auth/<provider>/` instead
+(`apps/space/hooks/oauth/core.tsx`) — that is the old bug NEWFRONT-821, and
+the green oracle still asserts the old path on its leg. Callback URLs are
+the server's own redirects. Completing a provider flow is unprovable on the
 seeded stack (no credentials): the oracle proves presence, compact shape and
-flow start, and the gate extends only if a provider is configured. Provider
+flow start, the web_new leg plus the `bug: NEWFRONT-821` intent scenario
+prove the spaces path and the carried return address, and the gate extends
+only if a provider is configured. Provider
 errors that arrive as codes (`*_NOT_CONFIGURED`, `*_OAUTH_PROVIDER_ERROR`,
 GitHub org membership) render through the same banner as SPC-063.
 
@@ -1428,13 +1429,13 @@ the fixing step:
   configuration failure renders no banner (old behavior, kept; no issue
   filed — the Gitea button only appears when the instance enables it).
 - `RATE_LIMIT_EXCEEDED` (5900, the server's answer to any throttled auth
-  call, including `email-check` and a throttled generate) is **not modelled**
-  in parity: it falls into the unknown-code branch — no banner, the step that
-  made the call stays as it was (email step with the address, or the code
-  step), and no automatic retry. This is exactly what the green oracle
-  asserts. The silent outcome is the old defect NEWFRONT-822; a fix adds a
-  banner later, under that issue and a new scenario, and is not present
-  behavior.
+  call, including `email-check` and a throttled generate) is modelled on
+  the new app (**NEWFRONT-822** fix for the old silence): it renders the
+  card's dismissible banner with try-again-later wording on the step that
+  made the call — the email step with the address for a throttled check,
+  the code step for a throttled generate — keeping the mode, with no
+  automatic retry. The green oracle still pins the old app's silence
+  (`banner: null`); the SPC-063 scenario asserts the banner on web_new only.
 The banner text is written from the code's meaning and translated (one
 catalog entry per known code); the code itself is never shown, and the
 server's raw message/address fields are not echoed into the banner. Codes the
@@ -1631,7 +1632,7 @@ create/confirm/link calls above stay exactly as described.
 | Code submit | native `POST /auth/spaces/magic-sign-in/` \| `.../magic-sign-up/` | form: `csrfmiddlewaretoken`, `code`, `email`, `next_path` | redirect to validated return path, or to the spaces base with `error_code` | 060 |
 | Password submit | native `POST /auth/spaces/sign-in/` \| `.../sign-up/` | form: `csrfmiddlewaretoken`, `email`, `password` (+ confirmation), `next_path` | redirect as above | 061 |
 | Session end (sign-out) | native `POST /auth/spaces/sign-out/` | form: `csrfmiddlewaretoken`, `next_path` | redirect to return path; session destroyed | 014 |
-| Providers | `GET /auth/{google,github,gitlab,gitea}/` (the workspace flow start the old space card uses; server callbacks at `.../callback/`). The spaces-specific `GET /auth/spaces/{provider}/` endpoints exist but are **not called** by this area (parity: oracle asserts `/auth/google/`) | `next_path` | redirect to provider | 062 |
+| Providers | `GET /auth/spaces/{google,github,gitlab,gitea}/` (the space-scoped flow start; server callbacks at `.../callback/`). The old space card starts the workspace flow `GET /auth/{provider}/` instead — old bug NEWFRONT-821; the oracle still asserts `/auth/google/` on its leg | `next_path` | redirect to provider | 062 |
 
 Auth error codes the card models (from the server's catalog; the card maps
 the number to a step and a translated banner, never shows the number):
@@ -1647,17 +1648,16 @@ the number to a step and a translated banner, never shows the number):
 `USER_ALREADY_EXIST`, `INSTANCE_NOT_CONFIGURED`,
 `SMTP_NOT_CONFIGURED`, `USER_ACCOUNT_DEACTIVATED` (5019),
 `OAUTH_NOT_CONFIGURED`, and the `GOOGLE_`/`GITHUB_`/`GITLAB_` configuration
-and provider-error codes. Deliberate exclusions, both proven by the old card
-and the oracle:
-- `RATE_LIMIT_EXCEEDED` (5900) is **not modelled**; it takes the unknown-code
-  branch (no banner). The defect is NEWFRONT-822; the catalog gains it only
-  when that issue is implemented with a new scenario.
+and provider-error codes, plus `RATE_LIMIT_EXCEEDED` (5900), which the new
+app models as a try-again-later banner on the calling step (**NEWFRONT-822**
+fix; the old card leaves it silent). Deliberate exclusion, proven by the old
+card and the oracle:
 - `GITEA_NOT_CONFIGURED` (5112) exists on the server but the old banner set
   lists only `OAUTH_NOT_CONFIGURED` plus the Google/GitHub/GitLab codes, so a
   Gitea configuration failure renders **no banner**. The new app keeps that;
   a slice must not add a Gitea banner.
 Unknown numbers: no banner. The catalog is the one list: SPC-058 and SPC-063
-read from it, with these exclusions stated there too.
+read from it, with this exclusion stated there too.
 
 ### 5.5 Response shapes the contracts must declare
 
@@ -1791,7 +1791,7 @@ pins the old behavior). The new app implements the intent in this column.
 | NEWFRONT-466 | SPC-057 | Comment reaction pills name their reactors and mark the visitor's own from server-loaded rows (read the flat actor shape). |
 | NEWFRONT-467 | SPC-056 | A failed edit reconciles the row to the stored text. |
 | NEWFRONT-469 | SPC-015, SPC-029 | The frame gate hides the card-footer reaction add control too; the old card kept a working add control while the overlay hid it. |
-| NEWFRONT-822 | SPC-058, SPC-063 | **Parity: no banner.** The old card has no 5900 entry, so a throttled auth call lands in the unknown-code branch (step unchanged, address kept, no retry, no explanation) and the green oracle pins `banner: null`. The new app builds that parity behavior, so the row is flippable now; the filed issue tracks the *defect* (a visitor gets no explanation) and, if it is implemented, adds a translated try-again-later banner on the step that made the call, with a new intent scenario. Until then the catalog keeps 5900 unmodelled (§5.4). |
+| NEWFRONT-822 | SPC-058, SPC-063 | **Intent: try-again-later banner on the calling step.** The old card has no 5900 entry, so a throttled auth call lands in the unknown-code branch (step unchanged, no explanation) and the green oracle pins `banner: null` for the old app. The new app fixes the defect: a throttled check or generate renders the card's dismissible banner with try-again-later wording on the step that made the call, keeping the address and mode, and the SPC-063 scenario asserts the banner on web_new only (§5.4). |
 | NEWFRONT-823 | SPC-014 | **Intent: first + last name in the trigger fallback.** The old trigger template repeats `first_name` (`display_name \|\| first_name first_name \|\| email \|\| neutral`), so a user without a display name reads their first name twice and the email/neutral fallbacks are unreachable. The new app builds display name → first + last → email → neutral, from the same current-user fields; the oracle reads the display-name case only. |
 | gate-only, no issue (addendum to NEWFRONT-463) | SPC-030/042 | Clicking a card from a filtered board keeps the filter keys in the address; the old app dropped them while the store kept filtering. Folded into SPC-030/042 and proven by the gate; NEWFRONT-463 covers the same address-loss family for the initial fetch. No separate issue: the gate scenario is the evidence and no user-visible divergence survives the intent. |
 | gate-only, no issue | SPC-022/030/042 | The one history model (settle replaces, open pushes, close replaces) is a new-app choice; the old app pushed on both layout settle and overlay open. It is folded into SPC-022 and pinned by the gate's address/history scenario, so no issue is filed — a Back that lands on a self-correcting malformed address is not a user-visible divergence once the address is already settled. |
@@ -1799,8 +1799,8 @@ pins the old behavior). The new app implements the intent in this column.
 | gate-only, no issue (addendum to NEWFRONT-467/459) | SPC-017/053 | A post whose image is still uploading is blocked until the upload settles; the old app stored a node without its file. Intent lives in SPC-053; no separate issue — the gate pins it and the upload-guard unit test covers the branch. |
 
 No row is left with an unowned old bug: NEWFRONT-469 carries the frame
-footer, NEWFRONT-822 carries the silent rate limit (built as parity, i.e.
-silent, until it is fixed), NEWFRONT-823 carries the duplicated first-name
+footer, NEWFRONT-822 carried the silent rate limit (fixed: the new app
+banners throttled calls in place), NEWFRONT-823 carries the duplicated first-name
 fallback in the account trigger, and the four gate-only items are either addenda
 to filed bugs (463, 454, 467/459) or explicit new-app choices (the history
 model) proven by the gate's intent scenarios. If a slice finds a
@@ -1815,9 +1815,10 @@ an issue and links it here rather than widening a gate-only note.
   the space query modules with a stubbed transport: address parsing and
   rewriting (including the replace/push/replace history model of SPC-022),
   filter parameter building, paging cursors, gating flags, the frame hook,
-  the path validator, the auth step reducer and error catalog (3900/5900
-  both in the unknown-code branch), the upload pre-checks (type, 5 MB) and
-  upload guard, the edit reconcile and the copy permission.
+  the path validator, the auth step reducer and error catalog (unknown
+  numbers stay silent; 5900 banners in place per NEWFRONT-822), the upload
+  pre-checks (type, 5 MB) and upload guard, the edit reconcile and the copy
+  permission.
 - Local checks: `pnpm --filter web_new typecheck|lint|test`, plus
   `check:boundaries`, `check:headers`, `check:deps`, `check:coexistence`, the
   similarity check and the paths gate. Slices append `built` to their rows.
@@ -1842,10 +1843,10 @@ an issue and links it here rather than widening a gate-only note.
   Writing those scenarios is part of the gate's fix list (a small scenario
   issue), never a silently skipped row and never a re-tag of the old ones.
 - Rows whose parity is the old *behavior* stay flippable without an intent
-  scenario: SPC-058/063 keep the unknown-code branch for 5900 (no banner,
-  oracle green) and the defect is tracked by NEWFRONT-822, which would add a
-  new scenario when it is implemented; SPC-016 keeps the placeholder navbar
-  in the settings stage (oracle green) rather than a full-viewport spinner.
+  scenario: SPC-016 keeps the placeholder navbar in the settings stage
+  (oracle green) rather than a full-viewport spinner. (SPC-058/063 used to
+  be in this family for 5900's silence; NEWFRONT-822 fixed it with a
+  web_new-only banner assertion in the SPC-063 scenario.)
 - Configuration variants for the config-driven rows:
   - mail + magic login **on** and **off** (SPC-059/060/061);
   - email/password enabled and disabled (SPC-059/061);

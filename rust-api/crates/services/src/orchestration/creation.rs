@@ -172,7 +172,7 @@ pub const OWNER_UNASSIGNED: Option<Uuid> = None;
 /// The issue projection every unit reads (`service.py` passes full issue
 /// rows; this projects the consumed columns). `$1` is the issue id.
 pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_id, parent_id, \
-    created_by_id, assigned_pod_id, agent_executor, git_work_branch, workpad, name, \
+    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, git_work_branch, workpad, name, \
     description_stripped, priority, sequence_id, target_date FROM issues WHERE id = $1";
 
 /// The project projection (`service.py` reads `issue.project` for the
@@ -188,6 +188,23 @@ pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name,
 /// the state id.
 pub const STATE_SELECT_SQL: &str = "SELECT id, name, \"group\" FROM states WHERE id = $1";
 
+/// SeaORM form of [`STATE_SELECT_SQL`]: a state's `(name, group)` through
+/// the plain manager (no soft-delete guard).
+pub async fn state_name_group(
+    db: &impl sea_orm::ConnectionTrait,
+    state_id: Uuid,
+) -> Result<Option<(String, String)>, sea_orm::DbErr> {
+    use pidash_db::entity::states;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    states::Entity::find()
+        .select_only()
+        .columns([states::Column::Name, states::Column::Group])
+        .filter(states::Column::Id.eq(state_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
+
 /// The consumed `agent_run` projection for creation reads. Django
 /// selects the full 39-column row; the L2 `READ_COLUMNS` projection
 /// lacks `parent_run_id` / `run_config` / `phase_kind` /
@@ -199,6 +216,7 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "pod_id",
     "runner_id",
     "pinned_runner_id",
+    "pin_kind",
     "parent_run_id",
     "work_item_id",
     "status",
@@ -248,18 +266,25 @@ pub fn run_select_sql() -> String {
 }
 
 /// The parent's runner for pinning (`service.py:538-540`:
-/// `parent.runner`). `$1` is the runner id.
-pub const RUNNER_SELECT_SQL: &str =
-    "SELECT id, pod_id, status, last_heartbeat_at, paused_at FROM runner WHERE id = $1";
+/// `parent.runner`). `$1` is the runner id. The last three fields are
+/// the #2903 engine facts: provisioning, pod_dispatch, and engine_paused
+/// (`dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> ''`)
+/// — the locality-pin gate (`locality_pin_allowed`).
+pub const RUNNER_SELECT_SQL: &str = "SELECT runner.id, runner.pod_id, runner.status, runner.last_heartbeat_at, runner.paused_at, runner.provisioning, runner.pod_dispatch, (dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> '') AS engine_paused, runner.name FROM runner LEFT JOIN dev_machine dm ON dm.id = runner.dev_machine_id WHERE runner.id = $1";
 
-/// The decoded [`RUNNER_SELECT_SQL`] row
-/// (`id, pod_id, status, last_heartbeat_at, paused_at`).
+/// The decoded [`RUNNER_SELECT_SQL`] row (`id, pod_id, status,
+/// last_heartbeat_at, paused_at, provisioning, pod_dispatch,
+/// engine_paused`).
 pub type RunnerSelectRow = (
     Uuid,
     Uuid,
     String,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
+    String,
+    String,
+    bool,
+    String,
 );
 
 /// The assigned pod (`service.py:329`): the default `Pod.objects`
@@ -306,8 +331,9 @@ pub fn run_lock_sql() -> String {
 /// this lists every non-generated column in model order (the three
 /// `JSONKeyBigIntegerField` generated columns and the
 /// `JSONKeyTextField` `refusal_category` excluded). Fixed values
-/// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14`
-/// carry the caller-supplied fields in [`NewAgentRun`] order.
+/// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14` and
+/// `$15` (`pin_kind`, appended at the end) carry the caller-supplied
+/// fields in [`NewAgentRun`] order.
 pub const RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
@@ -315,10 +341,17 @@ pub const RUN_INSERT_SQL: &str =
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
-    assigned_at, started_at, ended_at) \
+    assigned_at, started_at, ended_at, pin_kind) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
     NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
-    NULL, NULL, NULL)";
+    NULL, NULL, NULL, $15)";
+
+/// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+/// (`service.py:494-495,896-897`, `pod_once`, §23.3): a one-shot pod run
+/// starts a fresh agent session. Unsaved when the parent row has no
+/// thread. `$1` is the run id.
+pub const THREAD_CLEAR_SQL: &str =
+    "UPDATE agent_run SET thread_id = '' WHERE id = $1 AND thread_id <> ''";
 
 /// `run.save(update_fields=["prompt", "prompt_manifest"])`
 /// (`service.py:522,639,824`). `$1`/`$2` are prompt/manifest, `$3` the
@@ -544,6 +577,838 @@ pub fn run_insert_returning_sql() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// SeaORM builders (the domain creation seam runs these; the SQL texts above
+// stay for the jobs-side stores until they migrate)
+// ---------------------------------------------------------------------------
+
+/// SeaORM statements mirroring the creation-flow and render-bundle SQL
+/// above, one per constant (named after it), decoded by name.
+pub mod orm {
+    use chrono::{DateTime, Utc};
+    use pidash_db::entity::{
+        agent_run as run, agent_run_event as event, dev_machine, git_code_review_links as reviews,
+        git_repositories as repos, git_repository_bindings as bindings,
+        issue_agent_ticker as ticker, issue_assignees, issue_comments as comments, issue_labels,
+        issue_relations as relations, issues, labels, pod, projects,
+        prompt_section_override as overrides, runner, states, users, workspaces,
+    };
+    use sea_orm::sea_query::extension::postgres::{PgBinOper, PgFunc};
+    use sea_orm::sea_query::{
+        Alias, Condition, Expr, Func, InsertStatement, JoinType, LockType, Order, Query,
+        SelectStatement, SimpleExpr, UpdateStatement,
+    };
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use super::{AgentRunStatus, NewAgentRun, ACTIVE_STATUSES, RUN_VIEW_COLUMNS};
+
+    fn alias(name: &str) -> Alias {
+        Alias::new(name)
+    }
+
+    /// `<table>.<column>` for an aliased table.
+    fn at(table: &str, column: impl sea_orm::sea_query::IntoIden + 'static) -> Expr {
+        Expr::col((alias(table), column))
+    }
+
+    /// The [`RUN_VIEW_COLUMNS`] projection as entity columns.
+    pub const RUN_VIEW: [run::Column; 19] = [
+        run::Column::Id,
+        run::Column::WorkspaceId,
+        run::Column::CreatedById,
+        run::Column::PodId,
+        run::Column::RunnerId,
+        run::Column::PinnedRunnerId,
+        run::Column::PinKind,
+        run::Column::ParentRunId,
+        run::Column::WorkItemId,
+        run::Column::Status,
+        run::Column::Trigger,
+        run::Column::ExecutorKind,
+        run::Column::PhaseKind,
+        run::Column::RunConfig,
+        run::Column::ToolPlan,
+        run::Column::ErrorDetails,
+        run::Column::Prompt,
+        run::Column::PromptManifest,
+        run::Column::EndedAt,
+    ];
+
+    const _: () = assert!(RUN_VIEW.len() == RUN_VIEW_COLUMNS.len());
+
+    fn run_view() -> SelectStatement {
+        Query::select()
+            .columns(RUN_VIEW.map(|column| (run::Entity, column)))
+            .from(run::Entity)
+            .to_owned()
+    }
+
+    fn run_col(column: run::Column) -> Expr {
+        Expr::col((run::Entity, column))
+    }
+
+    /// [`super::ISSUE_SELECT_SQL`]: the consumed issue projection, no
+    /// scope.
+    pub fn issue_select(issue_id: Uuid) -> SelectStatement {
+        use issues::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::ProjectId,
+                C::StateId,
+                C::ParentId,
+                C::CreatedById,
+                C::AssignedPodId,
+                C::AssignedRunnerId,
+                C::AgentExecutor,
+                C::GitWorkBranch,
+                C::Workpad,
+                C::Name,
+                C::DescriptionStripped,
+                C::Priority,
+                C::SequenceId,
+                C::TargetDate,
+            ])
+            .from(issues::Entity)
+            .and_where(Expr::col(C::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::PROJECT_SELECT_SQL`]: the consumed project projection.
+    pub fn project_select(project_id: Uuid) -> SelectStatement {
+        use projects::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::Identifier,
+                C::Name,
+                C::Description,
+                C::RepoUrl,
+                C::BaseBranch,
+                C::DefaultAgentExecutor,
+                C::ProjectLeadId,
+                C::DefaultAssigneeId,
+                C::AgentDefaultMaxTicks,
+                C::AgentDefaultIntervalSeconds,
+                C::AgentReviewDefaultIntervalSeconds,
+                C::AgentTestDefaultIntervalSeconds,
+            ])
+            .from(projects::Entity)
+            .and_where(Expr::col(C::Id).eq(project_id))
+            .to_owned()
+    }
+
+    /// [`super::STATE_SELECT_SQL`]: `id`, `name`, `group`.
+    pub fn state_select(state_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                states::Column::Id,
+                states::Column::Name,
+                states::Column::Group,
+            ])
+            .from(states::Entity)
+            .and_where(Expr::col(states::Column::Id).eq(state_id))
+            .to_owned()
+    }
+
+    /// [`super::latest_prior_run_sql`]: the newest run on the item.
+    pub fn latest_prior_run_select(issue_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .order_by(run::Column::CreatedAt, Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::active_run_sql`]: the newest active run on the item.
+    pub fn active_run_select(issue_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(
+                run_col(run::Column::Status)
+                    .is_in(ACTIVE_STATUSES.iter().map(|status| status.value())),
+            )
+            .order_by(run::Column::CreatedAt, Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::run_select_sql`]: one run, unlocked.
+    pub fn run_select(run_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::run_lock_sql`]: one run, `FOR UPDATE OF agent_run`.
+    pub fn run_lock_select(run_id: Uuid) -> SelectStatement {
+        run_select(run_id)
+            .lock_with_tables(LockType::Update, [run::Entity])
+            .to_owned()
+    }
+
+    /// [`super::finalize_lock_sql`]: the still non-terminal run,
+    /// `FOR UPDATE OF agent_run`.
+    pub fn finalize_lock_select(run_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .and_where(
+                run_col(run::Column::Status).is_not_in(
+                    [
+                        AgentRunStatus::Completed,
+                        AgentRunStatus::Failed,
+                        AgentRunStatus::Cancelled,
+                        AgentRunStatus::Blocked,
+                        AgentRunStatus::Refused,
+                    ]
+                    .iter()
+                    .map(|status| status.value()),
+                ),
+            )
+            .lock_with_tables(LockType::Update, [run::Entity])
+            .to_owned()
+    }
+
+    /// [`super::finalize_update_sql`]: `failed`, the end stamp, the
+    /// terminal NULLs, and the `error_details` merge: drop the patch's
+    /// keys from the stored object (a non-object counts as `{}`), then
+    /// add its non-null values (`jsonb_strip_nulls`, applied here to the
+    /// flat patch).
+    pub fn finalize_update(
+        run_id: Uuid,
+        ended_at: DateTime<Utc>,
+        patch: &Value,
+    ) -> UpdateStatement {
+        let stored = Expr::case(
+            Expr::expr(Func::cust(alias("jsonb_typeof")).arg(run_col(run::Column::ErrorDetails)))
+                .eq("object"),
+            run_col(run::Column::ErrorDetails),
+        )
+        .finally(Expr::val(serde_json::json!({})));
+        let mut merged: SimpleExpr = stored.into();
+        let mut kept = serde_json::Map::new();
+        if let Some(object) = patch.as_object() {
+            for (key, value) in object {
+                merged = Expr::expr(merged).sub(Expr::val(key.as_str()));
+                if !value.is_null() {
+                    kept.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        let merged =
+            Expr::expr(merged).binary(PgBinOper::Concatenate, Expr::val(Value::Object(kept)));
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::Status, "failed")
+            .value(run::Column::EndedAt, ended_at)
+            .value(run::Column::TerminalHooksAppliedAt, None::<DateTime<Utc>>)
+            .value(
+                run::Column::TerminalCapacityReleasedAt,
+                None::<DateTime<Utc>>,
+            )
+            .value(run::Column::ErrorDetails, merged)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::RUNNER_SELECT_SQL`]: the parent's runner, with the
+    /// #2903 engine columns (`provisioning`, `pod_dispatch`,
+    /// `dev_machine_id`) so seam twins can populate `RunnerView`.
+    pub fn runner_select(runner_id: Uuid) -> SelectStatement {
+        use runner::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::PodId,
+                C::Status,
+                C::Name,
+                C::LastHeartbeatAt,
+                C::PausedAt,
+                C::Provisioning,
+                C::PodDispatch,
+                C::DevMachineId,
+            ])
+            .from(runner::Entity)
+            .and_where(Expr::col(C::Id).eq(runner_id))
+            .to_owned()
+    }
+
+    /// The engine-pause columns of one dev machine (`#2903` pause state).
+    pub fn dev_machine_select(machine_id: Uuid) -> SelectStatement {
+        use pidash_db::entity::dev_machine::Column as C;
+        Query::select()
+            .columns([C::EnginePausedByOwner, C::EngineAutoPauseReason])
+            .from(dev_machine::Entity)
+            .and_where(Expr::col(C::Id).eq(machine_id))
+            .to_owned()
+    }
+
+    /// [`super::ASSIGNED_POD_SELECT_SQL`]: a live pod by id.
+    pub fn assigned_pod_select(pod_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([pod::Column::Id, pod::Column::ProjectId])
+            .from(pod::Entity)
+            .and_where(Expr::col(pod::Column::Id).eq(pod_id))
+            .and_where(Expr::col(pod::Column::DeletedAt).is_null())
+            .to_owned()
+    }
+
+    /// [`super::DEFAULT_POD_SELECT_SQL`]: the first live default pod by id.
+    pub fn default_pod_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([pod::Column::Id, pod::Column::ProjectId])
+            .from(pod::Entity)
+            .and_where(Expr::col(pod::Column::ProjectId).eq(project_id))
+            .and_where(Expr::col(pod::Column::IsDefault).into())
+            .and_where(Expr::col(pod::Column::DeletedAt).is_null())
+            .order_by(pod::Column::Id, Order::Asc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::TICKER_RESUME_SELECT_SQL`]: the ticker's resume pointer.
+    pub fn ticker_resume_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(ticker::Column::ResumeParentRunId)
+            .from(ticker::Entity)
+            .and_where(Expr::col(ticker::Column::IssueId).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::WORK_ITEM_ID_SELECT_SQL`]: a run's work item.
+    pub fn work_item_id_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(run::Column::WorkItemId)
+            .from(run::Entity)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::ISSUE_LOCK_SQL`]: `Issue.all_objects` row lock, no scope.
+    pub fn issue_lock_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((issues::Entity, issues::Column::Id))
+            .from(issues::Entity)
+            .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(issue_id))
+            .lock_with_tables(LockType::Update, [issues::Entity])
+            .to_owned()
+    }
+
+    /// [`super::USER_FLAGS_SELECT_SQL`]: `is_active`, `is_bot`.
+    pub fn user_flags_select(user_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([users::Column::IsActive, users::Column::IsBot])
+            .from(users::Entity)
+            .and_where(Expr::col(users::Column::Id).eq(user_id))
+            .to_owned()
+    }
+
+    /// [`super::run_insert_returning_sql`]: every non-generated column
+    /// (the fixed literals as values), `RETURNING` the run view.
+    pub fn run_insert(row: &NewAgentRun) -> InsertStatement {
+        use run::Column as C;
+        let none_uuid = || Expr::value(None::<Uuid>);
+        let none_at = || Expr::value(None::<DateTime<Utc>>);
+        let none_json = || Expr::value(None::<Value>);
+        Query::insert()
+            .into_table(run::Entity)
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::OwnerId,
+                C::CreatedById,
+                C::PodId,
+                C::RunnerId,
+                C::PinnedRunnerId,
+                C::WorkItemId,
+                C::SchedulerBindingId,
+                C::ParentRunId,
+                C::Status,
+                C::ExecutorKind,
+                C::DispatchAttempts,
+                C::CancelRequestedAt,
+                C::CancelReason,
+                C::ToolPlan,
+                C::TerminalHooksAppliedAt,
+                C::TerminalCapacityReleasedAt,
+                C::Prompt,
+                C::Trigger,
+                C::PromptManifest,
+                C::PhaseKind,
+                C::RunConfig,
+                C::RequiredCapabilities,
+                C::ThreadId,
+                C::AgentMetadata,
+                C::LeaseExpiresAt,
+                C::DonePayload,
+                C::ErrorDetails,
+                C::LlmModel,
+                C::Usage,
+                C::CreatedAt,
+                C::AssignedAt,
+                C::StartedAt,
+                C::EndedAt,
+                C::PinKind,
+            ])
+            .values_panic([
+                Expr::value(row.id),
+                Expr::value(row.workspace_id),
+                none_uuid(),
+                Expr::value(row.created_by_id),
+                Expr::value(row.pod_id),
+                none_uuid(),
+                Expr::value(row.pinned_runner_id),
+                Expr::value(row.work_item_id),
+                none_uuid(),
+                Expr::value(row.parent_run_id),
+                Expr::value(super::STATUS_QUEUED),
+                Expr::value(row.executor_kind.value()),
+                Expr::value(0_i32),
+                none_at(),
+                Expr::value(""),
+                Expr::value(row.tool_plan.clone()),
+                none_at(),
+                none_at(),
+                Expr::value(""),
+                Expr::value(row.trigger.as_str()),
+                none_json(),
+                Expr::value(row.phase_kind.as_str()),
+                Expr::value(row.run_config.clone()),
+                Expr::value(serde_json::json!([])),
+                Expr::value(""),
+                Expr::value(serde_json::json!({})),
+                none_at(),
+                none_json(),
+                Expr::value(row.error_details.clone()),
+                Expr::value(""),
+                Expr::value(serde_json::json!({})),
+                Expr::value(row.now),
+                none_at(),
+                none_at(),
+                none_at(),
+                Expr::value(row.pin_kind.as_str()),
+            ])
+            .returning(Query::returning().columns(RUN_VIEW))
+            .to_owned()
+    }
+
+    /// [`super::THREAD_CLEAR_SQL`]: `parent.thread_id = ""` (`pod_once`,
+    /// §23.3), a no-op when the parent row has no thread.
+    pub fn thread_clear(run_id: Uuid) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::ThreadId, "")
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .and_where(run_col(run::Column::ThreadId).ne(""))
+            .to_owned()
+    }
+
+    /// [`super::PROMPT_UPDATE_SQL`].
+    pub fn prompt_update(run_id: Uuid, prompt: &str, manifest: &Value) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::Prompt, prompt)
+            .value(run::Column::PromptManifest, manifest.clone())
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::RUN_CONFIG_UPDATE_SQL`].
+    pub fn run_config_update(run_id: Uuid, config: &Value) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::RunConfig, config.clone())
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::TERMINAL_EVENT_EXISTS_SQL`]: output name `exists`.
+    pub fn terminal_event_exists_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(
+                Expr::exists(
+                    Query::select()
+                        .expr(Expr::val(1))
+                        .from(event::Entity)
+                        .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
+                        .and_where(Expr::col(event::Column::Kind).eq("terminal"))
+                        .to_owned(),
+                ),
+                alias("exists"),
+            )
+            .to_owned()
+    }
+
+    /// [`super::TERMINAL_EVENT_SEQ_SQL`]: `COALESCE(MAX(seq), 0) + 1`,
+    /// output name `seq` (int4, as `MAX(int4) + 1` is).
+    pub fn terminal_event_seq_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(
+                Expr::expr(Func::coalesce([
+                    Expr::col(event::Column::Seq).max(),
+                    Expr::val(0_i32).into(),
+                ]))
+                .add(1_i32),
+                alias("seq"),
+            )
+            .from(event::Entity)
+            .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::TERMINAL_EVENT_INSERT_SQL`].
+    pub fn terminal_event_insert(
+        run_id: Uuid,
+        seq: i32,
+        payload: &Value,
+        now: DateTime<Utc>,
+    ) -> InsertStatement {
+        Query::insert()
+            .into_table(event::Entity)
+            .columns([
+                event::Column::AgentRunId,
+                event::Column::Seq,
+                event::Column::Kind,
+                event::Column::Payload,
+                event::Column::CreatedAt,
+            ])
+            .values_panic([
+                Expr::value(run_id),
+                Expr::value(seq),
+                Expr::value("terminal"),
+                Expr::value(payload.clone()),
+                Expr::value(now),
+            ])
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_LABELS_SQL`]: label names through the link table
+    /// (link rows unfiltered), live labels, newest label first.
+    pub fn bundle_labels_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((alias("l"), labels::Column::Name))
+            .from_as(issue_labels::Entity, alias("il"))
+            .join_as(
+                JoinType::InnerJoin,
+                labels::Entity,
+                alias("l"),
+                at("l", labels::Column::Id).equals((alias("il"), issue_labels::Column::LabelId)),
+            )
+            .and_where(at("il", issue_labels::Column::IssueId).eq(issue_id))
+            .and_where(at("l", labels::Column::DeletedAt).is_null())
+            .order_by((alias("l"), labels::Column::CreatedAt), Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_ASSIGNEES_SQL`]: `display_name`, `email`, link rows
+    /// unfiltered, newest user first.
+    pub fn bundle_assignees_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("u"), users::Column::DisplayName),
+                (alias("u"), users::Column::Email),
+            ])
+            .from_as(issue_assignees::Entity, alias("ia"))
+            .join_as(
+                JoinType::InnerJoin,
+                users::Entity,
+                alias("u"),
+                at("u", users::Column::Id)
+                    .equals((alias("ia"), issue_assignees::Column::AssigneeId)),
+            )
+            .and_where(at("ia", issue_assignees::Column::IssueId).eq(issue_id))
+            .order_by((alias("u"), users::Column::CreatedAt), Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PROJECT_STATES_SQL`]: live non-triage states by
+    /// `sequence`.
+    pub fn bundle_project_states_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                states::Column::Name,
+                states::Column::Group,
+                states::Column::Description,
+            ])
+            .from(states::Entity)
+            .and_where(Expr::col(states::Column::ProjectId).eq(project_id))
+            .and_where(Expr::col(states::Column::DeletedAt).is_null())
+            .and_where(Expr::col(states::Column::Group).ne("triage"))
+            .order_by(states::Column::Sequence, Order::Asc)
+            .to_owned()
+    }
+
+    /// `issues i JOIN projects p LEFT JOIN states s`, projecting
+    /// `id`, `name`, `sequence_id`, `identifier`, `state_name`.
+    fn issue_refs() -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("i"), issues::Column::Id),
+                (alias("i"), issues::Column::Name),
+                (alias("i"), issues::Column::SequenceId),
+            ])
+            .column((alias("p"), projects::Column::Identifier))
+            .expr_as(at("s", states::Column::Name), alias("state_name"))
+            .from_as(issues::Entity, alias("i"))
+            .join_as(
+                JoinType::InnerJoin,
+                projects::Entity,
+                alias("p"),
+                at("p", projects::Column::Id).equals((alias("i"), issues::Column::ProjectId)),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                states::Entity,
+                alias("s"),
+                at("s", states::Column::Id).equals((alias("i"), issues::Column::StateId)),
+            )
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_CHILDREN_SQL`]: live, non-triage (a NULL group
+    /// drops, as `s.group != 'triage'` does), unarchived, non-draft
+    /// children, oldest first.
+    pub fn bundle_children_select(issue_id: Uuid) -> SelectStatement {
+        issue_refs()
+            .and_where(at("i", issues::Column::ParentId).eq(issue_id))
+            .and_where(at("i", issues::Column::DeletedAt).is_null())
+            .and_where(at("s", states::Column::Group).ne("triage"))
+            .and_where(at("i", issues::Column::ArchivedAt).is_null())
+            .and_where(at("p", projects::Column::ArchivedAt).is_null())
+            .and_where(at("i", issues::Column::IsDraft).not())
+            .order_by((alias("i"), issues::Column::CreatedAt), Order::Asc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_RELATIONS_SQL`]: live relation rows either way,
+    /// newest first.
+    pub fn bundle_relations_select(issue_id: Uuid) -> SelectStatement {
+        use relations::Column as C;
+        Query::select()
+            .columns([C::IssueId, C::RelatedIssueId, C::RelationType])
+            .from(relations::Entity)
+            .cond_where(
+                Condition::any()
+                    .add(Expr::col(C::IssueId).eq(issue_id))
+                    .add(Expr::col(C::RelatedIssueId).eq(issue_id)),
+            )
+            .and_where(Expr::col(C::DeletedAt).is_null())
+            .order_by(C::CreatedAt, Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_RELATION_TARGETS_SQL`]: the live targets, plus
+    /// `state_group`.
+    pub fn bundle_relation_targets_select(ids: &[Uuid]) -> SelectStatement {
+        issue_refs()
+            .expr_as(at("s", states::Column::Group), alias("state_group"))
+            .and_where(at("i", issues::Column::Id).is_in(ids.iter().copied()))
+            .and_where(at("i", issues::Column::DeletedAt).is_null())
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_COMMENTS_SQL`]: live, unfolded comments with the
+    /// actor (LEFT join), chronological.
+    pub fn bundle_comments_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("c"), comments::Column::CommentStripped),
+                (alias("c"), comments::Column::SpeakerType),
+                (alias("c"), comments::Column::SpeakerLabel),
+                (alias("c"), comments::Column::SpeakerAgentRunId),
+                (alias("c"), comments::Column::CreatedAt),
+            ])
+            .columns([
+                (alias("u"), users::Column::DisplayName),
+                (alias("u"), users::Column::Email),
+                (alias("u"), users::Column::Username),
+                (alias("u"), users::Column::IsBot),
+            ])
+            .from_as(comments::Entity, alias("c"))
+            .join_as(
+                JoinType::LeftJoin,
+                users::Entity,
+                alias("u"),
+                at("u", users::Column::Id).equals((alias("c"), comments::Column::ActorId)),
+            )
+            .and_where(at("c", comments::Column::IssueId).eq(issue_id))
+            .and_where(at("c", comments::Column::DeletedAt).is_null())
+            // `labels @> ARRAY['fold']` is `'fold' = ANY(labels)`.
+            .and_where(
+                Expr::val("fold")
+                    .eq(PgFunc::any(at("c", comments::Column::Labels)))
+                    .not(),
+            )
+            .order_by((alias("c"), comments::Column::CreatedAt), Order::Asc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_CODE_REVIEWS_SQL`]: live review links, newest first.
+    pub fn bundle_code_reviews_select(issue_id: Uuid) -> SelectStatement {
+        use reviews::Column as C;
+        Query::select()
+            .columns([
+                C::Url,
+                C::Title,
+                C::State,
+                C::Merged,
+                C::Draft,
+                C::Provider,
+                C::ExternalIid,
+            ])
+            .from(reviews::Entity)
+            .and_where(Expr::col(C::IssueId).eq(issue_id))
+            .and_where(Expr::col(C::DeletedAt).is_null())
+            .order_by(C::CreatedAt, Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_REMOTE_SQL`]: the oldest live binding's live repo.
+    pub fn bundle_remote_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("r"), repos::Column::Provider),
+                (alias("r"), repos::Column::HostUrl),
+                (alias("r"), repos::Column::FullName),
+            ])
+            .from_as(bindings::Entity, alias("b"))
+            .join_as(
+                JoinType::InnerJoin,
+                repos::Entity,
+                alias("r"),
+                at("r", repos::Column::Id).equals((alias("b"), bindings::Column::RepositoryId)),
+            )
+            .and_where(at("b", bindings::Column::ProjectId).eq(project_id))
+            .and_where(at("b", bindings::Column::DeletedAt).is_null())
+            .and_where(at("r", repos::Column::DeletedAt).is_null())
+            .order_by((alias("b"), bindings::Column::CreatedAt), Order::Asc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_ANCESTOR_HOP_SQL`]: one plain FK hop.
+    pub fn bundle_ancestor_hop_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                issues::Column::Name,
+                issues::Column::ProjectId,
+                issues::Column::ParentId,
+            ])
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PROJECT_IDENTIFIER_SQL`].
+    pub fn bundle_project_identifier_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(projects::Column::Identifier)
+            .from(projects::Entity)
+            .and_where(Expr::col(projects::Column::Id).eq(project_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_SEQUENCE_SQL`].
+    pub fn bundle_sequence_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(issues::Column::SequenceId)
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PARENT_COLS_SQL`]: the parent's columns plus its
+    /// live comment count (output name `comments_count`).
+    pub fn bundle_parent_cols_select(parent_id: Uuid) -> SelectStatement {
+        let count = Query::select()
+            .expr(Expr::col((alias("c"), comments::Column::Id)).count())
+            .from_as(comments::Entity, alias("c"))
+            .and_where(at("c", comments::Column::IssueId).equals((alias("i"), issues::Column::Id)))
+            .and_where(at("c", comments::Column::DeletedAt).is_null())
+            .to_owned();
+        Query::select()
+            .columns([
+                (alias("i"), issues::Column::Name),
+                (alias("i"), issues::Column::StateId),
+                (alias("i"), issues::Column::GitWorkBranch),
+            ])
+            .expr_as(
+                SimpleExpr::SubQuery(None, Box::new(count.into_sub_query_statement())),
+                alias("comments_count"),
+            )
+            .from_as(issues::Entity, alias("i"))
+            .and_where(at("i", issues::Column::Id).eq(parent_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PARENT_DESCRIPTION_SQL`].
+    pub fn bundle_parent_description_select(parent_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(issues::Column::DescriptionStripped)
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(parent_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PRIOR_RUN_COUNT_SQL`]: output name `n`.
+    pub fn bundle_prior_run_count_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(Expr::col(run::Column::Id).count(), alias("n"))
+            .from(run::Entity)
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(run_col(run::Column::Id).ne(run_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_TICKER_SQL`].
+    pub fn bundle_ticker_select(issue_id: Uuid) -> SelectStatement {
+        use ticker::Column as C;
+        Query::select()
+            .columns([C::Used, C::Waited, C::Granted, C::Enabled])
+            .from(ticker::Entity)
+            .and_where(Expr::col(C::IssueId).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_DONE_PAYLOAD_SQL`].
+    pub fn bundle_done_payload_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(run::Column::DonePayload)
+            .from(run::Entity)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_OVERRIDES_SQL`]: active workspace rows plus the
+    /// user's (`user_id = NULL` never matches).
+    pub fn bundle_overrides_select(workspace_id: Uuid, user_id: Option<Uuid>) -> SelectStatement {
+        use overrides::Column as C;
+        Query::select()
+            .columns([C::SectionKey, C::Body, C::Version, C::UserId])
+            .from(overrides::Entity)
+            .and_where(Expr::col(C::IsActive).into())
+            .and_where(Expr::col(C::WorkspaceId).eq(workspace_id))
+            .cond_where(
+                Condition::any()
+                    .add(Expr::col(C::UserId).is_null())
+                    .add(Expr::col(C::UserId).eq(user_id)),
+            )
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_WORKSPACE_SQL`].
+    pub fn bundle_workspace_select(workspace_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([workspaces::Column::Slug, workspaces::Column::Name])
+            .from(workspaces::Entity)
+            .and_where(Expr::col(workspaces::Column::Id).eq(workspace_id))
+            .to_owned()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Row views (plain data over the SQL above)
 // ---------------------------------------------------------------------------
 
@@ -559,6 +1424,9 @@ pub struct IssueView {
     pub parent_id: Option<Uuid>,
     pub created_by_id: Option<Uuid>,
     pub assigned_pod_id: Option<Uuid>,
+    /// `Issue.assigned_runner_id`: the dedicated runner (design §9.1),
+    /// `None` for a pod-shared issue.
+    pub assigned_runner_id: Option<Uuid>,
     /// `Issue.agent_executor`: NULL/blank inherits the project default.
     pub agent_executor: Option<String>,
     pub git_work_branch: Option<String>,
@@ -612,6 +1480,10 @@ pub struct RunView {
     pub pod_id: Uuid,
     pub runner_id: Option<Uuid>,
     pub pinned_runner_id: Option<Uuid>,
+    /// `AgentRun.pin_kind` ("dedicated", "locality", or "" pre-dedicated
+    /// rows): the pin source (§9.1), stamped at insert and echoed on
+    /// the read projection.
+    pub pin_kind: String,
     pub parent_run_id: Option<Uuid>,
     pub work_item_id: Option<Uuid>,
     pub status: AgentRunStatus,
@@ -682,6 +1554,7 @@ pub fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         pod_id: row.try_get("pod_id")?,
         runner_id: row.try_get("runner_id")?,
         pinned_runner_id: row.try_get("pinned_runner_id")?,
+        pin_kind: row.try_get("pin_kind")?,
         parent_run_id: row.try_get("parent_run_id")?,
         work_item_id: row.try_get("work_item_id")?,
         status: map_status(status)?,
@@ -706,10 +1579,20 @@ pub struct RunnerView {
     pub id: Uuid,
     pub pod_id: Uuid,
     pub status: String,
+    /// `runner.name` (the H-13/release and dedicated-bounce comments
+    /// name the runner).
+    pub name: String,
     /// `70d684af`: the pin check needs the heartbeat freshness.
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     /// `09738d222`: the pin check skips operator-paused runners.
     pub paused_at: Option<DateTime<Utc>>,
+    /// `runner.provisioning` — engine iff `desktop_bundled`.
+    pub provisioning: String,
+    /// `runner.pod_dispatch` (`pod_member` / `pinned_only`).
+    pub pod_dispatch: String,
+    /// The runner's dev machine's pause state (`false` when the runner
+    /// has no machine): owner pause or a non-empty auto-pause reason.
+    pub engine_paused: bool,
 }
 
 /// The consumed `pod` projection (live rows only, per `PodManager`).
@@ -754,6 +1637,76 @@ pub struct NewAgentRun {
     pub run_config: Value,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
+    /// `pin_kind` ($15, design §9.1): "dedicated" when the issue pins
+    /// its dedicated runner, else "locality".
+    pub pin_kind: String,
+}
+
+/// One §11.2/§23.3 system comment (Django `IssueComment.objects.create`,
+/// `SpeakerType.SYSTEM`): the refusal comment on a refused human run
+/// and the waiting comment for an automatic run queued behind an
+/// unavailable dedicated runner (Django `_post_dedicated_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSystemComment {
+    pub id: Uuid,
+    pub description_id: Uuid,
+    pub now: DateTime<Utc>,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub issue_id: Uuid,
+    pub actor_id: Uuid,
+    pub comment_html: String,
+    pub comment_stripped: String,
+}
+
+/// One [`CreationSeam::dedicated_pin`] call (design §9.1/§9.2): the
+/// pin decision for a creation, with the H-11/H-10 refusal answered in
+/// the same probe (Django `dedicated_run_refusal` + `resolve_run_pin`
+/// read the same assignment).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DedicatedPinArgs<'a> {
+    pub issue_id: Uuid,
+    /// The lineage parent (`None` for a first run / fresh session).
+    pub parent: Option<&'a RunView>,
+    /// The run's pod. `None` when the caller only needs the refusal
+    /// (entry surfaces resolve the pod after the refusal, like Django).
+    pub pod_id: Option<Uuid>,
+    pub fresh_session: bool,
+    pub creator_id: Option<Uuid>,
+    /// The raw trigger string (`run_ai`, `state_transition`, …) — the
+    /// human distinguisher (§8) reads it, like the usage rule does.
+    pub trigger: &'a str,
+    pub pod_once: bool,
+    pub actor_id: Uuid,
+    /// The creation clock (`created_at` of the run this pin feeds):
+    /// the §9.4 waiting comment anchors its 12-hour expiry to it.
+    pub now: DateTime<Utc>,
+}
+
+/// What [`CreationSeam::dedicated_pin`] decided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PinOutcome {
+    /// The H-11/H-10 refusal code (`assigned_runner_*`), `None` when
+    /// admitted. A refused human run creates nothing.
+    pub refusal: Option<&'static str>,
+    /// The §11.2 refusal comment to file (`None` on admission), and
+    /// the §9.4 waiting comment when the run is created behind an
+    /// unavailable dedicated runner.
+    pub refusal_comment: Option<NewSystemComment>,
+    pub waiting_comment: Option<NewSystemComment>,
+    /// The resolved pin for the INSERT (`runner_id` + `pin_kind`).
+    pub runner_id: Option<Uuid>,
+    pub pin_kind: String,
+}
+
+/// The `pin: "pod_once"` request bit, the serializers' shared parse
+/// (`(request.data.get("pin") or "").strip() == "pod_once"`).
+pub fn pod_once_requested(body: &Value) -> bool {
+    body.get("pin")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        == "pod_once"
 }
 
 // ---------------------------------------------------------------------------
@@ -991,13 +1944,27 @@ pub fn run_config_for_issue(
 /// every later run on the issue. A BUSY runner is alive and stays
 /// eligible; the pinned run waits for it. `09738d222`: an
 /// operator-paused runner is not eligible either — its pins would only
-/// wait out the pause.
+/// wait out the pause. #2903: a pin is also refused unless
+/// `locality_pin_allowed` — engines pin only while they take pod work
+/// (pod_member and unpaused); own-agent runners always pin.
 pub fn pinned_runner_for(
     runner: Option<&RunnerView>,
     target_pod_id: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Option<Uuid> {
     let runner = runner?;
+    let is_engine = runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let pod_member = runner.pod_dispatch
+        == pidash_db::runner_enroll::columns::enums::RUNNER_POD_DISPATCH_POD_MEMBER;
+    if !pidash_auth::permissions::runner::locality_pin_allowed(
+        true,
+        is_engine,
+        pod_member,
+        runner.engine_paused,
+    ) {
+        return None;
+    }
     if runner.status == RUNNER_STATUS_REVOKED || runner.status == RUNNER_STATUS_OFFLINE {
         return None;
     }
@@ -1417,6 +2384,37 @@ pub trait CreationSeam {
     /// `context.py:512-517`): consulted only when the run's plan
     /// enables extra toolsets. CE names none.
     fn extra_toolsets_schema_tool(&self) -> String;
+    /// The dedicated-runner pin decision for one creation (design
+    /// §9.1/§9.2 + §11.2/§23.3): the H-11/H-10 refusal answered in
+    /// the same probe as the pin (Django `dedicated_run_refusal`
+    /// then `resolve_run_pin` read the same assignment). A refused
+    /// caller creates nothing; the comments are filed by the seam.
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError>;
+    /// One §11.2/§23.3 system comment (Django
+    /// `_post_dedicated_refusal_comment` /
+    /// `_post_dedicated_waiting_comment` /
+    /// `_post_pod_once_started_comment`).
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError>;
+    /// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+    /// (`service.py:494-495,896-897`, `pod_once`, §23.3).
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError>;
+    /// The §23.3 `pod_once` started-comment row (Django
+    /// `_post_pod_once_started_comment`, `scheduling.py:1044-1067`),
+    /// filed by [`Self::insert_system_comment`] after a successful
+    /// create.
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError>;
 }
 
 /// The one-method seam for the `finalize_agent_run(run.id, FAILED, …)`
@@ -1454,6 +2452,10 @@ pub struct CreateDispatchRequest {
     pub parent: Option<RunView>,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
+    /// One-shot pod run (§23.3): the dedicated pin is bypassed for
+    /// this run only, and the parent's thread (the resume hint) is
+    /// cleared.
+    pub pod_once: bool,
     pub fresh_session: bool,
     /// The trigger to stamp, carried verbatim like Django's
     /// `trigger: str` (`service.py:742`): usually a member value,
@@ -1471,6 +2473,10 @@ pub struct ContinuationRequest {
     pub parent: RunView,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
+    /// One-shot pod run (§23.3): the dedicated pin is bypassed for
+    /// this run only, and the parent's thread (the resume hint) is
+    /// cleared.
+    pub pod_once: bool,
     /// The trigger to stamp, carried verbatim like Django's
     /// `trigger: str` (`service.py:443`): usually a member value,
     /// but the dispatch path forwards the stored `triggered_by`
@@ -1604,6 +2610,27 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             }
         }
     }
+    // The dedicated pin (§9.1): a dedicated issue pins its runner,
+    // whatever the parent/locality path computed.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        let outcome = seam
+            .dedicated_pin(&DedicatedPinArgs {
+                issue_id: issue.id,
+                parent: effective_parent.as_ref(),
+                pod_id: Some(req.pod_id),
+                fresh_session: req.fresh_session,
+                creator_id: Some(req.creator_id),
+                trigger: req.trigger.as_str(),
+                pod_once: req.pod_once,
+                actor_id: req.creator_id,
+                now: req.now,
+            })
+            .await?;
+        computed_pin = outcome.runner_id;
+        outcome.pin_kind
+    } else {
+        String::new()
+    };
     let pinned_runner = execution.merge_pin(computed_pin);
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
@@ -1631,6 +2658,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
                 None,
             ),
             now: req.now,
+            pin_kind: pin_kind.clone(),
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -1734,6 +2762,27 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
         .await?
         .or(admission_error);
+    // The dedicated pin (§9.2): a dedicated issue pins its runner,
+    // whatever the parent/locality path computed.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        let outcome = seam
+            .dedicated_pin(&DedicatedPinArgs {
+                issue_id: issue.id,
+                parent: Some(&req.parent),
+                pod_id: Some(req.pod_id),
+                fresh_session: false,
+                creator_id: Some(req.creator_id),
+                trigger: req.trigger.as_str(),
+                pod_once: req.pod_once,
+                actor_id: req.creator_id,
+                now: req.now,
+            })
+            .await?;
+        computed_pin = outcome.runner_id;
+        outcome.pin_kind
+    } else {
+        String::new()
+    };
     // Continuation inserts the literal repo snapshot, not the
     // `_run_config_for_issue` refresh (`service.py:489-493`): same
     // three keys, no base to strip.
@@ -1764,6 +2813,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             phase_kind: kind.clone(),
             run_config,
             now: req.now,
+            pin_kind: pin_kind.clone(),
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -1866,6 +2916,26 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
         Some(&req.parent.run_config),
     );
     let run_id = Uuid::new_v4();
+    // The dedicated pin (§9.2) survives a project move — the issue
+    // carries its runner into the new project; affinity clears only
+    // the locality pin.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        seam.dedicated_pin(&DedicatedPinArgs {
+            issue_id: issue.id,
+            parent: Some(&req.parent),
+            pod_id: Some(req.pod_id),
+            fresh_session: false,
+            creator_id: Some(req.parent.created_by_id),
+            trigger: req.parent.trigger.as_str(),
+            pod_once: false,
+            actor_id: req.parent.created_by_id,
+            now: req.now,
+        })
+        .await?
+        .pin_kind
+    } else {
+        String::new()
+    };
     let run = seam
         .insert_run(&NewAgentRun {
             id: run_id,
@@ -1884,6 +2954,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             phase_kind: String::new(),
             run_config,
             now: req.now,
+            pin_kind,
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -2199,6 +3270,209 @@ mod tests {
         }
     }
 
+    /// The [`orm`] builders, rendered without a database: aliased
+    /// joins (`AS`), INNER vs LEFT, the scopes, orderings, lock forms
+    /// and the output names the seam decodes by.
+    #[test]
+    fn orm_statement_shapes() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let render =
+            |select: sea_orm::sea_query::SelectStatement| select.to_string(PostgresQueryBuilder);
+        let id = uid(0x01);
+
+        let labels = render(orm::bundle_labels_select(id));
+        assert!(labels.contains("FROM \"issue_labels\" AS \"il\" INNER JOIN \"labels\" AS \"l\" ON \"l\".\"id\" = \"il\".\"label_id\""), "{labels}");
+        assert!(labels.contains("\"l\".\"deleted_at\" IS NULL"), "{labels}");
+        assert!(
+            labels.ends_with("ORDER BY \"l\".\"created_at\" DESC"),
+            "{labels}"
+        );
+        assert!(
+            !labels.contains("\"il\".\"deleted_at\""),
+            "link rows unfiltered: {labels}"
+        );
+
+        let assignees = render(orm::bundle_assignees_select(id));
+        assert!(
+            assignees
+                .contains("INNER JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"ia\".\"assignee_id\""),
+            "{assignees}"
+        );
+        assert!(
+            assignees.ends_with("ORDER BY \"u\".\"created_at\" DESC"),
+            "{assignees}"
+        );
+
+        let children = render(orm::bundle_children_select(id));
+        assert!(children.contains("FROM \"issues\" AS \"i\" INNER JOIN \"projects\" AS \"p\" ON \"p\".\"id\" = \"i\".\"project_id\" LEFT JOIN \"states\" AS \"s\" ON \"s\".\"id\" = \"i\".\"state_id\""), "{children}");
+        assert!(
+            children.contains("\"s\".\"name\" AS \"state_name\""),
+            "{children}"
+        );
+        for guard in [
+            "\"i\".\"deleted_at\" IS NULL",
+            "\"s\".\"group\" <> 'triage'",
+            "\"i\".\"archived_at\" IS NULL",
+            "\"p\".\"archived_at\" IS NULL",
+            "NOT \"i\".\"is_draft\"",
+        ] {
+            assert!(children.contains(guard), "{guard}: {children}");
+        }
+        assert!(
+            children.ends_with("ORDER BY \"i\".\"created_at\" ASC"),
+            "{children}"
+        );
+
+        let targets = render(orm::bundle_relation_targets_select(&[id, uid(0x02)]));
+        assert!(
+            targets.contains("\"s\".\"group\" AS \"state_group\""),
+            "{targets}"
+        );
+        assert!(targets.contains("\"i\".\"id\" IN ("), "{targets}");
+        assert!(
+            !targets.contains("archived_at"),
+            "targets keep archived rows: {targets}"
+        );
+
+        let comments = render(orm::bundle_comments_select(id));
+        assert!(comments.contains("FROM \"issue_comments\" AS \"c\" LEFT JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"c\".\"actor_id\""), "{comments}");
+        assert!(
+            comments.contains("NOT 'fold' = ANY(\"c\".\"labels\")"),
+            "{comments}"
+        );
+        assert!(
+            comments.ends_with("ORDER BY \"c\".\"created_at\" ASC"),
+            "{comments}"
+        );
+
+        let remote = render(orm::bundle_remote_select(id));
+        assert!(remote.contains("FROM \"git_repository_bindings\" AS \"b\" INNER JOIN \"git_repositories\" AS \"r\" ON \"r\".\"id\" = \"b\".\"repository_id\""), "{remote}");
+        assert!(
+            remote.ends_with("ORDER BY \"b\".\"created_at\" ASC LIMIT 1"),
+            "{remote}"
+        );
+
+        let parent = render(orm::bundle_parent_cols_select(id));
+        assert!(parent.contains("(SELECT COUNT(\"c\".\"id\") FROM \"issue_comments\" AS \"c\" WHERE \"c\".\"issue_id\" = \"i\".\"id\" AND \"c\".\"deleted_at\" IS NULL) AS \"comments_count\""), "{parent}");
+
+        let overrides = render(orm::bundle_overrides_select(id, None));
+        assert!(
+            overrides.contains("\"is_active\" AND \"workspace_id\" = "),
+            "{overrides}"
+        );
+        assert!(
+            overrides.contains("(\"user_id\" IS NULL OR \"user_id\" = NULL)"),
+            "{overrides}"
+        );
+
+        // Run reads: the view projection, newest first, the active set,
+        // and `FOR UPDATE OF "agent_run"` on the lock forms only.
+        let latest = render(orm::latest_prior_run_select(id));
+        assert!(
+            latest.ends_with("ORDER BY \"created_at\" DESC LIMIT 1"),
+            "{latest}"
+        );
+        assert!(!latest.contains("FOR UPDATE"), "{latest}");
+        let active = render(orm::active_run_select(id));
+        for status in ACTIVE_STATUSES {
+            assert!(
+                active.contains(&format!("'{}'", status.value())),
+                "{status:?}: {active}"
+            );
+        }
+        let lock = render(orm::run_lock_select(id));
+        assert!(lock.ends_with("FOR UPDATE OF \"agent_run\""), "{lock}");
+        let finalize = render(orm::finalize_lock_select(id));
+        assert!(finalize.contains("\"agent_run\".\"status\" NOT IN ('completed', 'failed', 'cancelled', 'blocked', 'refused')"), "{finalize}");
+        assert!(
+            finalize.ends_with("FOR UPDATE OF \"agent_run\""),
+            "{finalize}"
+        );
+        let issue_lock = render(orm::issue_lock_select(id));
+        assert!(
+            issue_lock.ends_with("FOR UPDATE OF \"issues\""),
+            "{issue_lock}"
+        );
+        assert!(
+            !issue_lock.contains("deleted_at"),
+            "all_objects: {issue_lock}"
+        );
+        let default_pod = render(orm::default_pod_select(id));
+        assert!(
+            default_pod
+                .contains("\"is_default\" AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC LIMIT 1"),
+            "{default_pod}"
+        );
+        for (column, name) in RUN_VIEW_COLUMNS.iter().zip(orm::RUN_VIEW.iter()) {
+            assert_eq!(
+                *column,
+                sea_orm::Iden::to_string(name),
+                "RUN_VIEW column order matches RUN_VIEW_COLUMNS"
+            );
+        }
+
+        // Writes: the finalize merge keeps the stored object (reset when
+        // not one), drops the patch's keys, adds its non-null values.
+        let merge = orm::finalize_update(id, now(), &finalize_error_details_patch("c", ""))
+            .to_string(PostgresQueryBuilder);
+        assert!(merge.contains("\"status\" = 'failed'"), "{merge}");
+        assert!(
+            merge.contains(
+                "\"terminal_hooks_applied_at\" = NULL, \"terminal_capacity_released_at\" = NULL"
+            ),
+            "{merge}"
+        );
+        assert!(merge.contains("(CASE WHEN (jsonb_typeof(\"agent_run\".\"error_details\") = 'object') THEN \"agent_run\".\"error_details\" ELSE '{}' END) - 'code' - 'message') || E'{"), "{merge}");
+        let insert = orm::run_insert(&NewAgentRun {
+            id,
+            workspace_id: uid(0x10),
+            created_by_id: uid(0x40),
+            pod_id: uid(0x50),
+            pinned_runner_id: None,
+            pin_kind: "locality".to_owned(),
+            work_item_id: uid(0x02),
+            parent_run_id: None,
+            executor_kind: AgentExecutorKind::CloudAgent,
+            error_details: json!({}),
+            tool_plan: json!({}),
+            trigger: "direct".to_owned(),
+            phase_kind: String::new(),
+            run_config: json!({}),
+            now: now(),
+        })
+        .to_string(PostgresQueryBuilder);
+        assert!(insert.starts_with("INSERT INTO \"agent_run\" (\"id\", \"workspace_id\", \"owner_id\", \"created_by_id\""), "{insert}");
+        assert!(
+            insert.contains("'queued', 'cloud_agent', 0, NULL, ''"),
+            "{insert}"
+        );
+        assert!(
+            insert.ends_with(&format!(
+                "RETURNING {}",
+                RUN_VIEW_COLUMNS
+                    .iter()
+                    .map(|column| format!("\"{column}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            "{insert}"
+        );
+        let seq = render(orm::terminal_event_seq_select(id));
+        assert!(
+            seq.contains("COALESCE(MAX(\"seq\"), 0) + 1 AS \"seq\""),
+            "{seq}"
+        );
+        let exists = render(orm::terminal_event_exists_select(id));
+        assert!(
+            exists.contains("EXISTS(SELECT 1 FROM \"agent_run_event\" WHERE"),
+            "{exists}"
+        );
+        assert!(
+            exists.contains("\"kind\" = 'terminal') AS \"exists\""),
+            "{exists}"
+        );
+    }
+
     fn issue_view() -> IssueView {
         IssueView {
             id: uid(0x01),
@@ -2208,6 +3482,7 @@ mod tests {
             parent_id: None,
             created_by_id: Some(uid(0x40)),
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             git_work_branch: None,
             workpad: None,
@@ -2254,6 +3529,7 @@ mod tests {
             pod_id: uid(0x50),
             runner_id: None,
             pinned_runner_id: None,
+            pin_kind: String::new(),
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status: AgentRunStatus::Queued,
@@ -2355,6 +3631,10 @@ mod tests {
         /// plans come back key-normalized while the caller's value keeps
         /// insertion order (PIDASHCONV-1072).
         normalize_tool_plan: bool,
+        /// Dedicated-runner assignments (design §9.1) keyed by issue.
+        assigned_runners: HashMap<Uuid, Option<Uuid>>,
+        system_comments: Vec<NewSystemComment>,
+        cleared_threads: Vec<Uuid>,
     }
 
     impl Default for FakeSeam {
@@ -2380,6 +3660,9 @@ mod tests {
                 finalized: Vec::new(),
                 lock_order: std::cell::RefCell::new(Vec::new()),
                 normalize_tool_plan: false,
+                assigned_runners: HashMap::new(),
+                system_comments: Vec::new(),
+                cleared_threads: Vec::new(),
             }
         }
     }
@@ -2569,6 +3852,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: row.pin_kind.clone(),
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
@@ -2654,6 +3938,67 @@ mod tests {
 
         fn extra_toolsets_schema_tool(&self) -> String {
             String::new()
+        }
+
+        async fn dedicated_pin(
+            &mut self,
+            args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            // The fake mirrors "no dedicated assignment": the issue's
+            // assigned runner decides; no refusal and unpinned.
+            let assigned = self
+                .assigned_runners
+                .get(&args.issue_id)
+                .copied()
+                .unwrap_or(None);
+            let (runner_id, pin_kind) = match assigned {
+                Some(runner_id) if !args.pod_once => (Some(runner_id), "dedicated".to_owned()),
+                _ => (
+                    None,
+                    crate::domain::issue_assignment::PIN_LOCALITY.to_owned(),
+                ),
+            };
+            Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id,
+                pin_kind,
+            })
+        }
+
+        async fn insert_system_comment(
+            &mut self,
+            comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            self.system_comments.push(comment.clone());
+            Ok(())
+        }
+
+        async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+            self.cleared_threads.push(run_id);
+            Ok(())
+        }
+
+        async fn pod_once_started_comment(
+            &mut self,
+            issue_id: Uuid,
+            _pod_id: Uuid,
+            actor_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            let issue = self.issue(issue_id).await?;
+            Ok(NewSystemComment {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                now,
+                project_id: issue.project_id.unwrap_or_else(Uuid::nil),
+                workspace_id: issue.workspace_id,
+                issue_id,
+                actor_id,
+                comment_html: "pod_once".to_owned(),
+                comment_stripped: "pod_once".to_owned(),
+            })
         }
     }
 
@@ -2761,14 +4106,19 @@ mod tests {
             id: uid(0x60),
             pod_id: uid(0x50),
             status: "online".to_owned(),
+            name: "runner-fixture".to_owned(),
             last_heartbeat_at: Some(clock),
             paused_at: None,
+            provisioning: "personal".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
+            engine_paused: false,
         };
         // M1: no runner.
         assert_eq!(pinned_runner_for(None, Some(uid(0x50)), clock), None);
         // M2: revoked.
         let revoked = RunnerView {
             status: RUNNER_STATUS_REVOKED.to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -2793,6 +4143,7 @@ mod tests {
         // M6 (`70d684af`): offline.
         let offline = RunnerView {
             status: RUNNER_STATUS_OFFLINE.to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -2820,6 +4171,7 @@ mod tests {
         // M9: busy but fresh stays eligible (the pinned run waits for it).
         let busy = RunnerView {
             status: "busy".to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -2831,6 +4183,7 @@ mod tests {
         // the heartbeat — not the status — rules it out.
         let busy_stale = RunnerView {
             status: "busy".to_owned(),
+            name: "runner-fixture".to_owned(),
             last_heartbeat_at: Some(clock - chrono::Duration::seconds(3600)),
             ..runner.clone()
         };
@@ -2854,6 +4207,33 @@ mod tests {
         };
         assert_eq!(
             pinned_runner_for(Some(&paused), Some(uid(0x50)), clock),
+            None
+        );
+        // #2903 locality gate: engines pin only while they take pod
+        // work. An unpaused pod-member engine pins; a paused one or a
+        // pinned-only one does not; own-agent runners pin regardless.
+        let engine = RunnerView {
+            provisioning: "desktop_bundled".to_owned(),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine), Some(uid(0x50)), clock),
+            Some(uid(0x60))
+        );
+        let engine_paused = RunnerView {
+            engine_paused: true,
+            ..engine.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine_paused), Some(uid(0x50)), clock),
+            None
+        );
+        let engine_pinned_only = RunnerView {
+            pod_dispatch: "pinned_only".to_owned(),
+            ..engine.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine_pinned_only), Some(uid(0x50)), clock),
             None
         );
     }
@@ -3137,6 +4517,7 @@ mod tests {
             parent,
             creator_id: uid(0x40),
             pod_id: uid(0x50),
+            pod_once: false,
             fresh_session: false,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: now(),
@@ -3198,8 +4579,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(Some(parent)))
@@ -3226,8 +4611,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let mut req = dispatch_req(Some(parent));
@@ -3329,6 +4718,7 @@ mod tests {
             parent,
             creator_id: uid(0x40),
             pod_id: uid(0x50),
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: now(),
         }
@@ -3348,8 +4738,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = create_continuation_run(&mut seam, &continuation_req(parent))
@@ -3486,8 +4880,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
@@ -3514,8 +4912,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
@@ -3985,6 +5387,7 @@ mod tests {
             "assigned_at",
             "started_at",
             "ended_at",
+            "pin_kind",
         ] {
             assert!(RUN_INSERT_SQL.contains(column), "missing {column}");
         }
@@ -4000,9 +5403,10 @@ mod tests {
         ] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
-        // `$1..$14` in NewAgentRun order.
+        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind,
+        // appended so no other bind moves.
         assert!(RUN_INSERT_SQL.contains("$14"));
-        assert!(!RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("$15"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
         assert!(!finalize_update_sql().contains("queue_position"));
         assert!(!RUN_INSERT_SQL.contains("queue_position"));

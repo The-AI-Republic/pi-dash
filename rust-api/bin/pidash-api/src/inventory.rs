@@ -289,6 +289,11 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/bulk-delete-issues/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+    // Bulk operation/subscribe (app_issues::handlers_bulk; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/bulk-operation-issues/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/bulk-subscribe-issues/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/comments/{comment_id}/reactions/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/comments/{comment_id}/reactions/{reaction_code}/",
@@ -315,6 +320,14 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/deleted-issues/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // Epics collection/detail (app_issues::handlers_core) + epic work
+    // items (app_issues::handlers_reads; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/epics/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/epics/{epic_id}/issues/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/epics/{pk}/",
+        owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/estimates/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/estimates/{estimate_id}/",
@@ -361,6 +374,9 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issue-labels/{pk}/",
         owned: &["GET", "PUT", "PATCH", "DELETE"], proxied: &["POST", "HEAD", "OPTIONS"] },
+    // Project issue types (app_issues::handlers_issue_types; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issue-types/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues-detail/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/",
@@ -413,6 +429,11 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/versions/{pk}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // Issue worklogs (app_issues::handlers_engage; NEWPIDASH-31).
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/",
+        owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{issue_id}/worklogs/{pk}/",
+        owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{pk}/",
         owned: &["GET", "PUT", "PATCH", "DELETE"], proxied: &["POST", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/issues/{pk}/archive/",
@@ -750,11 +771,13 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/",
-        owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+        owned: &["DELETE", "PATCH"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/create-runner/{request_id}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/revoke/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/dev-machines/{machine_id}/rotate/",
@@ -781,6 +804,12 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/",
         owned: &["GET", "PATCH", "DELETE"], proxied: &["POST", "PUT", "HEAD", "OPTIONS"] },
+    // Operator pause/resume (port 09738d222): POST owned, HEAD falls
+    // through to the GET proxy arm (NEWPIDASH-31).
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/pause/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/resume/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/revive/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/revoke/",
@@ -917,6 +946,13 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // v1 scheduler writes (PDASHOSS01-318, f0fde5a53): owned methods serve
+    // from v1_schedulers::writes, everything else proxies via the
+    // MethodRouter fallback (NEWPIDASH-31).
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/",
+        owned: &["PATCH", "DELETE"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/run-now/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/runs/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/states/",
@@ -971,8 +1007,13 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/wait/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/runners/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/schedulers/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // v1 scheduler definition write (PDASHOSS01-318, f0fde5a53; NEWPIDASH-31).
+    RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/",
+        owned: &["PATCH", "DELETE"], proxied: &["GET", "POST", "PUT", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/stickies.{format}/?",
         owned: &[], proxied: &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "api_v1", path: "/api/v1/workspaces/{slug}/stickies/",
@@ -1005,14 +1046,26 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/desktop-enroll/",
         owned: &["POST", "DELETE"], proxied: &["GET", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/",
+        owned: &["GET", "PATCH"], proxied: &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/commands/{request_id}/result/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/",
         owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/dev-machines/{dev_machine_id}/sessions/{sid}/poll",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/credential/revoke/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/model-token/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner", path: "/api/v1/runner/engine/profile/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/health/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner", path: "/api/v1/runner/machine-tokens/",
@@ -1351,10 +1404,16 @@ pub const TASKS: &[TaskRow] = &[
         name: "runner.expire_stale_approvals",
     },
     TaskRow {
+        name: "runner.fail_dedicated_runs",
+    },
+    TaskRow {
         name: "runner.fail_runs_on_offline_runners",
     },
     TaskRow {
         name: "runner.mark_offline_runners",
+    },
+    TaskRow {
+        name: "runner.pause_engines_with_expired_credentials",
     },
     TaskRow {
         name: "runner.reconcile_agent_run_terminal_effects",
@@ -1382,6 +1441,9 @@ pub const TASKS: &[TaskRow] = &[
     },
     TaskRow {
         name: "runner.sweep_stale_runners",
+    },
+    TaskRow {
+        name: "runner.sweep_stranded_dedicated_runs",
     },
 ];
 
@@ -1922,6 +1984,7 @@ mod tests {
             pool.clone(),
             runner_seams,
         );
+        pidash_jobs::runner_runs::register_engine_pause_tasks(&mut registry, pool.clone());
         // D-11 execution tasks (PIDASHCONV-832 + PIDASHCONV-866):
         // the same calls the worker builder makes — real register over the
         // lazy pool, no forward override (handlers never run here).
@@ -2095,7 +2158,7 @@ mod tests {
         );
         assert_eq!(
             pidash_jobs::runner_runs::TASK_NAMES.len(),
-            13,
+            16,
             "runner_runs group drifted"
         );
         assert_eq!(
@@ -2108,7 +2171,7 @@ mod tests {
             4,
             "auth mail group drifted"
         );
-        assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
+        assert_eq!(expected_rust.len(), 80, "worker-owned count drifted");
 
         let table_rust: std::collections::BTreeSet<&str> =
             TASKS.iter().map(|row| row.name).collect();
@@ -2135,7 +2198,7 @@ mod tests {
             .get("schedule")
             .and_then(|v| v.as_array())
             .expect("schedule");
-        assert_eq!(schedule.len(), 28);
+        assert_eq!(schedule.len(), 31);
         let find = |name: &str| {
             schedule
                 .iter()

@@ -34,6 +34,15 @@
 assistant/test_tasks_turn.py
 assistant/test_turn_errors.py
 assistant/test_update_issue_completion.py
+# PIDASHCONV-1566 / NEWPIDASH-25: the status-first turn-error drift oracle.
+# It publishes assistant.run_turn in Celery wire format and waits for a
+# worker (the same shape as assistant/test_turn_errors.py above), so the
+# HTTP matrix cannot run it on either backend (it errors at the
+# broker_url fixture). Its Django half belongs next to test_turn_errors.py
+# in the worker-plane oracle selection of rust-api-contract-tests.yml (its
+# docstring); the Rust mirrors are tasks_assistant/test_rust_replay.py in
+# rust-api-contract-tests-tasks-assistant-rust.yml.
+assistant/test_turn_errors_drift.py
 # PIDASHCONV-1578: the dispatch_coding_run prompt-failure oracle. It
 # drives a turn through the message POST and waits for a worker to
 # execute the scripted tool call, so the HTTP matrix cannot run it on

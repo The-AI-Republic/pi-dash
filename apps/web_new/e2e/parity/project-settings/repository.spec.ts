@@ -12,10 +12,11 @@
 // {"error":"GitHub token is missing"} — and that 401 trips the global
 // session interceptor, which reloads the page to / and back onto the tab
 // via next_path, so no "Bind failed" toast ever renders. The bug: scenario
-// pins that silence with no state change. The success clauses (bound pill
-// on match, canonical URL written back, sync pointer) need a connected
-// provider and are recorded in the area spec as unproven on the seeded
-// stack; they must gain a scenario wherever a provider-backed stack
+// pins that silence with no state change on the old app; web_new shows
+// the intended inline failure instead (NEWFRONT-395). The success clauses
+// (bound pill on match, canonical URL written back, sync pointer) need a
+// connected provider and are recorded in the area spec as unproven on the
+// seeded stack; they must gain a scenario wherever a provider-backed stack
 // exists.
 import { test, expect } from "../fixtures";
 import {
@@ -89,10 +90,10 @@ test(
 
       // The seeded stack has no provider: the backend refuses every bind
       // with its provider-missing error. Intended: the UI toasts "Bind
-      // failed" with that message verbatim. Actual: the 401 trips the
-      // global session interceptor, which reloads to / and back onto the
-      // tab — no toast ever renders. If fixed this fails: drop the bug:
-      // marker and assert the toast instead.
+      // failed" with that message verbatim. Actual on the old app: the
+      // 401 trips the global session interceptor, which reloads to / and
+      // back onto the tab — no toast ever renders. web_new implements
+      // the intended inline failure (NEWFRONT-395).
       const refusal = await serverBindRepositoryRaw(
         seed.workspaceSlug,
         projectId,
@@ -104,6 +105,27 @@ test(
 
       await driver.settingsGeneralFill("repoUrl", "https://github.com/octocat/Hello-World");
       await driver.settingsGeneralBind();
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-395): the refusal surfaces inline as "Bind
+        // failed" with the backend message verbatim; the tab stays put
+        // and nothing persists.
+        await expect
+          .poll(
+            async () => {
+              const toast = await driver.rulesLastToast();
+              return toast === null ? null : `${toast.title} ${toast.message}`;
+            },
+            { timeout: 30_000 }
+          )
+          .toContain("Bind failed");
+        const toast = await driver.rulesLastToast();
+        expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`).toContain("GitHub token is missing");
+        expect(await driver.settingsGeneralFormVisible()).toBe(true);
+        expect(await driver.settingsGeneralBindState()).toBe("bind");
+        expect(String((await serverProjectRecord(seed.workspaceSlug, projectId, session))["repo_url"] ?? "")).toBe("");
+        expect(String((await serverRepositoryStatus(seed.workspaceSlug, projectId, session))["bound"])).toBe("false");
+        return;
+      }
       expect(await driver.settingsGeneralFormVisible()).toBe(true);
       expect(await driver.settingsGeneralBindState()).toBe("bind");
       expect(await driver.rulesLastToast()).toBeNull();

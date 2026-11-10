@@ -3,7 +3,38 @@
 // See the LICENSE file for details.
 // Pure definition-form rules from parity/specs/agents.md §1 (AGT-002/005).
 
-export const DEFAULT_SCHEDULER_COLOR = "#5e6ad2";
+/**
+ * The preset swatches offered by the scheduler color field, in display
+ * order. The values match the old app's palette so schedulers stored
+ * earlier keep rendering the same color.
+ */
+export const SCHEDULER_COLOR_SWATCHES: readonly [string, ...string[]] = [
+  "#3b82f6",
+  "#6366f1",
+  "#8b5cf6",
+  "#a855f7",
+  "#d946ef",
+  "#ec4899",
+  "#ef4444",
+  "#f97316",
+  "#eab308",
+  "#84cc16",
+  "#22c55e",
+  "#10b981",
+  "#14b8a6",
+  "#06b6d4",
+  "#0ea5e9",
+  "#f59e0b",
+];
+
+/** The color a new scheduler starts with: the first preset swatch. */
+export const DEFAULT_SCHEDULER_COLOR: string = SCHEDULER_COLOR_SWATCHES[0];
+
+/** True when the stored value matches one of the preset swatches. */
+export function isSchedulerSwatchColor(value: string): boolean {
+  const folded = value.toLowerCase();
+  return SCHEDULER_COLOR_SWATCHES.some((swatch) => swatch.toLowerCase() === folded);
+}
 
 export interface SchedulerDefinitionValue {
   name: string;

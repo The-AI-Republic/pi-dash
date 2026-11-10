@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::explicit_auto_deref)]
 
 //! Beat-equivalent scheduler loop.
 //!
@@ -21,8 +22,15 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::watch;
 
+use sea_orm::sea_query::{
+    Alias, Expr, InsertStatement, OnConflict, Query as SeaQuery, SelectStatement,
+};
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult};
+
+use pidash_db::orm_tx;
+
 use crate::queue::{enqueue_exec, NewJob};
-use crate::schedule::{beat_schedule, due_entries, mark_run_sql, BeatEntry};
+use crate::schedule::{beat_schedule, due_entries, BeatEntry};
 
 /// Advisory-lock key for the scheduler singleton. Arbitrary but fixed:
 /// any second scheduler asking for this key waits on the first.
@@ -57,6 +65,35 @@ pub fn unlock_sql() -> &'static str {
     unlock_sql_inner()
 }
 
+/// Last-run ledger state (`rust_job_schedule`, the schedule state table):
+/// every entry's last fire time. SeaORM/`sea-query` expression of the same
+/// `SELECT name, last_run_at FROM rust_job_schedule` the legacy SQL
+/// strings spelled out.
+fn last_runs_select() -> SelectStatement {
+    SeaQuery::select()
+        .column(Alias::new("name"))
+        .column(Alias::new("last_run_at"))
+        .from(Alias::new("rust_job_schedule"))
+        .to_owned()
+}
+
+/// Last-run ledger write: upsert `(entry, now)` so the first fire
+/// inserts and later fires overwrite. `ON CONFLICT (name) DO UPDATE SET
+/// last_run_at = EXCLUDED.last_run_at` spelled through `OnConflict` —
+/// `update_column` against the excluded row's inserting value.
+fn mark_run_statement(name: &str, now: DateTime<Utc>) -> InsertStatement {
+    SeaQuery::insert()
+        .into_table(Alias::new("rust_job_schedule"))
+        .columns([Alias::new("name"), Alias::new("last_run_at")])
+        .values_panic([Expr::val(name).into(), Expr::val(now).into()])
+        .on_conflict(
+            OnConflict::column(Alias::new("name"))
+                .update_column(Alias::new("last_run_at"))
+                .to_owned(),
+        )
+        .to_owned()
+}
+
 /// Fire every due entry once: one transaction per entry holding the
 /// enqueue plus the last-run bookkeeping. Returns the fired entry names.
 pub async fn fire_due(
@@ -64,12 +101,18 @@ pub async fn fire_due(
     schedule: &[BeatEntry],
     now: &DateTime<Utc>,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let last_runs: HashMap<String, DateTime<Utc>> =
-        sqlx::query_as::<_, (String, DateTime<Utc>)>(crate::schedule::fetch_last_runs_sql())
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .collect();
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<QueryResult> = db
+        .query_all(DbBackend::Postgres.build(&last_runs_select()))
+        .await
+        .map_err(orm_tx::into_sqlx)?;
+    let mut last_runs: HashMap<String, DateTime<Utc>> = HashMap::with_capacity(rows.len());
+    for row in &rows {
+        // Named decode, never positional (orm-migration.md §3.2).
+        let name: String = row.try_get("", "name").map_err(orm_tx::into_sqlx)?;
+        let last_run: DateTime<Utc> = row.try_get("", "last_run_at").map_err(orm_tx::into_sqlx)?;
+        last_runs.insert(name, last_run);
+    }
     let mut fired = Vec::new();
     for entry in due_entries(schedule, now, &last_runs) {
         let mut tx = pool.begin().await?;
@@ -82,11 +125,16 @@ pub async fn fire_due(
             ),
         )
         .await?;
-        sqlx::query(mark_run_sql())
-            .bind(entry.name)
-            .bind(*now)
-            .execute(&mut *tx)
-            .await?;
+        {
+            // The mark runs on the same open transaction, so an enqueue
+            // without its bookkeeping (or vice versa) still cannot
+            // survive a crash between the two.
+            let tx_conn = orm_tx::TxConn::new(&mut tx);
+            tx_conn
+                .execute(DbBackend::Postgres.build(&mark_run_statement(entry.name, *now)))
+                .await
+                .map_err(orm_tx::into_sqlx)?;
+        }
         tx.commit().await?;
         fired.push(entry.name.to_owned());
     }
@@ -125,6 +173,9 @@ pub async fn run_scheduler(
                 }
             }
         }
+        // PostgreSQL session advisory lock returns its row by
+        // function, not by a table `SELECT`; spelling the function needs
+        // raw-sql: session advisory lock by function, not a table SELECT; builder needs Expr::cust, itself a raw marker.
         let locked: bool = match sqlx::query_scalar(try_lock_sql())
             .bind(BEAT_LOCK_KEY)
             .fetch_one(
@@ -196,6 +247,9 @@ pub async fn run_scheduler(
     // Release the lock on the session that holds it. If the session is
     // already gone, its end released the lock for us.
     if let Some(mut conn) = lock_conn {
+        // PostgreSQL session advisory unlock returns its row by
+        // function, not by a table `SELECT`; spelling the function needs
+        // raw-sql: session advisory unlock by function, not a table SELECT; builder needs Expr::cust, itself a raw marker.
         match sqlx::query_scalar::<_, bool>(unlock_sql())
             .bind(BEAT_LOCK_KEY)
             .fetch_one(&mut *conn)
@@ -236,6 +290,38 @@ mod tests {
 
     #[test]
     fn default_schedule_is_the_full_beat_table() {
-        assert_eq!(default_schedule().len(), 28);
+        assert_eq!(default_schedule().len(), 31);
+    }
+
+    #[test]
+    fn last_runs_statement_shape() {
+        use sea_orm::DbBackend;
+        let sql = DbBackend::Postgres.build(&last_runs_select()).to_string();
+        assert!(sql.contains("FROM"), "select from: {sql}");
+        assert!(
+            sql.contains("\"rust_job_schedule\""),
+            "schedule table: {sql}"
+        );
+        assert!(sql.contains("\"name\""), "name column: {sql}");
+        assert!(sql.contains("\"last_run_at\""), "last_run_at column: {sql}");
+    }
+
+    #[test]
+    fn mark_run_statement_shape() {
+        use sea_orm::DbBackend;
+        let now = Utc::now();
+        let sql = DbBackend::Postgres
+            .build(&mark_run_statement("prune-failed", now))
+            .to_string();
+        assert!(sql.contains("INSERT INTO"), "insert upsert into: {sql}");
+        assert!(
+            sql.contains("\"rust_job_schedule\""),
+            "schedule table: {sql}"
+        );
+        assert!(
+            sql.contains("ON CONFLICT (\"name\") DO UPDATE SET \"last_run_at\" = \"excluded\".\"last_run_at\""),
+            "upsert overwrites last_run_at from excluded: {sql}"
+        );
+        assert!(sql.contains("prune-failed"), "entry name binds: {sql}");
     }
 }

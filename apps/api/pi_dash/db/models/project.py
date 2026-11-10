@@ -69,6 +69,18 @@ def get_default_preferences():
     return {"pages": {"block_display": True}, "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}}
 
 
+class DedicatedRunnerLostAction(models.TextChoices):
+    """What happens to a dedicated issue when its runner is revoked/deleted.
+
+    Project setting for the dedicated-runner design §6.6 (H-2). Default
+    ``fail_to_backlog``: fail the run and move the issue to Backlog.
+    ``fall_back`` routes the issue to a squad instead (§13.1).
+    """
+
+    FAIL_TO_BACKLOG = "fail_to_backlog", "Fail the run and move the issue to Backlog"
+    FALL_BACK = "fall_back", "Fall back to the pod"
+
+
 class Project(BaseModel):
     NETWORK_CHOICES = ((0, "Secret"), (2, "Public"))
     name = models.CharField(max_length=255, verbose_name="Project Name")
@@ -165,6 +177,16 @@ class Project(BaseModel):
         max_length=24,
         choices=AgentExecutorKind.choices,
         default=get_default_agent_executor,
+    )
+    # What happens when an issue's dedicated runner is revoked or deleted
+    # (dedicated-runner design §6.6, H-2). Default ``fail_to_backlog`` for
+    # new and existing projects. Read by the runner-side lifecycle (§13.1)
+    # and nothing else; exposed writable on the project serializers. The
+    # default is a constant, so the migration is metadata-only on Postgres 11+.
+    dedicated_runner_lost_action = models.CharField(
+        max_length=24,
+        choices=DedicatedRunnerLostAction.choices,
+        default=DedicatedRunnerLostAction.FAIL_TO_BACKLOG,
     )
 
     def __init__(self, *args, **kwargs):

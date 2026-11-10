@@ -16,6 +16,7 @@ import * as React from "react";
 import { selectActiveEstimate } from "@pidash/api-client";
 
 import { NO_ESTIMATE_ID, selectEstimateOptions, selectEstimateValueLabel, type EstimateOption } from "./estimates.js";
+import { PropertyChip } from "./PropertyChip.js";
 import { usePickerEstimates } from "./reference.js";
 
 export interface EstimatePickerProps {
@@ -28,6 +29,10 @@ export interface EstimatePickerProps {
   variant?: ButtonVariant;
   /** Default trigger shows the glyph without the value. */
   iconOnly?: boolean;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
+  /** Accessible property name; the chip reads "Estimate: 3" when set. */
+  label?: string | undefined;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
@@ -61,6 +66,8 @@ export function EstimatePicker({
   disabled = false,
   variant = "secondary",
   iconOnly = false,
+  chip = false,
+  label = "Estimate",
   trigger,
   placeholder = "None",
   tabIndex,
@@ -96,6 +103,21 @@ export function EstimatePicker({
     const listed =
       value === null || estimates.data === undefined ? undefined : selectEstimateValueLabel(estimates.data, value);
     const text = value === null ? placeholder : (current?.label ?? listed ?? placeholder);
+    if (chip) {
+      // Before the list answers, a set point still shows the
+      // placeholder; only a resolved label counts as filled.
+      const filled = text !== placeholder;
+      return (
+        <PropertyChip
+          label={filled ? `${label}: ${text}` : label}
+          icon={<EstimateGlyph />}
+          text={text}
+          placeholder={!filled}
+          {...(filled ? { title: text } : {})}
+          {...(tabIndex === undefined ? {} : { tabIndex })}
+        />
+      );
+    }
     if (iconOnly) {
       return (
         <IconButton label={text} variant={variant}>

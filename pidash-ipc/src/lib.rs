@@ -17,6 +17,8 @@
 pub mod client;
 pub mod dto;
 pub mod protocol;
+#[cfg(windows)]
+pub mod windows_pipe;
 
 // Convenience flat re-exports so downstream clients can `use pidash_ipc::{...}`
 // without threading through the submodule layout.
@@ -32,6 +34,9 @@ pub use protocol::*;
 /// runner's IPC *server* needs the identical derivation.
 #[cfg(windows)]
 pub fn windows_pipe_name(path: &std::path::Path) -> String {
-    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, path.to_string_lossy().as_bytes());
+    let id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        path.to_string_lossy().as_bytes(),
+    );
     format!(r"\\.\pipe\pidash-{id}")
 }

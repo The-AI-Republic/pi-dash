@@ -83,13 +83,11 @@ use base64::Engine as _;
 use serde::Serialize;
 
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::v1_assets::sticky as sticky_kernel;
 
 use super::serializers_engage::issue_is_actively_synced;
-use crate::dispatch::{
-    cloud_agent_is_configured, managed_runner_availability, LlmProfile, UserFlags,
-};
+use crate::dispatch::{LlmProfile, UserFlags};
 use crate::tasks_cleanup::versions::chunk_ranges;
 
 // ---------------------------------------------------------------------------
@@ -102,11 +100,12 @@ use crate::tasks_cleanup::versions::chunk_ranges;
 /// `assignee_ids` first and `label_ids` second (`:187-190`). The write-only
 /// pair is absent from `super().to_representation` — the echo keys sit at
 /// the END, not in declared position.
-pub const ISSUE_CREATE_FIELDS: [&str; 41] = [
+pub const ISSUE_CREATE_FIELDS: [&str; 42] = [
     "id",
     "state_id",
     "parent_id",
     "assigned_pod_id",
+    "assigned_runner_id",
     "project_id",
     "workspace_id",
     "created_at",
@@ -159,6 +158,7 @@ pub struct IssueCreateRow<'a> {
     pub state_id: Option<&'a str>,
     pub parent_id: Option<&'a str>,
     pub assigned_pod_id: Option<&'a str>,
+    pub assigned_runner_id: Option<&'a str>,
     pub project_id: &'a str,
     pub workspace_id: &'a str,
     pub created_at: &'a str,
@@ -208,6 +208,7 @@ pub struct IssueCreateView {
     pub state_id: Option<String>,
     pub parent_id: Option<String>,
     pub assigned_pod_id: Option<String>,
+    pub assigned_runner_id: Option<String>,
     pub project_id: String,
     pub workspace_id: String,
     pub created_at: String,
@@ -287,6 +288,7 @@ pub fn issue_create_to_representation(
         state_id: row.state_id.map(str::to_owned),
         parent_id: row.parent_id.map(str::to_owned),
         assigned_pod_id: row.assigned_pod_id.map(str::to_owned),
+        assigned_runner_id: row.assigned_runner_id.map(str::to_owned),
         project_id: row.project_id.to_owned(),
         workspace_id: row.workspace_id.to_owned(),
         created_at: row.created_at.to_owned(),
@@ -379,35 +381,10 @@ pub const POD_DIFFERENT_PROJECT_MESSAGE: &str = "pod is in a different project";
 pub const POD_DELETED_MESSAGE: &str = "pod has been deleted";
 pub const POD_REASSIGN_MESSAGE: &str = "cannot reassign pod while the issue has an active run";
 
-/// Executor messages (`:281`, `:286`, `:301`, `:320`).
+/// Executor messages (`issue_assignment.py:37,45`, #2903).
 pub const EXECUTOR_UNKNOWN_MESSAGE: &str = "unknown agent executor";
-pub const EXECUTOR_CLOUD_UNAVAILABLE_MESSAGE: &str =
-    "Pi Dash Cloud Agent is not available on this instance";
-pub const EXECUTOR_PROJECT_REQUIRED_MESSAGE: &str = "A project is required for desktop runs";
 pub const EXECUTOR_MID_FLIGHT_MESSAGE: &str =
     "cannot change the execution target while the issue has an active run";
-
-/// Managed-runner refusal copy (`_MANAGED_UNAVAILABLE_DETAIL`, `:93-102`),
-/// keyed by [`ManagedRunnerReason`] code. Unknown codes fall back to the raw
-/// code (`.get(reason, reason)`).
-pub fn managed_unavailable_detail(reason: &str) -> Cow<'_, str> {
-    if reason == ManagedRunnerReason::DISABLED {
-        Cow::Borrowed("Pi Dash Agent is not enabled on this instance")
-    } else if reason == ManagedRunnerReason::NOT_CONNECTED {
-        Cow::Borrowed("Open the Pi Dash desktop app to run on this computer")
-    } else if reason == ManagedRunnerReason::LLM_CONFIG_MISSING {
-        Cow::Borrowed("Configure an AI provider in Pi Dash AI settings first")
-    } else if reason == ManagedRunnerReason::GATEWAY_SCOPES_MISSING {
-        Cow::Borrowed("Sign in to Pi Dash again to refresh your AI access")
-    } else if reason == ManagedRunnerReason::BYOK_UNSUPPORTED {
-        Cow::Borrowed(
-            "Pi Dash Agent on desktop uses OpenHub. Switch your AI provider to OpenHub to run here; \
-             Pi Dash AI and the Cloud Agent keep using your own key.",
-        )
-    } else {
-        Cow::Owned(reason.to_owned())
-    }
-}
 
 /// State / parent / estimate non-field messages (`:364`, `:374`, `:383`).
 pub const STATE_INVALID_MESSAGE: &str = "State is not valid please pass a valid state_id";
@@ -584,6 +561,11 @@ pub struct ValidateAttrs<'a> {
     /// `attrs["assigned_pod"]` (step 3): outer `None` = key absent,
     /// `Some(None)` = explicit clear, `Some(Some)` = resolved pod.
     pub assigned_pod: Option<Option<PodRef>>,
+    /// `attrs["assigned_runner"]` (step 3.5, design §7.1): outer `None`
+    /// = key absent (a pod-only request skips the E-checks), inner
+    /// `None` = explicit clear (E8 applies), `Some(id)` = dedicated
+    /// choice (E1-E8).
+    pub assigned_runner: Option<Option<uuid::Uuid>>,
     /// `attrs["agent_executor"]` (step 4): outer `None` = key absent,
     /// `Some(None)` = clear the override, `Some(Some)` = pinned value.
     pub agent_executor: Option<Option<&'a str>>,
@@ -642,6 +624,9 @@ pub struct ValidateInstance<'a> {
 
 /// Executor-policy inputs for the cloud/managed arms (`:284-310`).
 /// `PartialEq` only: the settings structs implement `PartialEq`, not `Eq`.
+/// #2903: the policy is no longer consulted by step 4 (no availability
+/// gates remain); kept only for signature parity with the pre-#2903
+/// kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExecutorPolicy<'a> {
     /// `CLOUD_AGENT_ENABLED` for [`cloud_agent_is_configured`].
@@ -702,12 +687,16 @@ pub struct ValidateProbes<'a> {
     /// but none is online, exactly as Python's `if` runs the paused
     /// probe last.
     pub paused_exists: &'a dyn Fn() -> bool,
+    /// The `validate_execution_target` E-check verdict (design §7.1):
+    /// the failing [`FieldError`](crate::domain::issue_assignment::FieldError)
+    /// or `None` when the choice is assignable.
+    pub runner_error: &'a dyn Fn() -> Option<crate::domain::issue_assignment::FieldError>,
 }
 
 /// The attrs `validate()` mutates, returned on success. Every other key
 /// passes through untouched (the handler keeps its own map): only
-/// `description_html` is replaced (sanitized, `:329-330`) and the id lists
-/// filtered (`:339-354`).
+/// `description_html` is replaced (sanitized, `:329-330`), the id lists
+/// filtered (`:339-354`), and `agent_executor` normalized (#2903).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedAttrs {
     /// Cleaned HTML when the input key was present and truthy.
@@ -716,6 +705,9 @@ pub struct ValidatedAttrs {
     pub assignee_ids: Option<Vec<uuid::Uuid>>,
     /// Surviving label ids when the input was present and non-empty.
     pub label_ids: Option<Vec<uuid::Uuid>>,
+    /// Normalized `agent_executor` (`#2903`): outer `None` = key absent,
+    /// inner `None` = explicit clear, `Some(k)` = normalized kind value.
+    pub agent_executor: Option<Option<String>>,
 }
 
 /// The sync-lock arm (`:216-229`): fields present in attrs whose value
@@ -760,7 +752,7 @@ pub fn issue_create_validate(
     attrs: &ValidateAttrs<'_>,
     ctx: &ValidateContext,
     instance: Option<&ValidateInstance<'_>>,
-    policy: &ExecutorPolicy<'_>,
+    _policy: &ExecutorPolicy<'_>,
     probes: &ValidateProbes<'_>,
 ) -> Result<ValidatedAttrs, CreateValidateError> {
     // Step 1. Sync lock (:216-229).
@@ -825,70 +817,69 @@ pub fn issue_create_validate(
         }
     }
 
-    // Step 4. agent_executor (:275-321): key presence, not truthiness.
+    let mut validated = ValidatedAttrs {
+        description_html: None,
+        assignee_ids: None,
+        label_ids: None,
+        agent_executor: None,
+    };
+
+    // Step 3.5. The dedicated-runner E-check (`validate_execution_target`,
+    // design §7.1): runs only when the runner key is present in attrs,
+    // after the pod checks and before the executor normalize, exactly
+    // Django's order. The wire key is `assigned_runner` (the attrs /
+    // source key), not the posted `assigned_runner_id`.
+    if attrs.assigned_runner.is_some() {
+        if let Some(error) = (probes.runner_error)() {
+            return Err(CreateValidateError::Field {
+                field: error.field,
+                message: Cow::Borrowed(error.detail),
+            });
+        }
+    }
+
+    // Step 4. agent_executor (#2903, `issue_assignment.py:28-51`): key
+    // presence, not truthiness. Unknown is a 400; deprecated choices
+    // translate to local_runner and the normalized value is stored; a
+    // translation CHANGED the value while the instance has an active run
+    // is the mid-flight 400. No availability checks remain.
     if let Some(executor) = attrs.agent_executor {
         if let Some(executor) = executor {
-            let Some(kind) = AgentExecutorKind::from_value(executor) else {
+            if AgentExecutorKind::from_value(executor).is_none() {
                 return Err(CreateValidateError::Field {
                     field: "agent_executor",
                     message: Cow::Borrowed(EXECUTOR_UNKNOWN_MESSAGE),
                 });
-            };
-            if kind == AgentExecutorKind::CloudAgent && !cloud_agent_is_configured(policy.cloud) {
-                return Err(CreateValidateError::Field {
-                    field: "agent_executor",
-                    message: Cow::Borrowed(EXECUTOR_CLOUD_UNAVAILABLE_MESSAGE),
-                });
             }
-            if kind == AgentExecutorKind::ManagedRunner {
-                let project = instance
-                    .map(|current| current.project)
-                    .or(attrs.attrs_project)
-                    .or_else(|| (probes.fetch_project)());
-                let Some(_project) = project else {
-                    return Err(CreateValidateError::Field {
-                        field: "agent_executor",
-                        message: Cow::Borrowed(EXECUTOR_PROJECT_REQUIRED_MESSAGE),
-                    });
-                };
-                let enrolled = (probes.enrolled_exists)();
-                let online = (probes.online_exists)();
-                let paused = enrolled && !online && (probes.paused_exists)();
-                let verdict = managed_runner_availability(
-                    policy.managed,
-                    policy.viewer,
-                    || (probes.llm_profile)(),
-                    enrolled,
-                    online,
-                    paused,
-                );
-                if !verdict.available
-                    && verdict.reason_code != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
-                {
-                    return Err(CreateValidateError::Field {
-                        field: "agent_executor",
-                        message: managed_unavailable_detail(&verdict.reason_code)
-                            .into_owned()
-                            .into(),
-                    });
-                }
-            }
-        }
-        if let Some(current) = instance {
-            if executor != current.agent_executor && (probes.has_active_run)() {
+            let normalized = pidash_types::dispatch::normalize_executor_write(executor)
+                .expect("known value parses")
+                .value()
+                .to_owned();
+            // `str(attrs["agent_executor"]) != str(instance.agent_executor)`:
+            // the mid-flight refusal compares the NORMALIZED write against
+            // the stored value, not against the input.
+            if instance.is_some_and(|instance| {
+                instance.agent_executor != Some(normalized.as_str()) && (probes.has_active_run)()
+            }) {
                 return Err(CreateValidateError::Field {
                     field: "agent_executor",
                     message: Cow::Borrowed(EXECUTOR_MID_FLIGHT_MESSAGE),
                 });
             }
+            validated.agent_executor = Some(Some(normalized));
+        } else {
+            // Explicit clear: `str(None)` vs the stored value.
+            if instance.is_some_and(|instance| {
+                instance.agent_executor.is_some() && (probes.has_active_run)()
+            }) {
+                return Err(CreateValidateError::Field {
+                    field: "agent_executor",
+                    message: Cow::Borrowed(EXECUTOR_MID_FLIGHT_MESSAGE),
+                });
+            }
+            validated.agent_executor = Some(None);
         }
     }
-
-    let mut validated = ValidatedAttrs {
-        description_html: None,
-        assignee_ids: None,
-        label_ids: None,
-    };
 
     // Step 5. description_html sanitize (:324-330): truthy inputs only; the
     // cleaned output always replaces the input (`nh3.clean` never returns
@@ -1090,6 +1081,216 @@ pub fn label_filter_null_project_sql(count: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// SeaORM forms of the validate/create/update probes above
+// ---------------------------------------------------------------------------
+
+/// [`POD_FETCH_SQL`]: `Pod.all_objects.get(pk)`, tombstones included.
+pub async fn fetch_pod_ref(
+    db: &impl sea_orm::ConnectionTrait,
+    pod_id: uuid::Uuid,
+) -> Result<Option<PodRef>, sea_orm::DbErr> {
+    use pidash_db::entity::pod;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    type PodRow = (
+        uuid::Uuid,
+        uuid::Uuid,
+        Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    );
+    let row: Option<PodRow> = pod::Entity::find()
+        .select_only()
+        .columns([
+            pod::Column::Id,
+            pod::Column::ProjectId,
+            pod::Column::DeletedAt,
+        ])
+        .filter(pod::Column::Id.eq(pod_id))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(row.map(|(id, project_id, deleted_at)| PodRef {
+        id,
+        project_id,
+        deleted: deleted_at.is_some(),
+    }))
+}
+
+/// [`STATE_EXISTS_SQL`]: a live non-triage state in the context project.
+/// A `None` project renders Django's `project_id IS NULL`.
+pub async fn state_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    state_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::states;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = states::Entity::find()
+        .select_only()
+        .column(states::Column::Id)
+        .filter(match project_id {
+            Some(project) => states::Column::ProjectId.eq(project),
+            None => states::Column::ProjectId.is_null(),
+        })
+        .filter(states::Column::Id.eq(state_id))
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`PARENT_EXISTS_SQL`]: a live issue in the context project (`None`
+/// renders `IS NULL`).
+pub async fn parent_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    issue_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::issues;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(match project_id {
+            Some(project) => issues::Column::ProjectId.eq(project),
+            None => issues::Column::ProjectId.is_null(),
+        })
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`ESTIMATE_EXISTS_SQL`]: a live estimate point in the context project
+/// (`None` renders `IS NULL`).
+pub async fn estimate_exists(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    estimate_point_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::estimate_points;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = estimate_points::Entity::find()
+        .select_only()
+        .column(estimate_points::Column::Id)
+        .filter(match project_id {
+            Some(project) => estimate_points::Column::ProjectId.eq(project),
+            None => estimate_points::Column::ProjectId.is_null(),
+        })
+        .filter(estimate_points::Column::Id.eq(estimate_point_id))
+        .filter(estimate_points::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`PROJECT_FETCH_SQL`]: `Project.objects.filter(pk).first()` (live rows,
+/// `-created_at`).
+pub async fn fetch_resolved_project(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+) -> Result<Option<ResolvedProject>, sea_orm::DbErr> {
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let row: Option<(uuid::Uuid, uuid::Uuid)> = projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Id, projects::Column::WorkspaceId])
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .order_by_desc(projects::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(row.map(|(project_id, workspace_id)| ResolvedProject {
+        project_id,
+        workspace_id,
+    }))
+}
+
+/// The `NON_TERMINAL_STATUSES` values [`HAS_ACTIVE_RUN_SQL`] lists, in
+/// tuple order.
+pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
+    "queued",
+    "assigned",
+    "waiting_for_worktree",
+    "running",
+    "cancel_requested",
+    "awaiting_approval",
+    "awaiting_reauth",
+    "paused_awaiting_input",
+];
+
+/// [`HAS_ACTIVE_RUN_SQL`]: a non-terminal run on the issue (plain manager).
+pub async fn has_active_run(
+    db: &impl sea_orm::ConnectionTrait,
+    issue_id: uuid::Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    use pidash_db::entity::agent_run;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let hit: Option<uuid::Uuid> = agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
+        .filter(agent_run::Column::Status.is_in(ACTIVE_RUN_STATUSES))
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
+
+/// [`assignee_member_filter_sql`]: the ids among `ids` that are active,
+/// live MEMBER-or-better members of the project, `-created_at` order.
+pub async fn filter_assignee_members(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<uuid::Uuid>, sea_orm::DbErr> {
+    use pidash_db::entity::project_members;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let rows: Vec<Option<uuid::Uuid>> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::MemberId)
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::Role.gte(15i16))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.is_in(ids.iter().copied()))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .order_by_desc(project_members::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
+        .await?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
+/// [`label_filter_sql`] / [`label_filter_null_project_sql`]: the live
+/// labels among `ids` in the context project (`None` matches project-less
+/// labels), `-created_at` order.
+pub async fn filter_project_labels(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: Option<uuid::Uuid>,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<uuid::Uuid>, sea_orm::DbErr> {
+    use pidash_db::entity::labels;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(match project_id {
+            Some(project) => labels::Column::ProjectId.eq(project),
+            None => labels::Column::ProjectId.is_null(),
+        })
+        .filter(labels::Column::Id.is_in(ids.iter().copied()))
+        .filter(labels::Column::DeletedAt.is_null())
+        .order_by_desc(labels::Column::CreatedAt)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+// ---------------------------------------------------------------------------
 // create (issue.py:387-462) / update (issue.py:464-518): write specs
 // ---------------------------------------------------------------------------
 
@@ -1161,14 +1362,6 @@ pub fn m2m_insert_sql(
     sql
 }
 
-/// Label twin of the assignee clear
-/// ([`ASSIGNEE_CLEAR_SQL`](crate::domain::issues::ASSIGNEE_CLEAR_SQL),
-/// `:496`): the assignee statement moved to domain/ (PIDASHCONV-1630)
-/// — `issue_assignees` is a covered table, `issue_labels` is not.
-/// Params: `$1` deletion timestamp, `$2` issue id (uuid).
-pub const LABEL_CLEAR_SQL: &str =
-    "UPDATE issue_labels SET deleted_at = $1 WHERE issue_id = $2 AND deleted_at IS NULL";
-
 /// The create default-assignee fallback (`:420-441`): when the validated
 /// (post-filter) assignee list is `None` or empty AND
 /// `context["default_assignee_id"]` is `Some` AND that member passes
@@ -1208,11 +1401,10 @@ pub const CREATE_CONTRACT: &str = "context keys, issue row (models), assignee ba
 
 /// `update()` (`:464-518`) execution contract: (1) when `assignee_ids` is
 /// present (even `[]`):
-/// [`ASSIGNEE_CLEAR_SQL`](crate::domain::issues::ASSIGNEE_CLEAR_SQL),
-/// then [`m2m_batches`] inserts
-/// via [`m2m_insert_sql`] WITH `ignore_conflicts`, `IntegrityError`
-/// swallowed; absent key leaves rows untouched; (2) same for `label_ids`
-/// with [`LABEL_CLEAR_SQL`]; (3) `instance.updated_at = now()` runs BEFORE
+/// the live links are soft-cleared (the domain m2m leg,
+/// `crate::domain::issues`), then [`m2m_batches`] inserts WITH
+/// `ignore_conflicts`, `IntegrityError` swallowed; absent key leaves rows
+/// untouched; (2) same for `label_ids`; (3) `instance.updated_at = now()` runs BEFORE
 /// the issue-row `UPDATE` even when only m2m keys changed (`:517-518`) —
 /// the row write always carries a fresh `updated_at`.
 pub const UPDATE_CONTRACT: &str = "per present m2m key: soft-clear then ignore-conflicts batches (swallowed); updated_at bumped before the issue UPDATE even for m2m-only writes";
@@ -1220,7 +1412,6 @@ pub const UPDATE_CONTRACT: &str = "per present m2m key: soft-clear then ignore-c
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::issues::ASSIGNEE_CLEAR_SQL;
     use serde_json::Value;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -1261,6 +1452,7 @@ mod tests {
             start_date: None,
             target_date: None,
             assigned_pod: None,
+            assigned_runner: None,
             agent_executor: None,
             description_html: None,
             description_binary: None,
@@ -1314,6 +1506,7 @@ mod tests {
         enrolled_exists: Box<dyn Fn() -> bool>,
         online_exists: Box<dyn Fn() -> bool>,
         paused_exists: Box<dyn Fn() -> bool>,
+        runner_error: Box<dyn Fn() -> Option<crate::domain::issue_assignment::FieldError>>,
     }
 
     impl ProbeBank {
@@ -1338,6 +1531,7 @@ mod tests {
                 enrolled_exists: Box::new(|| true),
                 online_exists: Box::new(|| true),
                 paused_exists: Box::new(|| false),
+                runner_error: Box::new(|| None),
             }
         }
 
@@ -1357,6 +1551,7 @@ mod tests {
                 enrolled_exists: &self.enrolled_exists,
                 online_exists: &self.online_exists,
                 paused_exists: &self.paused_exists,
+                runner_error: &self.runner_error,
             }
         }
     }
@@ -1402,18 +1597,10 @@ mod tests {
     fn managed_settings(enabled: bool) -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,
             desktop_min_version: String::new(),
-        }
-    }
-
-    fn active_user() -> UserFlags {
-        UserFlags {
-            is_active: true,
-            is_bot: false,
         }
     }
 
@@ -1583,8 +1770,30 @@ mod tests {
             serde_json::json!({ "assigned_pod_id": POD_DIFFERENT_PROJECT_MESSAGE }),
         );
 
-        // Step 4 wins once the pod key is absent.
+        // Step 3.5 (the dedicated-runner E-check) wins once the pod
+        // key is absent but a runner key is present.
         attrs.assigned_pod = None;
+        attrs.assigned_runner = Some(Some(uid(30)));
+        bank.runner_error = Box::new(|| {
+            Some(crate::domain::issue_assignment::FieldError {
+                field: "assigned_runner",
+                code: "runner_not_found",
+                detail: "runner not found",
+            })
+        });
+        let probes = bank.probes();
+        let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
+            .expect_err("runner wins");
+        assert_eq!(
+            err.raised_detail().expect("raised"),
+            serde_json::json!({ "assigned_runner": "runner not found" }),
+        );
+
+        // Step 4 wins once the runner key is absent (and the E-check
+        // no longer armed).
+        attrs.assigned_runner = None;
+        bank.runner_error = Box::new(|| None);
+        let probes = bank.probes();
         let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
             .expect_err("executor wins");
         assert_eq!(
@@ -1665,6 +1874,7 @@ mod tests {
                 description_html: None,
                 assignee_ids: None,
                 label_ids: Some(vec![uid(6)]),
+                agent_executor: None,
             }
         );
     }
@@ -1931,56 +2141,10 @@ mod tests {
                 .expect("unknown message")
         );
         assert_eq!(
-            EXECUTOR_CLOUD_UNAVAILABLE_MESSAGE,
-            rules["cloud_agent"]["message"]["agent_executor"]
-                .as_str()
-                .expect("cloud message")
-        );
-        assert_eq!(
-            EXECUTOR_PROJECT_REQUIRED_MESSAGE,
-            rules["managed_runner"]["missing_project_message"]["agent_executor"]
-                .as_str()
-                .expect("project message")
-        );
-        assert_eq!(
             EXECUTOR_MID_FLIGHT_MESSAGE,
             rules["mid_flight"]["message"]["agent_executor"]
                 .as_str()
                 .expect("mid-flight message")
-        );
-        let copy = &rules["reason_copy"];
-        assert_eq!(
-            managed_unavailable_detail(ManagedRunnerReason::DISABLED).as_ref(),
-            copy["managed_runner_disabled"]
-                .as_str()
-                .expect("disabled copy")
-        );
-        assert_eq!(
-            managed_unavailable_detail(ManagedRunnerReason::NOT_CONNECTED).as_ref(),
-            copy["desktop_not_connected"]
-                .as_str()
-                .expect("offline copy")
-        );
-        assert_eq!(
-            managed_unavailable_detail(ManagedRunnerReason::LLM_CONFIG_MISSING).as_ref(),
-            copy["llm_config_missing"].as_str().expect("llm copy")
-        );
-        assert_eq!(
-            managed_unavailable_detail(ManagedRunnerReason::GATEWAY_SCOPES_MISSING).as_ref(),
-            copy["gateway_scopes_missing"]
-                .as_str()
-                .expect("scopes copy")
-        );
-        assert_eq!(
-            managed_unavailable_detail(ManagedRunnerReason::BYOK_UNSUPPORTED).as_ref(),
-            copy["byok_not_supported_on_desktop"]
-                .as_str()
-                .expect("byok copy")
-        );
-        assert_eq!(
-            managed_unavailable_detail("something_new").as_ref(),
-            "something_new",
-            "unknown reason falls back to the raw code"
         );
 
         let ctx = ValidateContext {
@@ -2008,115 +2172,51 @@ mod tests {
             serde_json::json!({ "agent_executor": EXECUTOR_UNKNOWN_MESSAGE }),
         );
 
-        // Cloud arm follows the instance switch.
+        // #2903: deprecated writes translate to local_runner and the
+        // normalized value is stored — cloud/managed writes never refuse.
         attrs.agent_executor = Some(Some("cloud_agent"));
-        let err = issue_create_validate(&attrs, &ctx, None, &policy, &probes)
-            .expect_err("cloud disabled fails");
+        let translated = issue_create_validate(&attrs, &ctx, None, &policy, &probes)
+            .expect("cloud write translates");
         assert_eq!(
-            err.raised_detail().expect("raised"),
-            serde_json::json!({ "agent_executor": EXECUTOR_CLOUD_UNAVAILABLE_MESSAGE }),
+            translated.agent_executor,
+            Some(Some("local_runner".to_owned()))
         );
-        let cloud_on = cloud_settings(true);
-        let policy_on = ExecutorPolicy {
-            cloud: &cloud_on,
-            managed: &managed,
-            viewer: None,
-        };
-        issue_create_validate(&attrs, &ctx, None, &policy_on, &probes)
-            .expect("cloud enabled passes");
-
-        // Managed arm without any resolvable project.
-        let mut no_project = ProbeBank::permissive();
-        no_project.fetch_project = Box::new(|| None);
-        let no_project_probes = no_project.probes();
         attrs.agent_executor = Some(Some("managed_runner"));
-        let err = issue_create_validate(&attrs, &ctx, None, &policy_on, &no_project_probes)
-            .expect_err("missing project fails");
+        let translated = issue_create_validate(&attrs, &ctx, None, &policy, &probes)
+            .expect("managed write translates");
         assert_eq!(
-            err.raised_detail().expect("raised"),
-            serde_json::json!({ "agent_executor": EXECUTOR_PROJECT_REQUIRED_MESSAGE }),
+            translated.agent_executor,
+            Some(Some("local_runner".to_owned()))
         );
 
-        // Managed arm refused with the reason copy (instance switch off).
-        let mut current = instance(locked_values(&instance_json));
-        current.agent_executor = Some("managed_runner");
-        let err =
-            issue_create_validate(&attrs, &ctx, Some(&current), &policy_on, &no_project_probes)
-                .expect_err("managed disabled fails");
-        assert_eq!(
-            err.raised_detail().expect("raised"),
-            serde_json::json!({ "agent_executor": copy["managed_runner_disabled"] }),
-        );
-
-        // no_managed_runner_for_project self-heals: accepted.
-        let managed_on = managed_settings(true);
-        let viewer = active_user();
-        let policy_managed = ExecutorPolicy {
-            cloud: &cloud_on,
-            managed: &managed_on,
-            viewer: Some(&viewer),
-        };
-        let mut unenrolled = ProbeBank::permissive();
-        unenrolled.enrolled_exists = Box::new(|| false);
-        let unenrolled_probes = unenrolled.probes();
-        issue_create_validate(
-            &attrs,
-            &ctx,
-            Some(&current),
-            &policy_managed,
-            &unenrolled_probes,
-        )
-        .expect("no-runner-for-project passes");
-
-        // Every other failing reason refuses with its copy.
-        for reason in [
-            ManagedRunnerReason::LLM_CONFIG_MISSING,
-            ManagedRunnerReason::GATEWAY_SCOPES_MISSING,
-            ManagedRunnerReason::BYOK_UNSUPPORTED,
-        ] {
-            let owned = reason.to_owned();
-            let mut failing = ProbeBank::permissive();
-            failing.llm_profile = Box::new(move || LlmProfile {
-                available: false,
-                reason_code: owned.clone(),
-            });
-            let failing_probes = failing.probes();
-            let err = issue_create_validate(
-                &attrs,
-                &ctx,
-                Some(&current),
-                &policy_managed,
-                &failing_probes,
-            )
-            .unwrap_err();
-            assert_eq!(
-                err.raised_detail().expect("raised"),
-                serde_json::json!({ "agent_executor": managed_unavailable_detail(reason).as_ref() }),
-                "reason {reason} refuses with its copy"
-            );
-        }
-
-        // local_runner needs no policy at all.
+        // local_runner passes through unchanged.
         attrs.agent_executor = Some(Some("local_runner"));
-        issue_create_validate(&attrs, &ctx, None, &policy, &probes).expect("local passes");
+        let local =
+            issue_create_validate(&attrs, &ctx, None, &policy, &probes).expect("local passes");
+        assert_eq!(local.agent_executor, Some(Some("local_runner".to_owned())));
 
-        // Mid-flight change is refused; clearing to the same value passes.
+        // Mid-flight: `str(normalized) != str(instance)` under a live
+        // run is refused; a translated write that lands on the stored
+        // value skips the check (Django `normalize_issue_executor`).
         let mut busy = ProbeBank::permissive();
         busy.has_active_run = Box::new(|| true);
         let busy_probes = busy.probes();
         let mut flying = instance(locked_values(&instance_json));
         flying.agent_executor = Some("local_runner");
         attrs.agent_executor = Some(Some("cloud_agent"));
-        let err = issue_create_validate(&attrs, &ctx, Some(&flying), &policy_on, &busy_probes)
+        issue_create_validate(&attrs, &ctx, Some(&flying), &policy, &busy_probes)
+            .expect("translated write landing on stored value skips mid-flight");
+        attrs.agent_executor = Some(Some("local_runner"));
+        issue_create_validate(&attrs, &ctx, Some(&flying), &policy, &busy_probes)
+            .expect("unchanged executor skips mid-flight");
+        flying.agent_executor = Some("cloud_agent");
+        attrs.agent_executor = Some(Some("local_runner"));
+        let err = issue_create_validate(&attrs, &ctx, Some(&flying), &policy, &busy_probes)
             .expect_err("mid-flight change fails");
         assert_eq!(
             err.raised_detail().expect("raised"),
             serde_json::json!({ "agent_executor": EXECUTOR_MID_FLIGHT_MESSAGE }),
         );
-        flying.agent_executor = Some("managed_runner");
-        attrs.agent_executor = Some(Some("managed_runner"));
-        issue_create_validate(&attrs, &ctx, Some(&flying), &policy_managed, &busy_probes)
-            .expect("unchanged executor skips mid-flight");
     }
 
     #[test]
@@ -2437,6 +2537,7 @@ mod tests {
                 })
             },
             paused_exists: Box::new(|| false),
+            runner_error: Box::new(|| None),
         };
         let probes = bank.probes();
         let cloud = cloud_settings(false);
@@ -2461,6 +2562,7 @@ mod tests {
                 description_html: None,
                 assignee_ids: None,
                 label_ids: None,
+                agent_executor: None,
             }
         );
         for (index, counter) in counters.iter().enumerate() {
@@ -2486,8 +2588,8 @@ mod tests {
         let sent = serde_json::json!(["a", "b"]);
         assert_eq!(echo_initial_ids(Some(&sent)), sent);
 
-        // 41 wire keys with the echo pair appended last (:187-190).
-        assert_eq!(ISSUE_CREATE_FIELDS.len(), 41);
+        // 42 wire keys with the echo pair appended last (:187-190).
+        assert_eq!(ISSUE_CREATE_FIELDS.len(), 42);
         assert_eq!(ISSUE_CREATE_FIELDS[0], "id");
         assert_eq!(
             &ISSUE_CREATE_FIELDS[ISSUE_CREATE_FIELDS.len() - 2..],
@@ -2503,6 +2605,7 @@ mod tests {
             state_id: Some("22222222-2222-2222-2222-222222222222"),
             parent_id: None,
             assigned_pod_id: None,
+            assigned_runner_id: None,
             project_id: "33333333-3333-3333-3333-333333333333",
             workspace_id: "44444444-4444-4444-4444-444444444444",
             created_at: "2026-10-03T00:00:00Z",
@@ -2707,21 +2810,6 @@ mod tests {
         assert!(
             DEFAULT_ASSIGNEE_EXISTS_SQL.contains("is_active"),
             "{DEFAULT_ASSIGNEE_EXISTS_SQL}"
-        );
-        // Update clears are soft deletes scoped to live rows.
-        for sql in [ASSIGNEE_CLEAR_SQL, LABEL_CLEAR_SQL] {
-            assert!(sql.starts_with("UPDATE "), "{sql}");
-            assert!(sql.contains("SET deleted_at = $1"), "{sql}");
-            assert!(sql.contains("deleted_at IS NULL"), "{sql}");
-            assert!(!sql.contains("updated_at"), "auto_now untouched: {sql}");
-        }
-        assert!(
-            ASSIGNEE_CLEAR_SQL.contains("issue_assignees"),
-            "{ASSIGNEE_CLEAR_SQL}"
-        );
-        assert!(
-            LABEL_CLEAR_SQL.contains("issue_labels"),
-            "{LABEL_CLEAR_SQL}"
         );
         // Assignee/label filters: guards, order, IN-list forms.
         let member_sql = assignee_member_filter_sql(2);

@@ -89,6 +89,11 @@ describe("Sidebar", () => {
     expect(screen.queryByTestId("sidebar-workspace-switcher")).not.toBeInTheDocument();
   });
 
+  it("shows no Commands hint", () => {
+    render(sidebar());
+    expect(screen.queryByText("Commands")).toBeNull();
+  });
+
   it("renders the home row and marks it current on home", () => {
     render(sidebar({ currentPath: "/acme/" }));
     const home = screen.getByRole("link", { name: "Home" });
@@ -164,6 +169,13 @@ describe("Sidebar", () => {
     const account = screen.getByTestId("sidebar-user-menu");
     const update = screen.getByText("update ready");
     expect(account).not.toContainElement(update);
+  });
+
+  it("renders the About control beside the account row when provided (DESK-028)", () => {
+    render(sidebar({ aboutControl: <span>about entry</span> }));
+    const account = screen.getByTestId("sidebar-user-menu");
+    const about = screen.getByText("about entry");
+    expect(account).not.toContainElement(about);
   });
 
   it("renders the user menu with no plan badge in the footer (NEWFRONT-1045)", () => {

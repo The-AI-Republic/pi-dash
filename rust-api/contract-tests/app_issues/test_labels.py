@@ -116,6 +116,86 @@ def test_label_duplicate_name_is_400(clients, seed):
     assert resp.json() == {"name": ["LABEL_NAME_ALREADY_EXISTS"]}
 
 
+def test_label_name_and_color_are_trimmed(clients, seed):
+    # NEWPIDASH-139: DRF `CharField(trim_whitespace=True)` strips
+    # `name`/`color` before the blank/max-length checks and storage,
+    # and `validate_name` dedupes on the stripped value. Same status
+    # and body on both backends; fails on Rust before the fix.
+    import uuid
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    tag = uuid.uuid4().hex[:8]
+    trimmed = f"Padded {tag}"
+    resp = admin.post(
+        f"{_base(ws, pid)}/issue-labels/",
+        json={"name": f"  {trimmed}  ", "color": "  #123456  "},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["name"] == trimmed
+    assert body["color"] == "#123456"
+    label_id = body["id"]
+    try:
+        # Whitespace-only name is blank.
+        resp = admin.post(
+            f"{_base(ws, pid)}/issue-labels/",
+            json={"name": "   ", "color": "#123456"},
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"name": ["This field may not be blank."]}
+        # Padded case-insensitive duplicate is refused.
+        resp = admin.post(
+            f"{_base(ws, pid)}/issue-labels/",
+            json={"name": f" padded {tag} ", "color": "#123456"},
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"name": ["LABEL_NAME_ALREADY_EXISTS"]}
+        # Over-long whitespace is blank alone (blank pre-check runs
+        # before the max-length validator), not max-length.
+        resp = admin.post(
+            f"{_base(ws, pid)}/issue-labels/",
+            json={"name": " " * 300, "color": "#123456"},
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"name": ["This field may not be blank."]}
+        # Max-length runs on the stripped value: a padded 255-code-point
+        # core passes and is stored trimmed.
+        core = "n" * 255
+        resp = admin.post(
+            f"{_base(ws, pid)}/issue-labels/",
+            json={"name": f" {core} ", "color": "#123456"},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["name"] == core
+        assert admin.delete(
+            f"{_base(ws, pid)}/issue-labels/{resp.json()['id']}/"
+        ).status_code == 204
+        # PUT and PATCH share the same trim via `validate_label_fields`.
+        resp = admin.put(
+            f"{_base(ws, pid)}/issue-labels/{label_id}/",
+            json={"name": f"  Put {tag}  ", "color": "  #aabbcc  "},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["name"] == f"Put {tag}"
+        assert resp.json()["color"] == "#aabbcc"
+        resp = admin.patch(
+            f"{_base(ws, pid)}/issue-labels/{label_id}/",
+            json={"name": f"  Patch {tag}  "},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["name"] == f"Patch {tag}"
+        # Whitespace-only color validates as `""` (`allow_blank`).
+        resp = admin.patch(
+            f"{_base(ws, pid)}/issue-labels/{label_id}/",
+            json={"color": "   "},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["color"] == ""
+    finally:
+        assert admin.delete(
+            f"{_base(ws, pid)}/issue-labels/{label_id}/").status_code == 204
+
+
 def test_bulk_create_labels(clients, seed):
     admin = clients["admin"]
     ws, pid = seed["ws_slug"], seed["project"]

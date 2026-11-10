@@ -18,7 +18,7 @@ import { renderPagePdf, type LoadInterFontBytes } from "./renderPagePdf.js";
 
 export interface SavePageExportDeps {
   sink?: PageExportSink | undefined;
-  /** Page origin that stack-asset picture URLs resolve against. */
+  /** API origin that stack-asset picture URLs resolve against. */
   origin: string;
   fetchBytes?: FetchExportImageBytes | undefined;
   /** Inter TTF bytes; the production loader fetches them when absent. */

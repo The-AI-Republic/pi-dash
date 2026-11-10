@@ -1,12 +1,15 @@
-"""PIDASHCONV-1410: link-crawler <title> RCDATA oracle pins.
+"""PIDASHCONV-1410: link-crawler <title> oracle pins.
 
 Pins the Django-observed ``<title>`` texts the Rust crawler must
-reproduce byte for byte. ``<title>`` is RCDATA (CPython
-``html.parser`` lists ``title`` in ``RCDATA_CONTENT_ELEMENTS``,
-``html/parser.py:116``): nested markup is literal text while entities
-still decode, and the span ends only at ``</title`` followed by
-``[\\t\\n\\r\\f />]`` (case-insensitive — the ``interesting`` pattern
-``set_cdata_mode`` installs, ``html/parser.py:196-199``).
+reproduce byte for byte. On the production interpreter (stock CPython
+3.12.10 — ``apps/api/Dockerfile.api`` — and every stock release before
+3.12.12) ``html.parser`` has no RCDATA support: ``title`` is a normal
+element (``CDATA_CONTENT_ELEMENTS`` is just ``("script", "style")``),
+so nested markup is parsed, comments become child nodes ``get_text``
+skips, and unknown end tags are dropped while the title span continues
+to ``</title`` (matched case-insensitively by ``endtagfind``, which
+tolerates attributes, a blank before the name, and trailing space or
+``/``). An unterminated ``</title`` at EOF is literal text.
 
 Each test replicates exactly
 ``apps/api/pi_dash/bgtasks/work_item_link_task.py:141-143``::
@@ -16,6 +19,14 @@ Each test replicates exactly
 
 with ``response.content`` as raw response bytes. No Django import, no
 worker, no network: ``bs4`` is the only dependency beyond pytest.
+
+Interpreter requirement (NEWPIDASH-30): the pins below are the
+production-parser behavior. Upstream added RCDATA title handling in
+3.12.12 (and some distro builds backported it to earlier 3.12.x), on
+which ``<title>`` keeps nested markup literally and several pins read
+differently. Tests that differ across the two parsers skip on RCDATA
+interpreters instead of asserting the wrong oracle; run them on stock
+CPython 3.12.10, the version CI uses.
 
 Hermetic by necessity, not by preference (same reason as
 ``test_link_crawl_decoding.py``): the crawl task's SSRF guard
@@ -27,7 +38,10 @@ same literals through ``crawl()`` with a stub transport (they fail on
 pre-fix rust-dev).
 """
 
+from html.parser import HTMLParser
+
 import bs4
+import pytest
 from bs4 import BeautifulSoup
 
 
@@ -38,19 +52,34 @@ def django_title(content: bytes):
     return tag.get_text().strip() if tag else None
 
 
+# See the module docstring: these pins are the production (pre-RCDATA)
+# parser behavior and read differently where RCDATA was backported.
+requires_legacy_parser = pytest.mark.skipif(
+    hasattr(HTMLParser, "RCDATA_CONTENT_ELEMENTS"),
+    reason="pins stock html.parser (<=3.12.11, production 3.12.10); "
+    "this interpreter parses <title> as RCDATA (NEWPIDASH-30)",
+)
+
+
 def test_oracle_library_versions():
     """The pins below were observed on these exact versions."""
     assert bs4.__version__ == "4.12.3"
 
 
-def test_nested_markup_is_literal_text():
+@requires_legacy_parser
+def test_nested_markup_is_parsed():
+    # No RCDATA: <b> is a child element, so get_text() drops the tags
+    # while entities still decode.
     content = b"<title>A &amp; B <b>bold</b>&#33;</title>"
-    assert django_title(content) == "A & B <b>bold</b>!"
+    assert django_title(content) == "A & B bold!"
 
 
+@requires_legacy_parser
 def test_titlefoo_does_not_close():
+    # </titlefoo> is an end tag for an unknown element: dropped, and
+    # the title span continues past it to </title>.
     content = b"<title>a</titlefoo>b</title>"
-    assert django_title(content) == "a</titlefoo>b"
+    assert django_title(content) == "ab"
 
 
 def test_bare_lt_is_literal_text():
@@ -58,9 +87,11 @@ def test_bare_lt_is_literal_text():
     assert django_title(content) == "a < b"
 
 
-def test_comment_is_literal_text():
+@requires_legacy_parser
+def test_comment_inside_title_yields_text_only():
+    # The comment is a child node; get_text() skips it.
     content = b"<title>a<!--x-->b</title>"
-    assert django_title(content) == "a<!--x-->b"
+    assert django_title(content) == "ab"
 
 
 def test_close_is_case_insensitive():
@@ -77,19 +108,29 @@ def test_close_allows_trailing_space_slash_and_blank():
     assert django_title(b"<title>a</title foo=baz>rest") == "a"
 
 
-def test_close_needs_no_bracket():
-    assert django_title(b"<title>a</title b rest") == "a"
+@requires_legacy_parser
+def test_unterminated_close_is_literal_text():
+    # No ">" anywhere: parse_endtag never matches, so the would-be
+    # close tag stays text through EOF.
+    assert django_title(b"<title>a</title b rest") == "a</title b rest"
 
 
-def test_close_rejects_non_delimiters_and_eof():
-    assert django_title(b"<title>a</title!>b</title>") == "a</title!>b"
+@requires_legacy_parser
+def test_close_tag_punctuation_and_eof():
+    # "</title!>": parsed as an end tag for the unknown element
+    # "title!", which is dropped, so the text continues past it.
+    assert django_title(b"<title>a</title!>b</title>") == "ab"
     # No NUL vector: a NUL byte flips UnicodeDammit to UTF-16 (via
     # charset-normalizer when installed) so Django returns None — a
-    # charset-sniffing quirk, not RCDATA (PIDASHCONV-1410 review).
-    assert django_title(b"<title>a</ title>b</title>") == "a</ title>b"
+    # charset-sniffing quirk (PIDASHCONV-1410 review).
+    # A blank between "</" and the name still closes (endtagfind's
+    # "</\\s*").
+    assert django_title(b"<title>a</ title>b</title>") == "a"
+    # EOF before ">": the partial close tag is literal text.
     assert django_title(b"<title>a</title") == "a</title"
 
 
+@requires_legacy_parser
 def test_unclosed_title_runs_to_end():
     assert django_title(b"<title>abc") == "abc"
-    assert django_title(b"<title>a</titlefoo>") == "a</titlefoo>"
+    assert django_title(b"<title>a</titlefoo>") == "a"

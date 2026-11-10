@@ -4,12 +4,12 @@
 // The client-side sign-out sequence (AUTH-017). Every entry point — the
 // shell menus and palette, the switch and deactivation dialogs, and later
 // the not-found screen and the change-email dialog — runs this one path:
-// the desktop runtime disposal first (RUN-047: confirm, then daemon stop
-// and server enrollment removal while the session is still live), then a
-// fresh-CSRF sign-out POST, then client clearing, then the native webview
-// wipe, then the signed-out landing. Written from parity/specs/auth.md;
-// the runtime steps arrive through the registered hooks the runners
-// feature owns, so this file never imports a domain feature.
+// the desktop runtime confirmation first (RUN-047: ask, so cancelling
+// signs nothing out), then a fresh-CSRF sign-out POST, then the desktop
+// runtime disposal, then client clearing, then the native webview wipe,
+// then the signed-out landing. Written from parity/specs/auth.md; the
+// runtime steps arrive through the registered hooks the runners feature
+// owns, so this file never imports a domain feature.
 
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
@@ -22,7 +22,7 @@ import {
 import { getAppClient } from "../../core/api/client.js";
 import { markExplicitLogout } from "./cloudLogin.js";
 import { platform, type SessionTeardownApi } from "../../core/platform/index.js";
-import { getRuntimeSignOutHooks, instanceKeys } from "../../core/session/index.js";
+import { getRuntimeSignOutHooks, instanceKeys, type RuntimeSignOutChoice } from "../../core/session/index.js";
 import { signOut as clearSession } from "../../core/session/store.js";
 import { notifyError } from "../../shared/shell/index.js";
 
@@ -78,10 +78,12 @@ export interface PerformSignOutArgs {
  * signed-out landing target, or null when the user cancels the desktop
  * runtime confirmation (nothing is signed out then).
  *
- * When runtime hooks are registered (desktop), the runtime disposal runs
- * before the POST: server enrollment removal needs a live session. The
- * disposal itself is best-effort, so a failed revocation never traps the
- * user; a failed POST afterwards still leaves the session intact.
+ * When runtime hooks are registered (desktop), the confirmation is asked
+ * upfront but the runtime disposal itself runs only after the POST
+ * succeeds. A failed POST tears nothing down, so the user who stays
+ * signed in keeps their chat history, the computer sign-in and a working
+ * runtime. The disposal itself is best-effort, so a failed local step
+ * never traps the user once the server session is already gone.
  *
  * On the hosted backend (CLOUD-016) the POST is the cloud logout pair and
  * the landing is a full replacing navigation to /login, so every store
@@ -95,10 +97,12 @@ export function performSignOut(
 export async function performSignOut(args: PerformSignOutArgs): Promise<string | null> {
   const { client, queryClient, teardown } = args;
   const runtime = getRuntimeSignOutHooks();
+  let choice: RuntimeSignOutChoice | null = null;
   if (runtime) {
-    const choice = args.skipRuntimeConfirm ? { deleteChatHistory: false } : await runtime.confirmRuntimeSignOut();
+    choice = args.skipRuntimeConfirm
+      ? { deleteChatHistory: false, signOutComputer: false }
+      : await runtime.confirmRuntimeSignOut();
     if (choice === null) return null;
-    await runtime.disposeRuntimeForSignOut(choice);
   }
   client.clearCsrfCache();
   const cloud = isHostedBackend(queryClient);
@@ -108,6 +112,13 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
   } catch (error) {
     notifyError(SIGN_OUT_FAILED_TITLE, SIGN_OUT_FAILED_MESSAGE);
     throw error;
+  }
+  // The server has confirmed the sign-out, so the local runtime may now be
+  // torn down. A failed POST never reaches this point: chat history, the
+  // computer sign-in and the runtime identity stay untouched, and the user
+  // who stays signed in can carry on chatting without a page reload.
+  if (runtime !== null && choice !== null) {
+    await runtime.disposeRuntimeForSignOut(choice);
   }
   clearSession(queryClient);
   if (teardown !== undefined) {
@@ -131,11 +142,12 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
 }
 
 /**
- * Sign out everywhere (AUTH-017): end the server session, then clear every
- * client store and the query cache, then the desktop local teardown.
- * Resolves to the signed-out landing target, or null when the user
- * cancels the desktop runtime confirmation; a failed POST toasts and
- * rejects instead, so the caller leaves the user where they are.
+ * Sign out everywhere (AUTH-017): end the server session, then run the
+ * desktop runtime teardown, clear every client store and the query cache,
+ * then the native wipe. Resolves to the signed-out landing target, or
+ * null when the user cancels the desktop runtime confirmation; a failed
+ * POST toasts and rejects instead, so the caller leaves the user where
+ * they are and nothing local has been torn down.
  */
 export function useSignOut() {
   const queryClient = useQueryClient();

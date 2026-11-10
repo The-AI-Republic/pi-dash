@@ -34,7 +34,7 @@ concurrency:
 jobs:
   integrations-redirect-django:
     name: redirect suite vs Django worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -100,8 +100,9 @@ jobs:
       CONTRACT_TASK_TIMEOUT: "60"
       GITHUB_REDIRECT_MITM_PORT: "14722"
       GITHUB_REDIRECT_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
-      HTTPS_PROXY: http://127.0.0.1:14722
-      REQUESTS_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
+      # HTTPS_PROXY/REQUESTS_CA_BUNDLE are step-scoped (worker boot + pytest
+      # only): job-level proxy breaks checkout/pip, which run before the MITM
+      # the test module starts exists (NEWPIDASH-26).
     steps:
       - uses: actions/checkout@v6
 
@@ -134,6 +135,9 @@ jobs:
 
       - name: Start Celery worker (solo, MITM proxy env, no beat)
         working-directory: apps/api
+        env:
+          HTTPS_PROXY: http://127.0.0.1:14722
+          REQUESTS_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
         run: |
           # Same oracle includes as the worker-plane job (PIDASHCONV-1104):
           # task modules the stock worker never imports (PDASHOSS01-292).
@@ -143,6 +147,9 @@ jobs:
 
       - name: Run redirect oracle (Django)
         working-directory: rust-api/contract-tests
+        env:
+          HTTPS_PROXY: http://127.0.0.1:14722
+          REQUESTS_CA_BUNDLE: /tmp/pidash-1472-ca-bundle.pem
         # Same plugin dodge as the worker-plane job: the API install puts
         # pytest-django in this interpreter; the oracle never touches Django.
         run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django integrations/test_github_redirect.py -v
@@ -156,7 +163,7 @@ jobs:
 
   integrations-redirect-rust:
     name: redirect suite vs Rust worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:

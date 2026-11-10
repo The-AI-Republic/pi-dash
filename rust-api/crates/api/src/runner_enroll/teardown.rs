@@ -102,17 +102,21 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
+use pidash_db::entity::{agent_run, dev_machine, pod, runner, workspace_members};
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use sea_orm::sea_query::{Alias, Expr, Keyword, LockType, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::membership;
 use pidash_auth::permissions::runner as runner_perm;
 use pidash_auth::scope::TenantScope;
 use pidash_db::redis::client_from_settings;
-use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, pod as pod_cols, runner as r_cols,
-};
 use pidash_services::runner_enroll::queries::{catalog_reads, enroll_reads, manage_reads};
 use pidash_services::runner_enroll::revoke as revoke_kernel;
 use pidash_services::runner_enroll::serializers::shapes;
@@ -225,111 +229,6 @@ fn unix_now_secs() -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Handler-owned SQL (Django-probed, repo-pinned Django 4.2.30 — no merged
-// builder covers these five shapes, and the services layer is read-only
-// from here, so the text lives with the handlers like `manage.rs`
-// `workspace_role_in`)
-// ---------------------------------------------------------------------------
-
-/// `"table"."col", …` projection (the services-builders `qualified`
-/// shape, restated).
-fn qualified(table: &str, columns: &[&str]) -> String {
-    columns
-        .iter()
-        .map(|column| format!("\"{table}\".\"{column}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Locked runner read (`runners.py:476`).
-///
-/// `Runner.objects.select_for_update().filter(pk).first()` inside
-/// `transaction.atomic()`: full row (plain `Manager` — no scope),
-/// `Meta.ordering` kept, `LIMIT 1 FOR UPDATE`. `$1` = runner id.
-///
-/// Probe: `/tmp/592_probe.py` P2 (column order + `ORDER BY` + `LIMIT 1`;
-/// the `FOR UPDATE` tail is the E3/M6 merged-builder shape).
-fn runner_locked_read_sql() -> String {
-    format!(
-        "SELECT {} FROM \"runner\" WHERE \"runner\".\"id\" = $1 \
-         ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC \
-         LIMIT 1 FOR UPDATE",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-    )
-}
-
-/// Workspace-membership probe (`core/permissions.py:28-34`, via the
-/// refresh view `:441`).
-///
-/// `WorkspaceMember.objects.filter(workspace_id, member,
-/// is_active=True).exists()`: `SELECT 1 AS "a" … LIMIT 1`, Q-sorted
-/// (manager scope, bare `is_active`, member, workspace). `$1` = member
-/// (user) id, `$2` = workspace id.
-///
-/// Probe: `/tmp/592_probe5.py` (literal `1`, conjunct order).
-const MEMBERSHIP_EXISTS_SQL: &str = "SELECT 1 AS \"a\" FROM \"workspace_members\" \
-     WHERE (\"workspace_members\".\"deleted_at\" IS NULL \
-     AND \"workspace_members\".\"is_active\" \
-     AND \"workspace_members\".\"member_id\" = $1 \
-     AND \"workspace_members\".\"workspace_id\" = $2) LIMIT 1";
-
-/// Post-revoke re-read (`runners.py:491`).
-///
-/// `runner.refresh_from_db()`: the `.get()` single-row shape (full row,
-/// no scope, no ordering) with `LIMIT 1` (the queries-A `LIMIT 21`-probe
-/// omission). `$1` = runner id.
-///
-/// Probe: `/tmp/592_probe.py` P3 (column order, no `ORDER BY`).
-fn runner_refresh_sql() -> String {
-    format!(
-        "SELECT {} FROM \"runner\" WHERE \"runner\".\"id\" = $1 LIMIT 1",
-        qualified(r_cols::TABLE, r_cols::COLUMNS),
-    )
-}
-
-/// Lazy `runner.pod` load for the revoke response (`serializers.py`
-/// `pod_detail`).
-///
-/// The serializer reads `runner.pod` as a forward-FK attribute, so Django
-/// resolves it through `Pod._base_manager` (a plain `models.Manager`), NOT
-/// through `PodManager`: a tombstoned pod still renders. No scope, no
-/// ordering, `LIMIT 1`. `$1` = pod id.
-///
-/// Probe: `/tmp/592_probe.py` P4a.
-fn pod_lazy_sql() -> String {
-    format!(
-        "SELECT {} FROM \"pod\" WHERE \"pod\".\"id\" = $1 LIMIT 1",
-        qualified(pod_cols::TABLE, pod_cols::COLUMNS),
-    )
-}
-
-/// Lazy `runner.dev_machine` load for the revoke response
-/// (`dev_machine_detail`).
-///
-/// `DevMachine.objects.get(pk)`: plain manager (no scope), no ordering,
-/// `LIMIT 1`. `$1` = machine id. Runs only when `dev_machine_id` is set.
-///
-/// Probe: `/tmp/592_probe.py` P4b.
-fn machine_lazy_sql() -> String {
-    format!(
-        "SELECT {} FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 LIMIT 1",
-        qualified(dm_cols::TABLE, dm_cols::COLUMNS),
-    )
-}
-
-/// The reverse one-to-one `runner.live_state` read (the `manage.rs`
-/// `fetch_live_state` text, restated — that module's helper is private).
-///
-/// `RunnerLiveState` columns in `_meta` order over `runner_id`, `LIMIT 1`.
-/// `$1` = runner id.
-const LIVE_STATE_SQL: &str =
-    "SELECT \"runner_id\", \"observed_run_id\", \"last_event_at\", \"last_event_kind\", \
-     \"last_event_summary\", \"agent_pid\", \"agent_subprocess_alive\", \
-     \"approvals_pending\", \"usage\", \"llm_model\", \"turn_count\", \
-     \"agent_health\", \"agent_last_activity_at\", \"updated_at\" \
-     FROM \"runner_live_state\" WHERE \"runner_live_state\".\"runner_id\" = $1 LIMIT 1";
-
-// ---------------------------------------------------------------------------
 // Preamble (the `manage.rs` web / `machine.rs` daemon positions, restated)
 // ---------------------------------------------------------------------------
 
@@ -358,29 +257,37 @@ async fn web_actor(
 /// `SoftDeletionManager`, so tombstones do not count; `Meta.ordering`
 /// is `-created_at` with `.first()` → `LIMIT 1`.
 async fn workspace_role(
-    executor: &PgPool,
+    pool: &PgPool,
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<i32>, Response> {
-    workspace_role_in(executor, workspace_id, user_id).await
+    workspace_role_in(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
+    )
+    .await
 }
 
+/// The active, non-soft-deleted membership's role (`WorkspaceMember`
+/// default manager + `is_active`), newest first; `None` without one.
 async fn workspace_role_in(
-    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    db: &impl ConnectionTrait,
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<Option<i32>, Response> {
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "workspace_members"
-           WHERE ("workspace_id" = $1 AND "member_id" = $2
-             AND "is_active" AND "deleted_at" IS NULL)
-           ORDER BY "created_at" DESC LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(executor)
-    .await
-    .map_err(|_| server_error())?;
+    let role: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(|_| server_error())?;
     Ok(role.map(i32::from))
 }
 
@@ -510,33 +417,6 @@ fn body_workspace(data: &JVal) -> Result<Option<String>, Response> {
 // `POST /api/v1/runner/runners/<rid>/refresh/` (`enrollment.py:380-476`)
 // ---------------------------------------------------------------------------
 
-/// The E3 row facts the refresh view reads (runner block at 0; the
-/// joined workspace row is never read past the join itself; position 0
-/// is the URL id already in hand).
-struct RefreshRunner {
-    owner_id: Uuid,
-    workspace_id: Uuid,
-    dev_machine_id: Option<Uuid>,
-    refresh_token_hash: String,
-    refresh_token_generation: i32,
-    previous_refresh_token_hash: String,
-    revoked_at: Option<DateTime<Utc>>,
-}
-
-/// Decode the E3 row positionally (`r_cols::COLUMNS` order — indices
-/// pinned by `e3_decode_indices_follow_columns`).
-fn decode_refresh_runner(row: &sqlx::postgres::PgRow) -> Result<RefreshRunner, Response> {
-    Ok(RefreshRunner {
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        workspace_id: row.try_get(2).map_err(|_| server_error())?,
-        dev_machine_id: row.try_get(3).map_err(|_| server_error())?,
-        refresh_token_hash: row.try_get(9).map_err(|_| server_error())?,
-        refresh_token_generation: row.try_get(11).map_err(|_| server_error())?,
-        previous_refresh_token_hash: row.try_get(12).map_err(|_| server_error())?,
-        revoked_at: row.try_get(27).map_err(|_| server_error())?,
-    })
-}
-
 /// `access.expires_at.isoformat()` (`:473`): whole-seconds UTC renders
 /// `+00:00` with no fraction (the `machine.rs` `django_isoformat`
 /// position — `expires_at` is always whole seconds).
@@ -595,37 +475,25 @@ pub async fn runner_refresh(
         Err(_) => return server_error(),
     };
     // E3 — locked runner + workspace (`:403-404`).
-    let row: Option<sqlx::postgres::PgRow> =
-        match sqlx::query(&enroll_reads::refresh_locked_read_sql())
-            .bind(runner_id)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return server_error(),
-        };
-    let Some(row) = row else {
-        return unauthorized(INVALID_REFRESH_TOKEN_BODY);
+    let runner = match enroll_reads::refresh_locked_runner(&TxConn::new(&mut tx), runner_id).await {
+        Ok(row) => row,
+        Err(_) => return server_error(),
     };
-    let runner = match decode_refresh_runner(&row) {
-        Ok(runner) => runner,
-        Err(response) => return response,
+    let Some(runner) = runner else {
+        return unauthorized(INVALID_REFRESH_TOKEN_BODY);
     };
     if runner.revoked_at.is_some() {
         return unauthorized(RUNNER_REVOKED_BODY);
     }
     // E4 — dev-machine revoked probe, only when linked (`:415-425`).
     if let Some(dev_machine_id) = runner.dev_machine_id {
-        let hit: Option<i32> =
-            match sqlx::query_scalar(&enroll_reads::dev_machine_revoked_probe_sql())
-                .bind(dev_machine_id)
-                .fetch_optional(&mut *tx)
-                .await
-            {
-                Ok(hit) => hit,
-                Err(_) => return server_error(),
-            };
-        if hit.is_some() {
+        let hit = match enroll_reads::dev_machine_is_revoked(&TxConn::new(&mut tx), dev_machine_id)
+            .await
+        {
+            Ok(hit) => hit,
+            Err(_) => return server_error(),
+        };
+        if hit {
             return unauthorized(DEV_MACHINE_REVOKED_BODY);
         }
     }
@@ -666,16 +534,17 @@ pub async fn runner_refresh(
     }
 
     // Live membership re-check (`:441-446`).
-    let member: Option<i32> = match sqlx::query_scalar(MEMBERSHIP_EXISTS_SQL)
-        .bind(runner.owner_id)
-        .bind(runner.workspace_id)
-        .fetch_optional(&mut *tx)
-        .await
+    let member = match enroll_reads::is_active_member(
+        &TxConn::new(&mut tx),
+        runner.workspace_id,
+        runner.owner_id,
+    )
+    .await
     {
         Ok(member) => member,
         Err(_) => return server_error(),
     };
-    if member.is_none() {
+    if !member {
         let now = now_micros();
         let bundle = match revoke_runner_on_tx(
             &mut tx,
@@ -709,15 +578,16 @@ pub async fn runner_refresh(
     // runner.
     let new_refresh = enroll_tokens::mint_refresh_token(&secret);
     let new_generation = runner.refresh_token_generation + 1;
-    if sqlx::query(&enroll_reads::refresh_rotate_sql())
-        .bind(&new_refresh.hashed)
-        .bind(&new_refresh.fingerprint)
-        .bind(new_generation)
-        .bind(&runner.refresh_token_hash)
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
+    if enroll_reads::rotate_refresh_token(
+        &TxConn::new(&mut tx),
+        runner_id,
+        &new_refresh.hashed,
+        &new_refresh.fingerprint,
+        new_generation,
+        &runner.refresh_token_hash,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
@@ -741,9 +611,7 @@ pub async fn runner_refresh(
         Err(_) => return server_error(),
     };
     // Force-refresh clear, still inside the tx (`:467`).
-    if sqlx::query(&enroll_reads::force_refresh_clear_sql())
-        .bind(runner_id)
-        .execute(&mut *tx)
+    if enroll_reads::clear_force_refresh(&TxConn::new(&mut tx), runner_id)
         .await
         .is_err()
     {
@@ -883,33 +751,7 @@ pub async fn runner_self_revoke(
 /// The M6 locked row facts the revoke/rotate views read, plus the
 /// render fields for the QUIRK-m5-fallback path (the unannotated
 /// in-memory instance).
-struct LockedMachine {
-    id: Uuid,
-    owner_id: Uuid,
-    host_label: String,
-    label: String,
-    visibility: i16,
-    last_seen_at: Option<DateTime<Utc>>,
-    revoked_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-/// Decode the M6 row positionally (`dm_cols::COLUMNS` order — indices
-/// pinned by `m6_decode_indices_follow_columns`).
-fn decode_locked_machine(row: &sqlx::postgres::PgRow) -> Result<LockedMachine, Response> {
-    Ok(LockedMachine {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        host_label: row.try_get(2).map_err(|_| server_error())?,
-        label: row.try_get(3).map_err(|_| server_error())?,
-        visibility: row.try_get(4).map_err(|_| server_error())?,
-        last_seen_at: row.try_get(6).map_err(|_| server_error())?,
-        revoked_at: row.try_get(7).map_err(|_| server_error())?,
-        created_at: row.try_get(8).map_err(|_| server_error())?,
-        updated_at: row.try_get(9).map_err(|_| server_error())?,
-    })
-}
+use manage_reads::LockedMachineRow as LockedMachine;
 
 /// `_machine_is_in_workspace_scope` (`runners.py:132-147`): the kernel
 /// view check plus the M4a/M4b `EXISTS` probes (runner-or-token link).
@@ -930,29 +772,16 @@ async fn machine_in_workspace_scope(
     if !can_view {
         return Ok(false);
     }
-    let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
-    let runner_hit: Option<i32> =
-        sqlx::query_scalar(&manage_reads::machine_scope_runner_probe_sql())
-            .bind(1i32)
-            .bind(machine.id)
-            .bind(user_id)
-            .bind(visibility)
-            .bind(workspace_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|_| server_error())?;
-    if runner_hit.is_some() {
+    let conn = TxConn::new(tx);
+    if manage_reads::machine_scope_runner_exists(&conn, machine.id, user_id, workspace_id)
+        .await
+        .map_err(|_| server_error())?
+    {
         return Ok(true);
     }
-    let token_hit: Option<i32> = sqlx::query_scalar(&manage_reads::machine_scope_token_probe_sql())
-        .bind(1i32)
-        .bind(machine.id)
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(&mut **tx)
+    manage_reads::machine_scope_token_exists(&conn, machine.id, user_id, workspace_id)
         .await
-        .map_err(|_| server_error())?;
-    Ok(token_hit.is_some())
+        .map_err(|_| server_error())
 }
 
 /// Resolve the `workspace` gate shared by the machine endpoints
@@ -1011,21 +840,12 @@ pub async fn dev_machine_revoke(
         Err(_) => return server_error(),
     };
     // M6 — locked machine read (`:190`).
-    let row: Option<sqlx::postgres::PgRow> =
-        match sqlx::query(&manage_reads::machine_locked_read_sql())
-            .bind(machine_id)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return server_error(),
-        };
-    let Some(row) = row else {
-        return not_found();
-    };
-    let machine = match decode_locked_machine(&row) {
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
         Ok(machine) => machine,
-        Err(response) => return response,
+        Err(_) => return server_error(),
+    };
+    let Some(machine) = machine else {
+        return not_found();
     };
     match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
         Ok(true) => {}
@@ -1040,11 +860,7 @@ pub async fn dev_machine_revoke(
     let mut stamped: Option<(DateTime<Utc>, DateTime<Utc>)> = None;
     if machine.revoked_at.is_none() {
         let auto_now = now_micros();
-        if sqlx::query(&manage_reads::machine_revoke_sql())
-            .bind(now)
-            .bind(auto_now)
-            .bind(machine_id)
-            .execute(&mut *tx)
+        if manage_reads::revoke_machine(&TxConn::new(&mut tx), machine_id, now, auto_now)
             .await
             .is_err()
         {
@@ -1053,39 +869,37 @@ pub async fn dev_machine_revoke(
         stamped = Some((now, auto_now));
     }
     // Token revoke-all (`:198`).
-    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
+    // The engine credential goes with the machine (`:207`, #2910):
+    // revoking the machine signs the engine out with it.
+    if pidash_services::domain::engine_credential::revoke_engine_credential(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        "machine_removed",
+        now,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
     // Locked active-runner list (`:199`).
-    let runner_rows: Vec<sqlx::postgres::PgRow> =
-        match sqlx::query(&manage_reads::machine_runners_locked_list_sql())
-            .bind(machine_id)
-            .fetch_all(&mut *tx)
-            .await
-        {
+    let runner_rows =
+        match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
             Ok(rows) => rows,
             Err(_) => return server_error(),
         };
-    let mut runner_ids = Vec::with_capacity(runner_rows.len());
-    let mut runner_revoked: Vec<Option<DateTime<Utc>>> = Vec::with_capacity(runner_rows.len());
-    for row in &runner_rows {
-        let id: Uuid = match row.try_get(0) {
-            Ok(id) => id,
-            Err(_) => return server_error(),
-        };
-        let revoked_at: Option<DateTime<Utc>> = match row.try_get(27) {
-            Ok(revoked_at) => revoked_at,
-            Err(_) => return server_error(),
-        };
-        runner_ids.push(id);
-        runner_revoked.push(revoked_at);
-    }
-
-    // Frames for every runner BEFORE any revoke (`:201-203` — the
-    // enqueue-vs-evict rationale, same as `delete_runner`).
+    let (runner_ids, runner_revoked): (Vec<Uuid>, Vec<Option<DateTime<Utc>>>) =
+        runner_rows.into_iter().unzip();
     {
         let pubsub = TxPubsub::new(&mut tx, &state);
         for runner_id in &runner_ids {
@@ -1148,6 +962,180 @@ pub async fn dev_machine_revoke(
 }
 
 // ---------------------------------------------------------------------------
+// `POST /api/runners/dev-machines/<mid>/engine-sign-out/`
+// (`machines.py:231-257`, #2910)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/runners/dev-machines/<machine_id>/engine-sign-out/`
+/// (`machines.py:231-257`): revoke the machine's engine credential only
+/// (state `signed_out`). The machine must be the caller's; an optional
+/// workspace must contain it. Both misses answer the same 404. The
+/// answer is the M5 serialization when a workspace is in scope, else
+/// the plain serializer body.
+pub async fn dev_machine_engine_sign_out(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let body_ws = match body_workspace(&data) {
+        Ok(body_ws) => body_ws,
+        Err(response) => return response,
+    };
+    let query_ws = crate::license::query_last(&params, "workspace");
+    let workspace_raw = manage_reads::request_workspace_id(body_ws.as_deref(), query_ws.as_deref());
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    };
+    // The machine must be the caller's (`machines.py:244`).
+    let Some(machine) = machine else {
+        return not_found();
+    };
+    if machine.owner_id != user_id {
+        return not_found();
+    }
+    let workspace_id = if workspace_raw.is_empty() {
+        None
+    } else {
+        let workspace_id = match parse_uuid(&workspace_raw) {
+            Ok(workspace_id) => workspace_id,
+            Err(_) => return server_error(),
+        };
+        match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
+            Ok(true) => Some(workspace_id),
+            Ok(false) => return not_found(),
+            Err(response) => return response,
+        }
+    };
+    if pidash_services::domain::engine_credential::revoke_engine_credential(
+        &TxConn::new(&mut tx),
+        machine_id,
+        "signed_out",
+        now_micros(),
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
+    // `refresh_from_db`: re-read the row so the render sees the
+    // sign-in state's new value.
+    let Some(machine) = (match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    }) else {
+        return not_found();
+    };
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    // The engine keys ride the serializers (`DevMachineSerializer`'s
+    // `engine_sign_in_state` + `engine_credential_expires_at`, folded
+    // into the shared machine renders by NEWPIDASH-52); the locked
+    // row does not carry them, so a full re-read feeds the fallback
+    // render here.
+    let engine_full = {
+        use pidash_db::entity::dev_machine;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        dev_machine::Entity::find_by_id(machine_id)
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+    };
+    match workspace_id {
+        Some(workspace_id) => {
+            match serialize_machine(&pool, &machine, user_id, workspace_id, None).await {
+                Ok(body) => json_response(StatusCode::OK, body),
+                Err(response) => response,
+            }
+        }
+        None => {
+            // `DevMachineSerializer(machine).data` on the refreshed
+            // instance: the embedded annotations are absent, so the
+            // count/heartbeat keys are omitted (DRF `SkipField`) and
+            // `control_online` defaults false — the fallback render.
+            MachineRender {
+                id: machine.id.to_string(),
+                host_label: machine.host_label.clone(),
+                label: machine.label.clone(),
+                visibility: i64::from(machine.visibility),
+                provisioning: engine_full
+                    .as_ref()
+                    .map(|row| row.provisioning.clone())
+                    .unwrap_or_default(),
+                runner_count: None,
+                online_runner_count: None,
+                control_online: None,
+                engine_paused_by_owner: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_paused_by_owner)
+                    .unwrap_or_default(),
+                engine_auto_pause_reason: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_auto_pause_reason.clone())
+                    .unwrap_or_default(),
+                engine_team_runs: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_team_runs)
+                    .unwrap_or_default(),
+                engine_sign_in_state: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_sign_in_state.clone())
+                    .unwrap_or_default(),
+                engine_credential_expires_at: engine_full
+                    .as_ref()
+                    .and_then(|row| row.engine_credential_expires_at)
+                    .map(|dt| crate::serializer::render_datetime(&dt.with_timezone(&chrono::Utc))),
+                engine_state: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_state.clone())
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
+                engine_state_reported_at: engine_full
+                    .as_ref()
+                    .and_then(|row| row.engine_state_reported_at)
+                    .map(|dt| crate::serializer::render_datetime(&dt.with_timezone(&chrono::Utc))),
+                merged_into: engine_full
+                    .as_ref()
+                    .and_then(|row| row.merged_into_id)
+                    .map(|id| id.to_string()),
+                last_seen_at: machine
+                    .last_seen_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime),
+                last_heartbeat_at: None,
+                revoked_at: machine
+                    .revoked_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime),
+                created_at: crate::serializer::render_datetime(&machine.created_at),
+                updated_at: crate::serializer::render_datetime(&machine.updated_at),
+            }
+            .to_json()
+            .map(|body| json_response(StatusCode::OK, body))
+            .unwrap_or_else(|response| response)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `POST /api/runners/dev-machines/<mid>/rotate/` (`runners.py:211-246`)
 // ---------------------------------------------------------------------------
 
@@ -1184,21 +1172,12 @@ pub async fn dev_machine_rotate(
         Err(_) => return server_error(),
     };
     // M6 — locked machine read (`:228`).
-    let row: Option<sqlx::postgres::PgRow> =
-        match sqlx::query(&manage_reads::machine_locked_read_sql())
-            .bind(machine_id)
-            .fetch_optional(&mut *tx)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return server_error(),
-        };
-    let Some(row) = row else {
-        return not_found();
-    };
-    let machine = match decode_locked_machine(&row) {
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
         Ok(machine) => machine,
-        Err(response) => return response,
+        Err(_) => return server_error(),
+    };
+    let Some(machine) = machine else {
+        return not_found();
     };
     match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
         Ok(true) => {}
@@ -1212,21 +1191,22 @@ pub async fn dev_machine_rotate(
 
     // Token revoke-all (`:238`).
     let now = now_micros();
-    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(&mut *tx, machine_id, now)
-        .await
-        .is_err()
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
     {
         return server_error();
     }
     // Active-runner ids (`:239-241`).
-    let runner_ids: Vec<Uuid> = match sqlx::query_scalar(&manage_reads::machine_runner_ids_sql())
-        .bind(machine_id)
-        .fetch_all(&mut *tx)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(_) => return server_error(),
-    };
+    let runner_ids =
+        match manage_reads::live_machine_runner_ids(&TxConn::new(&mut tx), machine_id).await {
+            Ok(ids) => ids,
+            Err(_) => return server_error(),
+        };
     // Per id: revoke frame + session close (`:242-244`). No row writes.
     {
         let pubsub = TxPubsub::new(&mut tx, &state);
@@ -1285,20 +1265,12 @@ pub async fn runner_revoke(
         Ok(tx) => tx,
         Err(_) => return server_error(),
     };
-    let row: Option<sqlx::postgres::PgRow> = match sqlx::query(&runner_locked_read_sql())
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
-        .await
-    {
-        Ok(row) => row,
-        Err(_) => return server_error(),
-    };
-    let Some(row) = row else {
-        return not_found();
-    };
-    let runner = match decode_full_runner(&row) {
+    let runner = match lock_runner(&mut tx, runner_id).await {
         Ok(runner) => runner,
         Err(response) => return response,
+    };
+    let Some(runner) = runner else {
+        return not_found();
     };
     // View gate → 404 (`:479-480`).
     let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
@@ -1318,10 +1290,11 @@ pub async fn runner_revoke(
             return forbidden();
         }
     } else {
-        let role = match workspace_role_in(&mut *tx, runner.workspace_id, user_id).await {
-            Ok(role) => role,
-            Err(response) => return response,
-        };
+        let role =
+            match workspace_role_in(&TxConn::new(&mut tx), runner.workspace_id, user_id).await {
+                Ok(role) => role,
+                Err(response) => return response,
+            };
         let workspace = WorkspaceId::from(runner.workspace_id.to_string());
         let scope = TenantScope::new(workspace.clone());
         let manageable = runner_perm::can_manage_runner(
@@ -1404,9 +1377,18 @@ struct MachineRender {
     host_label: String,
     label: String,
     visibility: i64,
+    provisioning: String,
     runner_count: Option<i64>,
     online_runner_count: Option<i64>,
     control_online: Option<bool>,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<String>,
+    engine_state: Value,
+    engine_state_reported_at: Option<String>,
+    merged_into: Option<String>,
     last_seen_at: Option<String>,
     last_heartbeat_at: Option<Option<String>>,
     revoked_at: Option<String>,
@@ -1421,9 +1403,18 @@ impl MachineRender {
             host_label: &self.host_label,
             label: &self.label,
             visibility: self.visibility,
+            provisioning: &self.provisioning,
             runner_count: self.runner_count,
             online_runner_count: self.online_runner_count,
             control_online: self.control_online,
+            engine_paused_by_owner: self.engine_paused_by_owner,
+            engine_auto_pause_reason: &self.engine_auto_pause_reason,
+            engine_team_runs: self.engine_team_runs,
+            engine_sign_in_state: &self.engine_sign_in_state,
+            engine_credential_expires_at: self.engine_credential_expires_at.as_deref(),
+            engine_state: &self.engine_state,
+            engine_state_reported_at: self.engine_state_reported_at.as_deref(),
+            merged_into: self.merged_into.as_deref(),
             last_seen_at: self.last_seen_at.as_deref(),
             last_heartbeat_at: self
                 .last_heartbeat_at
@@ -1453,24 +1444,16 @@ async fn serialize_machine(
     let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
     let cutoff =
         now_micros() - chrono::Duration::seconds(manage_reads::CONTROL_PRESENCE_WINDOW_SECS);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&manage_reads::machine_serialize_sql())
-        .bind(user_id)
-        .bind(visibility)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(visibility)
-        .bind(workspace_id)
-        .bind("online")
-        .bind("busy")
-        .bind(user_id)
-        .bind(visibility)
-        .bind(workspace_id)
-        .bind(1i32)
-        .bind(cutoff)
-        .bind(machine.id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let row = manage_reads::machine_serialize(
+        &pidash_db::pool::sea_orm_connection(pool),
+        machine.id,
+        user_id,
+        workspace_id,
+        visibility,
+        cutoff,
+    )
+    .await
+    .map_err(|_| server_error())?;
     let Some(row) = row else {
         // QUIRK-m5-fallback: counts omitted, `control_online` false,
         // model fields from the in-memory instance (stamped when the
@@ -1479,14 +1462,35 @@ async fn serialize_machine(
             Some((revoked_at, updated_at)) => (Some(revoked_at), updated_at),
             None => (machine.revoked_at, machine.updated_at),
         };
+        let fallback_state =
+            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                &machine.engine_sign_in_state,
+                machine.engine_credential_expires_at,
+                Utc::now(),
+            );
         return MachineRender {
             id: machine.id.to_string(),
             host_label: machine.host_label.clone(),
             label: machine.label.clone(),
             visibility: i64::from(machine.visibility),
+            provisioning: machine.provisioning.clone(),
             runner_count: None,
             online_runner_count: None,
             control_online: None,
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+            engine_team_runs: machine.engine_team_runs,
+            engine_sign_in_state: fallback_state,
+            engine_credential_expires_at: machine
+                .engine_credential_expires_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+            engine_state: machine.engine_state.clone(),
+            engine_state_reported_at: machine
+                .engine_state_reported_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+            merged_into: machine.merged_into_id.map(|id| id.to_string()),
             last_seen_at: machine
                 .last_seen_at
                 .as_ref()
@@ -1498,30 +1502,49 @@ async fn serialize_machine(
         }
         .to_json();
     };
-    let last_seen_at: Option<DateTime<Utc>> = row.try_get(6).map_err(|_| server_error())?;
-    let revoked_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| server_error())?;
-    let created_at: DateTime<Utc> = row.try_get(8).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(9).map_err(|_| server_error())?;
-    let last_heartbeat_at: Option<DateTime<Utc>> = row.try_get(12).map_err(|_| server_error())?;
+    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+        &row.engine_sign_in_state,
+        row.engine_credential_expires_at,
+        Utc::now(),
+    );
     MachineRender {
         id: machine.id.to_string(),
-        host_label: row.try_get(2).map_err(|_| server_error())?,
-        label: row.try_get(3).map_err(|_| server_error())?,
+        host_label: row.host_label,
+        label: row.label,
         visibility: i64::from(machine.visibility),
-        runner_count: Some(row.try_get(10).map_err(|_| server_error())?),
-        online_runner_count: Some(row.try_get(11).map_err(|_| server_error())?),
-        control_online: Some(row.try_get(13).map_err(|_| server_error())?),
-        last_seen_at: last_seen_at
+        provisioning: row.provisioning,
+        runner_count: Some(row.runner_count),
+        online_runner_count: Some(row.online_runner_count),
+        control_online: Some(row.control_online),
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_team_runs: row.engine_team_runs,
+        engine_sign_in_state: sign_in_state,
+        engine_credential_expires_at: row
+            .engine_credential_expires_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        engine_state: row.engine_state,
+        engine_state_reported_at: row
+            .engine_state_reported_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        merged_into: row.merged_into_id.map(|id| id.to_string()),
+        last_seen_at: row
+            .last_seen_at
             .as_ref()
             .map(crate::serializer::render_datetime),
         last_heartbeat_at: Some(
-            last_heartbeat_at
+            row.last_heartbeat_at
                 .as_ref()
                 .map(crate::serializer::render_datetime),
         ),
-        revoked_at: revoked_at.as_ref().map(crate::serializer::render_datetime),
-        created_at: crate::serializer::render_datetime(&created_at),
-        updated_at: crate::serializer::render_datetime(&updated_at),
+        revoked_at: row
+            .revoked_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        created_at: crate::serializer::render_datetime(&row.created_at),
+        updated_at: crate::serializer::render_datetime(&row.updated_at),
     }
     .to_json()
 }
@@ -1537,6 +1560,7 @@ struct FullRunner {
     name: String,
     host_label: String,
     provisioning: String,
+    pod_dispatch: String,
     visibility: i16,
     enrolled_at: Option<DateTime<Utc>>,
     capabilities: Value,
@@ -1555,35 +1579,55 @@ struct FullRunner {
     paused_by_id: Option<Uuid>,
 }
 
-/// Decode a full runner row positionally (`r_cols::COLUMNS` order —
-/// indices pinned by `runner_decode_indices_follow_columns`).
-fn decode_full_runner(row: &sqlx::postgres::PgRow) -> Result<FullRunner, Response> {
-    Ok(FullRunner {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        workspace_id: row.try_get(2).map_err(|_| server_error())?,
-        dev_machine_id: row.try_get(3).map_err(|_| server_error())?,
-        pod_id: row.try_get(4).map_err(|_| server_error())?,
-        name: row.try_get(5).map_err(|_| server_error())?,
-        host_label: row.try_get(6).map_err(|_| server_error())?,
-        provisioning: row.try_get(7).map_err(|_| server_error())?,
-        visibility: row.try_get(8).map_err(|_| server_error())?,
-        enrolled_at: row.try_get(16).map_err(|_| server_error())?,
-        capabilities: row.try_get(17).map_err(|_| server_error())?,
-        status: row.try_get(18).map_err(|_| server_error())?,
-        os: row.try_get(19).map_err(|_| server_error())?,
-        arch: row.try_get(20).map_err(|_| server_error())?,
-        runner_version: row.try_get(21).map_err(|_| server_error())?,
-        dev_metadata: row.try_get(22).map_err(|_| server_error())?,
-        protocol_version: row.try_get(23).map_err(|_| server_error())?,
-        last_heartbeat_at: row.try_get(24).map_err(|_| server_error())?,
-        created_at: row.try_get(25).map_err(|_| server_error())?,
-        updated_at: row.try_get(26).map_err(|_| server_error())?,
-        revoked_at: row.try_get(27).map_err(|_| server_error())?,
-        revoked_reason: row.try_get(28).map_err(|_| server_error())?,
-        paused_at: row.try_get(29).map_err(|_| server_error())?,
-        paused_by_id: row.try_get(30).map_err(|_| server_error())?,
-    })
+impl From<runner::Model> for FullRunner {
+    fn from(row: runner::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&Utc);
+        Self {
+            id: row.id,
+            owner_id: row.owner_id,
+            workspace_id: row.workspace_id,
+            dev_machine_id: row.dev_machine_id,
+            pod_id: row.pod_id,
+            name: row.name,
+            host_label: row.host_label,
+            provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
+            visibility: row.visibility,
+            enrolled_at: row.enrolled_at.map(at),
+            capabilities: row.capabilities,
+            status: row.status,
+            os: row.os,
+            arch: row.arch,
+            runner_version: row.runner_version,
+            dev_metadata: row.dev_metadata,
+            protocol_version: row.protocol_version,
+            last_heartbeat_at: row.last_heartbeat_at.map(at),
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            revoked_at: row.revoked_at.map(at),
+            revoked_reason: row.revoked_reason,
+            paused_at: row.paused_at.map(at),
+            paused_by_id: row.paused_by_id,
+        }
+    }
+}
+
+/// Locked runner read (`runners.py:476`):
+/// `Runner.objects.select_for_update().filter(pk).first()` inside
+/// `transaction.atomic()`: full row (plain `Manager`, no scope),
+/// `Meta.ordering`, first, `FOR UPDATE`.
+async fn lock_runner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+) -> Result<Option<FullRunner>, Response> {
+    let row = runner::Entity::find_by_id(runner_id)
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .one(&TxConn::new(tx))
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(FullRunner::from))
 }
 
 /// Owned pod mini (`serializers.py:133-142`).
@@ -1594,11 +1638,16 @@ struct PodMiniOwned {
     project_id: Uuid,
 }
 
-/// Owned `dev_machine` mini (`serializers.py:145-153`).
+/// Owned `dev_machine` mini (`serializers.py:145-153` + #2910 trio).
 struct DevMachineMiniOwned {
     id: String,
     host_label: String,
     label: String,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
@@ -1624,40 +1673,30 @@ async fn fetch_live_state(
     pool: &PgPool,
     runner_id: Uuid,
 ) -> Result<Option<LiveStateOwned>, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(LIVE_STATE_SQL)
-        .bind(runner_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
+    let row =
+        manage_reads::runner_live_state(&pidash_db::pool::sea_orm_connection(pool), runner_id)
+            .await
+            .map_err(|_| server_error())?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let observed: Option<Uuid> = row.try_get(1).map_err(|_| server_error())?;
-    let last_event_at: Option<DateTime<Utc>> = row.try_get(2).map_err(|_| server_error())?;
-    let agent_last_activity_at: Option<DateTime<Utc>> =
-        row.try_get(12).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(13).map_err(|_| server_error())?;
-    let agent_pid: Option<i32> = row.try_get(5).map_err(|_| server_error())?;
-    let approvals_pending: Option<i32> = row.try_get(7).map_err(|_| server_error())?;
-    let turn_count: Option<i32> = row.try_get(10).map_err(|_| server_error())?;
+    let render = |at: &sea_orm::prelude::DateTimeWithTimeZone| {
+        crate::serializer::render_datetime(&at.with_timezone(&Utc))
+    };
     Ok(Some(LiveStateOwned {
-        observed_run_id: observed.map(|id| id.to_string()),
-        last_event_at: last_event_at
-            .as_ref()
-            .map(crate::serializer::render_datetime),
-        last_event_kind: row.try_get(3).map_err(|_| server_error())?,
-        last_event_summary: row.try_get(4).map_err(|_| server_error())?,
-        agent_pid: agent_pid.map(i64::from),
-        agent_subprocess_alive: row.try_get(6).map_err(|_| server_error())?,
-        approvals_pending: approvals_pending.map(i64::from),
-        usage: row.try_get(8).map_err(|_| server_error())?,
-        llm_model: row.try_get(9).map_err(|_| server_error())?,
-        turn_count: turn_count.map(i64::from),
-        agent_health: row.try_get(11).map_err(|_| server_error())?,
-        agent_last_activity_at: agent_last_activity_at
-            .as_ref()
-            .map(crate::serializer::render_datetime),
-        updated_at: crate::serializer::render_datetime(&updated_at),
+        observed_run_id: row.observed_run_id.map(|id| id.to_string()),
+        last_event_at: row.last_event_at.as_ref().map(render),
+        last_event_kind: row.last_event_kind,
+        last_event_summary: row.last_event_summary,
+        agent_pid: row.agent_pid.map(i64::from),
+        agent_subprocess_alive: row.agent_subprocess_alive,
+        approvals_pending: row.approvals_pending.map(i64::from),
+        usage: row.usage,
+        llm_model: row.llm_model,
+        turn_count: row.turn_count.map(i64::from),
+        agent_health: row.agent_health,
+        agent_last_activity_at: row.agent_last_activity_at.as_ref().map(render),
+        updated_at: render(&row.updated_at),
     }))
 }
 
@@ -1667,7 +1706,12 @@ struct RunnerRender {
     name: String,
     status: String,
     host_label: String,
+    is_engine: bool,
+    engine_paused: bool,
+    dispatch_paused: bool,
+    machine_display_name: String,
     provisioning: String,
+    pod_dispatch: String,
     os: String,
     arch: String,
     runner_version: String,
@@ -1702,14 +1746,34 @@ impl RunnerRender {
             project: &project_id,
             project_identifier: &self.pod_identifier,
         };
-        let dev_machine =
-            self.dev_machine_detail
-                .as_ref()
-                .map(|detail| shapes::DevMachineMiniRow {
+        let now = Utc::now();
+        let dev_mini_state;
+        let dev_mini_expires;
+        let dev_machine = match self.dev_machine_detail.as_ref() {
+            Some(detail) => {
+                dev_mini_state =
+                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        &detail.engine_sign_in_state,
+                        detail.engine_credential_expires_at,
+                        now,
+                    );
+                dev_mini_expires = detail
+                    .engine_credential_expires_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime);
+                Some(shapes::DevMachineMiniRow {
                     id: &detail.id,
                     host_label: &detail.host_label,
                     label: &detail.label,
-                });
+                    engine_paused_by_owner: detail.engine_paused_by_owner,
+                    engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                    engine_team_runs: detail.engine_team_runs,
+                    engine_sign_in_state: &dev_mini_state,
+                    engine_credential_expires_at: dev_mini_expires.as_deref(),
+                })
+            }
+            None => None,
+        };
         let live_state = self.live_state.as_ref().map(|live| shapes::LiveStateRow {
             observed_run_id: live.observed_run_id.as_deref(),
             last_event_at: live.last_event_at.as_deref(),
@@ -1730,7 +1794,12 @@ impl RunnerRender {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
+            is_engine: self.is_engine,
+            engine_paused: self.engine_paused,
+            dispatch_paused: self.dispatch_paused,
+            machine_display_name: &self.machine_display_name,
             provisioning: &self.provisioning,
+            pod_dispatch: &self.pod_dispatch,
             os: &self.os,
             arch: &self.arch,
             runner_version: &self.runner_version,
@@ -1752,6 +1821,10 @@ impl RunnerRender {
             paused_by: self.paused_by.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         };
         serde_json::to_string(&shapes::runner_to_representation(&row)).map_err(|_| server_error())
     }
@@ -1765,74 +1838,92 @@ impl RunnerRender {
 /// the query shape, never the bytes. A vanished row is the source's
 /// `DoesNotExist` → 500.
 async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_refresh_sql())
-        .bind(runner_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // `runner.refresh_from_db()`: the plain-manager row by pk.
+    let runner = runner::Entity::find_by_id(runner_id)
+        .one(&db)
         .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
-        return Err(server_error());
-    };
-    let runner = decode_full_runner(&row)?;
-    // Lazy `runner.pod` (`Pod.objects.get` — vanished row 500s).
-    let pod_row: Option<sqlx::postgres::PgRow> = sqlx::query(&pod_lazy_sql())
-        .bind(runner.pod_id)
-        .fetch_optional(pool)
+        .map_err(|_| server_error())?
+        .map(FullRunner::from)
+        .ok_or_else(server_error)?;
+    // Lazy `runner.pod`: a forward-FK read through `Pod._base_manager`, so
+    // a tombstoned pod still renders (vanished row 500s).
+    let pod_row = pod::Entity::find_by_id(runner.pod_id)
+        .one(&db)
         .await
-        .map_err(|_| server_error())?;
-    let Some(pod_row) = pod_row else {
-        return Err(server_error());
-    };
-    let pod_id: Uuid = pod_row.try_get(0).map_err(|_| server_error())?;
-    let project_id: Uuid = pod_row.try_get(2).map_err(|_| server_error())?;
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let project_id = pod_row.project_id;
     let pod = PodMiniOwned {
-        id: pod_id.to_string(),
-        name: pod_row.try_get(3).map_err(|_| server_error())?,
-        is_default: pod_row.try_get(6).map_err(|_| server_error())?,
+        id: pod_row.id.to_string(),
+        name: pod_row.name,
+        is_default: pod_row.is_default,
         project_id,
     };
     // Lazy `runner.dev_machine` (only when linked; vanished row 500s).
     let mut dev_machine_detail = None;
     if let Some(dev_machine_id) = runner.dev_machine_id {
-        let machine_row: Option<sqlx::postgres::PgRow> = sqlx::query(&machine_lazy_sql())
-            .bind(dev_machine_id)
-            .fetch_optional(pool)
+        let machine = dev_machine::Entity::find_by_id(dev_machine_id)
+            .one(&db)
             .await
-            .map_err(|_| server_error())?;
-        let Some(machine_row) = machine_row else {
-            return Err(server_error());
-        };
-        let mini_id: Uuid = machine_row.try_get(0).map_err(|_| server_error())?;
+            .map_err(|_| server_error())?
+            .ok_or_else(server_error)?;
         dev_machine_detail = Some(DevMachineMiniOwned {
-            id: mini_id.to_string(),
-            host_label: machine_row.try_get(2).map_err(|_| server_error())?,
-            label: machine_row.try_get(3).map_err(|_| server_error())?,
+            id: machine.id.to_string(),
+            host_label: machine.host_label.clone(),
+            label: machine.label.clone(),
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+            engine_team_runs: machine.engine_team_runs,
+            engine_sign_in_state: machine.engine_sign_in_state.clone(),
+            engine_credential_expires_at: machine
+                .engine_credential_expires_at
+                .map(|at| at.with_timezone(&Utc)),
         });
     }
-    // Lazy `pod.project.identifier` (the `catalog_reads` full-row read —
-    // the builder's `ORDER BY` is unobservable on a PK lookup). This is a
-    // forward-FK attribute read, so Django uses `Project._base_manager`
-    // (`SoftDeletionManager` does not apply) and a tombstoned project still
-    // renders its identifier: the base variant drops the `deleted_at` scope.
-    let project_row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&catalog_reads::project_by_id_base_sql())
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-    let Some(project_row) = project_row else {
-        return Err(server_error());
+    let is_engine = runner.provisioning == "desktop_bundled";
+    let engine_paused = match &dev_machine_detail {
+        Some(machine) if is_engine => {
+            machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty()
+        }
+        _ => false,
     };
-    let pod_identifier: String = project_row
-        .try_get("identifier")
-        .map_err(|_| server_error())?;
+    let machine_display_name = match &dev_machine_detail {
+        Some(machine) => {
+            if !machine.label.is_empty() {
+                machine.label.clone()
+            } else if !machine.host_label.is_empty() {
+                machine.host_label.clone()
+            } else {
+                "This computer".to_owned()
+            }
+        }
+        None => {
+            if !runner.host_label.is_empty() {
+                runner.host_label.clone()
+            } else {
+                runner.name.clone()
+            }
+        }
+    };
+    // Lazy `pod.project.identifier`: a forward-FK read through
+    // `Project._base_manager`, so a tombstoned project still renders.
+    let (_, pod_identifier) = catalog_reads::project_facts(&db, project_id, false)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
     let live_state = fetch_live_state(pool, runner_id).await?;
     RunnerRender {
         id: runner.id.to_string(),
         name: runner.name.clone(),
         status: runner.status.clone(),
         host_label: runner.host_label.clone(),
+        is_engine,
+        engine_paused,
+        dispatch_paused: runner.paused_at.is_some(),
+        machine_display_name,
         provisioning: runner.provisioning.clone(),
+        pod_dispatch: runner.pod_dispatch.clone(),
         os: runner.os.clone(),
         arch: runner.arch.clone(),
         runner_version: runner.runner_version.clone(),
@@ -1876,8 +1967,7 @@ async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String,
 // ---------------------------------------------------------------------------
 
 use pidash_db::runner_enroll::columns::enums as runner_enums;
-use pidash_db::runner_runs::agent_run as run_cols;
-use pidash_services::runner_sessions::offline_recovery as pins_kernel;
+use pidash_services::runner_sessions::guards::BUSY_STATUSES;
 
 /// `{"error": ..., "code": "runner_revoked"}` 409
 /// (`_lock_manageable_runner`, `runners.py:507-522`): the operator
@@ -1886,20 +1976,147 @@ pub const RUNNER_REVOKED_CONFLICT_BODY: &str =
     r#"{"error":"runner is revoked","code":"runner_revoked"}"#;
 
 /// `runner.save(update_fields=["paused_at", "paused_by", "updated_at"])`
-/// on pause (`runners.py:544`). Binds: `$1` now, `$2` pausing user id,
-/// `$3` now, `$4` runner id.
-pub const PAUSE_RUNNER_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"paused_at\" = $1, \"paused_by_id\" = $2, \"updated_at\" = $3 WHERE \"runner\".\"id\" = $4";
+/// on pause (`runners.py:544`): both stamps plus `updated_at`, one
+/// `now`.
+fn pause_runner_statement(
+    runner_id: Uuid,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<runner::Entity> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::PausedAt, Expr::value(now))
+        .col_expr(runner::Column::PausedById, Expr::value(user_id))
+        .col_expr(runner::Column::UpdatedAt, Expr::value(now))
+        .filter(runner::Column::Id.eq(runner_id))
+}
 
 /// The same `save(update_fields=...)` on resume (`runners.py:587`),
-/// clearing the stamps. Binds: `$1` now, `$2` runner id.
-pub const RESUME_RUNNER_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \"updated_at\" = $1 WHERE \"runner\".\"id\" = $2";
+/// clearing the stamps.
+fn resume_runner_statement(
+    runner_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<runner::Entity> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::PausedAt, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(
+            runner::Column::PausedById,
+            SimpleExpr::Keyword(Keyword::Null),
+        )
+        .col_expr(runner::Column::UpdatedAt, Expr::value(now))
+        .filter(runner::Column::Id.eq(runner_id))
+}
 
 /// In-flight runs for the pause body
 /// (`AgentRun.objects.filter(runner=runner,
 /// status__in=BUSY_STATUSES).values_list("id", "status")`,
-/// `runners.py:552-554`). Binds: `$1` runner id. Statuses in
-/// `BUSY_STATUSES` order (pinned by the test below); newest first.
-pub const IN_FLIGHT_RUNS_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"status\" FROM \"agent_run\" WHERE (\"agent_run\".\"runner_id\" = $1 AND \"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth')) ORDER BY \"agent_run\".\"created_at\" DESC";
+/// `runners.py:552-554`), newest first.
+fn in_flight_runs_select(
+    runner_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, String)>> {
+    agent_run::Entity::find()
+        .select_only()
+        .columns([agent_run::Column::Id, agent_run::Column::Status])
+        .filter(agent_run::Column::RunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.is_in(BUSY_STATUSES.iter().map(AgentRunStatus::value)))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_tuple()
+}
+
+// Pin release (`release_pins_for_paused_runner`, `tasks.py:184-219`) on
+// SeaORM: twins of the `offline_recovery` text builders this handler
+// drove (`paused_runner_pin_ids_select`, `paused_runner_pin_lock_select`,
+// `clear_parent_thread_sql`, `clear_pin_sql`), spelled here so the
+// shared kernel file stays untouched while pi-dash#2953 reworks it.
+
+/// `agent_run.pinned_runner_id -> runner.id` (trimmed from the entity).
+fn pinned_runner_rel() -> sea_orm::RelationDef {
+    agent_run::Entity::belongs_to(runner::Entity)
+        .from(agent_run::Column::PinnedRunnerId)
+        .to(runner::Column::Id)
+        .into()
+}
+
+/// Paused-runner candidate ids: every QUEUED `local_runner` run pinned
+/// to the just-paused runner, whatever its age; no `LIMIT`.
+fn paused_runner_pin_ids_select(
+    runner_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::ExecutorKind.eq(AgentExecutorKind::LocalRunner.value()))
+        .filter(agent_run::Column::PinnedRunnerId.is_not_null())
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_tuple()
+}
+
+/// The re-locked pin candidate: its pod, its parent and the parent's
+/// `thread_id` (the `select_related` leg, null without a parent).
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct PausedPinRow {
+    pod_id: Uuid,
+    parent_run_id: Option<Uuid>,
+    parent_thread_id: Option<String>,
+}
+
+/// The parent self-join alias (Django's `T3`).
+const PARENT_ALIAS: &str = "T3";
+
+/// Paused-runner re-check lock: the candidate back under `FOR UPDATE
+/// OF "agent_run"` with the still-paused predicate re-applied (the
+/// runner may have been resumed since the list was read), plus the
+/// parent row.
+fn paused_runner_pin_lock_select(
+    run_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<PausedPinRow>> {
+    let mut select = agent_run::Entity::find()
+        .select_only()
+        .columns([agent_run::Column::PodId, agent_run::Column::ParentRunId])
+        .expr_as(
+            Expr::col((Alias::new(PARENT_ALIAS), agent_run::Column::ThreadId)),
+            "parent_thread_id",
+        )
+        .join(JoinType::InnerJoin, pinned_runner_rel())
+        .join_as(
+            JoinType::LeftJoin,
+            agent_run::Entity::belongs_to(agent_run::Entity)
+                .from(agent_run::Column::ParentRunId)
+                .to(agent_run::Column::Id)
+                .into(),
+            Alias::new(PARENT_ALIAS),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+        .filter(agent_run::Column::PinnedRunnerId.is_not_null())
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
+        .filter(runner::Column::PausedAt.is_not_null())
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(1);
+    QueryTrait::query(&mut select).lock_with_tables(LockType::Update, [agent_run::Entity]);
+    select.into_model()
+}
+
+/// Parent `thread_id` clear (`parent.save(update_fields=["thread_id"])`
+/// after stamping `""`).
+fn clear_parent_thread_statement(parent_id: Uuid) -> sea_orm::UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::ThreadId, Expr::value(String::new()))
+        .filter(agent_run::Column::Id.eq(parent_id))
+}
+
+/// Pin clear (`run.save(update_fields=["pinned_runner"])` after
+/// stamping `None`).
+fn clear_pin_statement(run_id: Uuid) -> sea_orm::UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(
+            agent_run::Column::PinnedRunnerId,
+            SimpleExpr::Keyword(Keyword::Null),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+}
 
 /// `_lock_manageable_runner` (`runners.py:495-522`): lock the row, 404
 /// when missing or invisible, 403 when unmanageable. The caller checks
@@ -1910,15 +2127,9 @@ async fn lock_manageable_runner(
     runner_id: Uuid,
     user_id: Uuid,
 ) -> Result<FullRunner, Response> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&runner_locked_read_sql())
-        .bind(runner_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    let Some(row) = row else {
+    let Some(runner) = lock_runner(tx, runner_id).await? else {
         return Err(not_found());
     };
-    let runner = decode_full_runner(&row)?;
     // View gate → 404 (`:499-500`).
     let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
         workspace: WorkspaceId::from(runner.workspace_id.to_string()),
@@ -1936,7 +2147,7 @@ async fn lock_manageable_runner(
             return Err(forbidden());
         }
     } else {
-        let role = workspace_role_in(&mut **tx, runner.workspace_id, user_id).await?;
+        let role = workspace_role_in(&TxConn::new(tx), runner.workspace_id, user_id).await?;
         let workspace = WorkspaceId::from(runner.workspace_id.to_string());
         let scope = TenantScope::new(workspace.clone());
         let manageable = runner_perm::can_manage_runner(
@@ -1990,12 +2201,8 @@ pub async fn runner_pause(
     let transition = runner.paused_at.is_none();
     if transition {
         let now = now_micros();
-        if sqlx::query(PAUSE_RUNNER_UPDATE_SQL)
-            .bind(now)
-            .bind(user_id)
-            .bind(now)
-            .bind(runner_id)
-            .execute(&mut *tx)
+        if pause_runner_statement(runner_id, user_id, now)
+            .exec(&TxConn::new(&mut tx))
             .await
             .is_err()
         {
@@ -2058,10 +2265,8 @@ pub async fn runner_resume(
     }
     let transition = runner.paused_at.is_some();
     if transition
-        && sqlx::query(RESUME_RUNNER_UPDATE_SQL)
-            .bind(now_micros())
-            .bind(runner_id)
-            .execute(&mut *tx)
+        && resume_runner_statement(runner_id, now_micros())
+            .exec(&TxConn::new(&mut tx))
             .await
             .is_err()
     {
@@ -2086,9 +2291,8 @@ pub async fn runner_resume(
 /// In-flight `{"id", "status"}` rows for the pause body
 /// (`runners.py:552-554`), newest first, as a JSON array string.
 async fn fetch_in_flight_runs(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(IN_FLIGHT_RUNS_SQL)
-        .bind(runner_id)
-        .fetch_all(pool)
+    let rows: Vec<(Uuid, String)> = in_flight_runs_select(runner_id)
+        .all(&pidash_db::pool::sea_orm_connection(pool))
         .await
         .map_err(|_| server_error())?;
     let items: Vec<Value> = rows
@@ -2119,16 +2323,10 @@ async fn release_pins_for_paused_runner(
     state: &AppState,
     runner_id: Uuid,
 ) -> Result<(), ()> {
-    use sqlx::Row;
-    let pinned: Vec<Uuid> = sqlx::query_scalar(&pins_kernel::paused_runner_pin_ids_select())
-        .bind(AgentExecutorKind::LocalRunner.value())
-        .bind(AgentRunStatus::Queued.value())
-        .bind(runner_id)
-        .fetch_all(pool)
+    let pinned: Vec<Uuid> = paused_runner_pin_ids_select(runner_id)
+        .all(&pidash_db::pool::sea_orm_connection(pool))
         .await
         .map_err(|_| ())?;
-    let lock_sql = pins_kernel::paused_runner_pin_lock_select();
-    let at = |column: &str| run_cols::COLUMNS.iter().position(|name| *name == column);
     let mut released = 0usize;
     let mut pod_ids: Vec<Uuid> = Vec::new();
     for run_id in pinned {
@@ -2136,47 +2334,34 @@ async fn release_pins_for_paused_runner(
         // re-lock the still-paused pin, clear the parent thread, clear
         // the pin. A lock miss rolls back the empty tx.
         let mut tx = pool.begin().await.map_err(|_| ())?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(&lock_sql)
-            .bind(run_id)
-            .bind(AgentRunStatus::Queued.value())
-            .fetch_optional(&mut *tx)
+        let conn = TxConn::new(&mut tx);
+        let row = paused_runner_pin_lock_select(run_id)
+            .one(&conn)
             .await
             .map_err(|_| ())?;
         let Some(row) = row else {
             tx.rollback().await.map_err(|_| ())?;
             continue;
         };
-        let pod_id: Option<Uuid> = row.try_get(at("pod_id").ok_or(())?).map_err(|_| ())?;
-        let parent_run_id: Option<Uuid> = row
-            .try_get(at("parent_run_id").ok_or(())?)
-            .map_err(|_| ())?;
-        // The T3 parent projection follows the run projection; the
-        // join is a LEFT OUTER JOIN, so every parent cell is null
-        // without one.
-        let thread_at = run_cols::COLUMNS.len() + at("thread_id").ok_or(())?;
-        let parent_thread: Option<String> = row.try_get(thread_at).map_err(|_| ())?;
         // Parent write first, pin write second (source order).
-        if let Some(parent_id) =
-            parent_run_id.filter(|_| parent_thread.as_deref().is_some_and(|t| !t.is_empty()))
-        {
-            sqlx::query(&pins_kernel::clear_parent_thread_sql())
-                .bind(String::new())
-                .bind(parent_id)
-                .execute(&mut *tx)
+        if let Some(parent_id) = row.parent_run_id.filter(|_| {
+            row.parent_thread_id
+                .as_deref()
+                .is_some_and(|t| !t.is_empty())
+        }) {
+            clear_parent_thread_statement(parent_id)
+                .exec(&conn)
                 .await
                 .map_err(|_| ())?;
         }
-        sqlx::query(&pins_kernel::clear_pin_sql())
-            .bind(run_id)
-            .execute(&mut *tx)
+        clear_pin_statement(run_id)
+            .exec(&conn)
             .await
             .map_err(|_| ())?;
         tx.commit().await.map_err(|_| ())?;
         released += 1;
-        if let Some(pod_id) = pod_id {
-            if !pod_ids.contains(&pod_id) {
-                pod_ids.push(pod_id);
-            }
+        if !pod_ids.contains(&row.pod_id) {
+            pod_ids.push(row.pod_id);
         }
     }
     for pod_id in pod_ids {
@@ -2214,7 +2399,6 @@ async fn drain_runner_by_id(pool: &PgPool, state: &AppState, runner_id: Uuid) ->
 // Executors (F6/F8: called, never inlined)
 // ---------------------------------------------------------------------------
 
-use pidash_db::runner_sessions::models::runner_session as db_runner_session;
 use pidash_db::runner_sessions::outbox as session_outbox;
 use pidash_db::runner_sessions::outbox::OutboxError as SessionOutboxError;
 use pidash_db::runner_sessions::RunnerSession as DbRunnerSession;
@@ -2282,15 +2466,12 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         &self,
         runner_id: Uuid,
     ) -> Result<Vec<DbRunnerSession>, SessionOutboxError> {
-        let rows = sqlx::query(pubsub_kernel::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(self.pool)
-            .await
-            .map_err(SessionOutboxError::Db)?;
-        rows.iter()
-            .map(db_runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SessionOutboxError::Db)
+        pubsub_kernel::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| SessionOutboxError::Db(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -2299,7 +2480,7 @@ impl PubsubStore for PoolPubsubStore<'_, '_> {
         reason: &str,
     ) -> Result<(), SessionOutboxError> {
         pidash_services::domain::tokens::revoke_runner_session(
-            self.pool,
+            &pidash_db::pool::sea_orm_connection(self.pool),
             session_id,
             now_micros(),
             reason,
@@ -2397,15 +2578,9 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
     ) -> Result<Vec<DbRunnerSession>, SessionOutboxError> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
-        let rows = sqlx::query(pubsub_kernel::CLOSE_ACTIVE_SESSIONS_SQL)
-            .bind(runner_id)
-            .fetch_all(&mut **tx)
+        pubsub_kernel::active_runner_sessions(&TxConn::new(tx), runner_id)
             .await
-            .map_err(SessionOutboxError::Db)?;
-        rows.iter()
-            .map(db_runner_session::runner_session_from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SessionOutboxError::Db)
+            .map_err(|error| SessionOutboxError::Db(into_sqlx(error)))
     }
 
     async fn revoke_runner_session(
@@ -2416,7 +2591,7 @@ impl PubsubStore for TxPubsub<'_, '_, '_> {
         let mut guard = self.tx.lock().await;
         let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
         pidash_services::domain::tokens::revoke_runner_session(
-            &mut **tx,
+            &pidash_db::orm_tx::TxConn::new(tx),
             session_id,
             now_micros(),
             reason,
@@ -2553,6 +2728,71 @@ async fn fire_bundle(
                 );
             }
         },
+        // §13.1: the ticking-issue bounce for a lost runner (Django
+        // `_bounce_issue_no_eligible_runner` on the revoke commit).
+        // Actor nil: the bounce is system-driven (Django `actor=None`
+        // → `get_agent_system_user()`); presence gating is inert for
+        // runner reasons.
+        |issue_id, runner_name, reason, triggered_by| async move {
+            let name = runner_name.unwrap_or_else(|| "the dedicated runner".to_owned());
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                Uuid::nil(),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, _)) => {
+                    if let Err(error) = pidash_jobs::orchestration::bounce_issue_no_eligible_runner(
+                        pool,
+                        deps,
+                        now,
+                        0.0,
+                        issue_id,
+                        &triggered_by,
+                        &reason,
+                        &name,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner bounce failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner bounce: dispatch deps failed");
+                }
+            }
+        },
+        // §13.1 `fall_back` step 2: recreate the cancelled run in
+        // the default pod (Django `_create_and_dispatch_run`).
+        |issue_id, _pod_id, trigger, creator| async move {
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                creator.unwrap_or(Uuid::nil()),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, matcher)) => {
+                    if let Err(error) = pidash_jobs::orchestration::dispatch_continuation_run(
+                        pool, deps, &matcher, now, 0.0, issue_id, &trigger, creator, false, false,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner recreate failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner recreate: dispatch deps failed");
+                }
+            }
+        },
     )
     .await
     .map_err(|_| ())
@@ -2569,94 +2809,69 @@ async fn fire_bundle(
 /// pool left partial deletes committed when a later one failed.
 async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), ()> {
     let mut tx = pool.begin().await.map_err(|_| ())?;
-    let root: Option<sqlx::postgres::PgRow> = sqlx::query(delete_kernel::COLLECT_RUNNER_BY_ID_SQL)
-        .bind(runner_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    if root.is_none() {
-        return Ok(());
-    }
-    let chat_ids: Vec<Uuid> = sqlx::query_scalar(&delete_kernel::collect_chat_ids_sql(1))
-        .bind(runner_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    let mut message_ids: Vec<Uuid> = Vec::new();
-    if !chat_ids.is_empty() {
-        let fetch_sql = delete_kernel::collect_message_ids_sql(chat_ids.len());
-        let mut fetched = sqlx::query_scalar(&fetch_sql);
-        for chat_id in &chat_ids {
-            fetched = fetched.bind(*chat_id);
+    let runners = [runner_id];
+    {
+        let conn = TxConn::new(&mut tx);
+        if !delete_kernel::runner_exists(&conn, runner_id)
+            .await
+            .map_err(|_| ())?
+        {
+            return Ok(());
         }
-        message_ids = fetched.fetch_all(&mut *tx).await.map_err(|_| ())?;
-        let events_sql = delete_kernel::delete_chat_events_sql(chat_ids.len());
-        let approvals_sql = delete_kernel::delete_chat_approvals_sql(chat_ids.len());
-        let dedupes_sql = delete_kernel::delete_chat_dedupes_sql(chat_ids.len());
-        let mut events = sqlx::query(&events_sql);
-        let mut approvals = sqlx::query(&approvals_sql);
-        let mut dedupes = sqlx::query(&dedupes_sql);
-        for chat_id in &chat_ids {
-            events = events.bind(*chat_id);
-            approvals = approvals.bind(*chat_id);
-            dedupes = dedupes.bind(*chat_id);
+        let chat_ids = delete_kernel::chat_ids_for_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        let mut message_ids: Vec<Uuid> = Vec::new();
+        if !chat_ids.is_empty() {
+            message_ids = delete_kernel::message_ids_for_chats(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_events(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_approvals(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_dedupes(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        events.execute(&mut *tx).await.map_err(|_| ())?;
-        approvals.execute(&mut *tx).await.map_err(|_| ())?;
-        dedupes.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    pidash_services::domain::tokens::delete_runner_sessions_for_runners(&mut *tx, &[runner_id])
+        pidash_services::domain::tokens::delete_runner_sessions_for_runners(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            &runners,
+        )
         .await
         .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::delete_force_refresh_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::delete_live_state_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::null_run_runners_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    sqlx::query(&delete_kernel::null_run_pins_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
-    if !message_ids.is_empty() {
-        let null_sql = delete_kernel::null_event_messages_sql(message_ids.len());
-        let mut nulls = sqlx::query(&null_sql);
-        for message_id in &message_ids {
-            nulls = nulls.bind(*message_id);
+        let conn = TxConn::new(&mut tx);
+        delete_kernel::delete_force_refresh(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::delete_live_state(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_pins(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        if !message_ids.is_empty() {
+            delete_kernel::null_event_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        nulls.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    if !message_ids.is_empty() {
-        let deletes_sql = delete_kernel::delete_chat_messages_sql(message_ids.len());
-        let mut deletes = sqlx::query(&deletes_sql);
-        for message_id in &message_ids {
-            deletes = deletes.bind(*message_id);
+        if !chat_ids.is_empty() {
+            delete_kernel::delete_chat_sessions(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
         }
-        deletes.execute(&mut *tx).await.map_err(|_| ())?;
+        delete_kernel::delete_runner_rows(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
     }
-    if !chat_ids.is_empty() {
-        let deletes_sql = delete_kernel::delete_chat_sessions_sql(chat_ids.len());
-        let mut deletes = sqlx::query(&deletes_sql);
-        for chat_id in &chat_ids {
-            deletes = deletes.bind(*chat_id);
-        }
-        deletes.execute(&mut *tx).await.map_err(|_| ())?;
-    }
-    sqlx::query(&delete_kernel::delete_runner_rows_sql(1))
-        .bind(runner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| ())?;
     if tx.commit().await.is_err() {
         return Err(());
     }
@@ -2741,6 +2956,10 @@ pub fn web_routes() -> Router<AppState> {
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     Router::new()
         .route(
+            "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
+            owned(post(dev_machine_engine_sign_out), POST_ONLY),
+        )
+        .route(
             "/api/runners/dev-machines/{machine_id}/revoke/",
             owned(post(dev_machine_revoke), POST_ONLY),
         )
@@ -2807,8 +3026,6 @@ mod tests {
         include_str!("../../../../fixtures/runner_enroll/external/wire_pins.json");
     const FIXTURE_ENROLL_REFRESH_SQL: &str =
         include_str!("../../../../fixtures/runner_enroll/queries/enroll_refresh.sql");
-    const FIXTURE_MACHINES_RUNNERS_SQL: &str =
-        include_str!("../../../../fixtures/runner_enroll/queries/machines_runners.sql");
 
     fn daemon_fixture(key: &str) -> serde_json::Value {
         let fixture: serde_json::Value = serde_json::from_str(FIXTURE_ENDPOINTS).unwrap();
@@ -3020,37 +3237,95 @@ mod tests {
 
     // ---- Operator pause/resume SQL + bodies (`09738d222`) -------------------
 
+    fn pg_update<E: EntityTrait>(update: sea_orm::UpdateMany<E>) -> String {
+        update.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn pg_selector<S: sea_orm::SelectorTrait>(selector: sea_orm::Selector<S>) -> String {
+        selector
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string()
+    }
+
     #[test]
-    fn pause_resume_sql_match_django_saves() {
+    fn pause_resume_statements_match_django_saves() {
+        let now: DateTime<Utc> = "2026-01-02T03:04:05Z".parse().expect("ts");
+        let user = Uuid::new_v4();
         // SET order follows `update_fields`, not the model.
         assert_eq!(
-            PAUSE_RUNNER_UPDATE_SQL,
-            "UPDATE \"runner\" SET \"paused_at\" = $1, \"paused_by_id\" = $2, \"updated_at\" = $3 WHERE \"runner\".\"id\" = $4"
+            pg_update(pause_runner_statement(Uuid::nil(), user, now)),
+            format!(
+                "UPDATE \"runner\" SET \"paused_at\" = '2026-01-02 03:04:05.000000 +00:00', \
+                 \"paused_by_id\" = '{user}', \"updated_at\" = '2026-01-02 03:04:05.000000 +00:00' \
+                 WHERE \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000'"
+            )
         );
         assert_eq!(
-            RESUME_RUNNER_UPDATE_SQL,
-            "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \"updated_at\" = $1 WHERE \"runner\".\"id\" = $2"
+            pg_update(resume_runner_statement(Uuid::nil(), now)),
+            "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \
+             \"updated_at\" = '2026-01-02 03:04:05.000000 +00:00' \
+             WHERE \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000'"
         );
     }
 
     #[test]
-    fn in_flight_sql_lists_busy_statuses_in_order() {
-        use pidash_services::runner_sessions::guards::BUSY_STATUSES;
+    fn in_flight_select_lists_busy_statuses_in_order() {
         let want: Vec<String> = BUSY_STATUSES
             .iter()
             .map(|status| format!("'{}'", status.value()))
             .collect();
+        let sql = pg_selector(in_flight_runs_select(Uuid::nil()));
+        assert!(sql.starts_with(
+            "SELECT \"agent_run\".\"id\", \"agent_run\".\"status\" FROM \"agent_run\" WHERE"
+        ));
+        assert!(sql.contains(&format!("IN ({})", want.join(", "))), "{sql}");
         assert!(
-            IN_FLIGHT_RUNS_SQL.contains(&format!("IN ({})", want.join(", "))),
-            "{IN_FLIGHT_RUNS_SQL}"
+            sql.contains("\"agent_run\".\"runner_id\" = '00000000-0000-0000-0000-000000000000'"),
+            "{sql}"
         );
         assert!(
-            IN_FLIGHT_RUNS_SQL.contains("\"agent_run\".\"runner_id\" = $1"),
-            "{IN_FLIGHT_RUNS_SQL}"
+            sql.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"),
+            "{sql}"
         );
+    }
+
+    #[test]
+    fn paused_pin_statements_shape() {
+        let ids = pg_selector(paused_runner_pin_ids_select(Uuid::nil()));
+        assert!(ids.starts_with("SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE"));
+        assert!(ids.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        assert!(ids.contains("\"agent_run\".\"pinned_runner_id\" IS NOT NULL"));
+        assert!(ids.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(ids.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
+        assert!(ids.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"));
+        assert!(!ids.contains("LIMIT"));
+        let lock = pg_selector(paused_runner_pin_lock_select(Uuid::nil()));
         assert!(
-            IN_FLIGHT_RUNS_SQL.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"),
-            "{IN_FLIGHT_RUNS_SQL}"
+            lock.starts_with(
+                "SELECT \"agent_run\".\"pod_id\", \"agent_run\".\"parent_run_id\", \
+                 \"T3\".\"thread_id\" AS \"parent_thread_id\" FROM \"agent_run\" \
+                 INNER JOIN \"runner\" ON \"agent_run\".\"pinned_runner_id\" = \"runner\".\"id\" \
+                 LEFT JOIN \"agent_run\" AS \"T3\" ON \"agent_run\".\"parent_run_id\" = \"T3\".\"id\""
+            ),
+            "{lock}"
+        );
+        assert!(lock.contains("\"runner\".\"paused_at\" IS NOT NULL"));
+        assert!(lock.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
+        assert!(
+            lock.ends_with(
+                "ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""
+            ),
+            "{lock}"
+        );
+        assert_eq!(
+            pg_update(clear_parent_thread_statement(Uuid::nil())),
+            "UPDATE \"agent_run\" SET \"thread_id\" = '' WHERE \"agent_run\".\"id\" = \
+             '00000000-0000-0000-0000-000000000000'"
+        );
+        assert_eq!(
+            pg_update(clear_pin_statement(Uuid::nil())),
+            "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE \"agent_run\".\"id\" = \
+             '00000000-0000-0000-0000-000000000000'"
         );
     }
 
@@ -3117,57 +3392,6 @@ mod tests {
     }
 
     #[test]
-    fn f5_handler_owned_builders() {
-        // R4 row-locked read core (fixture abbreviates `SELECT *`;
-        // the builder emits the probe-verified Django column list).
-        let locked = normalize_sql(&runner_locked_read_sql());
-        assert!(
-            locked.contains(r#"FROM "runner" WHERE "runner"."id" = $1"#),
-            "{locked}"
-        );
-        assert!(locked.contains("LIMIT 1 FOR UPDATE"), "{locked}");
-        assert!(
-            normalize_sql(FIXTURE_MACHINES_RUNNERS_SQL)
-                .contains(r#"SELECT * FROM "runner" WHERE "id" = $1 LIMIT 1 FOR UPDATE"#),
-            "R4 fixture drifted"
-        );
-        // Membership probe: literal 1, conjunct order pinned.
-        assert_eq!(
-            normalize_sql(MEMBERSHIP_EXISTS_SQL),
-            normalize_sql(
-                r#"SELECT 1 AS "a" FROM "workspace_members"
-                WHERE ("workspace_members"."deleted_at" IS NULL
-                AND "workspace_members"."is_active"
-                AND "workspace_members"."member_id" = $1
-                AND "workspace_members"."workspace_id" = $2) LIMIT 1"#
-            )
-        );
-        // Re-read: full row, no scope, no ordering, LIMIT 1.
-        let reread = normalize_sql(&runner_refresh_sql());
-        assert!(
-            reread.contains(r#"FROM "runner" WHERE "runner"."id" = $1 LIMIT 1"#),
-            "{reread}"
-        );
-        assert!(!reread.contains("ORDER BY"), "{reread}");
-        // Lazy loads: the pod load is a forward-FK dereference, so it
-        // resolves through `_base_manager` and carries NO soft-delete
-        // scope (a tombstoned pod still renders — PIDASHCONV-1210); the
-        // machine load is on a plain (unscoped) manager either way.
-        assert!(
-            !normalize_sql(&pod_lazy_sql()).contains(r#""deleted_at" IS NULL"#),
-            "pod lazy load must not filter tombstones"
-        );
-        assert!(
-            normalize_sql(&pod_lazy_sql()).contains(r#"FROM "pod" WHERE "pod"."id" = $1 LIMIT 1"#),
-            "pod lazy load shape"
-        );
-        assert!(
-            normalize_sql(&machine_lazy_sql()).contains(r#"FROM "dev_machine""#),
-            "machine lazy load"
-        );
-    }
-
-    #[test]
     fn f5_machine_tx_sql_cores() {
         // M6 cores, executed in-tx by the machine endpoints.
         let locked = normalize_sql(&manage_reads::machine_locked_read_sql());
@@ -3230,5 +3454,119 @@ mod tests {
         deduped.sort_unstable();
         deduped.dedup();
         assert_eq!(deduped.len(), reasons.len());
+    }
+
+    /// Pause/resume + pin-release against temp copies on one transaction
+    /// (`TxConn`): the pause stamp, the in-flight body read, the pin
+    /// ids + re-lock + clears, and the resume stamp.
+    #[tokio::test]
+    async fn live_pause_resume_on_temp_tables() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let mut tx = pool.begin().await.expect("begin");
+        for table in ["runner", "agent_run"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (runner_id, pod_id, user_id, ws, creator, busy_id, pin_id, parent_id) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let now = chrono::Utc::now();
+        sqlx::query(&format!(
+            "INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) \
+             VALUES ('{runner_id}', 'r', '{{}}', 'online', '', '', '', 4, now(), now(), '{user_id}', '{ws}', '{pod_id}', '', '', '', 0, '', 1, '', '', '', 0, '{{}}', 'manual')"
+        ))
+        .execute(&mut *tx).await.expect("seed runner");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, runner_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details) \
+             VALUES ('{busy_id}', 'running', '', '{{}}', '{{}}', '', now(), now(), '{ws}', '{runner_id}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}')"
+        ))
+        .execute(&mut *tx).await.expect("seed busy run");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, parent_run_id) \
+             VALUES ('{parent_id}', 'completed', '', '{{}}', '{{}}', 'parent-thread', now(), NULL, '{ws}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', NULL)"
+        ))
+        .execute(&mut *tx).await.expect("seed parent run");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, pinned_runner_id, parent_run_id) \
+             VALUES ('{pin_id}', 'queued', '', '{{}}', '{{}}', '', now(), now(), '{ws}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', '{runner_id}', '{parent_id}')"
+        ))
+        .execute(&mut *tx).await.expect("seed pinned run");
+        {
+            let conn = TxConn::new(&mut tx);
+            // Pause stamps the runner and the in-flight read sees the busy run.
+            assert_eq!(
+                pause_runner_statement(runner_id, user_id, now)
+                    .exec(&conn)
+                    .await
+                    .expect("pause")
+                    .rows_affected,
+                1
+            );
+            let inflight: Vec<(Uuid, String)> = in_flight_runs_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("in-flight");
+            assert_eq!(inflight, vec![(busy_id, "running".to_owned())]);
+            // Pin ids, re-lock with the parent's thread, then the clears.
+            let ids: Vec<Uuid> = paused_runner_pin_ids_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("pin ids");
+            assert_eq!(ids, vec![pin_id]);
+            let row = paused_runner_pin_lock_select(pin_id)
+                .one(&conn)
+                .await
+                .expect("pin lock")
+                .expect("row");
+            assert_eq!(row.pod_id, pod_id);
+            assert_eq!(row.parent_run_id, Some(parent_id));
+            assert_eq!(row.parent_thread_id.as_deref(), Some("parent-thread"));
+            assert_eq!(
+                clear_parent_thread_statement(parent_id)
+                    .exec(&conn)
+                    .await
+                    .expect("clear parent")
+                    .rows_affected,
+                1
+            );
+            assert_eq!(
+                clear_pin_statement(pin_id)
+                    .exec(&conn)
+                    .await
+                    .expect("clear pin")
+                    .rows_affected,
+                1
+            );
+            assert!(paused_runner_pin_ids_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("pin ids after")
+                .is_empty());
+            // Resume clears the stamps.
+            assert_eq!(
+                resume_runner_statement(runner_id, now)
+                    .exec(&conn)
+                    .await
+                    .expect("resume")
+                    .rows_affected,
+                1
+            );
+        }
+        tx.rollback().await.expect("rollback");
     }
 }

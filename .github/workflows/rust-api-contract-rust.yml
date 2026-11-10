@@ -23,7 +23,10 @@
 # mixed suites (TASK_ORACLE_IGNORES.txt) are excluded from both runs with
 # the same --ignore selection. Django is served with runserver except for
 # the suites in ASGI_SUITES.txt, whose SSE/event streams are async
-# iterators runserver can never flush (uvicorn instead).
+# iterators runserver can never flush (uvicorn instead), plus loop, which
+# pins the production server's empty missing Content-Type (NEWPIDASH-25).
+# The suites in PRODUCTION_SUITES.txt boot both backends on
+# pi_dash.settings.production instead of the test profile (NEWPIDASH-25).
 name: rust-api contract tests — Rust matrix
 
 on:
@@ -48,7 +51,7 @@ concurrency:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.suites.outputs.matrix }}
     steps:
@@ -70,7 +73,7 @@ jobs:
       fail-fast: false
       matrix:
         suite: ${{ fromJSON(needs.setup.outputs.matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -118,6 +121,13 @@ jobs:
       # Rust handler that publishes .delay() (e.g. forgot-password mail)
       # 500s without a reachable broker.
       AMQP_URL: redis://localhost:6379/1
+      # The same Django broker under the name the HTTP suites read
+      # (NEWPIDASH-25): workerless suites observe Django's .delay()
+      # enqueues by draining it (app_issues completion-comment, bulk and
+      # worklog activity tests); without it those helpers see nothing.
+      # Rust never reads this name, and every _harness broker reader
+      # already falls back to AMQP_URL, which carries the same value.
+      CELERY_BROKER_URL: redis://localhost:6379/1
       RABBITMQ_HOST: localhost
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: pi_dash
@@ -235,6 +245,18 @@ jobs:
             echo "DJANGO_SERVER=runserver" >> "$GITHUB_ENV"
           fi
 
+      # PRODUCTION_SUITES.txt suites pin production-only behaviour
+      # (prompting: SECURE_PROXY_SSL_HEADER, PIDASHCONV-1228), so both
+      # backends boot pi_dash.settings.production for them: both Django
+      # starts, the Rust serve/worker (profile from the module's last
+      # segment) and both pytest runs read this. The migrations above ran
+      # on the test profile; the schema is the same.
+      - name: Select settings profile
+        run: |
+          if grep -qx "${{ matrix.suite }}" rust-api/contract-tests/PRODUCTION_SUITES.txt; then
+            echo "DJANGO_SETTINGS_MODULE=pi_dash.settings.production" >> "$GITHUB_ENV"
+          fi
+
       # The prompting suite's dual-engine file tests compare the Rust
       # section mirrors against the Django prompting tree they were
       # ported from. The checkout's apps/api can be older than the port
@@ -328,7 +350,10 @@ jobs:
           set +e
           IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
           LOG="/tmp/pytest-django-${{ matrix.suite }}.log"
+          # CONTRACT_APP_BASE_URL: the APP_BASE_URL the backend under test
+          # was booted with (activity `origin`, app_issues bulk tests).
           BASE_URL="$DJANGO_BASE_URL" CONTRACT_WEB_URL="$DJANGO_BASE_URL" \
+            CONTRACT_APP_BASE_URL="$DJANGO_BASE_URL" \
             PIDASH_CONTRACT_BACKEND=django \
             python -m pytest "${{ matrix.suite }}" $IGNORES -q --tb=short 2>&1 | tee "$LOG"
           echo "DJANGO_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
@@ -476,6 +501,7 @@ jobs:
           IGNORES=$(grep "^${{ matrix.suite }}/" TASK_ORACLE_IGNORES.txt | sed 's/^/--ignore=/' | tr '\n' ' ')
           LOG="/tmp/pytest-rust-${{ matrix.suite }}.log"
           BASE_URL="$RUST_BASE_URL" CONTRACT_WEB_URL="$RUST_BASE_URL" \
+            CONTRACT_APP_BASE_URL="$RUST_BASE_URL" \
             PIDASH_CONTRACT_BACKEND=rust \
             python -m pytest "${{ matrix.suite }}" $IGNORES -q --tb=short 2>&1 | tee "$LOG"
           echo "RUST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"

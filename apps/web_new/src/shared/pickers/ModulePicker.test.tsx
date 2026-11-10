@@ -308,3 +308,100 @@ describe("ModuleChips", () => {
     expect(screen.getByRole("button", { name: "Remove Alpha" })).toBeDisabled();
   });
 });
+
+describe("ModulePicker chip", () => {
+  it("names a single picked module", async () => {
+    const { queryClient } = harness(MODULES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={ALPHA}
+          onChange={() => undefined}
+          chip
+          placeholder="Modules"
+          preload
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "Modules: Alpha" })).toHaveTextContent("Alpha");
+  });
+
+  it("carries the dialog tab stop through the chip", async () => {
+    const { queryClient } = harness(MODULES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={ALPHA}
+          onChange={() => undefined}
+          chip
+          placeholder="Modules"
+          triggerId="Modules"
+          tabIndex={11}
+          preload
+        />
+      </QueryClientProvider>
+    );
+    const chip = await screen.findByRole("button", { name: "Modules: Alpha" });
+    expect(chip).toHaveAttribute("id", "Modules");
+    expect(chip).toHaveAttribute("tabindex", "11");
+  });
+
+  it("shows the property name while empty", () => {
+    const { queryClient } = harness(MODULES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          multiple
+          value={[]}
+          onChange={() => undefined}
+          chip
+          label="Modules"
+          placeholder="Modules"
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "Modules" })).toHaveTextContent("Modules");
+  });
+
+  it("names one picked module and counts several", async () => {
+    const { queryClient } = harness(MODULES);
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          multiple
+          value={[ALPHA]}
+          onChange={() => undefined}
+          chip
+          label="Modules"
+          placeholder="Modules"
+          preload
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "Modules: Alpha" })).toHaveTextContent("Alpha");
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ModulePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          multiple
+          value={[ALPHA, BETA]}
+          onChange={() => undefined}
+          chip
+          label="Modules"
+          placeholder="Modules"
+          preload
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "Modules: 2 Modules" })).toHaveTextContent("2 Modules");
+  });
+});

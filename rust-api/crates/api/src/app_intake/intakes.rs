@@ -66,8 +66,14 @@
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect,
+    RelationTrait,
+};
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use pidash_db::entity::{file_assets, intakes as intake_entity, projects, users, workspaces};
 
 use pidash_services::app_intake::permissions as guards;
 
@@ -109,16 +115,19 @@ pub async fn intake_tenant(pool: &PgPool, slug: &str, project_raw: &str) -> Resu
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(project_raw);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::ProjectNotFound)
 }
 
 /// Parse a UUID path segment: Django's `<uuid:>` converter leaves the
@@ -279,9 +288,12 @@ async fn check_user_row(
     rendered: &str,
     id: Uuid,
 ) -> Result<Option<Uuid>, Denial> {
-    let row: Option<(Uuid,)> = sqlx::query_as(r#"SELECT id FROM users WHERE id = $1"#)
-        .bind(id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> = users::Entity::find_by_id(id)
+        .select_only()
+        .column(users::Column::Id)
+        .into_tuple()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     if row.is_none() {
@@ -373,34 +385,114 @@ pub struct IntakeRow {
     pub logo_props: serde_json::Value,
 }
 
-const INTAKE_COLS: &str = concat!(
-    "i.id, i.created_at, i.updated_at, i.created_by_id, i.updated_by_id, i.deleted_at, ",
-    "i.project_id, i.workspace_id, i.name, i.description, i.is_default, i.view_props, i.logo_props"
-);
+/// `intakes` row decoded by name, with the pending count annotation.
+#[derive(Debug, Clone, FromQueryResult)]
+struct IntakeWithCount {
+    id: Uuid,
+    created_at: chrono::DateTime<chrono::FixedOffset>,
+    updated_at: chrono::DateTime<chrono::FixedOffset>,
+    created_by_id: Option<Uuid>,
+    updated_by_id: Option<Uuid>,
+    deleted_at: Option<chrono::DateTime<chrono::FixedOffset>>,
+    project_id: Uuid,
+    workspace_id: Uuid,
+    name: String,
+    description: String,
+    is_default: bool,
+    view_props: serde_json::Value,
+    logo_props: serde_json::Value,
+    pending_issue_count: i64,
+}
 
-impl IntakeRow {
-    pub fn get(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            id: row.try_get("id")?,
-            created_at: row.try_get("created_at")?,
-            updated_at: row.try_get("updated_at")?,
-            created_by_id: row.try_get("created_by_id")?,
-            updated_by_id: row.try_get("updated_by_id")?,
-            deleted_at: row.try_get("deleted_at")?,
-            project_id: row.try_get("project_id")?,
-            workspace_id: row.try_get("workspace_id")?,
-            name: row.try_get("name")?,
-            description: row.try_get("description")?,
-            is_default: row.try_get("is_default")?,
-            view_props: row.try_get("view_props")?,
-            logo_props: row.try_get("logo_props")?,
-        })
+impl From<IntakeWithCount> for IntakeRow {
+    fn from(row: IntakeWithCount) -> Self {
+        Self {
+            id: row.id,
+            created_at: row.created_at.with_timezone(&Utc),
+            updated_at: row.updated_at.with_timezone(&Utc),
+            created_by_id: row.created_by_id,
+            updated_by_id: row.updated_by_id,
+            deleted_at: row.deleted_at.map(|dt| dt.with_timezone(&Utc)),
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            name: row.name,
+            description: row.description,
+            is_default: row.is_default,
+            view_props: row.view_props,
+            logo_props: row.logo_props,
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Fetches (same WHERE semantics as the queries layer)
 // ---------------------------------------------------------------------------
+
+/// Build the `fetch_intake` select (extracted for the alias regression
+/// test; see `intake_select_uses_joined_aliases`).
+fn build_intake_select(
+    slug: &str,
+    project_id: &Uuid,
+    pk: Option<Uuid>,
+    include_deleted: bool,
+) -> sea_orm::sea_query::SelectStatement {
+    use sea_orm::sea_query::{Alias, Expr, Func, JoinType, Order};
+    let mut stmt = sea_orm::sea_query::Query::select();
+    stmt.expr(Expr::col((Alias::new("i"), Alias::new("id"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("created_at"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("updated_at"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("created_by_id"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("updated_by_id"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("deleted_at"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("project_id"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("workspace_id"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("name"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("description"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("is_default"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("view_props"))))
+        .expr(Expr::col((Alias::new("i"), Alias::new("logo_props"))))
+        .expr_as(
+            {
+                let case = sea_orm::sea_query::CaseStatement::new().case(
+                    Expr::col((Alias::new("ii"), Alias::new("status"))).eq(-2),
+                    Expr::col((Alias::new("ii"), Alias::new("id"))),
+                );
+                Func::count(sea_orm::sea_query::SimpleExpr::Case(Box::new(case)))
+            },
+            Alias::new("pending_issue_count"),
+        )
+        .from_as(Alias::new("intakes"), Alias::new("i"))
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("workspaces"),
+            Alias::new("w"),
+            Expr::col((Alias::new("w"), Alias::new("id")))
+                .equals((Alias::new("i"), Alias::new("workspace_id"))),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            Alias::new("intake_issues"),
+            Alias::new("ii"),
+            Expr::col((Alias::new("i"), Alias::new("id")))
+                .equals((Alias::new("ii"), Alias::new("intake_id")))
+                .and(Expr::col((Alias::new("ii"), Alias::new("deleted_at"))).is_null()),
+        )
+        .cond_where(
+            sea_orm::sea_query::Condition::all()
+                .add(Expr::col((Alias::new("w"), Alias::new("slug"))).eq(slug))
+                .add(Expr::col((Alias::new("i"), Alias::new("project_id"))).eq(*project_id)),
+        );
+    if !include_deleted {
+        stmt.and_where(Expr::col((Alias::new("i"), Alias::new("deleted_at"))).is_null());
+    }
+    if let Some(pk_value) = pk {
+        stmt.and_where(Expr::col((Alias::new("i"), Alias::new("id"))).eq(pk_value));
+    }
+    stmt.group_by_col((Alias::new("i"), Alias::new("id")))
+        .order_by((Alias::new("i"), Alias::new("name")), Order::Asc)
+        .limit(1);
+    stmt
+}
 
 /// `IntakeViewSet.get_queryset` (`base.py:60-70`) executed: the tenant
 /// filter with the `pending_issue_count` annotation (`:68`,
@@ -418,38 +510,24 @@ pub async fn fetch_intake(
     pk: Option<Uuid>,
     include_deleted: bool,
 ) -> Result<Option<(IntakeRow, i64)>, Denial> {
-    let mut sql = format!(
-        r#"SELECT {cols}, COUNT(ii.id) FILTER (WHERE ii.status = -2) AS pending_issue_count
-           FROM intakes i INNER JOIN workspaces w ON (w.id = i.workspace_id)
-           LEFT OUTER JOIN intake_issues ii ON (i.id = ii.intake_id AND ii.deleted_at IS NULL)
-           WHERE (w.slug = $1 AND i.project_id = $2"#,
-        cols = INTAKE_COLS,
-    );
-    if !include_deleted {
-        sql.push_str(" AND i.deleted_at IS NULL");
-    }
-    if pk.is_some() {
-        sql.push_str(" AND i.id = $3");
-    }
-    sql.push_str(") GROUP BY i.id ORDER BY i.name ASC LIMIT 1");
-    let mut query = sqlx::query(&sql).bind(slug).bind(project_id);
-    if let Some(pk) = pk {
-        query = query.bind(pk);
-    }
-    let row = query
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // Django `Count("issue_intake", filter=status=-2)` over the soft-delete
+    // scoped reverse manager: LEFT JOIN with `deleted_at IS NULL` in the ON
+    // clause, `COUNT(ii.id) FILTER (WHERE ii.status = -2)`. One sea-query
+    // statement, decoded by name into `IntakeWithCount`.
+    let stmt = build_intake_select(slug, project_id, pk, include_deleted);
+    let statement = sea_orm::DbBackend::Postgres.build(&stmt);
+    let result = db
+        .query_one(statement)
         .await
         .map_err(|_| Denial::ServerError)?;
-    match row {
-        None => Ok(None),
-        Some(row) => {
-            let intake = IntakeRow::get(&row).map_err(|_| Denial::ServerError)?;
-            let pending: i64 = row
-                .try_get("pending_issue_count")
-                .map_err(|_| Denial::ServerError)?;
-            Ok(Some((intake, pending)))
-        }
-    }
+    let Some(result) = result else {
+        return Ok(None);
+    };
+    let row = FromQueryResult::from_query_result(&result, "").map_err(|_| Denial::ServerError)?;
+    let row: IntakeWithCount = row;
+    let pending = row.pending_issue_count;
+    Ok(Some((IntakeRow::from(row), pending)))
 }
 
 /// One `projects` row for the `ProjectLiteSerializer` nest (plain join,
@@ -465,53 +543,95 @@ struct ProjectRow {
     is_default: bool,
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+struct ProjectProbe {
+    id: Uuid,
+    identifier: String,
+    name: String,
+    cover_image: Option<String>,
+    cover_image_asset_id: Option<Uuid>,
+    logo_props: serde_json::Value,
+    description: String,
+    is_default: bool,
+}
+
 async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<ProjectRow>, Denial> {
-    let row = sqlx::query(
-        r#"SELECT id, identifier, name, cover_image, cover_image_asset_id, logo_props, description, is_default FROM "projects" WHERE "projects"."id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| {
-        Ok(ProjectRow {
-            id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-            identifier: row.try_get("identifier").map_err(|_| Denial::ServerError)?,
-            name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-            cover_image: row
-                .try_get("cover_image")
-                .map_err(|_| Denial::ServerError)?,
-            cover_image_asset_id: row
-                .try_get("cover_image_asset_id")
-                .map_err(|_| Denial::ServerError)?,
-            logo_props: row.try_get("logo_props").map_err(|_| Denial::ServerError)?,
-            description: row
-                .try_get("description")
-                .map_err(|_| Denial::ServerError)?,
-            is_default: row.try_get("is_default").map_err(|_| Denial::ServerError)?,
-        })
-    })
-    .transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<ProjectProbe> = projects::Entity::find_by_id(*project_id)
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::CoverImageAssetId,
+            projects::Column::LogoProps,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+        ])
+        .into_model::<ProjectProbe>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|r| ProjectRow {
+        id: r.id,
+        identifier: r.identifier,
+        name: r.name,
+        cover_image: r.cover_image,
+        cover_image_asset_id: r.cover_image_asset_id,
+        logo_props: r.logo_props,
+        description: r.description,
+        is_default: r.is_default,
+    }))
 }
 
 /// `cover_image_url` (`db/models/project.py:176-185`): the cover asset's
+/// Decision from one `file_assets` cover lookup. The pre-migration
+/// `Option<(String,)>` decode made a present row with a NULL
+/// `entity_type` a decode error (500); preserved exactly here. Do not
+/// align to Django (which returns the asset URL, `None` for NULL or
+/// unmatched types) — that divergence is tracked separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverDecision {
+    /// No asset row, or a non-static entity type: serve the raw
+    /// `cover_image` text (or null).
+    Raw,
+    /// A static cover type: serve `/api/assets/v2/static/<id>/`.
+    Static,
+    /// A present row with a NULL `entity_type`: preserve the old 500.
+    ServerError,
+}
+
+fn cover_decision(row: Option<Option<String>>) -> CoverDecision {
+    match row {
+        None => CoverDecision::Raw,
+        Some(None) => CoverDecision::ServerError,
+        Some(Some(entity_type)) => match entity_type.as_str() {
+            "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+                CoverDecision::Static
+            }
+            _ => CoverDecision::Raw,
+        },
+    }
+}
+
 /// URL, else the raw `cover_image` text, else null.
 async fn cover_image_url(pool: &PgPool, project: &ProjectRow) -> Result<Option<String>, Denial> {
     if let Some(asset_id) = project.cover_image_asset_id {
-        let row: Option<(String,)> = sqlx::query_as(
-            r#"SELECT entity_type FROM "file_assets" WHERE "file_assets"."id" = $1"#,
-        )
-        .bind(asset_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if let Some((entity_type,)) = row {
-            match entity_type.as_str() {
-                "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-                    return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
-                }
-                _ => return Ok(project.cover_image.clone()),
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let row: Option<Option<String>> = file_assets::Entity::find_by_id(asset_id)
+            .select_only()
+            .column(file_assets::Column::EntityType)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+        match cover_decision(row) {
+            CoverDecision::ServerError => return Err(Denial::ServerError),
+            CoverDecision::Static => {
+                return Ok(Some(format!("/api/assets/v2/static/{asset_id}/")));
             }
+            CoverDecision::Raw => return Ok(project.cover_image.clone()),
         }
     }
     Ok(project.cover_image.clone())
@@ -934,33 +1054,59 @@ pub async fn partial_update(
     let logo_props = validated.logo_props.unwrap_or(stored.logo_props);
     let deleted_at = validated.deleted_at.unwrap_or(stored.deleted_at);
     let created_by_id = validated.created_by.unwrap_or(stored.created_by_id);
-    let write = sqlx::query(
-        r#"UPDATE intakes SET name = $2, description = $3, is_default = $4, view_props = $5, logo_props = $6,
-                  deleted_at = $7, created_by_id = $8, updated_at = $9, updated_by_id = $10
-           WHERE id = $1"#,
-    )
-    .bind(pk)
-    .bind(name)
-    .bind(description)
-    .bind(is_default)
-    .bind(view_props)
-    .bind(logo_props)
-    .bind(deleted_at)
-    .bind(created_by_id)
-    .bind(now)
-    .bind(actor.id)
-    .execute(pool)
-    .await;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let write = intake_entity::Entity::update_many()
+        .col_expr(
+            intake_entity::Column::Name,
+            sea_orm::sea_query::Expr::value(name),
+        )
+        .col_expr(
+            intake_entity::Column::Description,
+            sea_orm::sea_query::Expr::value(description),
+        )
+        .col_expr(
+            intake_entity::Column::IsDefault,
+            sea_orm::sea_query::Expr::value(is_default),
+        )
+        .col_expr(
+            intake_entity::Column::ViewProps,
+            sea_orm::sea_query::Expr::value(view_props),
+        )
+        .col_expr(
+            intake_entity::Column::LogoProps,
+            sea_orm::sea_query::Expr::value(logo_props),
+        )
+        .col_expr(
+            intake_entity::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(
+                deleted_at.map(|dt| dt.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap())),
+            ),
+        )
+        .col_expr(
+            intake_entity::Column::CreatedById,
+            sea_orm::sea_query::Expr::value(created_by_id),
+        )
+        .col_expr(
+            intake_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(
+                now.with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
+            ),
+        )
+        .col_expr(
+            intake_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(actor.id),
+        )
+        .filter(intake_entity::Column::Id.eq(pk))
+        .exec(&db)
+        .await;
     if let Err(error) = write {
         // The uniqueness validators are skipped (QUIRK-no-unique-check),
         // so a duplicate name reaches the database: the partial unique
         // constraint fires and `handle_exception` answers the
         // `IntegrityError` branch (`{"error": "The payload is not
         // valid"}`).
-        if let sqlx::Error::Database(db) = &error {
-            if db.code().as_deref() == Some("23505") || db.constraint().is_some() {
-                return Denial::BadError("The payload is not valid".to_owned()).into_response();
-            }
+        if pidash_db::orm_tx::is_integrity_violation(&error) {
+            return Denial::BadError("The payload is not valid".to_owned()).into_response();
         }
         return Denial::ServerError.into_response();
     }
@@ -1053,15 +1199,25 @@ async fn soft_delete_intake(
     actor_id: &Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    sqlx::query(
-        r#"UPDATE intakes SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#,
-    )
-    .bind(intake_id)
-    .bind(now)
-    .bind(actor_id)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let tz = chrono::FixedOffset::east_opt(0).unwrap();
+    intake_entity::Entity::update_many()
+        .col_expr(
+            intake_entity::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now.with_timezone(&tz)),
+        )
+        .col_expr(
+            intake_entity::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now.with_timezone(&tz)),
+        )
+        .col_expr(
+            intake_entity::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(*actor_id),
+        )
+        .filter(intake_entity::Column::Id.eq(*intake_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1111,6 +1267,38 @@ mod tests {
             assert!(
                 validate_datetime(&mut errs, "deleted_at", &json!(text), true).is_none(),
                 "{text:?}"
+            );
+        }
+    }
+
+    /// `cover_image_url` lookup outcome (NEWPIDASH-113): the
+    /// pre-migration `Option<(String,)>` decode made a present row
+    /// with a NULL `entity_type` a 500; preserved exactly.
+    #[test]
+    fn cover_decision_preserves_old_null_decode_error() {
+        // No row: raw fall-through, as before.
+        assert_eq!(cover_decision(None), CoverDecision::Raw);
+        // NULL entity_type: the old 500, not a raw-text fallback.
+        assert_eq!(cover_decision(Some(None)), CoverDecision::ServerError);
+        // Static cover types serve the static path.
+        for kind in [
+            "WORKSPACE_LOGO",
+            "USER_AVATAR",
+            "USER_COVER",
+            "PROJECT_COVER",
+        ] {
+            assert_eq!(
+                cover_decision(Some(Some(kind.to_owned()))),
+                CoverDecision::Static,
+                "{kind}"
+            );
+        }
+        // Anything else (incl. empty) serves the raw text, as before.
+        for kind in ["ISSUE_ATTACHMENT", "unknown", ""] {
+            assert_eq!(
+                cover_decision(Some(Some(kind.to_owned()))),
+                CoverDecision::Raw,
+                "{kind}"
             );
         }
     }
@@ -1189,6 +1377,43 @@ mod tests {
         assert_eq!(python_str(&json!(["x"])), "['x']");
         assert_eq!(python_str(&json!({"a": 1})), "{'a': 1}");
         assert_eq!(python_str(&json!(null)), "None");
+    }
+
+    /// NEWPIDASH-138: the SeaORM list query qualifies joined columns as
+    /// `w` / `ii`, so the joins must alias the tables the same way.
+    /// Without `join_as` Postgres answers
+    /// `missing FROM-clause entry for table "w"` and the handler maps
+    /// the error to 500, while Django's ORM join answers 200.
+    #[test]
+    fn intake_select_uses_joined_aliases() {
+        let project_id =
+            Uuid::parse_str("40ffd807-0000-4000-8000-000000000000").expect("fixed test UUID");
+        let stmt = build_intake_select("parity-ws", &project_id, None, false);
+        let sql = sea_orm::DbBackend::Postgres.build(&stmt).sql;
+        assert!(
+            sql.contains(r#"AS "w""#),
+            "workspaces join must alias as w: {sql}"
+        );
+        assert!(
+            sql.contains(r#"AS "ii""#),
+            "intake_issues join must alias as ii: {sql}"
+        );
+        assert!(
+            !sql.contains(r#"JOIN "workspaces" ON"#),
+            "bare workspaces join would miss the w alias: {sql}"
+        );
+        assert!(
+            !sql.contains(r#"JOIN "intake_issues" ON"#),
+            "bare intake_issues join would miss the ii alias: {sql}"
+        );
+        assert!(
+            sql.contains(r#""w"."slug""#),
+            "tenant filter must use w: {sql}"
+        );
+        assert!(
+            sql.contains(r#""ii"."status""#),
+            "pending annotation must use ii: {sql}"
+        );
     }
 
     /// `IntakeSerializer` key order follows `INTAKE_KEY_ORDER`

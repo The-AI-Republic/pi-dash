@@ -567,6 +567,7 @@ def test_run_now_conflicts(world, conn):
             "phase_kind": "",
             "agent_metadata": {},
             "usage": {"input": 1, "output": 1, "total": 2},
+            "pin_kind": "locality",
             "scheduler_binding_id": world["binding"]["id"],
         },
     )

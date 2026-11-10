@@ -55,7 +55,7 @@ re-recording fixtures.
   set (sign-in refuses without it), and Redis up (session open/poll,
   stream-upgrade tickets, machine-token redeem, DRF anon throttle), e.g.
   `SECRET_KEY=contract-test-secret WEB_URL=http://localhost:3000 python
-  apps/api/manage.py runserver 8000` after `manage.py migrate`. The anon
+apps/api/manage.py runserver 8000` after `manage.py migrate`. The anon
   throttle (30/min per IP) is shared across runs: re-running the suite
   within a minute of a previous run can 429 the AllowAny endpoints —
   either wait out the window or clear this run's key in Redis.
@@ -153,14 +153,14 @@ re-recording fixtures.
   host under test (else `Secure` cookies + CSRF 403 over `http`),
   `APP_BASE_URL`/`WEB_URL` must point at the server under test, dummy
   `AWS_*` creds suffice for offline presigning but `AWS_S3_BUCKET_NAME`
-  + `AWS_REGION` must also be set, one Redis db index per parallel run
-  (anon throttle 30/min — pace full runs). Tripwire: `BaseViewSet`
-  `permission_classes` is redundant with the global DRF
-  `DEFAULT_PERMISSION_CLASSES`, so the demo removes BOTH layers — then
-  `test_list_requires_auth`, `test_create_requires_auth`,
-  `test_issue_reaction_list_requires_auth` flip 401/403 → 200 (revert
-  afterwards). Pins two Django bugs for the port: project-boards 500 and
-  always-empty reaction/vote lists.
+  - `AWS_REGION` must also be set, one Redis db index per parallel run
+    (anon throttle 30/min — pace full runs). Tripwire: `BaseViewSet`
+    `permission_classes` is redundant with the global DRF
+    `DEFAULT_PERMISSION_CLASSES`, so the demo removes BOTH layers — then
+    `test_list_requires_auth`, `test_create_requires_auth`,
+    `test_issue_reaction_list_requires_auth` flip 401/403 → 200 (revert
+    afterwards). Pins two Django bugs for the port: project-boards 500 and
+    always-empty reaction/vote lists.
 
 ## Run: web_edge
 
@@ -213,12 +213,13 @@ CONTRACT_WEB_URL=http://127.0.0.1:8123 \
 
 Env contract:
 
-| var                   | meaning                                                                                                                 |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `BASE_URL`            | server under test (default `http://127.0.0.1:8000`)                                                                     |
-| `DATABASE_URL`        | psycopg conninfo for seeding (required)                                                                                 |
-| `CONTRACT_SECRET_KEY` | must equal the server's `SECRET_KEY`; only used to forge session cookies / machine-token hashes when seeding (required) |
-| `CONTRACT_WEB_URL`    | must equal the server's `WEB_URL`; expected `verification_uri` base (required)                                          |
+| var                       | meaning                                                                                                                                                                                                                       |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BASE_URL`                | server under test (default `http://127.0.0.1:8000`)                                                                                                                                                                           |
+| `DATABASE_URL`            | psycopg conninfo for seeding (required)                                                                                                                                                                                       |
+| `CONTRACT_SECRET_KEY`     | must equal the server's `SECRET_KEY`; only used to forge session cookies / machine-token hashes when seeding (required)                                                                                                       |
+| `CONTRACT_WEB_URL`        | must equal the server's `WEB_URL`; expected `verification_uri` base (required)                                                                                                                                                |
+| `PIDASH_CONTRACT_BACKEND` | which backend `BASE_URL` serves: `django` (default when unset) or `rust`; read by `_harness.diffs` (see "Deliberate differences" below). The Rust-matrix CI sets it explicitly per half; Django-only runs rely on the default |
 
 ## Run: app_issues (PIDASHCONV-84)
 
@@ -406,6 +407,39 @@ WORKER_QUEUE=ct17 \
   reruns against the same database are safe.
 - Raw-SQL seeding bypasses model signals (no builtin-scheduler seeding, no
   default-pod creation): each test sees exactly what it inserted.
+
+## Deliberate differences (DIFF cases)
+
+When an "Old bug fix" changes the new system on purpose, the contract case
+that pinned the old behaviour pins _both_ behaviours with the per-backend
+expectation marker, `_harness.diffs.expect`:
+
+```python
+from _harness.diffs import expect
+
+def test_space_unknown_uuid_user(browser, user):
+    res = browser.post(space_reset_url(user), data={"new_password": "x"})
+    assert res.status_code == expect("DIFF-4", django=500, rust=302)
+```
+
+- `diff_id` names the row in `.ai_design/validation/differences.md` this
+  divergence is recorded under (anything but `DIFF-<n>` fails the test).
+- The `django=` arm pins the old system's real behaviour — run the case
+  against live Django to prove it before converting.
+- The `rust=` arm pins the fixed behaviour.
+- Each arm is a fixed expectation: the case still fails if either backend
+  drifts from its pinned value. Never delete the case and never weaken it
+  to pass on both.
+
+How the harness knows which backend is under test:
+`PIDASH_CONTRACT_BACKEND` — `django` when unset or blank (the default),
+`rust` for the Rust server; any other value fails the test. The Rust-matrix
+CI (`.github/workflows/rust-api-contract-rust.yml`) exports it explicitly
+per half (`django` for the oracle run, `rust` for the Rust run); Django-only
+workflows and local Django runs rely on the default. New code branches on
+`diffs.current_backend()` / `diffs.is_rust()` instead of reading the
+variable ad hoc. Unit tests: `_harness/tests/test_diffs.py` (no backend
+needed).
 
 The server under test must be the full stack: Postgres (seeded directly),
 Redis + a Celery worker (write endpoints enqueue activity tasks), and S3
@@ -790,3 +824,64 @@ Known oracle limits (pinned, not skipped): full dispatch-True run creation
 needs an eligible runner (owned by the D-13+ runner gates);
 `done_signal.py` has zero production callers and is excluded.
 (PIDASHCONV-75 orchestration engine oracle)
+
+## Domain: dispatch (NEWPIDASH-54 multi-tenant validation)
+
+`dispatch/` is the cloud-agent task oracle (PIDASHCONV-22, D-11): every
+test seeds its own world straight into Postgres and publishes jobs
+through the live worker's channel (`_harness` auto-detects: Celery wire
+when a Django worker answers inspect, else `rust_job_queue` rows for
+`pidash-api worker`). The same modules run against Django (oracle) and
+the Rust binary unchanged; whichever leg diverges is a parity defect.
+
+NEWPIDASH-54 additions (multi-tenant, one worker, stub providers):
+
+- `test_multi_tenant.py` — tenant isolation + BYOK credentials on the
+  OpenAI lane (per-tenant keys, cross-workspace refusal, rotation,
+  deletion → `llm_config_missing`). The Anthropic lane pins
+  `api.anthropic.com` on both stacks with no base URL, so it is pinned
+  by provider-failure parity + cross-tenant non-contamination only.
+- `test_concurrency.py` — 20 runs across 10 tenants (per-run
+  history/usage/output separation + key isolation), the isolated
+  no-stall ordering proof, per-tenant provider-failure isolation with
+  retry counts (429/5xx/timeout → 3 attempts, malformed → 1), a
+  row-locked write tool blocked past `tool_timeout` that still runs
+  to completion, the single-active-run DB constraint per issue, and
+  per-tenant scan backpressure / stale-sweep parity.
+- `test_budgets.py` — per-run counting: request limit and input-token
+  limit trip `iteration_limit` only on the limited tenant (and on the
+  limited tenant's next run — counting restarts per run), invalid
+  output retries 3 times (`retries=2`) and ends `provider_error`,
+  the 3-write budget lets exactly 3 writes succeed.
+- `test_safety.py` — prompt-injection boundary (refused exactly as
+  Django refuses), toolsets OSS parity (`extra_toolsets=True` is inert
+  in OSS), and the SSRF cases. The SSRF cases need a **guard-on**
+  worker stack (`ASSISTANT_BLOCK_PRIVATE_URLS=True` on both backends,
+  read at worker start) and skip unless `PIDASH_N54_SSRF_GUARD=1` is
+  set; the rest of the suite needs the guard off for the 127.0.0.1
+  stubs.
+
+Worker concurrency must be raised on both legs (`--concurrency 24` on
+Celery prefork and on `pidash-api worker`) or the no-stall ordering
+is unobservable by construction; the CI lanes below define it. The
+stack also sets `CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS=5` /
+`CLOUD_AGENT_TOOL_TIMEOUT_SECONDS=5` so the provider-timeout cases
+take ~16s per leg.
+
+CI lanes:
+
+- Django half: the worker-plane oracle job in
+  `.github/workflows/rust-api-contract-tests.yml` runs `dispatch/`
+  (minus `test_create_project_issue_transition.py` — pre-existing
+  failure on main, `found:` on NEWPIDASH-1) plus
+  `assistant/test_turn_isolation.py`; the three ordering proofs that
+  need concurrent claims (the stall test, the per-tenant failure
+  isolation, and the hanging tool) are deselected there (the solo
+  worker serialises claims) and run on the Rust lane instead.
+- Rust half: `.github/workflows/rust-api-contract-tests-dispatch-rust.yml`
+  boots `pidash-api worker --concurrency 24` and runs the
+  backend-branched dispatch modules plus `test_turn_isolation.py`;
+  the SSRF step then boots a second, guard-on worker and runs
+  `test_safety.py::test_ssrf_blocks_internal_base_url_per_tenant`
+  with `PIDASH_N54_SSRF_GUARD=1`.
+  (NEWPIDASH-54)

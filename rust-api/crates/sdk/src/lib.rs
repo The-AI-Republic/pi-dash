@@ -107,6 +107,13 @@ pub mod domain {
     pub use pidash_services::domain::workspaces::members::add_with_active;
     // Renamed: the flat `deactivate_by_workspace` is the projects twin
     // (UPDATE project_members); this one writes workspace_members.
+    pub use pidash_services::domain::issue_assignment::list_project_runners;
+    pub use pidash_services::domain::issue_assignment::resolve_pod_ref;
+    pub use pidash_services::domain::issue_assignment::resolve_runner_ref;
+    pub use pidash_services::domain::issue_assignment::runner_list_row_to_value;
+    pub use pidash_services::domain::issue_assignment::ResolveError;
+    pub use pidash_services::domain::issue_assignment::RunnerListParams;
+    pub use pidash_services::domain::issue_assignment::RunnerListRow;
     pub use pidash_services::domain::workspaces::members::deactivate_by_workspace as deactivate_workspace_members_by_workspace;
     pub use pidash_services::domain::workspaces::members::deactivate_without_updated_by;
     pub use pidash_services::domain::workspaces::members::overwrite;
@@ -223,15 +230,23 @@ pub mod read {
     pub use pidash_services::read::requested_names;
     pub use pidash_services::read::resolve_workpad_state;
     pub use pidash_services::read::search_issues;
-    pub use pidash_services::read::search_issues_sql;
+    pub use pidash_services::read::search_issues_statement;
     pub use pidash_services::read::state_row_from;
     pub use pidash_services::read::workpad_stripped;
     pub use pidash_services::read::workspace_of;
     pub use pidash_services::read::workspace_row;
     pub use pidash_services::read::workspace_slug;
+    // PIDASHCONV-1723: dispatch_wait render seam for MCP pidash_get_issue
+    // (design §14.3). Overlay calls fetch_active_dispatch_run then
+    // build_dispatch_wait with the viewer for `releasable`.
+    pub use pidash_services::domain::issue_assignment::build_dispatch_wait;
+    pub use pidash_services::domain::issue_assignment::dedicated_refusal_body;
+    pub use pidash_services::domain::issue_assignment::fetch_active_dispatch_run;
+    pub use pidash_services::domain::issue_assignment::RunWaitInputs;
     pub use pidash_services::read::ActorDetailView;
     pub use pidash_services::read::AssetRow;
     pub use pidash_services::read::BlockerRows;
+    pub use pidash_services::read::CommentDbRow;
     pub use pidash_services::read::CommentReactionView;
     pub use pidash_services::read::CommentRow;
     pub use pidash_services::read::CommentView;
@@ -241,26 +256,24 @@ pub mod read {
     pub use pidash_services::read::Error;
     pub use pidash_services::read::IssueFlatView;
     pub use pidash_services::read::IssueSearchParams;
+    pub use pidash_services::read::IssueSearchRow;
     pub use pidash_services::read::IssueSearchSort;
     pub use pidash_services::read::IssueSearchStatus;
     pub use pidash_services::read::OwnedAssigneeRow;
     pub use pidash_services::read::OwnedRelationItem;
+    pub use pidash_services::read::PrLinkDbRow;
     pub use pidash_services::read::ProfileRow;
     pub use pidash_services::read::ProjectLiteView;
     pub use pidash_services::read::RenderRequest;
     pub use pidash_services::read::StateRow;
     pub use pidash_services::read::StateRowTuple;
     pub use pidash_services::read::UserShape;
+    pub use pidash_services::read::WorkpadDbRow;
     pub use pidash_services::read::WorkspaceLiteView;
     pub use pidash_services::read::WriteProject;
     pub use pidash_services::read::COMMENT_COLUMNS;
-    pub use pidash_services::read::FULL_ROW_COLUMNS;
     pub use pidash_services::read::ISSUE_EXTRA_COLS;
     pub use pidash_services::read::ISSUE_SELECT_COLS;
-    pub use pidash_services::read::PR_DETAIL_SQL;
-    pub use pidash_services::read::PR_LINK_BY_ID_SQL;
-    pub use pidash_services::read::PR_LINK_LIST_SQL;
-    pub use pidash_services::read::PR_LIST_SQL;
     pub use pidash_services::v1_projects::ser_workflow::state_base_map;
     pub use pidash_services::v1_work_items::shape_issue;
     pub use pidash_services::v1_work_items::shape_issue::issue_url;
@@ -303,7 +316,10 @@ pub mod ops {
     pub use pidash_jobs::orchestration::run_work_item_id;
     pub use pidash_jobs::orchestration::HandoffInlineDeps;
     pub use pidash_jobs::orchestration::HandoffStore;
+    pub use pidash_jobs::runner_enroll::bounce_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::fire_revoke_bundle;
+    pub use pidash_jobs::runner_enroll::overlay_store_deps;
+    pub use pidash_jobs::runner_enroll::recreate_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::revoke as runners_revoke; // renamed: `revoke` is the services revoke module.
     pub use pidash_jobs::runner_enroll::RevokeBundle;
     pub use pidash_jobs::runner_enroll::RevokeCollected;
@@ -459,6 +475,9 @@ pub mod operations {
     pub use pidash_services::operations::relations;
     pub use pidash_services::operations::requested_data_text;
     pub use pidash_services::operations::requested_data_value;
+    // NEWPIDASH-37: api-backed (the scheduler cores live in `pidash_api`),
+    // same contract as the services-backed submodules.
+    pub use pidash_api::v1_schedulers::service as schedulers;
     pub use pidash_services::operations::workpad;
     pub use pidash_services::operations::Deps;
     pub use pidash_services::operations::Error;
@@ -488,6 +507,7 @@ pub mod compat {
     pub use pidash_api::space::sanitize::sanitize_html;
     pub use pidash_api::space::sanitize::strip_tags;
     pub use pidash_api::space::sanitize::Sanitize;
+    pub use pidash_api::v1_work_items::handlers_actions::dispatch_deps_for_ids;
     pub use pidash_api::v1_work_items::handlers_actions::gate_fn;
     pub use pidash_api::v1_work_items::handlers_actions::profile_fn;
     pub use pidash_api::v1_work_items::handlers_actions::LiveMatcher;
@@ -751,7 +771,9 @@ pub mod jobs {
     pub use pidash_jobs::integrations::github_sync::TASK_NAMES as GITHUB_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::license::tasks::TASK_NAME;
     pub use pidash_jobs::loop_scan::TASK_NAMES as LOOP_SCAN_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
+    pub use pidash_jobs::orchestration::bounce_issue_no_eligible_runner;
     pub use pidash_jobs::orchestration::create_and_dispatch_run;
+    pub use pidash_jobs::orchestration::dispatch_continuation_run;
     pub use pidash_jobs::orchestration::preflight_eligibility_or_bounce;
     pub use pidash_jobs::orchestration::runner_seams::complete_project_move_handoff_live;
     pub use pidash_jobs::orchestration::StoreDeps;
@@ -825,6 +847,9 @@ pub mod db {
     pub use pidash_db::orchestration::querysets::fetch_is_workspace_member;
     pub use pidash_db::orchestration::runs::active_run_for;
     pub use pidash_db::orchestration::runs::latest_prior_run;
+    // NEWPIDASH-37: the SeaORM-over-sqlx bridge; the overlay's
+    // transaction-held calls need it after the Batch 3 ORM migration.
+    pub use pidash_db::orm_tx::TxConn;
     pub use pidash_db::pool::Pools; // also imported by the overlay as `pidash_db::Pools`.
     pub use pidash_db::redis::client_from_settings; // canonical settings client (PIDASHCONV-1593).
     pub use pidash_db::redis::RedisHandle;
@@ -956,5 +981,32 @@ mod tests {
         let _ = std::mem::size_of_val(&crate::read::render_comment_value);
         let _ = std::mem::size_of::<crate::read::DecodedComment>();
         let _ = std::mem::size_of::<crate::read::SocialRenderError>();
+    }
+
+    /// NEWPIDASH-37: the scheduler service entries resolve through the
+    /// SDK facade. Behaviour is pinned by `pidash_api`'s cores (the
+    /// entries call the same functions the v1 handlers call) and by the
+    /// v1_schedulers contract suite; this only locks the paths.
+    #[test]
+    fn operations_schedulers_is_exported() {
+        use crate::operations::schedulers;
+        let _ = std::mem::size_of_val(&schedulers::list_definitions);
+        let _ = std::mem::size_of_val(&schedulers::list_project_schedulers);
+        let _ = std::mem::size_of_val(&schedulers::get_scheduler);
+        let _ = std::mem::size_of_val(&schedulers::list_runs);
+        let _ = std::mem::size_of_val(&schedulers::patch_binding);
+        let _ = std::mem::size_of_val(&schedulers::run_now);
+        let _ = std::mem::size_of_val(&schedulers::install_binding);
+        let _ = std::mem::size_of_val(&schedulers::uninstall_binding);
+        let _ = std::mem::size_of_val(&schedulers::create_definition);
+        let _ = std::mem::size_of_val(&schedulers::patch_definition);
+        let _ = std::mem::size_of_val(&schedulers::delete_definition);
+        let _ = std::mem::size_of_val(&schedulers::denial_parts);
+        let _ = std::mem::size_of::<schedulers::ServiceCtx>();
+        let _ = std::mem::size_of::<schedulers::ListParams>();
+        let _ = std::mem::size_of::<schedulers::Outcome>();
+        let _ = std::mem::size_of::<schedulers::Denial>();
+        let params = schedulers::ListParams::empty();
+        assert!(params.per_page.is_none());
     }
 }

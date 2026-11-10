@@ -11,7 +11,8 @@ import { Button } from "@pidash/kit";
 import { Copy, ImageUp, PencilLine } from "lucide-react";
 import * as React from "react";
 
-import { workspaceAddress, workspaceInitial } from "../rules.js";
+import { shareableAddress } from "../../../../shared/shell/shareLink.js";
+import { workspaceInitial } from "../rules.js";
 
 export interface WorkspaceIdentityCardProps {
   workspaceSlug: string;
@@ -30,7 +31,12 @@ export function WorkspaceIdentityCard({
   onOpenLogo,
   onCopyAddress,
 }: WorkspaceIdentityCardProps): React.ReactElement {
-  const address = workspaceAddress(window.location.origin, workspaceSlug);
+  let address = `/${workspaceSlug}`;
+  try {
+    address = shareableAddress(`/${workspaceSlug}`);
+  } catch {
+    // No hosted origin: show the site-relative path, never the bundle origin.
+  }
   return (
     <div
       data-testid="workspace-general-identity"

@@ -156,11 +156,12 @@ def seed(db_conn):
                 " repo_url, base_branch, agent_default_interval_seconds,"
                 " agent_default_max_ticks, agent_ticking_enabled, is_default,"
                 " agent_review_default_interval_seconds, default_agent_executor,"
+                " dedicated_runner_lost_action,"
                 " agent_test_default_interval_seconds)"
-                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (NOW, NOW, ids[key], name, "", 0, identifier, ids[ws_key], True,
                  True, True, True, True, 0, 0, "{}", True, True, True, "UTC",
-                 True, "", "", 3600, 100, True, False, 10800, "muse", 10800),
+                 True, "", "", 3600, 100, True, False, 10800, "muse", "fail_to_backlog", 10800),
             )
         for user_key, role in (("admin", 20), ("member", 15), ("guest", 5)):
             cur.execute(

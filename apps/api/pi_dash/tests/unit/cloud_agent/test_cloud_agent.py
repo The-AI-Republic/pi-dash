@@ -93,8 +93,10 @@ def _cloud_run(issue, create_user, **overrides):
 
 @pytest.mark.unit
 @override_settings(DEFAULT_AGENT_EXECUTOR="cloud_agent")
-def test_setting_backed_project_default_callable():
-    assert get_default_agent_executor() == AgentExecutorKind.CLOUD_AGENT
+def test_setting_backed_project_default_accepts_only_local_runner():
+    # Runner is the only executor for new projects (built_engine_as_runner
+    # §6): another configured default is ignored, and flagged by managed.W001.
+    assert get_default_agent_executor() == AgentExecutorKind.LOCAL_RUNNER
 
 
 @pytest.mark.unit
@@ -553,7 +555,10 @@ def test_executor_options_report_cloud_and_local_independently(project):
         "kind": AgentExecutorKind.LOCAL_RUNNER,
         "available": False,
         "reason_code": "no_local_runner",
+        "deprecated": False,
     }
+    # The Cloud Agent entry stays for older clients, flagged as deprecated.
+    assert options["cloud_agent"]["deprecated"] is True
 
 
 @pytest.mark.unit
@@ -682,3 +687,30 @@ def test_cloud_transition_on_a_spent_pool_parks(issue, create_user, project):
     assert ticker.pending_entry is False
     assert ticker.enabled is False
     assert ticker.disarm_reason == "pool_spent"
+
+
+@pytest.mark.unit
+@override_settings(**CLOUD_SETTINGS)
+def test_direct_cloud_run_merges_execution_pin_once(project, create_user):
+    """The cloud executor's pin default must not collide with the direct pin."""
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    from pi_dash.runner.models import Pod
+    from pi_dash.runner.views.runs import AgentRunListEndpoint
+
+    project.default_agent_executor = AgentExecutorKind.CLOUD_AGENT
+    project.save(update_fields=["default_agent_executor"])
+    _configure_llm(create_user)
+    pod = Pod.default_for_project(project)
+    request = APIRequestFactory().post(
+        "/api/runners/runs/",
+        {"workspace": str(project.workspace_id), "pod": str(pod.id), "prompt": "Review the project"},
+        format="json",
+    )
+    force_authenticate(request, user=create_user)
+    with patch("pi_dash.cloud_agent.creation.dispatch_after_commit"):
+        response = AgentRunListEndpoint.as_view()(request)
+    assert response.status_code == 201, response.data
+    run = AgentRun.objects.get(id=response.data["id"])
+    assert run.executor_kind == AgentExecutorKind.CLOUD_AGENT
+    assert run.pinned_runner_id is None
+    assert run.pin_kind == "locality"

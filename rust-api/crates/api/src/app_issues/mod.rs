@@ -42,6 +42,7 @@
 //! - the manager's triage exclusion keeps NULL-state rows (Django
 //!   negates null-safely: `NOT (group = 'triage' AND group IS NOT NULL)`).
 
+pub(crate) mod access;
 pub mod expand;
 pub mod handlers_archive;
 pub mod handlers_bulk;
@@ -52,8 +53,13 @@ pub mod handlers_labels_attachments;
 pub mod handlers_reads;
 pub mod handlers_relations;
 pub mod handlers_versions_move;
+pub mod list_engine;
+#[cfg(test)]
+mod list_oracle;
 pub mod queries_core;
 pub mod queries_engage;
+#[cfg(test)]
+mod reads_oracle;
 pub mod render;
 
 use std::collections::HashMap;
@@ -74,7 +80,7 @@ use crate::state::AppState;
 
 use pidash_services::app_issues::{
     deleted_ids_body, envelope, on_results_fields, order_sql, raw_group_mismatch, v2_fields,
-    ListParams, OrderSpec, ParseOptions, DETAIL_FIELDS, LIST_VALUES_FIELDS, PRIORITY_VALUES,
+    ListParams, ParseOptions, DETAIL_FIELDS, LIST_VALUES_FIELDS, PRIORITY_VALUES,
     STATE_GROUP_VALUES,
 };
 
@@ -348,6 +354,11 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s `ValidationError` branch (bad UUID in `issues=`).
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
+/// Resolver 404 for a `<uuid:...>` segment that misses the converter
+/// (global `handler404`, `pi_dash/urls.py:15` → `custom_404_view`):
+/// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space after
+/// the colon (PIDASHCONV-1713).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
@@ -378,6 +389,8 @@ pub enum Denial {
     NotFound,
     /// 404, `{"detail":"Project not found"}` (project-kwarg rewrite miss).
     ProjectNotFound,
+    /// 404, the URL resolver (`<uuid:...>` converter miss → `handler404`).
+    PageNotFound,
     /// 400, `{"detail": ...}` (`ParseError`, filter validation).
     BadDetail(String),
     /// 415, unsupported media type (DRF `UnsupportedMediaType`); the body
@@ -403,6 +416,7 @@ impl Denial {
             ),
             Denial::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned()),
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::PageNotFound => (StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
                 format!("{{\"detail\":{}}}", json_string(message)),
@@ -536,16 +550,10 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    access::project_id_by_identifier(&pidash_db::pool::sea_orm_connection(pool), slug, &upper)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ProjectNotFound)
 }
 
 /// `allow_permission([ADMIN, MEMBER, GUEST])` at `PROJECT` level: an
@@ -559,50 +567,21 @@ async fn allow_project(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<(), Denial> {
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    match role {
-        Some((20,)) | Some((15,)) | Some((5,)) => Ok(()),
-        _ => {
-            let member: Option<(i32,)> = sqlx::query_as(
-                r#"SELECT 1 FROM project_members pm
-                   JOIN workspaces w ON w.id = pm.workspace_id
-                   WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-                   AND pm.is_active AND pm.deleted_at IS NULL"#,
-            )
-            .bind(user_id)
-            .bind(project_id)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            let admin: Option<(i32,)> = sqlx::query_as(
-                r#"SELECT 1 FROM workspace_members wm
-                   JOIN workspaces w ON w.id = wm.workspace_id
-                   WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role = 20
-                   AND wm.is_active AND wm.deleted_at IS NULL"#,
-            )
-            .bind(user_id)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            if member.is_some() && admin.is_some() {
-                Ok(())
-            } else {
-                Err(Denial::Forbidden)
-            }
-        }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if matches!(role, Some(20 | 15 | 5)) {
+        return Ok(());
+    }
+    // The fallback's "any active project membership" is the role row.
+    let admin = access::is_workspace_admin(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if role.is_some() && admin {
+        Ok(())
+    } else {
+        Err(Denial::Forbidden)
     }
 }
 
@@ -615,28 +594,21 @@ async fn tenant_context(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<TenantContext, Denial> {
-    let row: Option<(uuid::Uuid, bool)> = sqlx::query_as(
-        r#"SELECT p.workspace_id, p.guest_view_all_features FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (workspace_id, guest_view_all) = row.ok_or(Denial::NotFound)?;
-    let member: Option<(String, i16)> = sqlx::query_as(
-        r#"SELECT u.user_timezone, pm.role FROM users u
-           LEFT JOIN project_members pm ON pm.member_id = u.id
-             AND pm.project_id = $2 AND pm.is_active AND pm.deleted_at IS NULL
-           WHERE u.id = $1"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let (timezone_name, role) = member.ok_or(Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let (workspace_id, guest_view_all) = access::project_tenant(&db, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::NotFound)?;
+    let timezone_name = access::user_timezone(&db, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    // The actor is a project member past the gates; a missing membership
+    // (a NULL role off the old LEFT JOIN) stays the 500 it was.
+    let role = access::project_role_any_slug(&db, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     let timezone: Tz = timezone_name.parse().map_err(|_| Denial::ServerError)?;
     let guest_scoped = role == 5 && !guest_view_all;
     Ok(TenantContext {
@@ -714,11 +686,13 @@ impl Binder {
 }
 
 /// Render a kernel [`Condition`] to a `WHERE`-ready fragment plus binds.
-/// The `SELECT 1 WHERE` shell keeps user placeholders numbered from `$1`
-/// (`Expr::cust` emits no bind of its own).
+/// The `SELECT 1 WHERE` shell keeps user placeholders numbered from `$1`;
+/// the shell literal is a custom keyword — sea-query renders it bind-free,
+/// so no placeholder of its own leaks into the fragment.
 pub fn render_condition(cond: &Condition) -> (String, Vec<sea_query::Value>) {
     let mut stmt = SelectStatement::new();
-    stmt.expr(Expr::cust("1")).cond_where(cond.clone());
+    stmt.expr(Expr::custom_keyword("1"))
+        .cond_where(cond.clone());
     let (sql, values) = stmt.build(PostgresQueryBuilder);
     let fragment = sql
         .strip_prefix("SELECT 1 WHERE ")
@@ -773,7 +747,10 @@ pub async fn fetch_count(
         .fetch_one(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
-    row.try_get::<i64, _>(0).map_err(|_| Denial::ServerError)
+    // Every caller runs a COUNT aggregate; Postgres names it `count`.
+    // Decode by name, never by position (orm-migration.md §1).
+    row.try_get::<i64, _>("count")
+        .map_err(|_| Denial::ServerError)
 }
 
 // ---- filter stack -----------------------------------------------------------
@@ -838,6 +815,29 @@ pub fn filter_denial(error: pidash_db::filter::FilterError) -> Denial {
     Denial::BadFilter(message, code.to_owned())
 }
 
+/// A rich leaf's `IssueFilterSet` name: `field` plus the lookup suffix
+/// (`exact` has none).
+pub(crate) fn leaf_name(field: &str, lookup: pidash_db::filter::Lookup) -> String {
+    let suffix = match lookup {
+        pidash_db::filter::Lookup::Exact => return field.to_owned(),
+        pidash_db::filter::Lookup::In => "in",
+        pidash_db::filter::Lookup::Gt => "gt",
+        pidash_db::filter::Lookup::Gte => "gte",
+        pidash_db::filter::Lookup::Lt => "lt",
+        pidash_db::filter::Lookup::Lte => "lte",
+        pidash_db::filter::Lookup::Contains => "contains",
+        pidash_db::filter::Lookup::IContains => "icontains",
+        pidash_db::filter::Lookup::StartsWith => "startswith",
+        pidash_db::filter::Lookup::IStartsWith => "istartswith",
+        pidash_db::filter::Lookup::EndsWith => "endswith",
+        pidash_db::filter::Lookup::IEndsWith => "iendswith",
+        pidash_db::filter::Lookup::IExact => "iexact",
+        pidash_db::filter::Lookup::IsNull => "isnull",
+        pidash_db::filter::Lookup::Range => "range",
+    };
+    format!("{field}__{suffix}")
+}
+
 /// Compile one `filters`-param tree against `IssueFilterSet`: structure
 /// and shapes via the kernel tree, every leaf through
 /// [`pidash_db::filterset`] (the `_build_leaf_q` equivalent — the leaf
@@ -847,27 +847,7 @@ pub fn compile_filter_tree(
     tree: &pidash_db::filter::FilterTree,
     tz: &chrono_tz::Tz,
 ) -> Result<Condition, pidash_db::filter::FilterError> {
-    use pidash_db::filter::{FilterTree, Lookup};
-    fn leaf_name(field: &str, lookup: Lookup) -> String {
-        let suffix = match lookup {
-            Lookup::Exact => return field.to_owned(),
-            Lookup::In => "in",
-            Lookup::Gt => "gt",
-            Lookup::Gte => "gte",
-            Lookup::Lt => "lt",
-            Lookup::Lte => "lte",
-            Lookup::Contains => "contains",
-            Lookup::IContains => "icontains",
-            Lookup::StartsWith => "startswith",
-            Lookup::IStartsWith => "istartswith",
-            Lookup::EndsWith => "endswith",
-            Lookup::IEndsWith => "iendswith",
-            Lookup::IExact => "iexact",
-            Lookup::IsNull => "isnull",
-            Lookup::Range => "range",
-        };
-        format!("{field}__{suffix}")
-    }
+    use pidash_db::filter::FilterTree;
     match tree {
         FilterTree::And(children) => {
             let mut cond = Condition::all();
@@ -929,12 +909,10 @@ pub async fn filters_timezone(
     {
         return Ok(chrono_tz::UTC);
     }
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    let name = access::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -1231,201 +1209,6 @@ fn parse_datetime_param(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 // related manager to a join. (The annotation subqueries are different —
 // those query `.objects` managers directly, so they keep their guards.)
 
-/// Relation joins the list query can use: SQL table plus kernel alias.
-const RELATION_JOINS: &[(&str, &str, &str)] = &[
-    ("issue_assignees", "issue_assignee", "assignee_id"),
-    ("cycle_issues", "issue_cycle", "cycle_id"),
-    ("module_issues", "issue_module", "module_id"),
-    ("issue_mentions", "issue_mention", "mention_id"),
-    ("issue_labels", "label_issue", "label_id"),
-    ("issue_subscribers", "issue_subscribers", "subscriber_id"),
-];
-
-/// True when every `"alias".` reference in the filter SQL is an
-/// `IS NULL` / `IS NOT NULL` test (the `__isnull` predicates).
-fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
-    let marker = format!("\"{alias}\".");
-    let mut rest = where_sql;
-    while let Some(start) = rest.find(&marker) {
-        let after = &rest[start + marker.len()..];
-        let ident_len = after
-            .chars()
-            .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
-            .map(|char| char.len_utf8())
-            .sum::<usize>();
-        let tail = after[ident_len..].trim_start();
-        if !(tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")) {
-            return false;
-        }
-        rest = &after[ident_len..];
-    }
-    true
-}
-
-/// M2M group filters (`GROUP_FILTER_MAPPER`): grouped by this raw field
-/// forces an INNER join on that relation with the deleted guard.
-fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
-    let raw = match alias {
-        "issue_assignee" => "assignees__id",
-        "label_issue" => "labels__id",
-        "issue_module" => "issue_module__module_id",
-        _ => return false,
-    };
-    group_by == Some(raw) || sub_group_by == Some(raw)
-}
-
-/// Scalar subquery annotations shared by every list path
-/// (`apply_annotations` + the grouper array annotations).
-/// `unguarded_arrays` reproduces `IssueDetailEndpoint.apply_annotations` +
-/// `IssueListDetailSerializer`'s prefetch reads: the reverse managers run
-/// on the plain `objects` manager, so the array subqueries carry *no*
-/// soft-delete guard and the module one neither joins `modules` nor checks
-/// `scalar_counts` selects the empty-count rendering per path: Django
-/// uses two annotation shapes for these three counts and they differ
-/// exactly here (both verified with `str(qs.query)` on Django 4.2.30,
-/// `USE_TZ`, `TIME_ZONE="UTC"`).
-/// Scalar (`Func(F("id"), function="Count")`, not an Aggregate → no
-/// `GROUP BY`): `(SELECT Count(U0."id") ...)` always returns one row, so
-/// empty renders `0`. Used by `IssueListEndpoint.get`
-/// (`app/views/issue/base.py:121-141`) and
-/// `IssueDetailEndpoint.apply_annotations` (`base.py:999-1019`) — the
-/// `flat_list` and `detail_list` paths (`scalar_counts = true`, plain
-/// `COUNT`).
-/// Grouped (`Subquery(...values().annotate(count=Count()).values("count"))`
-/// → `GROUP BY`): zero related rows yield zero groups, so the scalar
-/// subquery is `NULL` → JSON `null`. Used by
-/// `IssueViewSet.apply_annotations` (`base.py:225-251`) and
-/// `IssuePaginatedViewSet.get_queryset` (`base.py:839-866`) — the
-/// `list_issues` (flat + grouped) and `v2_list` paths
-/// (`scalar_counts = false`, `NULLIF(COUNT(*), 0)`).
-/// Array guards mirror the managers Django queries through:
-/// `IssueLabel`/`IssueAssignee`/`ModuleIssue.objects` are soft-deletion
-/// managers (deleted rows excluded everywhere); the v2 assignee filter
-/// adds the active-member join; the grouper and the v2 view add the
-/// archived-module guard, while the detail endpoint's
-/// `Prefetch(...objects.all())` carries the manager's deleted filter only
-/// (`module_archived_guard = false` there). The extra `m.deleted_at`
-/// guard on modules is a disclosed divergence (shared helper, all paths).
-fn annotation_selects(
-    arrays: bool,
-    skip_array: Option<&str>,
-    assignee_active_member: bool,
-    module_archived_guard: bool,
-    scalar_counts: bool,
-) -> String {
-    let count = if scalar_counts {
-        "COUNT(*)"
-    } else {
-        "NULLIF(COUNT(*), 0)"
-    };
-    let mut selects = format!(
-        r#"issue.id, issue.name, issue.state_id, issue.sort_order, issue.completed_at,
-        issue.estimate_point_id AS estimate_point, issue.priority, issue.start_date,
-        issue.target_date, issue.sequence_id, issue.project_id, issue.parent_id,
-        (SELECT ci.cycle_id FROM cycle_issues ci
-          WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1) AS cycle_id,
-        (SELECT {count} FROM issue_links il
-          WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS link_count,
-        (SELECT {count} FROM file_assets fa
-          WHERE fa.issue_id = issue.id AND fa.entity_type = 'ISSUE_ATTACHMENT'
-            AND fa.deleted_at IS NULL) AS attachment_count,
-        (SELECT {count} FROM issues c
-           LEFT JOIN states cs ON cs.id = c.state_id AND cs.deleted_at IS NULL
-           JOIN projects cp ON cp.id = c.project_id
-          WHERE c.parent_id = issue.id AND c.deleted_at IS NULL
-            AND (cs."group" IS NULL OR NOT (cs."group" = 'triage'))
-            AND c.archived_at IS NULL AND cp.archived_at IS NULL AND c.is_draft = FALSE
-        ) AS sub_issues_count,
-        issue.created_at, issue.updated_at, issue.created_by_id AS created_by,
-        issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at,
-        issue.deleted_at, state."group" AS "state__group""#,
-    );
-    if arrays {
-        if skip_array != Some("label_ids") {
-            selects.push_str(
-                r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT il.label_id), '{}'::uuid[])
-           FROM issue_labels il
-          WHERE il.issue_id = issue.id AND il.deleted_at IS NULL) AS label_ids"#,
-            );
-        }
-        if skip_array != Some("assignee_ids") {
-            if assignee_active_member {
-                selects.push_str(
-                    r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[])
-           FROM issue_assignees ia
-          WHERE ia.issue_id = issue.id AND ia.deleted_at IS NULL
-            AND EXISTS (SELECT 1 FROM project_members pm
-                         WHERE pm.member_id = ia.assignee_id
-                           AND pm.is_active AND pm.deleted_at IS NULL)) AS assignee_ids"#,
-                );
-            } else {
-                selects.push_str(
-                    r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT ia.assignee_id), '{}'::uuid[])
-           FROM issue_assignees ia
-          WHERE ia.issue_id = issue.id AND ia.deleted_at IS NULL) AS assignee_ids"#,
-                );
-            }
-        }
-        if skip_array != Some("module_ids") {
-            if module_archived_guard {
-                selects.push_str(
-                    r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
-           FROM module_issues mi JOIN modules m ON m.id = mi.module_id
-          WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL
-            AND m.archived_at IS NULL AND m.deleted_at IS NULL) AS module_ids"#,
-                );
-            } else {
-                selects.push_str(
-                    r#",
-        (SELECT COALESCE(ARRAY_AGG(DISTINCT mi.module_id), '{}'::uuid[])
-           FROM module_issues mi
-          WHERE mi.issue_id = issue.id AND mi.deleted_at IS NULL) AS module_ids"#,
-                );
-            }
-        }
-    }
-    selects
-}
-
-/// `WHERE` preamble: tenant scope plus the `issue_objects` manager
-/// (`SoftDeletionManager` + triage/archived/draft exclusions).
-/// `detail` selects the `IssueDetailEndpoint` permission model: the
-/// `Exists` membership subquery (passed separately via `extra`) replaces
-/// the guest `created_by` scoping, so the preamble skips it. The flat
-/// `issues/list/` endpoint never scopes guests either
-/// (`IssueListEndpoint.get` has no role-5 check), so it passes
-/// `guest_scope = false` too.
-/// The triage exclusion keeps NULL-state rows: `state` is a nullable FK
-/// and Django's `exclude(state__group=TRIAGE)` retains them via
-/// `split_exclude`'s `IS NULL` disjunct; a bare `NOT (group = 'triage')`
-/// over the left join would drop them (three-valued logic).
-fn base_where(
-    binder: &mut Binder,
-    gate: &Gate,
-    slug: &str,
-    detail: bool,
-    guest_scope: bool,
-) -> String {
-    let slug_holder = binder.bind_string(slug.to_owned());
-    let project_holder = binder.bind_uuid(gate.project_id);
-    let mut where_sql = format!(
-        r#"workspaces.slug = {slug_holder} AND issue.project_id = {project_holder}
-        AND issue.deleted_at IS NULL
-        AND (state."group" IS NULL OR NOT (state."group" = 'triage'))
-        AND issue.archived_at IS NULL AND project.archived_at IS NULL
-        AND issue.is_draft = FALSE"#
-    );
-    if gate.guest_scoped && !detail && guest_scope {
-        let user_holder = binder.bind_uuid(gate.user_id);
-        where_sql.push_str(&format!(" AND issue.created_by_id = {user_holder}"));
-    }
-    where_sql
-}
-
 /// Full FROM…WHERE for the filtered issue set. Returns the SQL through
 /// `LIMIT/OFFSET`-free (callers add windows, counts, ordering) and
 /// reports which relation aliases render in the filter SQL (for the
@@ -1479,114 +1262,6 @@ impl FilterLayers {
         legacy: false,
         guest_scope: false,
     };
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn filtered_set(
-    gate: &Gate,
-    slug: &str,
-    query: &QueryMap,
-    group_by: Option<&str>,
-    sub_group_by: Option<&str>,
-    extra: Option<(String, Vec<sea_query::Value>)>,
-    detail: bool,
-    layers: FilterLayers,
-) -> Result<FilteredSet, Denial> {
-    let mut binder = Binder::new();
-    let preamble = base_where(&mut binder, gate, slug, detail, layers.guest_scope);
-    let mut fragments: Vec<String> = vec![preamble];
-    // Rich filters (`filters` JSON via ComplexFilterBackend + IssueFilterSet).
-    let mut complex_sql = String::new();
-    if layers.rich {
-        if let Some(cond) = complex_filter(query, &gate.timezone)? {
-            let (fragment, values) = render_condition(&cond);
-            complex_sql = binder.splice(&fragment, values);
-        }
-    }
-    // Legacy filters. Relative dates resolve against the UTC date, exactly
-    // like `timezone.now().date()` in `issue_filters.py` (`now()` is always
-    // UTC; the request tz activation only affects `localtime()`). The
-    // `__date` truncations use the gate's actor zone instead (Django's
-    // `TruncDate` under the `TimezoneMixin`-activated user zone).
-    let mut legacy_sql_text = String::new();
-    if layers.legacy {
-        let flat: HashMap<String, String> = query
-            .keys()
-            .filter_map(|key| query_last(query, key).map(|last| (key.clone(), last)))
-            .collect();
-        let today = chrono::Utc::now().date_naive();
-        let legacy = pidash_db::issue_filters::issue_filters_get(&flat, "", today)
-            .map_err(|_| Denial::ServerError)?;
-        for (name, value) in legacy.predicates() {
-            let fragment = legacy_sql(&mut binder, name, value, &gate.timezone)?;
-            if legacy_sql_text.is_empty() {
-                legacy_sql_text = fragment;
-            } else {
-                legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
-            }
-        }
-    }
-    if !complex_sql.is_empty() {
-        fragments.push(complex_sql);
-    }
-    if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
-    }
-    if let Some((fragment, binds)) = extra {
-        fragments.push(binder.splice(&fragment, binds));
-    }
-    let where_sql = fragments.join(" AND ");
-    // INNER when referenced by a positive condition or m2m-grouped
-    // (Django's `filter()` join); LEFT when every reference is an
-    // `IS [NOT] NULL` test (Django's `__isnull` join) or unreferenced.
-    // Joined tables carry no soft-delete guard: `filter()` never applies a
-    // related manager to a join, so `filter(labels__in=...)` matches
-    // soft-deleted link rows and `labels__isnull=False` keeps issues whose
-    // only links are deleted.
-    let mut joins = String::new();
-    let mut referenced = Vec::new();
-    if layers.rich || layers.legacy {
-        for (table, alias, key_column) in RELATION_JOINS {
-            let marker = format!("\"{alias}\".");
-            let mentioned = where_sql.contains(&marker);
-            let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
-            let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
-            let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
-            if used {
-                referenced.push(*alias);
-            }
-            let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
-            joins.push_str(&format!(
-                " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
-            ));
-            let _ = key_column;
-        }
-        let intake_used = where_sql.contains("\"issue_intake\".");
-        joins.push_str(&format!(
-            " {} intake_issues AS issue_intake ON issue_intake.issue_id = issue.id",
-            if intake_used {
-                "INNER JOIN"
-            } else {
-                "LEFT JOIN"
-            }
-        ));
-        if intake_used {
-            referenced.push("issue_intake");
-        }
-    }
-    let from_where = format!(
-        r#"FROM issues AS issue
-        JOIN projects AS project ON project.id = issue.project_id
-        JOIN workspaces ON workspaces.id = issue.workspace_id
-        LEFT JOIN states AS state ON state.id = issue.state_id AND state.deleted_at IS NULL
-        {joins}
-        WHERE {where_sql}"#
-    );
-    Ok(FilteredSet {
-        from_where,
-        values: binder.values(),
-        referenced,
-    })
 }
 
 // ---- ordering ---------------------------------------------------------------
@@ -1863,14 +1538,6 @@ fn quote_json(rendered: String) -> String {
 // ---- group values ---------------------------------------------------------------
 // Port of `issue_group_values`: the known group buckets per field.
 
-/// `state_id` group values (`utils/grouper.py::issue_group_values`,
-/// `State.objects.filter(is_triage=False, ...)`): the explicit
-/// `is_triage = FALSE` plus `StateManager`'s `NOT (group = 'triage')`
-/// (`db/models/state.py:79-83`). `$1` = slug, `$2` = project.
-const STATE_GROUP_VALUES_SQL: &str = r#"SELECT s.id FROM states s JOIN workspaces w ON w.id = s.workspace_id
-                   WHERE s.is_triage = FALSE AND NOT (s."group" = 'triage')
-                   AND w.slug = $1 AND s.project_id = $2 AND s.deleted_at IS NULL"#;
-
 /// `SELECT` for the `target_date`/`start_date`/`created_by` group-values
 /// branches (`utils/grouper.py::issue_group_values`):
 /// `SELECT DISTINCT {column}, issue.created_at ... ORDER BY issue.created_at DESC`.
@@ -1898,101 +1565,7 @@ pub async fn group_values(
     project_id: &uuid::Uuid,
     filtered: &FilteredSet,
 ) -> Result<Vec<String>, Denial> {
-    // Binds for a fresh statement: slug + project first (same order).
-    let scalar_text = |rows: Vec<(Option<String>,)>| {
-        rows.into_iter()
-            .filter_map(|row| row.0)
-            .collect::<Vec<String>>()
-    };
     match field {
-        "state_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(STATE_GROUP_VALUES_SQL)
-                .bind(slug)
-                .bind(project_id)
-                .fetch_all(pool)
-                .await
-                .map_err(|_| Denial::ServerError)?;
-            Ok(rows.into_iter().map(|row| row.0.to_string()).collect())
-        }
-        "labels__id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT l.id FROM labels l JOIN workspaces w ON w.id = l.workspace_id
-                   WHERE w.slug = $1 AND l.project_id = $2 AND l.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            let mut out: Vec<String> = rows.into_iter().map(|row| row.0.to_string()).collect();
-            out.push("None".to_owned());
-            Ok(out)
-        }
-        "assignees__id" => {
-            let rows: Vec<(Option<uuid::Uuid>,)> = sqlx::query_as(
-                r#"SELECT pm.member_id FROM project_members pm
-                   JOIN workspaces w ON w.id = pm.workspace_id
-                   WHERE w.slug = $1 AND pm.project_id = $2 AND pm.is_active
-                   AND pm.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            Ok(scalar_text(
-                rows.into_iter()
-                    .map(|row| (row.0.map(|id| id.to_string()),))
-                    .collect(),
-            ))
-        }
-        "issue_module__module_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT m.id FROM modules m JOIN workspaces w ON w.id = m.workspace_id
-                   WHERE w.slug = $1 AND m.project_id = $2 AND m.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            let mut out: Vec<String> = rows.into_iter().map(|row| row.0.to_string()).collect();
-            out.push("None".to_owned());
-            Ok(out)
-        }
-        "cycle_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT c.id FROM cycles c JOIN workspaces w ON w.id = c.workspace_id
-                   WHERE w.slug = $1 AND c.project_id = $2 AND c.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .bind(project_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            let mut out: Vec<String> = rows.into_iter().map(|row| row.0.to_string()).collect();
-            out.push("None".to_owned());
-            Ok(out)
-        }
-        "project_id" => {
-            let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-                   WHERE w.slug = $1 AND p.deleted_at IS NULL"#,
-            )
-            .bind(slug)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            Ok(rows.into_iter().map(|row| row.0.to_string()).collect())
-        }
-        "priority" => Ok(PRIORITY_VALUES
-            .iter()
-            .map(|value| (*value).to_owned())
-            .collect()),
-        "state__group" => Ok(STATE_GROUP_VALUES
-            .iter()
-            .map(|value| (*value).to_owned())
-            .collect()),
         "target_date" | "start_date" | "created_by" => {
             let column = match field {
                 "target_date" => "issue.target_date::text",
@@ -2013,6 +1586,96 @@ pub async fn group_values(
             }
             Ok(out)
         }
+        _ => known_group_values(pool, field, slug, project_id).await,
+    }
+}
+
+/// The group buckets that do not depend on the filtered set (every field
+/// but `target_date` / `start_date` / `created_by`); unknown fields have
+/// none.
+pub async fn known_group_values(
+    pool: &sqlx::PgPool,
+    field: &str,
+    slug: &str,
+    project_id: &uuid::Uuid,
+) -> Result<Vec<String>, Denial> {
+    match field {
+        "state_id" => {
+            let rows = access::non_triage_state_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            Ok(rows.into_iter().map(|id| id.to_string()).collect())
+        }
+        "labels__id" => {
+            let rows = access::label_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let mut out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
+            out.push("None".to_owned());
+            Ok(out)
+        }
+        "assignees__id" => {
+            let rows = access::member_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            Ok(rows
+                .into_iter()
+                .flatten()
+                .map(|id| id.to_string())
+                .collect())
+        }
+        "issue_module__module_id" => {
+            let rows = access::module_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let mut out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
+            out.push("None".to_owned());
+            Ok(out)
+        }
+        "cycle_id" => {
+            let rows = access::cycle_ids(
+                &pidash_db::pool::sea_orm_connection(pool),
+                slug,
+                *project_id,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            let mut out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
+            out.push("None".to_owned());
+            Ok(out)
+        }
+        "project_id" => {
+            let rows =
+                access::workspace_project_ids(&pidash_db::pool::sea_orm_connection(pool), slug)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            let out: Vec<String> = rows.into_iter().map(|id| id.to_string()).collect();
+            Ok(out)
+        }
+        "priority" => Ok(PRIORITY_VALUES
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect()),
+        "state__group" => Ok(STATE_GROUP_VALUES
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect()),
         _ => Ok(Vec::new()),
     }
 }
@@ -2128,13 +1791,6 @@ pub async fn epic_list_issues(
     list_issues_inner(state, slug, project_id, &query, extension, true).await
 }
 
-/// The epic boundary as a WHERE fragment (`epics.py:65-66`): Django's
-/// `filter(type__is_epic=True)` inner-joins `issue_types` with no
-/// related-manager guard — the EXISTS below is that join (the
-/// single-letter alias keeps the relation-join marker scan quiet).
-const EPIC_ONLY_FRAGMENT: &str =
-    "EXISTS(SELECT 1 FROM issue_types AS t WHERE t.id = issue.type_id AND t.is_epic)";
-
 /// The `IssueViewSet.list` pipeline after extraction: `epic_only`
 /// adds the epic boundary to the filtered set (`epics.py:65-66`).
 async fn list_issues_inner(
@@ -2150,21 +1806,18 @@ async fn list_issues_inner(
     let order_spec = order_sql(&context.params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
-    let updated_gt = updated_at_gt(query)?;
+    let updated_gt = list_engine::updated_at_gt(query)?;
     // The epics collection filters `type__is_epic=True`
     // (`epics.py:65-66`): Django inner-joins with no related-manager
     // guard, so untyped rows fall outside while rows under inactive or
-    // soft-deleted epic types still match — the EXISTS below is that
-    // join as a WHERE fragment (no binds of its own).
+    // soft-deleted epic types still match — the EXISTS is that join.
     let extra = match (updated_gt, epic_only) {
-        ((Some(fragment), binds), true) => {
-            Some((format!("{fragment} AND {EPIC_ONLY_FRAGMENT}"), binds))
-        }
-        ((Some(fragment), binds), false) => Some((fragment, binds)),
-        ((None, _), true) => Some((EPIC_ONLY_FRAGMENT.to_owned(), Vec::new())),
-        ((None, _), false) => None,
+        (Some(updated), true) => Some(updated.and(list_engine::epic_only())),
+        (Some(updated), false) => Some(updated),
+        (None, true) => Some(list_engine::epic_only()),
+        (None, false) => None,
     };
-    let filtered = filtered_set(
+    let set = list_engine::issue_set(
         &context.gate,
         &context.slug,
         query,
@@ -2179,13 +1832,12 @@ async fn list_issues_inner(
     // `FROM` always carries the unfiltered `issue_cycle` bridge join,
     // which the cycle-name traversal reuses like Django (fresh joins
     // would fan every link out twice).
-    let key = order_key(
+    let key = list_engine::order_expr(
         &order_spec.out_param,
         &context.params.order_by,
         Some("issue_cycle"),
         true,
     )?;
-    let direction = if key.descending { "DESC" } else { "ASC" };
     // `per_page` already validated by the strict preamble; the cursor
     // parses here with the paginator kernel's exact errors.
     let per_page = context.params.per_page;
@@ -2196,44 +1848,58 @@ async fn list_issues_inner(
     if let Some(group) = group_by.clone() {
         return grouped_response(
             &context,
-            &filtered,
+            &set,
             &group,
             sub_group_by.clone(),
-            &key.expr,
-            direction,
+            &key,
             per_page,
             cursor,
-            &key.joins,
         )
         .await;
     }
     // Grouped `Count` annotations: empty counts render NULL.
-    let selects = annotation_selects(true, None, false, true, false);
     let fields = on_results_fields(None, None);
     flat_paginated_response(
-        &context, &filtered, &key.expr, direction, per_page, cursor, selects, fields, false, None,
-        &key.joins,
+        &context,
+        &set,
+        &key,
+        per_page,
+        cursor,
+        LIST_ANNOTATIONS,
+        fields,
+        false,
+        None,
     )
     .await
 }
 
+/// The project list's annotations (`IssueViewSet.apply_annotations`):
+/// grouped `Count` subqueries (empty → `NULL`), guarded arrays with the
+/// archived-module guard.
+pub(crate) const LIST_ANNOTATIONS: list_engine::Annotations = list_engine::Annotations {
+    arrays: true,
+    skip_array: None,
+    assignee_active_member: false,
+    module_archived_guard: true,
+    scalar_counts: false,
+};
+
 /// The flat (non-grouped) branch of `IssueViewSet.list`, through
 /// `issue_on_results` (hence `state__group`, no `deleted_at`) — shared
 /// with `issues-detail/`, which passes the `IssueListDetailSerializer`
-/// selects (unguarded arrays) and field list (no `state__group`).
+/// annotations (no archived-module guard, scalar counts) and field list
+/// (no `state__group`).
 #[allow(clippy::too_many_arguments)]
-async fn flat_paginated_response(
+pub(crate) async fn flat_paginated_response(
     context: &ListContext,
-    filtered: &FilteredSet,
-    key_expr: &str,
-    direction: &str,
+    set: &list_engine::IssueSet,
+    key: &list_engine::OrderExpr,
     per_page: i64,
     cursor: crate::paginator::Cursor,
-    selects: String,
+    annotations: list_engine::Annotations,
     fields: Vec<String>,
     shift: bool,
     expands: Option<&[String]>,
-    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         apply_offset_window, max_hits, next_cursor, offset_window, prev_cursor,
@@ -2244,22 +1910,21 @@ async fn flat_paginated_response(
     // The cycle-name traversal joins ride on the row query only: fan-out
     // rows differ in `__order_key`, so `DISTINCT` keeps one row per link
     // like Django, while the totals below stay distinct-issue counts.
-    let row_where = with_order_joins(&filtered.from_where, order_joins);
-    let inner = format!(
-        "SELECT DISTINCT {selects}, ({key_expr}) AS __order_key {row_where} ORDER BY __order_key {direction} NULLS LAST, issue.created_at DESC LIMIT {} OFFSET {}",
+    let page_stmt = list_engine::flat_page(
+        set,
+        annotations,
+        key,
         window.stop - window.offset,
-        window.offset
-    );
-    let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
+        window.offset,
+    )?;
+    let rows = list_engine::fetch_rows(&context.pool, page_stmt).await?;
     let has_more = rows.len() as i64 > limit;
     let page: Vec<Map<String, Value>> = apply_offset_window(&rows, limit)
         .map_err(page_denial)?
         .into_iter()
         .collect();
-    let total_count = {
-        let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
-        fetch_count(&context.pool, &sql, filtered.values.clone()).await?
-    };
+    let total_count =
+        list_engine::fetch_n(&context.pool, &list_engine::count_distinct(set)).await?;
     let next = next_cursor(limit, window.page, has_more);
     let prev = prev_cursor(limit, window.page);
     let shaped: Vec<String> = match expands {
@@ -2318,16 +1983,14 @@ pub fn page_denial(error: crate::paginator::PageError) -> Denial {
 /// (`process_grouped_results` / `process_sub_grouped_results`); `count`
 /// is the pre-grouping window length, exactly like `CursorResult.__len__`.
 #[allow(clippy::too_many_arguments)]
-async fn grouped_response(
+pub(crate) async fn grouped_response(
     context: &ListContext,
-    filtered: &FilteredSet,
+    set: &list_engine::IssueSet,
     group_by: &str,
     sub_group_by: Option<String>,
-    key_expr: &str,
-    direction: &str,
+    key: &list_engine::OrderExpr,
     per_page: i64,
     cursor: crate::paginator::Cursor,
-    order_joins: &str,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -2335,31 +1998,23 @@ async fn grouped_response(
     };
     let limit = per_page.min(1000);
     let window = grouped_window(limit, cursor.offset, cursor.value, None).map_err(page_denial)?;
-    let group_expr = group_expression(group_by)?;
     // Grouped `Count` annotations: empty counts render NULL.
-    let selects = annotation_selects(true, skip_array_for(group_by), false, true, false);
-    let member_select = group_member_select(group_by);
-    let sub_expr = match &sub_group_by {
-        Some(sub) => Some(group_expression(sub)?),
-        None => None,
-    };
-    let partition = match &sub_expr {
-        Some(sub) => format!("{group_expr}, {sub}"),
-        None => group_expr.clone(),
+    let annotations = list_engine::Annotations {
+        skip_array: skip_array_for(group_by),
+        ..LIST_ANNOTATIONS
     };
     // The cycle-name traversal joins ride on the row query: the window
     // numbers fan-out rows like Django's, and the final order is global.
-    let row_where = with_order_joins(&filtered.from_where, order_joins);
-    let inner = format!(
-        "SELECT * FROM (SELECT DISTINCT {selects}{member_select}, ({key_expr}) AS __order_key,
-         ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY ({key_expr}) {direction} NULLS LAST, issue.created_at DESC) AS __rn
-         {row_where}) __w
-         WHERE __w.__rn > {offset} AND __w.__rn <= {stop}
-         ORDER BY __w.__order_key {direction} NULLS LAST, __w.created_at DESC",
-        offset = window.offset,
-        stop = window.stop,
-    );
-    let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
+    let page_stmt = list_engine::grouped_page(
+        set,
+        group_by,
+        sub_group_by.as_deref(),
+        annotations,
+        key,
+        window.offset,
+        window.stop,
+    )?;
+    let rows = list_engine::fetch_rows(&context.pool, page_stmt).await?;
     let has_more = rows.iter().any(|row| {
         row.get("__rn")
             .and_then(|value| value.as_i64())
@@ -2379,9 +2034,9 @@ async fn grouped_response(
     let window_empty = page.is_empty();
     let window_len = page.len();
     // Totals over the filtered set with the intake/archived/draft count filter.
-    let count_filter =
-        "((issue_intake.status = ANY('{1,-1,2}')) OR issue_intake.id IS NULL) AND issue.archived_at IS NULL AND issue.is_draft = FALSE";
-    let group_totals = group_total_pairs(context, filtered, &group_expr, count_filter).await?;
+    let group_totals =
+        list_engine::fetch_group_totals(&context.pool, &list_engine::group_totals(set, group_by)?)
+            .await?;
     if !window_empty && group_totals.is_empty() {
         // `...order_by("-count")[0]` on an empty group list: IndexError.
         return Err(Denial::ServerError);
@@ -2393,34 +2048,32 @@ async fn grouped_response(
     // the order-joined rows (pinned live: fan-out links count, so a
     // 5-issue list with two doubled issues answers 7). Without traversal
     // joins the sets coincide and the distinct count stands.
-    let total_count = {
-        let sql = if order_joins.is_empty() {
-            format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where)
-        } else {
-            format!(
-                "SELECT COUNT(*) {}",
-                with_order_joins(&filtered.from_where, order_joins)
-            )
-        };
-        fetch_count(&context.pool, &sql, filtered.values.clone()).await?
+    let total_stmt = if key.joins.is_empty() {
+        list_engine::count_distinct(set)
+    } else {
+        list_engine::count_rows(set, key.joins)
     };
+    let total_count = list_engine::fetch_n(&context.pool, &total_stmt).await?;
     let fields = on_results_fields(Some(group_by), sub_group_by.as_deref());
     let shaped: Vec<Map<String, Value>> = page
         .iter()
         .map(|row| shape_map(row, &fields, &context.gate.timezone, false))
         .collect();
-    let group_fields = group_values(
+    let group_fields = list_engine::group_values(
         &context.pool,
         group_by,
         &context.slug,
         &context.gate.project_id,
-        filtered,
+        set,
     )
     .await?;
-    let results_value = match &sub_expr {
+    let results_value = match &sub_group_by {
         Some(sub) => {
-            let sub_pairs =
-                sub_total_pairs(context, filtered, &group_expr, sub, count_filter).await?;
+            let sub_pairs = list_engine::fetch_sub_totals(
+                &context.pool,
+                &list_engine::sub_totals(set, group_by, sub)?,
+            )
+            .await?;
             let (group_totals_map, sub_totals_map) = sub_total_dicts(&group_totals, &sub_pairs);
             let _ = group_totals_map;
             let seeded = sub_field_dict(&group_fields, &totals, &sub_totals_map)
@@ -2428,13 +2081,8 @@ async fn grouped_response(
             let Value::Object(cells) = seeded else {
                 return Err(Denial::ServerError);
             };
-            process_sub_grouped_results(
-                &shaped,
-                group_by,
-                &sub_group_by.clone().unwrap_or_default(),
-                cells,
-            )
-            .map_err(|_| Denial::ServerError)?
+            process_sub_grouped_results(&shaped, group_by, sub, cells)
+                .map_err(|_| Denial::ServerError)?
         }
         None => process_grouped_results(&shaped, group_by, &group_fields, &totals)
             .map_err(|_| Denial::ServerError)?,
@@ -2520,24 +2168,6 @@ fn shape_json_value(field: &str, value: &Value, timezone: &Tz, shift: bool) -> V
     }
 }
 
-/// The SQL expression a group field partitions by.
-fn group_expression(field: &str) -> Result<String, Denial> {
-    Ok(match field {
-        "labels__id" => "label_issue.label_id".to_owned(),
-        "assignees__id" => "issue_assignee.assignee_id".to_owned(),
-        "issue_module__module_id" => "issue_module.module_id".to_owned(),
-        "state_id" => "issue.state_id".to_owned(),
-        "priority" => "issue.priority".to_owned(),
-        "cycle_id" => "(SELECT ci.cycle_id FROM cycle_issues ci WHERE ci.issue_id = issue.id AND ci.deleted_at IS NULL LIMIT 1)".to_owned(),
-        "project_id" => "issue.project_id".to_owned(),
-        "state__group" => "state.\"group\"".to_owned(),
-        "target_date" => "issue.target_date".to_owned(),
-        "start_date" => "issue.start_date".to_owned(),
-        "created_by" => "issue.created_by_id".to_owned(),
-        _ => return Err(Denial::ServerError),
-    })
-}
-
 /// The array annotation the grouper skips for an m2m group field.
 fn skip_array_for(group_by: &str) -> Option<&'static str> {
     match group_by {
@@ -2546,70 +2176,6 @@ fn skip_array_for(group_by: &str) -> Option<&'static str> {
         "issue_module__module_id" => Some("module_ids"),
         _ => None,
     }
-}
-
-/// Extra select carrying the raw m2m group key per joined row.
-fn group_member_select(group_by: &str) -> &'static str {
-    match group_by {
-        "labels__id" => ", label_issue.label_id AS \"labels__id\"",
-        "assignees__id" => ", issue_assignee.assignee_id AS \"assignees__id\"",
-        "issue_module__module_id" => ", issue_module.module_id AS \"issue_module__module_id\"",
-        _ => "",
-    }
-}
-
-/// `(group, filtered count)` pairs for the totals dict.
-async fn group_total_pairs(
-    context: &ListContext,
-    filtered: &FilteredSet,
-    group_expr: &str,
-    count_filter: &str,
-) -> Result<Vec<(String, i64)>, Denial> {
-    let sql = format!(
-        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COUNT(DISTINCT issue.id) FILTER (WHERE {strip_and}) AS n {} GROUP BY 1",
-        filtered.from_where,
-        strip_and = count_filter.strip_prefix("AND ").unwrap_or(count_filter),
-    );
-    let query = bind_all(&sql, filtered.values.clone())?;
-    let rows = query
-        .fetch_all(&context.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let bucket: String = row.try_get("bucket").map_err(|_| Denial::ServerError)?;
-        let count: i64 = row.try_get("n").map_err(|_| Denial::ServerError)?;
-        out.push((bucket, count));
-    }
-    Ok(out)
-}
-
-/// `(group, sub, count)` pairs for the nested sub-totals.
-async fn sub_total_pairs(
-    context: &ListContext,
-    filtered: &FilteredSet,
-    group_expr: &str,
-    sub_expr: &str,
-    count_filter: &str,
-) -> Result<Vec<(String, String, i64)>, Denial> {
-    let sql = format!(
-        "SELECT COALESCE(({group_expr})::text, 'None') AS bucket, COALESCE(({sub_expr})::text, 'None') AS sub, COUNT(DISTINCT issue.id) FILTER (WHERE {strip_and}) AS n {} GROUP BY 1, 2",
-        filtered.from_where,
-        strip_and = count_filter.strip_prefix("AND ").unwrap_or(count_filter),
-    );
-    let query = bind_all(&sql, filtered.values.clone())?;
-    let rows = query
-        .fetch_all(&context.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let bucket: String = row.try_get("bucket").map_err(|_| Denial::ServerError)?;
-        let sub: String = row.try_get("sub").map_err(|_| Denial::ServerError)?;
-        let count: i64 = row.try_get("n").map_err(|_| Denial::ServerError)?;
-        out.push((bucket, sub, count));
-    }
-    Ok(out)
 }
 
 /// Whether the pagination window itself is empty (`if results:` in
@@ -2641,19 +2207,13 @@ pub async fn flat_list(
     let order_spec = order_sql(&context.params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
-    let mut extra_binder = Binder::new();
-    let mut holders = Vec::with_capacity(validated.len());
-    for id in validated {
-        holders.push(extra_binder.bind_uuid(id));
-    }
-    let extra = format!("issue.id IN ({})", holders.join(","));
-    let filtered = filtered_set(
+    let set = list_engine::issue_set(
         &context.gate,
         &context.slug,
         &query,
         context.params.group_by.as_deref(),
         context.params.sub_group_by.as_deref(),
-        Some((extra, extra_binder.values())),
+        Some(list_engine::id_in(validated)),
         false,
         FilterLayers::NO_GUEST,
     )?;
@@ -2668,12 +2228,10 @@ pub async fn flat_list(
     // paginator re-ordering, no `NULLS LAST` (Postgres defaults apply).
     // The cycle-name traversal joins ride on the row query's `FROM`, so a
     // multi-linked issue fans out into one row per link like Django.
-    let (order_clause, order_joins) = flat_order_sql(&order_spec, &context.params.order_by)?;
     // Scalar `Func(Count)` annotations: empty counts render 0.
-    let selects = annotation_selects(true, None, false, true, true);
-    let row_where = with_order_joins(&filtered.from_where, &order_joins);
-    let inner = format!("SELECT {selects} {row_where} ORDER BY {order_clause}");
-    let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
+    let rows_stmt =
+        list_engine::flat_list_rows(&set, &order_spec.out_param, &context.params.order_by)?;
+    let rows = list_engine::fetch_rows(&context.pool, rows_stmt).await?;
     // The flat `.values()` shape: 26 keys with `deleted_at`, no `state__group`.
     let fields: Vec<String> = LIST_VALUES_FIELDS
         .iter()
@@ -2731,12 +2289,10 @@ async fn serializer_is_epic(pool: &sqlx::PgPool, raw: Option<&Value>) -> Result<
     let id = text
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::ServerError)?;
-    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    access::issue_type_is_epic(&pidash_db::pool::sea_orm_connection(pool), id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 /// The flat `fields=`/`expand=` branch: `IssueSerializer(queryset, ...)`
@@ -2754,43 +2310,21 @@ async fn serializer_list(
     query: &QueryMap,
     validated: Vec<uuid::Uuid>,
 ) -> HandlerResult {
-    let mut extra_binder = Binder::new();
-    let mut holders = Vec::with_capacity(validated.len());
-    for id in validated {
-        holders.push(extra_binder.bind_uuid(id));
-    }
-    let extra = format!("issue.id IN ({})", holders.join(","));
-    let filtered = filtered_set(
+    let set = list_engine::issue_set(
         &context.gate,
         &context.slug,
         query,
         None,
         None,
-        Some((extra, extra_binder.values())),
+        Some(list_engine::id_in(validated)),
         false,
         FilterLayers::SERIALIZER,
     )?;
     // `is_synced`: empty `external_source` short-circuits false before any
     // query; otherwise either sync table holds a live row (both use
     // soft-deletion managers, so deleted rows do not count).
-    let selects = r#"issue.id, issue.workspace_id, issue.name, issue.state_id, issue.sort_order,
-        issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority,
-        issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id,
-        issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id,
-        issue.agent_executor, issue.created_at, issue.updated_at,
-        issue.created_by_id AS created_by, issue.updated_by_id AS updated_by,
-        issue.is_draft, issue.archived_at,
-        (CASE WHEN issue.external_source IS NULL OR issue.external_source = '' THEN FALSE
-         ELSE (EXISTS (SELECT 1 FROM git_issue_syncs g
-                       WHERE g.issue_id = issue.id AND g.deleted_at IS NULL)
-            OR EXISTS (SELECT 1 FROM github_issue_syncs gh
-                       WHERE gh.issue_id = issue.id AND gh.deleted_at IS NULL))
-         END) AS is_synced"#;
-    let inner = format!(
-        "SELECT {selects} {} ORDER BY issue.created_at DESC",
-        filtered.from_where
-    );
-    let mut rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
+    let mut rows =
+        list_engine::fetch_rows(&context.pool, list_engine::serializer_rows(&set)).await?;
     let fields: Vec<String> = SERIALIZER_FIELDS
         .iter()
         .map(|name| (*name).to_owned())
@@ -2868,80 +2402,6 @@ fn serializer_row_map(
     Ok(map)
 }
 
-/// `ORDER BY` for the unpaginated flat endpoint: the rewritten branches
-/// carry complete SQL; the default branch resolves the raw param without
-/// the paginator's `NULLS LAST` or forced tiebreak.
-fn flat_order_sql(order_spec: &OrderSpec, orig_param: &str) -> Result<(String, String), Denial> {
-    let out = order_spec.out_param.as_str();
-    if out == "priority_order"
-        || out == "-priority_order"
-        || out == "state_order"
-        || out == "-state_order"
-    {
-        return Ok((order_spec.order_by_sql.clone(), String::new()));
-    }
-    if out == "min_values" || out == "-min_values" {
-        let descending = out.starts_with('-');
-        let sub = min_order_subquery(orig_param.trim_start_matches('-'))?;
-        return Ok((
-            format!(
-                "{sub} {}, created_at DESC",
-                if descending { "DESC" } else { "ASC" }
-            ),
-            String::new(),
-        ));
-    }
-    // The flat `FROM` always carries the unfiltered `issue_cycle`
-    // bridge join, which the cycle-name traversal reuses like Django.
-    let key = order_key(out, orig_param, Some("issue_cycle"), false)?;
-    let mut sql = format!(
-        "{expr} {}",
-        if key.descending { "DESC" } else { "ASC" },
-        expr = key.expr,
-    );
-    if !orig_param.contains("created_at") {
-        sql.push_str(", created_at DESC");
-    }
-    Ok((sql, key.joins))
-}
-
-/// The `IssueDetailEndpoint.get` permission subquery: the issue survives
-/// when the actor holds an active project membership with a role above
-/// guest, or an active guest membership on a project with
-/// `guest_view_all_features`, or an active guest membership without it on
-/// issues they created. The outer query already pins the issue's workspace
-/// and project, so correlating the primary key (plus the project, belt and
-/// braces) makes the subquery's own workspace/project filters redundant —
-/// omitted, not weakened. Role and soft-delete semantics mirror
-/// [`allow_project`].
-fn permission_exists_fragment(binder: &mut Binder, gate: &Gate) -> String {
-    let project_holder = binder.bind_uuid(gate.project_id);
-    let user_holder = binder.bind_uuid(gate.user_id);
-    let branch = |role_pred: &str, view_all: &str, own_only: bool| {
-        let own = if own_only {
-            format!(" AND _perm.created_by_id = {user_holder}")
-        } else {
-            String::new()
-        };
-        format!(
-            "EXISTS (SELECT 1 FROM project_members AS _pm \
-             JOIN projects AS _pp ON _pp.id = _pm.project_id \
-             WHERE _pm.project_id = _perm.project_id \
-             AND _pm.member_id = {user_holder} AND _pm.is_active \
-             AND _pm.deleted_at IS NULL AND {role_pred} \
-             AND _pp.guest_view_all_features = {view_all}{own})"
-        )
-    };
-    format!(
-        "EXISTS (SELECT 1 FROM issues AS _perm \
-         WHERE _perm.id = issue.id AND _perm.project_id = {project_holder} \
-         AND ({} OR {} OR {}))",
-        branch("_pm.role > 5", "TRUE", false),
-        branch("_pm.role = 5", "TRUE", false),
-        branch("_pm.role = 5", "FALSE", true),
-    )
-}
-
 /// `GET .../issues-detail/`: `IssueDetailEndpoint.get` — the permission
 /// `Exists` subquery over the same filtered set, the prefetch-equivalent
 /// arrays (manager-deleted-guarded, no archived-module guard),
@@ -2973,15 +2433,13 @@ pub async fn detail_list(
     let order_spec = order_sql(&params.order_by, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
-    let mut perm_binder = Binder::new();
-    let exists = permission_exists_fragment(&mut perm_binder, &gate);
-    let filtered = filtered_set(
+    let set = list_engine::issue_set(
         &gate,
         &context.slug,
         &query,
         None,
         None,
-        Some((exists, perm_binder.values())),
+        Some(list_engine::permission_exists(&gate)),
         true,
         FilterLayers::NO_GUEST,
     )?;
@@ -2989,36 +2447,40 @@ pub async fn detail_list(
     // counts render `0`), so its count keys order `0`-style. Its `FROM`
     // always carries the unfiltered `issue_cycle` bridge join, which the
     // cycle-name traversal reuses like Django.
-    let key = order_key(
+    let key = list_engine::order_expr(
         &order_spec.out_param,
         &params.order_by,
         Some("issue_cycle"),
         false,
     )?;
-    let direction = if key.descending { "DESC" } else { "ASC" };
     // `per_page` already validated by the strict preamble; the cursor
     // parses here with the paginator kernel's exact errors.
     let per_page = params.per_page;
     let cursor = crate::paginator::Cursor::from_string(&params.cursor_raw)
         .map_err(|error| Denial::BadDetail(error.detail()))?;
-    // Scalar `Func(Count)` annotations: empty counts render 0.
-    let selects = annotation_selects(true, None, false, false, true);
+    // Scalar `Func(Count)` annotations (empty counts render 0); the
+    // prefetch arrays carry the managers' deleted guard only.
+    let annotations = list_engine::Annotations {
+        arrays: true,
+        skip_array: None,
+        assignee_active_member: false,
+        module_archived_guard: false,
+        scalar_counts: true,
+    };
     let fields: Vec<String> = DETAIL_FIELDS
         .iter()
         .map(|name| (*name).to_owned())
         .collect();
     flat_paginated_response(
         &context,
-        &filtered,
-        &key.expr,
-        direction,
+        &set,
+        &key,
         per_page,
         cursor,
-        selects,
+        annotations,
         fields,
         false,
         context.params.expand.as_deref(),
-        &key.joins,
     )
     .await
 }
@@ -3044,39 +2506,24 @@ pub async fn v2_list(
     .await?;
     let cursor_raw = query_last(&query, "cursor");
     let cursor_raw = cursor_raw.as_deref();
-    let updated_gt = updated_at_gt(&query)?;
-    let extra = match updated_gt {
-        (Some(fragment), binds) => Some((fragment, binds)),
-        (None, _) => None,
-    };
-    let filtered = filtered_set(
+    let set = list_engine::issue_set(
         &context.gate,
         &context.slug,
         &query,
         None,
         None,
-        extra,
+        list_engine::updated_at_gt(&query)?,
         false,
         FilterLayers::V2,
     )?;
-    let total_results = {
-        let sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
-        fetch_count(&context.pool, &sql, filtered.values.clone()).await?
-    };
+    let total_results =
+        list_engine::fetch_n(&context.pool, &list_engine::count_distinct(&set)).await?;
     let page = v2_page(cursor_raw, total_results).map_err(|_| Denial::ServerError)?;
-    // Grouped `Count` annotations: empty counts render NULL.
-    let mut selects = annotation_selects(true, None, true, true, false);
-    // `description_html` is a plain model column, not an annotation: v2
-    // always selects it (like `.values()` does) so `?description=true`
-    // renders it instead of null.
-    selects.push_str(", issue.description_html");
-    let inner = format!(
-        "SELECT {selects} {} ORDER BY issue.updated_at LIMIT {} OFFSET {}",
-        filtered.from_where,
-        page.end - page.start,
-        page.start
-    );
-    let rows = fetch_json_rows(&context.pool, &inner, filtered.values.clone()).await?;
+    // Grouped `Count` annotations (empty counts render NULL) plus
+    // `description_html`, a plain model column v2 always selects (like
+    // `.values()` does) so `?description=true` renders it.
+    let rows_stmt = list_engine::v2_rows(&set, page.end - page.start, page.start)?;
+    let rows = list_engine::fetch_rows(&context.pool, rows_stmt).await?;
     let fields: Vec<String> = v2_fields(context.params.description)
         .into_iter()
         .map(str::to_owned)
@@ -3121,55 +2568,18 @@ pub async fn deleted_list(
         ListMode::Lenient,
     )
     .await?;
-    let mut binder = Binder::new();
-    let slug_holder = binder.bind_string(context.slug.clone());
-    let project_holder = binder.bind_uuid(context.gate.project_id);
-    let mut where_sql = format!(
-        "FROM issues AS issue JOIN projects AS project ON project.id = issue.project_id
-         JOIN workspaces ON workspaces.id = issue.workspace_id
-         WHERE workspaces.slug = {slug_holder} AND issue.project_id = {project_holder}
-         AND (issue.archived_at IS NOT NULL OR issue.deleted_at IS NOT NULL)"
-    );
     // `all_objects`: no soft-delete scope, no manager exclusions, and —
     // note — no guest `created_by` scoping either (the view never applies
     // it). The allow gate already ran; deleted-issues has no rich/legacy
-    // filters, only `updated_at__gt`.
-    let updated_gt = updated_at_gt(&query)?;
-    if let Some(extra) = updated_gt.0 {
-        let (fragment, binds) = (extra, updated_gt.1);
-        where_sql.push_str(&format!(" AND {}", binder.splice(&fragment, binds)));
-    }
-    // `Issue.Meta.ordering = ("-created_at",)` — Django returns newest
-    // first; the bare id array must match byte for byte.
-    let sql = format!("SELECT issue.id::text AS id {where_sql} ORDER BY issue.created_at DESC");
-    let query_bound = bind_all(&sql, binder.values())?;
-    let rows = query_bound
-        .fetch_all(&context.pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut ids = Vec::new();
-    for row in rows {
-        let id: String = row.try_get("id").map_err(|_| Denial::ServerError)?;
-        ids.push(id);
-    }
+    // filters, only `updated_at__gt`. `Issue.Meta.ordering =
+    // ("-created_at",)`: newest first, byte for byte.
+    let stmt = list_engine::deleted_ids(
+        &context.gate,
+        &context.slug,
+        list_engine::updated_at_gt(&query)?,
+    );
+    let ids = list_engine::fetch_ids(&context.pool, &stmt).await?;
     Ok(json_response(deleted_ids_body(&ids)))
-}
-
-/// `updated_at__gt` shared by list, v2 and deleted-issues. Garbage is a
-/// `ValidationError` (400 invalid detail), not SQL text.
-fn updated_at_gt(query: &QueryMap) -> Result<(Option<String>, Vec<sea_query::Value>), Denial> {
-    let raw = query_last(query, "updated_at__gt");
-    let Some(raw) = raw else {
-        return Ok((None, Vec::new()));
-    };
-    let parsed = parse_datetime_param(&raw)
-        .ok_or_else(|| Denial::BadError(INVALID_DETAIL_BODY_MSG.to_owned()))?;
-    let mut binder = Binder::new();
-    let holder = binder.bind_string(parsed.to_rfc3339());
-    Ok((
-        Some(format!("issue.updated_at > {holder}::timestamptz")),
-        binder.values(),
-    ))
 }
 
 /// `recent_visited_task.delay` is a deferred publish, not inline work: in
@@ -3363,27 +2773,6 @@ mod tests {
     }
 
     #[test]
-    fn count_annotations_grouped_paths_render_null_when_empty() {
-        // `IssueViewSet.apply_annotations` + `IssuePaginatedViewSet`: the
-        // grouped `Count` subquery has no `Coalesce`, so zero related rows
-        // yield NULL, not 0 (`list_issues` flat/grouped, `v2_list`).
-        let selects = annotation_selects(true, None, false, true, false);
-        assert_eq!(selects.matches("NULLIF(COUNT(*), 0)").count(), 3);
-        assert!(!selects.contains("(SELECT COUNT(*)"));
-    }
-
-    #[test]
-    fn count_annotations_scalar_paths_render_zero_when_empty() {
-        // `IssueListEndpoint.get` + `IssueDetailEndpoint`: `Func(Count)` is
-        // not an Aggregate, so Django emits no GROUP BY and the subquery
-        // always returns one row — 0 when empty, never NULL (`flat_list`,
-        // `detail_list`).
-        let selects = annotation_selects(true, None, false, true, true);
-        assert_eq!(selects.matches("(SELECT COUNT(*)").count(), 3);
-        assert!(!selects.contains("NULLIF"));
-    }
-
-    #[test]
     fn distinct_group_values_keep_django_extra_select() {
         // `values_list(field, flat=True).distinct()` with the default
         // `-created_at` ordering: Django selects the ordering column too
@@ -3393,140 +2782,6 @@ mod tests {
         assert!(sql.contains("issue.created_at AS ordering_created_at"));
         assert!(sql.contains("ORDER BY issue.created_at DESC"));
         assert!(!sql.contains("IS NOT NULL"));
-    }
-
-    #[test]
-    fn state_group_values_exclude_triage_group() {
-        // `State.objects.filter(is_triage=False, ...)`: the explicit flag
-        // plus `StateManager`'s `NOT (group = 'triage')`.
-        assert!(STATE_GROUP_VALUES_SQL.contains("s.is_triage = FALSE"));
-        assert!(STATE_GROUP_VALUES_SQL.contains("NOT (s.\"group\" = 'triage')"));
-        assert!(STATE_GROUP_VALUES_SQL.contains("s.deleted_at IS NULL"));
-    }
-
-    #[test]
-    fn detail_arrays_keep_deleted_guard_without_module_join() {
-        // The detail prefetches (`...objects.all()`) carry the managers'
-        // deleted filter but no archived-module guard.
-        let guarded = annotation_selects(true, None, false, true, false);
-        assert!(guarded.contains("il.deleted_at IS NULL"));
-        assert!(guarded.contains("JOIN modules m ON m.id = mi.module_id"));
-        assert!(guarded.contains("m.archived_at IS NULL"));
-        let detail = annotation_selects(true, None, false, false, true);
-        assert!(detail.contains("il.deleted_at IS NULL"));
-        assert!(detail.contains("ia.deleted_at IS NULL"));
-        assert!(detail.contains("mi.deleted_at IS NULL"));
-        assert!(!detail.contains("JOIN modules"));
-        assert!(!detail.contains("m.archived_at IS NULL"));
-    }
-
-    #[test]
-    fn permission_exists_has_three_membership_branches() {
-        let gate = Gate {
-            user_id: uuid::Uuid::nil(),
-            timezone: "UTC".parse().expect("tz"),
-            workspace_id: uuid::Uuid::nil(),
-            project_id: uuid::Uuid::nil(),
-            guest_scoped: true,
-        };
-        let mut binder = Binder::new();
-        let fragment = permission_exists_fragment(&mut binder, &gate);
-        assert!(fragment.starts_with("EXISTS (SELECT 1 FROM issues AS _perm"));
-        assert!(fragment.contains("_perm.id = issue.id"));
-        assert!(fragment.contains("_pm.role > 5"));
-        assert!(fragment.contains("_pm.role = 5"));
-        assert!(fragment.contains("_pp.guest_view_all_features = TRUE"));
-        assert!(fragment.contains("_pp.guest_view_all_features = FALSE"));
-        assert!(fragment.contains("_perm.created_by_id = $2"));
-        assert_eq!(binder.values().len(), 2);
-    }
-
-    #[test]
-    fn detail_filtered_set_skips_guest_scoping_for_exists() {
-        let gate = Gate {
-            user_id: uuid::Uuid::nil(),
-            timezone: "UTC".parse().expect("tz"),
-            workspace_id: uuid::Uuid::nil(),
-            project_id: uuid::Uuid::nil(),
-            guest_scoped: true,
-        };
-        let query: QueryMap = Default::default();
-        let scoped = filtered_set(
-            &gate,
-            "w",
-            &query,
-            None,
-            None,
-            None,
-            false,
-            FilterLayers::FULL,
-        )
-        .expect("set");
-        assert!(scoped.from_where.contains("issue.created_by_id"));
-        // The triage exclusion keeps NULL-state rows (nullable FK +
-        // `split_exclude` semantics).
-        assert!(scoped
-            .from_where
-            .contains("(state.\"group\" IS NULL OR NOT (state.\"group\" = 'triage'))"));
-        let mut binder = Binder::new();
-        let exists = permission_exists_fragment(&mut binder, &gate);
-        let detail = filtered_set(
-            &gate,
-            "w",
-            &query,
-            None,
-            None,
-            Some((exists, binder.values())),
-            true,
-            FilterLayers::NO_GUEST,
-        )
-        .expect("set");
-        assert!(!detail.from_where.contains("issue.created_by_id"));
-        assert!(detail
-            .from_where
-            .contains("EXISTS (SELECT 1 FROM issues AS _perm"));
-    }
-
-    #[test]
-    fn v2_layers_skip_filter_stacks_but_keep_guest_scope() {
-        let gate = Gate {
-            user_id: uuid::Uuid::nil(),
-            timezone: "UTC".parse().expect("tz"),
-            workspace_id: uuid::Uuid::nil(),
-            project_id: uuid::Uuid::nil(),
-            guest_scoped: true,
-        };
-        let mut query: QueryMap = Default::default();
-        query.insert("state".to_owned(), OneOrMany::One("x".to_owned()));
-        let v2 = filtered_set(
-            &gate,
-            "w",
-            &query,
-            None,
-            None,
-            None,
-            false,
-            FilterLayers::V2,
-        )
-        .expect("set");
-        // Guest scoping stays; no rich/legacy predicates, no relation joins.
-        assert!(v2.from_where.contains("issue.created_by_id"));
-        assert!(!v2.from_where.contains("issue_labels"));
-        assert!(!v2.from_where.contains("issue_assignees"));
-        assert!(!v2.from_where.contains("intake_issues"));
-        assert!(v2.referenced.is_empty());
-        let flat = filtered_set(
-            &gate,
-            "w",
-            &Default::default(),
-            None,
-            None,
-            None,
-            false,
-            FilterLayers::NO_GUEST,
-        )
-        .expect("set");
-        assert!(!flat.from_where.contains("issue.created_by_id"));
     }
 
     #[test]
@@ -3770,6 +3025,17 @@ mod tests {
             filter_denial(E::EmptyRangeBounds("x".to_owned())),
             Denial::ServerError
         ));
+    }
+
+    #[test]
+    fn page_not_found_pins_the_resolver_404_bytes() {
+        // `custom_404_view` (`app/views/error_404.py`) returns
+        // `JsonResponse({"error": "Page not found."})`: `json.dumps`
+        // defaults, i.e. the space after the colon (PIDASHCONV-1713).
+        let (status, body) = Denial::PageNotFound.status_and_body();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, r#"{"error": "Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
     }
 }
 

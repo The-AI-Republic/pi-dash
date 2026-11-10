@@ -77,6 +77,10 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    accounts, instance_configurations, profiles, project_member_invites, users,
+    workspace_member_invites, workspace_members, workspaces,
+};
 use pidash_db::redis::RedisHandle;
 use pidash_services::auth_oauth::{error as oauth_error, exchange, providers};
 use pidash_services::auth_session::shapes::{self, HostSettings, ParamValue};
@@ -336,12 +340,8 @@ fn client_ip(headers: &HeaderMap, remote_addr: Option<&str>) -> Option<String> {
 /// `ordering = ("-created_at",)`): the latest non-deleted row decides
 /// `is_setup_done`.
 async fn instance_setup_done(pool: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        "SELECT is_setup_done FROM instances WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.is_some_and(|(done,)| done))
+    let row = pidash_db::license::queries::fetch_instance_first(pool).await?;
+    Ok(row.is_some_and(|instance| instance.is_setup_done))
 }
 
 /// One `instance_configurations` read with the view's `os.environ` default
@@ -354,12 +354,20 @@ async fn config_value(
     key: &str,
     env_default: Option<String>,
 ) -> Result<Option<String>, sqlx::Error> {
-    let row: Option<(Option<String>, bool)> = sqlx::query_as(
-        "SELECT value, is_encrypted FROM instance_configurations WHERE key = $1 AND deleted_at IS NULL",
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(Option<String>, bool)> = instance_configurations::Entity::find()
+        .filter(instance_configurations::Column::Key.eq(key))
+        .filter(instance_configurations::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([
+            instance_configurations::Column::Value,
+            instance_configurations::Column::IsEncrypted,
+        ])
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
     match row {
         Some((Some(value), true)) => {
             let keyring = pidash_db::config::encryption::Keyring::from_secret(secret_key);
@@ -573,16 +581,62 @@ struct GithubAuth {
     user_data: providers::ProviderUserData,
 }
 
+/// Test-only base URL for the four github OAuth endpoints (contract +
+/// unit stubs). Unset in production: both backends hardcode
+/// `https://github.com` / `https://api.github.com`, so without this the
+/// exchange legs are unstubbable (PIDASHCONV-1472 precedent:
+/// `PIDASH_GITHUB_API_BASE` for the job transports). When set — e.g. to
+/// `http://127.0.0.1:<stub-port>` — the token, userinfo, emails and
+/// org-membership URLs are built under it instead of the production
+/// hosts. Read per exchange, so contract servers pick it up from boot
+/// env.
+fn oauth_stub_base() -> Option<String> {
+    std::env::var("PIDASH_GITHUB_OAUTH_BASE")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// The four endpoint URLs for one exchange: the production consts by
+/// default, or stubbed under `oauth_base` when the test override is set
+/// (one stub serves all four paths).
+struct GithubUrls {
+    token: String,
+    userinfo: String,
+    emails: String,
+    org_membership_base: String,
+}
+
+fn github_urls(oauth_base: Option<&str>) -> GithubUrls {
+    match oauth_base {
+        Some(base) => {
+            let base = base.trim_end_matches('/');
+            GithubUrls {
+                token: format!("{base}/login/oauth/access_token"),
+                userinfo: format!("{base}/user"),
+                emails: format!("{base}/user/emails"),
+                org_membership_base: format!("{base}/orgs"),
+            }
+        }
+        None => GithubUrls {
+            token: providers::GITHUB_TOKEN_URL.to_owned(),
+            userinfo: providers::GITHUB_USERINFO_URL.to_owned(),
+            emails: providers::GITHUB_EMAILS_URL.to_owned(),
+            org_membership_base: providers::GITHUB_ORG_MEMBERSHIP_URL.to_owned(),
+        },
+    }
+}
+
 /// `GitHubOAuthProvider.authenticate()` (`github.py:84-182` over
 /// `adapter/oauth.py:66-100`).
 ///
 /// Transport mirrors `requests` exactly: no timeout on the token/userinfo
-/// calls, connection/status failures raise the provider error (5120),
-/// while a non-JSON body escapes as a 500 (`response.json()` raising
-/// `ValueError` is not a `RequestException`). The org-membership GET has
-/// no `try` at all (`github.py:137-143`), so its transport failure is a
-/// 500 too — only a non-200 *status* raises `GITHUB_USER_NOT_IN_ORG`
-/// (5122).
+/// calls; transport, status, body-read and decode failures all raise the
+/// provider error (5120), because `response.json()` sits inside the
+/// `try ... except requests.RequestException` and `JSONDecodeError` has
+/// subclassed `RequestException` since requests 2.27. The org-membership
+/// GET has no `try` at all (`github.py:137-143`), so its transport
+/// failure is a 500 — only a non-200 *status* raises
+/// `GITHUB_USER_NOT_IN_ORG` (5122).
 async fn exchange_github(
     client_id: &str,
     client_secret: &str,
@@ -590,8 +644,38 @@ async fn exchange_github(
     code: &str,
     redirect_uri: &str,
 ) -> Result<GithubAuth, CallbackFailure> {
+    let stub_base = oauth_stub_base();
+    exchange_github_with_base(
+        client_id,
+        client_secret,
+        organization_id,
+        code,
+        redirect_uri,
+        stub_base.as_deref(),
+    )
+    .await
+}
+
+/// [`exchange_github`] with the endpoint base pinned: `None` is the
+/// production-host call above; `Some(http://127.0.0.1:<port>)` drives a
+/// local stub (unit tests call this directly, so no test mutates process
+/// env).
+async fn exchange_github_with_base(
+    client_id: &str,
+    client_secret: &str,
+    organization_id: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    oauth_base: Option<&str>,
+) -> Result<GithubAuth, CallbackFailure> {
     let provider_error = || CallbackFailure::Auth(exchange::map_exchange_error("github"));
     let http = reqwest::Client::new();
+    let GithubUrls {
+        token: token_url,
+        userinfo: userinfo_url,
+        emails: emails_url,
+        org_membership_base,
+    } = github_urls(oauth_base);
 
     // `set_token_data` (`github.py:84-89`): form POST with
     // `{"Accept": "application/json"}`.
@@ -599,7 +683,7 @@ async fn exchange_github(
         providers::github_token_post_data(code, client_id, client_secret, redirect_uri);
     let post_refs: Vec<(&str, &str)> = post_pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let token_response = http
-        .post(providers::GITHUB_TOKEN_URL)
+        .post(token_url)
         .header("Accept", "application/json")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(providers::urlencode(&post_refs))
@@ -610,20 +694,18 @@ async fn exchange_github(
     let token_response = token_response
         .error_for_status()
         .map_err(|_| provider_error())?;
-    // `.json()` outside `RequestException` reach: decode failure is a 500.
+    // `.json()` is inside the `try` too (`oauth.py:75-84`), and
+    // `JSONDecodeError` subclasses `RequestException`, so a non-JSON
+    // body is the provider error — like the google/gitlab/gitea ports.
     // (`reqwest` ships without its `json` feature here, so decode goes
     // through `bytes` + `serde_json`, with the same error mapping.)
-    let token_bytes = token_response
-        .bytes()
-        .await
-        .map_err(|_| CallbackFailure::Server)?;
-    let token_json: Value =
-        serde_json::from_slice(&token_bytes).map_err(|_| CallbackFailure::Server)?;
+    let token_bytes = token_response.bytes().await.map_err(|_| provider_error())?;
+    let token_json: Value = serde_json::from_slice(&token_bytes).map_err(|_| provider_error())?;
     let tokens = providers::github_token_data(&token_json);
 
     // `get_user_response` (`oauth.py:86-100`).
     let userinfo_response = http
-        .get(providers::GITHUB_USERINFO_URL)
+        .get(userinfo_url)
         .header(
             "Authorization",
             format!("Bearer {}", python_str(&tokens.access_token)),
@@ -637,17 +719,15 @@ async fn exchange_github(
     let userinfo_bytes = userinfo_response
         .bytes()
         .await
-        .map_err(|_| CallbackFailure::Server)?;
-    let userinfo: Value =
-        serde_json::from_slice(&userinfo_bytes).map_err(|_| CallbackFailure::Server)?;
+        .map_err(|_| provider_error())?;
+    let userinfo: Value = serde_json::from_slice(&userinfo_bytes).map_err(|_| provider_error())?;
 
     // Org gate (`github.py:145-160`): only when an organization id is set;
     // a non-200 membership status raises 5122, transport failure escapes.
     if organization_id.is_some_and(|org| !org.is_empty()) {
         let org = organization_id.unwrap_or("");
         let login = userinfo.get("login").and_then(|v| v.as_str()).unwrap_or("");
-        let membership_url =
-            providers::github_membership_url(providers::GITHUB_ORG_MEMBERSHIP_URL, org, login);
+        let membership_url = providers::github_membership_url(&org_membership_base, org, login);
         let membership = http
             .get(membership_url)
             .header(
@@ -669,11 +749,12 @@ async fn exchange_github(
     }
 
     // `__get_email` (`github.py:108-135`): transport → 5120, non-list or
-    // missing primary → 5120, decode failure → 500. The status is never
-    // checked (`raise_for_status` is absent there, unlike the token and
-    // userinfo legs), so a non-2xx body decodes like any other.
+    // missing primary → 5120, and decode failure → 5120 as well
+    // (`requests.get(...).json()` is inside the `try`). The status is
+    // never checked (`raise_for_status` is absent there, unlike the token
+    // and userinfo legs), so a non-2xx body decodes like any other.
     let emails_response = http
-        .get(providers::GITHUB_EMAILS_URL)
+        .get(emails_url)
         .header(
             "Authorization",
             format!("Bearer {}", python_str(&tokens.access_token)),
@@ -685,9 +766,8 @@ async fn exchange_github(
     let emails_bytes = emails_response
         .bytes()
         .await
-        .map_err(|_| CallbackFailure::Server)?;
-    let emails: Value =
-        serde_json::from_slice(&emails_bytes).map_err(|_| CallbackFailure::Server)?;
+        .map_err(|_| provider_error())?;
+    let emails: Value = serde_json::from_slice(&emails_bytes).map_err(|_| provider_error())?;
     let email =
         providers::github_primary_email(&emails).map_err(|_| exchange::map_github_email_error())?;
 
@@ -895,14 +975,24 @@ async fn complete_login_or_signup(
     // `user = User.objects.filter(email=email).first()`;
     // `is_signup = bool(user)` — True when the user EXISTS
     // (QUIRK-is-signup-inverted, ported as-is).
-    let existing: Option<(Uuid, bool, String, String, bool, bool)> = sqlx::query_as(
-        "SELECT id, is_active, password, display_name, is_superuser, is_staff \
-         FROM users WHERE email = $1",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| CallbackFailure::Server)?;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let existing: Option<(Uuid, bool, String, String, bool, bool)> = users::Entity::find()
+        .filter(users::Column::Email.eq(email))
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)
+        .map_err(|_| CallbackFailure::Server)?
+        .map(|user| {
+            (
+                user.id,
+                user.is_active,
+                user.password,
+                user.display_name,
+                user.is_superuser,
+                user.is_staff,
+            )
+        });
     let is_signup = existing.is_some();
 
     let (
@@ -934,13 +1024,17 @@ async fn complete_login_or_signup(
         .await
         .map_err(|_| CallbackFailure::Server)?;
         if enable_signup.as_deref() == Some("0") {
-            let invited: Option<(i64,)> = sqlx::query_as(
-                "SELECT 1 FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL LIMIT 1",
-            )
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| CallbackFailure::Server)?;
+            let invited: Option<Uuid> = workspace_member_invites::Entity::find()
+                .filter(workspace_member_invites::Column::Email.eq(email))
+                .filter(workspace_member_invites::Column::DeletedAt.is_null())
+                .select_only()
+                .column(workspace_member_invites::Column::Id)
+                .limit(1)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(pidash_db::orm_tx::into_sqlx)
+                .map_err(|_| CallbackFailure::Server)?;
             if invited.is_none() {
                 return Err(CallbackFailure::Auth(
                     oauth_error::AuthenticationException::new(
@@ -1021,7 +1115,7 @@ async fn complete_login_or_signup(
         // avatar exists to delete (same shape as the google signup).
         let mut created_asset = None;
         if !avatar.is_empty() {
-            identity::stamp_avatar_url(pool, id, &avatar)
+            identity::stamp_avatar_url(&pidash_db::pool::sea_orm_connection(pool), id, &avatar)
                 .await
                 .map_err(|_| CallbackFailure::Server)?;
             if let Some(asset_id) = super::download_and_upload_avatar(
@@ -1029,9 +1123,13 @@ async fn complete_login_or_signup(
             )
             .await
             {
-                identity::stamp_avatar_asset(pool, id, asset_id)
-                    .await
-                    .map_err(|_| CallbackFailure::Server)?;
+                identity::stamp_avatar_asset(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    id,
+                    asset_id,
+                )
+                .await
+                .map_err(|_| CallbackFailure::Server)?;
                 created_asset = Some(asset_id);
             }
         }
@@ -1097,7 +1195,7 @@ async fn complete_login_or_signup(
         {
             Some(asset_id) => {
                 identity::sync_user_data(
-                    pool,
+                    &pidash_db::pool::sea_orm_connection(pool),
                     user_id,
                     &identity::SyncUpdate {
                         first_name: &first_name,
@@ -1115,7 +1213,7 @@ async fn complete_login_or_signup(
             }
             None => {
                 identity::sync_user_data(
-                    pool,
+                    &pidash_db::pool::sea_orm_connection(pool),
                     user_id,
                     &identity::SyncUpdate {
                         first_name: &first_name,
@@ -1158,7 +1256,7 @@ async fn complete_login_or_signup(
     };
     let is_staff = is_staff || is_superuser;
     identity::save_user_data(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         user_id,
         &identity::LoginStamps {
             medium: Some("github"),
@@ -1204,16 +1302,19 @@ async fn complete_login_or_signup(
     let prior: Option<(chrono::DateTime<chrono::Utc>, Value)> = if provider_id.is_empty() {
         None
     } else {
-        sqlx::query_as(
-            "SELECT \"created_at\", \"metadata\" FROM \"accounts\" \
-             WHERE \"user_id\" = $1 AND \"provider\" = $2 AND \"provider_account_id\" = $3 LIMIT 1",
-        )
-        .bind(user_id)
-        .bind("github")
-        .bind(provider_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| CallbackFailure::Server)?
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let model = accounts::Entity::find()
+            .filter(accounts::Column::UserId.eq(user_id))
+            .filter(accounts::Column::Provider.eq("github"))
+            .filter(accounts::Column::ProviderAccountId.eq(provider_id))
+            .limit(1)
+            .one(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx);
+        model
+            .map_err(|_| CallbackFailure::Server)?
+            .map(|m| (m.created_at.with_timezone(&chrono::Utc), m.metadata))
     };
     let mut conn = pool.acquire().await.map_err(|_| CallbackFailure::Server)?;
     let existing = prior.map(|(created_at, metadata)| account_queries::ExistingAccount {
@@ -1221,7 +1322,7 @@ async fn complete_login_or_signup(
         metadata,
     });
     account_queries::create_update_account(
-        &mut conn,
+        &pidash_db::orm_tx::TxConn::new(&mut conn),
         user_id,
         "github",
         &user_data_value,
@@ -1329,23 +1430,37 @@ async fn process_invitations(
     user_id: Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
     // Accepted workspace invites → members, `ignore_conflicts=True`.
     // Newest first (`Meta.ordering = ("-created_at",)`); the slug rides
     // along for the per-invite cache invalidation + event below.
-    let workspace_invites: Vec<(Uuid, i16, String)> = sqlx::query_as(
-        r#"SELECT i.workspace_id, i.role, w.slug FROM workspace_member_invites i
-           JOIN workspaces w ON w.id = i.workspace_id
-           WHERE i.email = $1 AND i.accepted AND i.deleted_at IS NULL
-           ORDER BY i.created_at DESC"#,
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await?;
+    let workspace_invites: Vec<(Uuid, i16, String)> = workspace_member_invites::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspace_member_invites::Relation::Workspaces.def(),
+        )
+        .select_only()
+        .columns([
+            workspace_member_invites::Column::WorkspaceId,
+            workspace_member_invites::Column::Role,
+        ])
+        .column_as(workspaces::Column::Slug, "slug")
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::Accepted.eq(true))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_member_invites::Column::CreatedAt)
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
     for (workspace_id, role, _slug) in &workspace_invites {
         let view_props = workspace_default_props();
         let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
         members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::NewMember {
                 workspace_id: *workspace_id,
                 user_id: Some(user_id),
@@ -1388,19 +1503,28 @@ async fn process_invitations(
     // `workspace_project_join.py:76-87` sets `project_id` on every
     // `ProjectMember` row (Django main; PB-1008 retired), so the join
     // succeeds and the invite is consumed.
-    let project_invites: Vec<(Uuid, Uuid, i16, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT workspace_id, project_id, role, created_by_id FROM project_member_invites
-           WHERE email = $1 AND accepted AND deleted_at IS NULL"#,
-    )
-    .bind(email)
-    .fetch_all(pool)
-    .await?;
+    let project_invites: Vec<(Uuid, Uuid, i16, Option<Uuid>)> =
+        project_member_invites::Entity::find()
+            .select_only()
+            .columns([
+                project_member_invites::Column::WorkspaceId,
+                project_member_invites::Column::ProjectId,
+                project_member_invites::Column::Role,
+                project_member_invites::Column::CreatedById,
+            ])
+            .filter(project_member_invites::Column::Email.eq(email))
+            .filter(project_member_invites::Column::Accepted.eq(true))
+            .filter(project_member_invites::Column::DeletedAt.is_null())
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)?;
     for (workspace_id, _project_id, role, created_by) in &project_invites {
         let clamped = if *role == 5 || *role == 15 { *role } else { 15 };
         let view_props = workspace_default_props();
         let issue_props = serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true});
         members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &members::NewMember {
                 workspace_id: *workspace_id,
                 user_id: Some(user_id),
@@ -1422,7 +1546,7 @@ async fn process_invitations(
         let prefs = serde_json::json!({"pages": {"block_display": true},
                     "navigation": {"default_tab": "work_items", "hide_in_more_menu": []}});
         pidash_services::domain::projects::members::add(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             &pidash_services::domain::projects::members::NewProjectMember {
                 workspace_id: *workspace_id,
                 project_id: Some(*project_id),
@@ -1442,22 +1566,28 @@ async fn process_invitations(
 
     // Both invite sets soft-delete (queryset `.delete()` → `UPDATE
     // deleted_at`, `mixins.py:SoftDeletionQuerySet`).
-    sqlx::query(
-        r#"UPDATE workspace_member_invites SET deleted_at = $1
-           WHERE email = $2 AND accepted AND deleted_at IS NULL"#,
-    )
-    .bind(now)
-    .bind(email)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"UPDATE project_member_invites SET deleted_at = $1
-           WHERE email = $2 AND accepted AND deleted_at IS NULL"#,
-    )
-    .bind(now)
-    .bind(email)
-    .execute(pool)
-    .await?;
+    workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::Accepted.eq(true))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    project_member_invites::Entity::update_many()
+        .col_expr(
+            project_member_invites::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(project_member_invites::Column::Email.eq(email))
+        .filter(project_member_invites::Column::Accepted.eq(true))
+        .filter(project_member_invites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
     Ok(())
 }
 
@@ -1470,49 +1600,75 @@ async fn redirection_path(
     user_id: Uuid,
     email: &str,
 ) -> Result<String, sqlx::Error> {
-    let profile: Option<(bool, Option<Uuid>)> =
-        sqlx::query_as("SELECT is_onboarded, last_workspace_id FROM profiles WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+        RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let profile: Option<(bool, Option<Uuid>)> = profiles::Entity::find()
+        .filter(profiles::Column::UserId.eq(user_id))
+        .select_only()
+        .columns([
+            profiles::Column::IsOnboarded,
+            profiles::Column::LastWorkspaceId,
+        ])
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
     let (is_onboarded, last_workspace_id) = profile.unwrap_or((false, None));
     if !is_onboarded {
         return Ok("onboarding".to_owned());
     }
     if let Some(last_id) = last_workspace_id {
-        let row: Option<(String,)> = sqlx::query_as(
-            r#"SELECT w.slug FROM workspaces w
-               JOIN workspace_members wm ON wm.workspace_id = w.id
-                 AND wm.member_id = $1 AND wm.is_active AND wm.deleted_at IS NULL
-               WHERE w.id = $2 AND w.deleted_at IS NULL LIMIT 1"#,
-        )
-        .bind(user_id)
-        .bind(last_id)
-        .fetch_optional(pool)
-        .await?;
-        if let Some((slug,)) = row {
+        let row: Option<String> = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Id.eq(last_id))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)?;
+        if let Some(slug) = row {
             return Ok(slug);
         }
     }
-    let fallback: Option<(String,)> = sqlx::query_as(
-        r#"SELECT w.slug FROM workspaces w
-           JOIN workspace_members wm ON wm.workspace_id = w.id
-             AND wm.member_id = $1 AND wm.is_active AND wm.deleted_at IS NULL
-           WHERE w.deleted_at IS NULL ORDER BY w.created_at LIMIT 1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some((slug,)) = fallback {
+    let fallback: Option<String> = workspaces::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            workspaces::Relation::WorkspaceMembers.def(),
+        )
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .order_by_asc(workspaces::Column::CreatedAt)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    if let Some(slug) = fallback {
         return Ok(slug);
     }
-    let invites: Option<(i64,)> = sqlx::query_as(
-        "SELECT COUNT(*) FROM workspace_member_invites WHERE email = $1 AND deleted_at IS NULL",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
-    if invites.is_some_and(|(n,)| n > 0) {
+    let invites: u64 = workspace_member_invites::Entity::find()
+        .filter(workspace_member_invites::Column::Email.eq(email))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    if invites > 0 {
         return Ok("invitations".to_owned());
     }
     Ok("create-workspace".to_owned())
@@ -1733,6 +1889,108 @@ async fn space_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The invite + redirection selects keep the raw-SQL shape: inner
+    /// joins, live rows only, newest-first invites, the same filters
+    /// and order (no database needed, orm-migration.md §3.2).
+    #[test]
+    fn invite_and_redirection_statement_shapes() {
+        use pidash_db::entity::{
+            project_member_invites, workspace_member_invites, workspace_members, workspaces,
+        };
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+            QueryTrait, RelationTrait,
+        };
+        let user_id = Uuid::nil();
+
+        // Accepted workspace invites with slugs, newest first
+        // (`Meta.ordering = ("-created_at",)`).
+        let ws = workspace_member_invites::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspace_member_invites::Relation::Workspaces.def(),
+            )
+            .select_only()
+            .columns([
+                workspace_member_invites::Column::WorkspaceId,
+                workspace_member_invites::Column::Role,
+            ])
+            .column_as(workspaces::Column::Slug, "slug")
+            .filter(workspace_member_invites::Column::Email.eq("a@b.test"))
+            .filter(workspace_member_invites::Column::Accepted.eq(true))
+            .filter(workspace_member_invites::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_member_invites::Column::CreatedAt)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(ws.contains("INNER JOIN"), "ws join: {ws}");
+        assert!(ws.contains("\"slug\""), "ws slug: {ws}");
+        assert!(
+            ws.contains("ORDER BY \"workspace_member_invites\".\"created_at\" DESC"),
+            "ws newest-first order: {ws}"
+        );
+
+        // Accepted project invites, no order on this arm.
+        let pr = project_member_invites::Entity::find()
+            .select_only()
+            .columns([
+                project_member_invites::Column::WorkspaceId,
+                project_member_invites::Column::ProjectId,
+                project_member_invites::Column::Role,
+                project_member_invites::Column::CreatedById,
+            ])
+            .filter(project_member_invites::Column::Email.eq("a@b.test"))
+            .filter(project_member_invites::Column::Accepted.eq(true))
+            .filter(project_member_invites::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!pr.contains("ORDER BY"), "pr unordered: {pr}");
+        assert!(pr.contains("\"deleted_at\" IS NULL"), "pr live rows: {pr}");
+
+        // Redirection last-workspace lookup: joined, both live,
+        // LIMIT 1, no order.
+        let last_id = Uuid::nil();
+        let last = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::Id.eq(last_id))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(last.contains("INNER JOIN"), "last join: {last}");
+        assert!(last.contains("LIMIT 1"), "last limit: {last}");
+        assert!(!last.contains("ORDER BY"), "last unordered: {last}");
+
+        // Redirection fallback: earliest-created workspace first.
+        let fallback = workspaces::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                workspaces::Relation::WorkspaceMembers.def(),
+            )
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .filter(workspace_members::Column::MemberId.eq(user_id))
+            .filter(workspace_members::Column::IsActive.eq(true))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .order_by_asc(workspaces::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            fallback.contains("ORDER BY \"workspaces\".\"created_at\" ASC"),
+            "fallback order: {fallback}"
+        );
+        assert!(fallback.contains("LIMIT 1"), "fallback limit: {fallback}");
+    }
 
     #[test]
     fn overlong_redirect_location_answers_400() {
@@ -3185,5 +3443,182 @@ mod tests {
             "S3 traffic shape"
         );
         let _ = avatar_url;
+    }
+
+    // -- exchange decode mapping (NEWPIDASH-18) -------------------------
+    // A 200 with a non-JSON body on any of the three exchange legs is the
+    // provider error (5120), because `response.json()` sits inside the
+    // `try ... except requests.RequestException` and `JSONDecodeError`
+    // subclasses `RequestException`. These drive
+    // `exchange_github_with_base` against a loopback stub serving the
+    // four endpoint paths.
+
+    /// Loopback OAuth-provider stub: answers each request from `routes`
+    /// (`(method, path, status line, body)`; first match wins, else 404)
+    /// and records the request lines seen. Bodies starting with `<`
+    /// are served as `text/html`, the rest as `application/json`.
+    fn exchange_stub(
+        routes: Vec<(&'static str, &'static str, &'static str, &'static str)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind exchange stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let recorded = std::sync::Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut socket) = stream else {
+                    break;
+                };
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = [0u8; 8192];
+                let Ok(n) = socket.read(&mut buf) else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let request_line = head.lines().next().unwrap_or("").to_owned();
+                recorded.lock().expect("locks").push(request_line.clone());
+                let (_, _, status, body) = routes
+                    .iter()
+                    .find(|(method, path, _, _)| {
+                        request_line.starts_with(&format!("{method} {path}"))
+                    })
+                    .copied()
+                    .unwrap_or(("GET", "/", "404 Not Found", "not found"));
+                let content_type = if body.starts_with('<') {
+                    "text/html"
+                } else {
+                    "application/json"
+                };
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(body.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    fn assert_provider_error(err: CallbackFailure) {
+        match err {
+            CallbackFailure::Auth(exc) => {
+                assert_eq!(exc.error_code, 5120);
+                assert_eq!(exc.error_message, "GITHUB_OAUTH_PROVIDER_ERROR");
+            }
+            CallbackFailure::Server => panic!("non-JSON provider body mapped to 500, want 5120"),
+        }
+    }
+
+    #[test]
+    fn github_urls_default_to_production_consts() {
+        let urls = github_urls(None);
+        assert_eq!(urls.token, providers::GITHUB_TOKEN_URL);
+        assert_eq!(urls.userinfo, providers::GITHUB_USERINFO_URL);
+        assert_eq!(urls.emails, providers::GITHUB_EMAILS_URL);
+        assert_eq!(
+            urls.org_membership_base,
+            providers::GITHUB_ORG_MEMBERSHIP_URL
+        );
+    }
+
+    #[test]
+    fn github_urls_override_serves_all_four_paths() {
+        let urls = github_urls(Some("http://127.0.0.1:9999/"));
+        assert_eq!(urls.token, "http://127.0.0.1:9999/login/oauth/access_token");
+        assert_eq!(urls.userinfo, "http://127.0.0.1:9999/user");
+        assert_eq!(urls.emails, "http://127.0.0.1:9999/user/emails");
+        assert_eq!(urls.org_membership_base, "http://127.0.0.1:9999/orgs");
+    }
+
+    #[tokio::test]
+    async fn github_exchange_nonjson_token_body_is_provider_error() {
+        let (base, seen) = exchange_stub(vec![(
+            "POST",
+            "/login/oauth/access_token",
+            "200 OK",
+            "<html><body>Bad Gateway</body></html>",
+        )]);
+        let err = exchange_github_with_base(
+            "id",
+            "secret",
+            None,
+            "code",
+            "http://app.test/auth/github/callback/",
+            Some(&base),
+        )
+        .await
+        .err()
+        .expect("non-JSON token body must fail the exchange");
+        assert_provider_error(err);
+        let seen = seen.lock().expect("locks");
+        assert!(
+            seen.iter()
+                .any(|line| line.starts_with("POST /login/oauth/access_token")),
+            "stub saw no token POST: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_exchange_nonjson_userinfo_body_is_provider_error() {
+        let (base, seen) = exchange_stub(vec![
+            (
+                "POST",
+                "/login/oauth/access_token",
+                "200 OK",
+                r#"{"access_token":"t"}"#,
+            ),
+            ("GET", "/user", "200 OK", "<html>proxy error</html>"),
+        ]);
+        let err = exchange_github_with_base(
+            "id",
+            "secret",
+            None,
+            "code",
+            "http://app.test/auth/github/callback/",
+            Some(&base),
+        )
+        .await
+        .err()
+        .expect("non-JSON userinfo body must fail the exchange");
+        assert_provider_error(err);
+        let seen = seen.lock().expect("locks");
+        assert!(
+            seen.iter().any(|line| line.starts_with("GET /user ")),
+            "stub saw no userinfo GET: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_exchange_empty_emails_body_is_provider_error() {
+        let (base, seen) = exchange_stub(vec![
+            (
+                "POST",
+                "/login/oauth/access_token",
+                "200 OK",
+                r#"{"access_token":"t"}"#,
+            ),
+            // Prefix match: the emails route sorts before `/user`.
+            ("GET", "/user/emails", "200 OK", ""),
+            ("GET", "/user", "200 OK", r#"{"login":"octocat"}"#),
+        ]);
+        let err = exchange_github_with_base(
+            "id",
+            "secret",
+            None,
+            "code",
+            "http://app.test/auth/github/callback/",
+            Some(&base),
+        )
+        .await
+        .err()
+        .expect("empty emails body must fail the exchange");
+        assert_provider_error(err);
+        let seen = seen.lock().expect("locks");
+        assert!(
+            seen.iter().any(|line| line.starts_with("GET /user/emails")),
+            "stub saw no emails GET: {seen:?}"
+        );
     }
 }

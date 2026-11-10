@@ -272,6 +272,10 @@ export interface ParityDriver {
   openResetPassword(params: { uid: string; token: string; email: string }): Promise<void>;
   /** Fill the new-password fields on the reset/set form and submit. */
   submitNewPassword(password: string, confirmPassword: string): Promise<void>;
+  /** Fill the new-password fields on the reset/set form without submitting. */
+  fillNewPasswordFields(password: string, confirmPassword: string): Promise<void>;
+  /** Whether the reset/set form submit is currently enabled. */
+  newPasswordSubmitEnabled(): Promise<boolean>;
   /** Open the set-password page; requires a signed-in session. */
   openSetPassword(): Promise<void>;
   /** Open an arbitrary app path (guards and legacy redirects). */
@@ -924,6 +928,8 @@ export interface ParityDriver {
   uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
   /** Click the widget action-row button (e.g. `Manually Run AI`); ends settled. */
   clickWidgetAction(name: string): Promise<void>;
+  /** True when the named widget action-row control is present and disabled (NEWPIDASH-141). */
+  widgetActionDisabled(name: string): Promise<boolean>;
   /** Post a comment through the composer; ends with the comment rendered. */
   postComment(text: string): Promise<void>;
   /** Type into the composer without submitting; the draft stays editable. */
@@ -964,6 +970,8 @@ export interface ParityDriver {
   isOverflowCreateVisible(): Promise<boolean>;
   /** Whether the overflow slide-over shows its no-match empty state. */
   isOverflowEmptyStateVisible(): Promise<boolean>;
+  /** Whether an overflow slide-over row's sub-navigation is expanded. */
+  isOverflowRowOpen(projectName: string): Promise<boolean>;
   /** Whether a sidebar project row's link is currently inside the viewport. */
   isProjectRowInViewport(projectName: string): Promise<boolean>;
   /** Whether a sidebar project row's sub-navigation is expanded. */
@@ -992,6 +1000,8 @@ export interface ParityDriver {
   openFavoritesFolderDialog(): Promise<void>;
   /** Open the help menu from the sidebar. */
   openHelpMenu(): Promise<void>;
+  /** Open the quick-actions menu of the named overflow slide-over row. */
+  openOverflowQuickMenu(projectName: string): Promise<void>;
   /** Open the quick-actions menu of the named sidebar project row. */
   openProjectQuickMenu(projectName: string): Promise<void>;
   /** Follow a sidebar link by its label. */
@@ -1004,6 +1014,8 @@ export interface ParityDriver {
   openWorkspaceSwitcher(): Promise<void>;
   /** Project names listed in the overflow slide-over. */
   overflowProjectNames(): Promise<string[]>;
+  /** Links of the currently expanded overflow slide-over sub-navigation. */
+  overflowSubnavLinks(): Promise<{ text: string; href: string | null }[]>;
   /** Item labels of the currently open project quick-actions menu. */
   projectQuickMenuTexts(): Promise<string[]>;
   /** Href of a sidebar project row, if the row is rendered. */
@@ -1018,6 +1030,8 @@ export interface ParityDriver {
   setFavoritesOpen(open: boolean): Promise<void>;
   /** Expand or collapse the secondary-destinations disclosure. */
   setMoreSectionOpen(open: boolean): Promise<void>;
+  /** Bring an overflow slide-over row to the wanted expansion state. */
+  setOverflowRowOpen(projectName: string, open: boolean): Promise<void>;
   /**
    * Bring a sidebar project row to the wanted expansion state, toggling
    * again when a remount swallows the first click. Leaves the final state
@@ -1211,6 +1225,10 @@ export interface ParityDriver {
   codeReviewInputValue(): Promise<string>;
   /** Detach the review row showing `title`; resolves once its row is gone. */
   codeReviewDetach(title: string): Promise<void>;
+  /** Whether the attach form input is present (archived items hide it). */
+  codeReviewAttachVisible(): Promise<boolean>;
+  /** Whether any per-row detach control is present (archived items hide it). */
+  codeReviewDetachVisible(): Promise<boolean>;
   /** Whether the worklog create control renders in the activity header. */
   worklogCreateVisible(): Promise<boolean>;
   // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Observed on
@@ -2037,6 +2055,10 @@ export interface ParityDriver {
   pressInTopBarSearch(key: string): Promise<void>;
   /** Click outside the top-bar panel to close it. */
   closeTopBarViaOutsideClick(): Promise<void>;
+  /** Rendered width of the top-bar search input in CSS pixels, or null when absent. */
+  topBarSearchWidth(): Promise<number | null>;
+  /** Viewport-relative left edge and width of the top-bar search input, or null when absent. */
+  topBarSearchRect(): Promise<{ x: number; width: number } | null>;
 
   // --- shared empty-state kit tiers (SHELL-104) ---
   //     The kit tiers are distinguished by rendered structure: Simple centers
@@ -4963,6 +4985,8 @@ export interface ParityDriver {
   runnersReleaseMutationShaping(): Promise<void>;
   /** Side-nav rail: header, overview link, contacts, empty state. */
   runnersRail(): Promise<RunnersRail>;
+  /** The rail's and the content pane's vertical extent against the viewport (NEWPIDASH-3). */
+  runnersRailGeometry(): Promise<RunnersRailGeometry>;
   /** Pod tiles in display order with default marker and runner count. */
   runnersPodTiles(): Promise<RunnersPodTile[]>;
   /** Toggle one pod tile's table filter. */
@@ -9101,6 +9125,15 @@ export interface ParityDriver {
   cyclesFiltersClearAll(): Promise<void>;
   /** Whether the filters menu button carries its active-filters marker. */
   cyclesFiltersActive(): Promise<boolean>;
+
+  // --- Auth throttled email check (NEWPIDASH-15, AUTH-006). Appended;
+  // --- existing methods above are untouched per the shared driver contract.
+  /**
+   * Submit the email step when the answer keeps the card on it (a
+   * server-answered error such as the 429 throttle refusal). Resolves with
+   * the email-check response status once it arrives.
+   */
+  submitEmailExpectingError(email: string): Promise<number>;
 }
 
 /** One list group / board column as rendered (NEWFRONT-449, SPC-023/024/026). */
@@ -9662,6 +9695,30 @@ export interface CloudAssistantConnectionFacts {
   actions: string[];
 }
 
+/** One hosted-lane picker option (NEWPIDASH-150). */
+export interface CloudAssistantModelOptionFacts {
+  /** Picker option value (the model slug). */
+  value: string;
+  /** Option text as rendered (label plus credit badge, when present). */
+  text: string;
+  /** Whether the option is disabled (paid model on the free plan). */
+  disabled: boolean;
+}
+
+/** Hosted-lane picker budget facts (NEWPIDASH-150). */
+export interface CloudAssistantModelBudgetFacts {
+  /** Card title the facts were read from. */
+  title: string;
+  /** Current picker value (the active model). */
+  value: string;
+  /** Picker options in display order, with badges and disabled states. */
+  options: CloudAssistantModelOptionFacts[];
+  /** Needs-credit notice text, or null when the stored model is affordable. */
+  notice: string | null;
+  /** Top-up link target, or null when no wallet address is wired. */
+  topUpHref: string | null;
+}
+
 /** AI Assistant add-form structure (NEWFRONT-440, CLOUD-033). */
 export interface CloudAssistantAddFormFacts {
   /** Provider option values in display order. */
@@ -10038,6 +10095,15 @@ export interface WsSettingsMemberRowFacts {
   wsSettingsMobileCrumb(): Promise<string>;
   /** Restore the wide viewport after narrow-screen reads. */
   wsSettingsWideViewport(): Promise<void>;
+  /** Bounding box of the settings content column with its padded parent, or null on full-width sections. */
+  wsSettingsContentBox(): Promise<{
+    x: number;
+    width: number;
+    parentX: number;
+    parentWidth: number;
+  } | null>;
+  /** Effective left gutter of the settings content column in CSS pixels. */
+  wsSettingsContentGutter(): Promise<number>;
   /** Whether the general details form is currently rendered. */
   wsSettingsGeneralVisible(): Promise<boolean>;
   /** Current value of the workspace-name field. */
@@ -10749,12 +10815,12 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralTimezoneText(): Promise<string>;
   /** Creation-timestamp line as rendered. */
   settingsGeneralCreatedText(): Promise<string>;
-  /** Selected execution-target value. */
-  settingsGeneralExecutorValue(): Promise<string>;
-  /** Whether an execution-target option is disabled. */
-  settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean>;
-  /** Pick an execution target. */
-  settingsGeneralSetExecutor(value: string): Promise<void>;
+  /**
+   * Whether the tab still renders a default execution-target control.
+   * Runner is the only executor (built-in engine design §6), so both apps
+   * answer false once the form has rendered.
+   */
+  settingsGeneralExecutorPresent(): Promise<boolean>;
   /** Whether the automated-run master switch is on. */
   settingsGeneralTickingOn(): Promise<boolean>;
   /** Flip the automated-run master switch. */
@@ -11467,6 +11533,12 @@ export interface DeskSigninUpdateLink {
   ganttDependencyHandleCount(): Promise<number>;
   /** Drag the handle of `fromId` onto the lane of `toId`; resolves once the pointer releases. */
   ganttLinkBlocks(fromId: string, toId: string): Promise<void>;
+  // --- Cloud assistant model budget (NEWPIDASH-150). Appended; existing
+  // --- methods above are untouched per the shared driver contract. The
+  // --- scenario runs on web_new only: the OSS oracle provably lacks the
+  // --- free-quota picker, so the old-app driver throws on these.
+  /** Hosted-lane picker budget facts for the titled connection. */
+  cloudAssistantModelBudget(title: string): Promise<CloudAssistantModelBudgetFacts>;
 }
 
 /** General-tab field keys for the NEWFRONT-426 settingsProfile readers. */
@@ -11716,6 +11788,14 @@ export interface RunnersRail {
   overviewHref: string | null;
   contacts: RunnersRailContact[];
   emptyVisible: boolean;
+}
+
+/** Vertical extent of the runners rail and its content pane, in CSS px from the viewport top. */
+export interface RunnersRailGeometry {
+  viewportHeight: number;
+  railTop: number;
+  railBottom: number;
+  contentBottom: number;
 }
 
 /** One rail chat contact. */

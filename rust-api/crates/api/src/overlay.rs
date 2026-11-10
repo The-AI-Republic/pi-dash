@@ -242,7 +242,12 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::app_workspace::routes())
             .merge(crate::app_project::routes())
             .merge(crate::v1_openapi::routes()),
-        RouteGroup::License => crate::license::routes(),
+        // The runner LLM model catalog CRUD (NEWPIDASH-169) merges here
+        // with the license console; sibling handler issues extend the
+        // merge, keeping both sides.
+        RouteGroup::License => {
+            crate::license::routes().merge(crate::runner_models::admin::routes())
+        }
         // Space handlers merge their routers here (intake: PIDASHCONV-177;
         // sibling handler issues extend the merge; merges keep both sides).
         RouteGroup::Space => crate::space::routes(),
@@ -316,12 +321,17 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::runner_enroll::enroll::web_routes())
             .merge(crate::runner_enroll::delete_cmds::web_routes())
             .merge(crate::runner_enroll::teardown::web_routes())
-            .merge(crate::runner_enroll::projects::web_routes()),
+            .merge(crate::runner_enroll::projects::web_routes())
+            // The signed-in model catalog read (NEWPIDASH-169) merges
+            // here; sibling handler issues extend the merge, keeping
+            // both sides.
+            .merge(crate::runner_models::catalog::routes()),
         RouteGroup::Runner => crate::runner_runs::run_endpoints::routes()
             .merge(crate::runner_runs::chat::daemon_routes())
             .merge(crate::runner_runs::daemon_routes())
             .merge(crate::runner_enroll::teardown::daemon_routes())
             .merge(crate::runner_sessions::routes())
+            .merge(crate::runner_engine::routes())
             .merge(crate::runner_enroll::enroll::daemon_routes())
             .merge(crate::runner_enroll::delete_cmds::daemon_routes())
             .merge(crate::runner_enroll::desktop::routes())

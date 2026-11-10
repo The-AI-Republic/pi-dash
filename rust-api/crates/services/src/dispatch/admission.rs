@@ -25,7 +25,7 @@
 //!   [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`] / [`ONLINE_MANAGED_RUNNER_SQL`] +
 //!   [`managed_runner_availability`].
 //! * `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`)
-//!   → [`managed_runner_configuration_check`] (E001/E003/E004 + the data-driven
+//!   → [`managed_runner_configuration_check`] (E001/E004 + the data-driven
 //!   E002 recipe cross-check over [`PhaseTemplate`] rows).
 //! * `IsDesktopSession` (`permissions.py:12-28`) → [`is_desktop_session`] +
 //!   [`DesktopSessionRequiredBody`].
@@ -401,8 +401,8 @@ fn unavailable(reason: &str) -> ManagedAvailability {
 /// the viewer owns on the project's pod.
 ///
 /// Django renders `owner=user` as `owner_id = $1` and `pod__project_id` as the
-/// `pod` join + `pod.project_id = $2` (same join shape as L3's
-/// `LOCAL_RUNNER_EXISTS_SQL`). Table `runner` is `db_table = "runner"`
+/// `pod` join + `pod.project_id = $2` (same join shape as the L3 local
+/// EXISTS legs). Table `runner` is `db_table = "runner"`
 /// (`runner/models.py:479`); `pod` is `db_table = "pod"`. Params: `$1` owner
 /// id (uuid), `$2` project id (uuid), `$3` workspace id (uuid).
 pub const ENROLLED_MANAGED_RUNNERS_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL LIMIT 1";
@@ -436,6 +436,59 @@ pub const ONLINE_MANAGED_RUNNER_SQL: &str = "SELECT runner.id FROM runner INNER 
 /// `.filter(paused_at__isnull=False)`. Params: `$1` owner id (uuid),
 /// `$2` project id (uuid), `$3` workspace id (uuid).
 pub const ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL: &str = "SELECT 1 FROM runner INNER JOIN pod ON pod.id = runner.pod_id WHERE runner.owner_id = $1 AND runner.provisioning = 'desktop_bundled' AND pod.project_id = $2 AND runner.workspace_id = $3 AND runner.revoked_at IS NULL AND runner.paused_at IS NOT NULL LIMIT 1";
+
+/// Which managed-runner probe [`managed_runner_probe`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedRunnerProbe {
+    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`].
+    Enrolled,
+    /// [`ONLINE_MANAGED_RUNNER_SQL`], heartbeat at or after the bound.
+    Online(chrono::DateTime<chrono::Utc>),
+    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`].
+    Paused,
+}
+
+/// The SeaORM form of the three managed-runner probes: the matching
+/// runner's id (the newest heartbeat first for [`ManagedRunnerProbe::Online`]),
+/// or `None`. Non-revoked desktop-bundled runners the owner holds on the
+/// project's pod (`runner INNER JOIN pod`), in this workspace.
+pub async fn managed_runner_probe(
+    db: &impl sea_orm::ConnectionTrait,
+    probe: ManagedRunnerProbe,
+    owner_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, sea_orm::DbErr> {
+    use pidash_db::entity::{pod, runner};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect};
+    let to_pod: sea_orm::RelationDef = runner::Entity::belongs_to(pod::Entity)
+        .from(runner::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    let mut query = runner::Entity::find()
+        .select_only()
+        .column(runner::Column::Id)
+        .join(JoinType::InnerJoin, to_pod)
+        .filter(runner::Column::OwnerId.eq(owner_id))
+        .filter(runner::Column::Provisioning.eq("desktop_bundled"))
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .filter(runner::Column::WorkspaceId.eq(workspace_id))
+        .filter(runner::Column::RevokedAt.is_null());
+    match probe {
+        ManagedRunnerProbe::Enrolled => {}
+        ManagedRunnerProbe::Online(bound) => {
+            query = query
+                .filter(runner::Column::Status.eq("online"))
+                .filter(runner::Column::LastHeartbeatAt.gte(bound))
+                .filter(runner::Column::PausedAt.is_null())
+                .order_by_desc(runner::Column::LastHeartbeatAt);
+        }
+        ManagedRunnerProbe::Paused => {
+            query = query.filter(runner::Column::PausedAt.is_not_null());
+        }
+    }
+    query.into_tuple().one(db).await
+}
 
 // ---------------------------------------------------------------------------
 // Desktop-only permission (`permissions.py:12-28`)
@@ -485,37 +538,26 @@ where
 // Configuration checks (`cloud_agent/checks.py`, `managed_runner/checks.py`)
 // ---------------------------------------------------------------------------
 
-/// One Django `Error` (`id` + message) from a configuration check.
+/// One Django `Error`/`Warning` (`id` + message) from a configuration check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigurationError {
-    /// The check id (`cloud_agent.E001`, …).
+    /// The check id (`cloud_agent.E005`, `managed.W001`, …).
     pub id: &'static str,
     /// The message, verbatim.
     pub message: String,
 }
 
-/// `cloud_agent_configuration_check` (`cloud_agent/checks.py:8-74`).
+/// `cloud_agent_configuration_check` (`cloud_agent/checks.py:8-74`, #2903).
 ///
-/// Active ids are E001/E002/E005/E007/E008; E003/E004/E006 covered retired
-/// platform model settings (`checks.py:15-17`). `default_agent_executor` is
-/// the `DEFAULT_AGENT_EXECUTOR` setting.
+/// Active ids are E005/E007/E008; E001/E002 retired with the executor
+/// translation (E003/E004/E006 covered retired platform model settings,
+/// `checks.py:15-17`). `default_agent_executor` is unused and kept only
+/// for signature parity with the pre-#2903 check.
 pub fn cloud_agent_configuration_check(
     cloud: &CloudAgentSettings,
-    default_agent_executor: &str,
+    _default_agent_executor: &str,
 ) -> Vec<ConfigurationError> {
     let mut errors = Vec::new();
-    if AgentExecutorKind::from_value(default_agent_executor).is_none() {
-        errors.push(ConfigurationError {
-            id: "cloud_agent.E001",
-            message: "DEFAULT_AGENT_EXECUTOR is invalid".to_string(),
-        });
-    }
-    if default_agent_executor == AgentExecutorKind::CloudAgent.value() && !cloud.enabled {
-        errors.push(ConfigurationError {
-            id: "cloud_agent.E002",
-            message: "Cloud default requires CLOUD_AGENT_ENABLED".to_string(),
-        });
-    }
     // `sorted(set(disabled) - set(READ) - set(WRITE))` (`checks.py:20`): sorted
     // unique unknown names; byte order in both languages.
     let known: BTreeSet<&str> = READ_TOOLS
@@ -643,9 +685,10 @@ pub struct PhaseTemplate<'a> {
     pub template_name: &'a str,
 }
 
-/// `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`).
+/// `managed_runner_configuration_check` (`managed_runner/checks.py:20-50`, #2903).
 ///
-/// E001/E003/E004 plus the orchestration-`PHASES` × `MANAGED_RECIPES`
+/// W001 (any non-local default is ignored with a warning, never refused),
+/// E003/E004, plus the orchestration-`PHASES` × `MANAGED_RECIPES`
 /// cross-check as a data-driven rule (`checks.py:42-49`): one E002 per phase
 /// (in phase order) whose `template_name` has no recipe-table entry. Both
 /// tables arrive as data — `managed_recipes` is shaped like
@@ -658,17 +701,12 @@ pub fn managed_runner_configuration_check(
     managed_recipes: &[(&str, &[&str])],
 ) -> Vec<ConfigurationError> {
     let mut errors = Vec::new();
-    if default_agent_executor == AgentExecutorKind::ManagedRunner.value() && !managed.enabled {
+    if default_agent_executor != AgentExecutorKind::LocalRunner.value() {
         errors.push(ConfigurationError {
-            id: "managed.E001",
-            message: "DEFAULT_AGENT_EXECUTOR=managed_runner requires MANAGED_RUNNER_ENABLED"
-                .to_string(),
-        });
-    }
-    if managed.max_per_user_project < 1 {
-        errors.push(ConfigurationError {
-            id: "managed.E003",
-            message: "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1".to_string(),
+            id: "managed.W001",
+            message: format!(
+                "DEFAULT_AGENT_EXECUTOR='{default_agent_executor}' is ignored: new projects always use local_runner"
+            ),
         });
     }
     if managed.queued_max_age_secs <= 0 {
@@ -859,7 +897,6 @@ mod tests {
     fn django_managed_settings() -> ManagedRunnerSettings {
         ManagedRunnerSettings {
             enabled: false,
-            max_per_user_project: 1,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
             sweep_interval_secs: 300,
@@ -1264,23 +1301,11 @@ mod tests {
     #[test]
     fn cloud_check_vectors_match_fixture() {
         let golden = &fixture()["cloud_agent_configuration_check"];
-        // E001: invalid default.
-        let errors = cloud_agent_configuration_check(&django_cloud_settings(), "bogus");
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                golden["E001"][0][0].as_str().expect("id"),
-                golden["E001"][0][1].as_str().expect("msg"),
-            )]
-        );
-        // E002: cloud default with the kill switch off.
-        let errors = cloud_agent_configuration_check(&django_cloud_settings(), "cloud_agent");
-        assert_eq!(
-            check_pairs(&errors),
-            vec![(
-                golden["E002"][0][0].as_str().expect("id"),
-                golden["E002"][0][1].as_str().expect("msg"),
-            )]
+        // #2903: E001/E002 retired — an invalid or cloud default no
+        // longer errors here.
+        assert!(cloud_agent_configuration_check(&django_cloud_settings(), "bogus").is_empty());
+        assert!(
+            cloud_agent_configuration_check(&django_cloud_settings(), "cloud_agent").is_empty()
         );
         // E005: unknown disabled tool.
         let mut cloud = django_cloud_settings();
@@ -1369,7 +1394,8 @@ mod tests {
             ("scheduler", &[]),
             ("direct", &[]),
         ];
-        // E001: managed default with the kill switch off (verbatim in fixture).
+        // #2903: W001 — a non-local default warns (never refuses). The
+        // Django repr of a string is single-quoted.
         let errors = managed_runner_configuration_check(
             &django_managed_settings(),
             "managed_runner",
@@ -1378,24 +1404,23 @@ mod tests {
         );
         assert_eq!(
             check_pairs(&errors),
-            vec![("managed.E001", golden["E001"].as_str().expect("msg"),)]
-        );
-        // E003/E004: the fixture entries gloss the trigger ("(< 1)", "(<= 0)");
-        // — the messages below are verbatim from `checks.py:30-37`.
-        assert_eq!(
-            golden["E003"],
-            "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1 (< 1)"
-        );
-        let mut managed = django_managed_settings();
-        managed.max_per_user_project = 0;
-        let errors = managed_runner_configuration_check(&managed, "local_runner", &phases, recipes);
-        assert_eq!(
-            check_pairs(&errors),
             vec![(
-                "managed.E003",
-                "MANAGED_RUNNER_MAX_PER_USER_PROJECT must be at least 1",
+                "managed.W001",
+                "DEFAULT_AGENT_EXECUTOR='managed_runner' is ignored: new projects always use local_runner",
             )]
         );
+        // A local default is silent.
+        let errors = managed_runner_configuration_check(
+            &django_managed_settings(),
+            "local_runner",
+            &phases,
+            recipes,
+        );
+        assert!(errors.is_empty());
+        // E004: the fixture entry glosses the trigger ("(<= 0)");
+        // — the message below is verbatim from `checks.py:30-37`.
+        // E003 is gone with the cap (#2910): no check references the removed
+        // setting, so a default-constructed settings value passes clean.
         assert_eq!(
             golden["E004"],
             "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS must be positive (<= 0)"
@@ -1456,7 +1481,8 @@ mod tests {
 
     #[test]
     fn managed_check_clean_with_live_recipe_table() {
-        // Django's phases against the real ported MANAGED_RECIPES: no E002.
+        // Django's phases against the real ported MANAGED_RECIPES: no
+        // E002; only the W001 default-executor warning remains (#2903).
         let mut managed = django_managed_settings();
         managed.enabled = true;
         let errors = managed_runner_configuration_check(
@@ -1465,7 +1491,15 @@ mod tests {
             &django_phases(),
             crate::prompting::recipes::MANAGED_RECIPES,
         );
-        assert!(errors.is_empty());
+        assert_eq!(
+            errors,
+            [ConfigurationError {
+                id: "managed.W001",
+                message: "DEFAULT_AGENT_EXECUTOR='managed_runner' is ignored: new projects \
+                          always use local_runner"
+                    .to_owned(),
+            }]
+        );
     }
 
     // -- managed_runner_availability (`policy.py:76-96`) -----------------------

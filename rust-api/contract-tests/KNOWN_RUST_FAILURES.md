@@ -16,8 +16,10 @@ Entry format (parsed by `_harness/rust_matrix.py`, one line per suite):
 
 Rules:
 
-- One fix issue per root cause, filed under PIDASHCONV-1 with title
-  `Rust <domain> fix: …`, the failing test, and the suspected file.
+- One fix issue per root cause, with the failing test and the suspected
+  file. Under PIDASHCONV the title was `Rust <domain> fix: …`; since the
+  NEWPIDASH project it is a NEWPIDASH `Bug:`/`Drift:` issue (the parser
+  accepts any `<PROJECT>-<n>` id).
 - Never edit the test to match Rust; fix Rust (or prove Django wrong in
   the fix issue and port the corrected behaviour).
 - This list must be empty for PIDASHCONV-821 to be Done.

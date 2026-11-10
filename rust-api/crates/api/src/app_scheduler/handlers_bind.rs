@@ -11,8 +11,9 @@
 //! green. Trace: `rust-api/fixtures/app_scheduler/TRACE.md`.
 //!
 //! Layering: this file wires the merged layers and adds no new logic —
-//! gates from [`super::gate`], SQL + `next_run_at` decisions from
-//! `pidash_services::app_scheduler::queries`, shapes + validation from
+//! gates from [`super::gate`], statements as SeaORM entities/queries
+//! (orm-migration), `next_run_at` decisions from
+//! `pidash_services::app_scheduler::queries`, shapes from
 //! `pidash_services::app_scheduler::shape` — and supplies the two
 //! jobs-backed closures those layers take as parameters: `rrule_validator`
 //! over `pidash_jobs::tasks_ticker::rrule::validate_rrule_string` (the
@@ -88,18 +89,27 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    agent_run, pod, projects, runner, scheduler_bindings, schedulers, workspaces,
+};
+use pidash_db::orm_tx;
 use pidash_db::tasks_ticker::models::{scheduler, scheduler_binding};
 use pidash_services::app_scheduler::{queries, shape};
 use pidash_services::runner_runs::guards;
+use sea_orm::sea_query::{Condition, Expr};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, JoinType, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
+};
 
 use crate::app_issues::{query_last, QueryMap};
 use crate::middleware::SessionHandle;
 use crate::runner_runs::runs::{
-    binding_details_for_many, decode_run, render_list_row, run_select_list, tool_calls_for_many,
-    total_pages, PodMiniStrings,
+    binding_details_for_many, render_list_row, run_from_model, tool_calls_for_many, total_pages,
+    PodMiniStrings, RunPageRow,
 };
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
@@ -353,7 +363,8 @@ pub(crate) async fn apply_install(
         queries::install_next_run_at(&bundle, saved.row.next_run_at, now, next_fire_for_binding);
     if let Some(computed) = write {
         let stamp = Utc::now();
-        write_next_run_at(pool, &saved.row.id, Some(&computed), &stamp).await?;
+        let mut conn = pool.acquire().await.map_err(|_| Denial::ServerError)?;
+        write_next_run_at(&mut *conn, &saved.row.id, Some(&computed), &stamp).await?;
         saved.row.next_run_at = Some(computed);
         saved.row.updated_at = stamp;
     }
@@ -392,7 +403,11 @@ pub async fn binding_detail(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let row = match fetch_binding_detail(pool, &binding_id, &project_id, &slug).await {
+    let mut conn = match pool.acquire().await {
+        Ok(conn) => conn,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let row = match fetch_binding_detail(&mut conn, &binding_id, &project_id, &slug).await {
         Ok(Some(row)) => row,
         Ok(None) => return Denial::NotFound(NOT_FOUND_BINDING_BODY).into_response(),
         Err(denial) => return denial.into_response(),
@@ -438,8 +453,13 @@ pub async fn binding_patch(
         Err(response) => return response,
     };
     // The binding lookup (`:255-260`) precedes `request.data` access, so a
-    // missing row 404s before any body parse error can fire.
-    let current = match fetch_binding_detail(pool, &binding_id, &project_id, &slug).await {
+    // missing row 404s before any body parse error can fire. One checked
+    // out connection serves the lookup and the save below.
+    let mut conn = match pool.acquire().await {
+        Ok(conn) => conn,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let current = match fetch_binding_detail(&mut conn, &binding_id, &project_id, &slug).await {
         Ok(Some(row)) => row,
         Ok(None) => return Denial::NotFound(NOT_FOUND_BINDING_BODY).into_response(),
         Err(denial) => return denial.into_response(),
@@ -450,10 +470,6 @@ pub async fn binding_patch(
     };
     // Unlike install, the body feeds straight into the serializer
     // ([`apply_binding_patch`] answers the non-object 400s).
-    let mut conn = match pool.acquire().await {
-        Ok(conn) => conn,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
     let row = match apply_binding_patch(
         pool,
         &mut conn,
@@ -524,15 +540,7 @@ pub(crate) async fn apply_binding_patch(
     enforce_unique_patch(pool, target.binding_id, current, &attrs).await?;
     validate_patch_cross(current, &attrs)?;
     let stamp = Utc::now();
-    update_binding(
-        &mut *conn,
-        target.binding_id,
-        current,
-        &attrs,
-        user_id,
-        &stamp,
-    )
-    .await?;
+    update_binding(conn, target.binding_id, current, &attrs, user_id, &stamp).await?;
     // The response re-renders the in-memory row: saved values plus the
     // conditional recompute below.
     let mut row = patched_row(current, &attrs, user_id, &stamp);
@@ -541,14 +549,9 @@ pub(crate) async fn apply_binding_patch(
         // sees the just-saved row. `refresh_from_db` on a vanished row
         // raises bare `DoesNotExist` (not `get_object_or_404`) → the
         // `ObjectDoesNotExist` 404 branch. Unreachable except races.
-        row = fetch_binding_detail(
-            &mut *conn,
-            target.binding_id,
-            target.project_id,
-            target.slug,
-        )
-        .await?
-        .ok_or(Denial::ObjectNotFound)?;
+        row = fetch_binding_detail(conn, target.binding_id, target.project_id, target.slug)
+            .await?
+            .ok_or(Denial::ObjectNotFound)?;
         let bundle = queries::RruleBundle {
             dtstart: row.dtstart,
             rrule: row.rrule.as_str(),
@@ -561,7 +564,7 @@ pub(crate) async fn apply_binding_patch(
             queries::patch_next_run_at(&bundle, row.next_run_at, now, next_fire_for_binding_checked)
         {
             let stamp = Utc::now();
-            write_next_run_at(&mut *conn, &row.id, computed.as_ref(), &stamp).await?;
+            write_next_run_at(conn, &row.id, computed.as_ref(), &stamp).await?;
             row.next_run_at = computed;
             row.updated_at = stamp;
         }
@@ -604,7 +607,11 @@ pub async fn binding_uninstall(
         Ok(context) => context,
         Err(response) => return response,
     };
-    let exists = match fetch_binding_detail(pool, &binding_id, &project_id, &slug).await {
+    let mut conn = match pool.acquire().await {
+        Ok(conn) => conn,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let exists = match fetch_binding_detail(&mut conn, &binding_id, &project_id, &slug).await {
         Ok(row) => row,
         Err(denial) => return denial.into_response(),
     };
@@ -616,7 +623,8 @@ pub async fn binding_uninstall(
     // (`db/mixins.py:72-78`).
     let now = Utc::now();
     let now2 = Utc::now();
-    if let Err(denial) = uninstall_binding(pool, &binding_id, &resolved.user_id, &now, &now2).await
+    if let Err(denial) =
+        uninstall_binding(&mut *conn, &binding_id, &resolved.user_id, &now, &now2).await
     {
         return denial.into_response();
     }
@@ -668,64 +676,54 @@ pub async fn binding_runs(
     };
     // `get_object_or_404` precedes pagination: a foreign binding 404s
     // even with garbage `page`/`per_page`.
-    if let Err(response) = require_binding(pool, &binding_id, &project_id, &slug).await {
+    let mut conn = match pool.acquire().await {
+        Ok(conn) => conn,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Err(response) = require_binding(&mut conn, &binding_id, &project_id, &slug).await {
         return response;
     }
     let page_raw = query_last(&query, "page");
     let per_page_raw = query_last(&query, "per_page");
     let (page, per_page) = guards::parse_pagination(page_raw.as_deref(), per_page_raw.as_deref());
-    let total_count: i64 = match sqlx::query_scalar(&binding_runs_count_sql())
-        .bind(binding_id)
-        .bind(resolved.user_id)
-        .bind(resolved.user_id)
-        .fetch_one(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let total_count: i64 = match binding_runs_base(binding_id, resolved.user_id)
+        .count(&db)
         .await
     {
-        Ok(count) => count,
+        Ok(count) => count as i64,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let pages = total_pages(total_count, per_page);
     // `page` is unbounded (`max(1, huge)`); saturate the offset into
-    // `i64` — a huge page reads an empty slice either way.
+    // `u64` — a huge page reads an empty slice either way.
     let offset = i128::from(page - 1) * i128::from(per_page);
-    let offset = offset.min(i128::from(i64::MAX)) as i64;
-    let rows = match sqlx::query(&binding_runs_page_sql())
-        .bind(binding_id)
-        .bind(resolved.user_id)
-        .bind(resolved.user_id)
-        .bind(per_page)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
+    let offset = offset.max(0).min(i128::from(u64::MAX)) as u64;
+    let rows = match binding_runs_page_statement(
+        binding_id,
+        resolved.user_id,
+        per_page.max(0) as u64,
+        offset,
+    )
+    .all(&db)
+    .await
     {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let mut runs: Vec<(pidash_db::runner_runs::AgentRun, PodMiniStrings)> =
         Vec::with_capacity(rows.len());
-    for row in &rows {
-        let run = match decode_run(row, 0) {
+    for row in rows {
+        let RunPageRow {
+            run: model,
+            mini_id,
+            mini_name,
+            mini_is_default,
+            mini_project_id,
+            mini_project_identifier,
+        } = row;
+        let run = match run_from_model(model) {
             Ok(run) => run,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let mini_id: Uuid = match row.try_get("mini_id") {
-            Ok(id) => id,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let mini_name: String = match row.try_get("mini_name") {
-            Ok(name) => name,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let mini_is_default: bool = match row.try_get("mini_is_default") {
-            Ok(flag) => flag,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let mini_project_id: Uuid = match row.try_get("mini_project_id") {
-            Ok(id) => id,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let mini_project_identifier: String = match row.try_get("mini_project_identifier") {
-            Ok(identifier) => identifier,
             Err(_) => return Denial::ServerError.into_response(),
         };
         runs.push((
@@ -765,7 +763,10 @@ pub async fn binding_runs(
                 None => return Denial::ServerError.into_response(),
             },
         };
-        results.push(render_list_row(run, pod, calls, binding));
+        match render_list_row(pool, run, pod, calls, binding, None).await {
+            Ok(value) => results.push(value),
+            Err(response) => return response.into_response(),
+        }
     }
     // `count` is the page length, not the total (`views.py:363`).
     let count = results.len();
@@ -780,63 +781,64 @@ pub async fn binding_runs(
     json_response(StatusCode::OK, body.to_string())
 }
 
-/// Binding-runs WHERE (`views.py:339-348`): this binding's runs passing
-/// the private-runner gate. Params `$1..=$3`: binding, requester,
-/// requester.
-fn binding_runs_where() -> String {
-    r#"("agent_run"."scheduler_binding_id" = $1 AND ("agent_run"."runner_id" IS NULL OR "runner"."owner_id" = $2 OR "agent_run"."created_by_id" = $3))"#.to_owned()
+/// Binding-runs base (`views.py:339-356`): this binding's runs passing
+/// the private-runner gate. The runner leg survives the count (the
+/// gate needs it); every join is many-to-one, so nothing fans out.
+fn binding_runs_base(binding_id: Uuid, user_id: Uuid) -> sea_orm::Select<agent_run::Entity> {
+    let gate = Condition::any()
+        .add(agent_run::Column::RunnerId.is_null())
+        .add(runner::Column::OwnerId.eq(user_id))
+        .add(agent_run::Column::CreatedById.eq(user_id));
+    agent_run::Entity::find()
+        .join(JoinType::LeftJoin, agent_run::Relation::Runner.def())
+        .filter(agent_run::Column::SchedulerBindingId.eq(binding_id))
+        .filter(gate)
 }
 
-/// Binding-runs count (`views.py:356`): Django counts over the trimmed
-/// joins (only the runner leg survives — the WHERE needs it); no
-/// `DISTINCT` (every join is many-to-one, so nothing fans out).
-fn binding_runs_count_sql() -> String {
-    format!(
-        r#"SELECT COUNT(*) AS "__count" FROM "agent_run" LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") WHERE {where_}"#,
-        where_ = binding_runs_where(),
-    )
-}
-
-/// Binding-runs page (`views.py:353-359`): the 39-column run image plus
-/// the pod-mini columns, `-created_at`, `LIMIT $4` / `OFFSET $5`.
-/// Django's page additionally INNER JOINs `scheduler_bindings` +
-/// `schedulers` (the `scheduler_binding__scheduler` select_related
-/// leg); those joins are result-identical no-ops here — the WHERE pins
+/// Binding-runs page (`views.py:353-359`): the run image plus the
+/// pod-mini columns, `-created_at`, `LIMIT` / `OFFSET`. Django's page
+/// additionally INNER JOINs `scheduler_bindings` + `schedulers` (the
+/// `scheduler_binding__scheduler` select_related leg); those joins are
+/// result-identical no-ops here — the base already pins
 /// `scheduler_binding_id` to one existing row and both joins follow
 /// non-null FKs with no `deleted_at` scope — and the current shape
 /// reads nothing from them, so the page carries only the legs the
-/// WHERE and the shape need. (PIDASHCONV-1060 renders the joined
+/// gate and the shape need. (PIDASHCONV-1060 renders the joined
 /// scheduler columns; it extends this SELECT, not the row set.)
-fn binding_runs_page_sql() -> String {
-    format!(
-        concat!(
-            r#"SELECT {runs}, "pod"."id" AS "mini_id", "#,
-            r#""pod"."name" AS "mini_name", "#,
-            r#""pod"."is_default" AS "mini_is_default", "#,
-            r#""pod"."project_id" AS "mini_project_id", "#,
-            r#""projects"."identifier" AS "mini_project_identifier" "#,
-            r#"FROM "agent_run" "#,
-            r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id") "#,
-            r#"INNER JOIN "pod" ON ("agent_run"."pod_id" = "pod"."id") "#,
-            r#"INNER JOIN "projects" ON ("pod"."project_id" = "projects"."id") "#,
-            r#"WHERE {where_} "#,
-            r#"ORDER BY "agent_run"."created_at" DESC LIMIT $4 OFFSET $5"#,
-        ),
-        runs = run_select_list(),
-        where_ = binding_runs_where(),
-    )
+fn binding_runs_page_statement(
+    binding_id: Uuid,
+    user_id: Uuid,
+    limit: u64,
+    offset: u64,
+) -> sea_orm::Selector<sea_orm::SelectModel<RunPageRow>> {
+    let pod_relation = agent_run::Entity::belongs_to(pod::Entity)
+        .from(agent_run::Column::PodId)
+        .to(pod::Column::Id)
+        .into();
+    binding_runs_base(binding_id, user_id)
+        .join(JoinType::InnerJoin, pod_relation)
+        .join(JoinType::InnerJoin, pod::Relation::Projects.def())
+        .column_as(pod::Column::Id, "mini_id")
+        .column_as(pod::Column::Name, "mini_name")
+        .column_as(pod::Column::IsDefault, "mini_is_default")
+        .column_as(pod::Column::ProjectId, "mini_project_id")
+        .column_as(projects::Column::Identifier, "mini_project_identifier")
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(limit)
+        .offset(offset)
+        .into_model::<RunPageRow>()
 }
 
 /// The binding lookup shared by the runs endpoint: `Ok(())` when the
 /// row exists in this project + workspace, else the 404/error response.
 #[allow(clippy::result_large_err)]
 async fn require_binding(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     binding_id: &Uuid,
     project_id: &Uuid,
     slug: &str,
 ) -> Result<(), Response> {
-    match fetch_binding_detail(pool, binding_id, project_id, slug).await {
+    match fetch_binding_detail(conn, binding_id, project_id, slug).await {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(Denial::NotFound(NOT_FOUND_BINDING_BODY).into_response()),
         Err(denial) => Err(denial.into_response()),
@@ -2182,55 +2184,14 @@ fn single_field_denial(field: &str, message: &str) -> Denial {
 }
 
 // ---------------------------------------------------------------------------
-// SQL execution (`queries.rs` statements via `:name` → `$n`)
+// SQL execution (SeaORM statements; every fallback maps to the 500)
 // ---------------------------------------------------------------------------
 
-/// Translate one [`queries`] statement's symbolic `:name` placeholders to
-/// positional `$n` in the statement's `*_PARAMS` order (first appearance).
-/// The scanner matches identifier boundaries, so `:now` never collides
-/// with `:now2`; `::` casts pass through untouched.
-fn translate_placeholders(sql: &str, params: &[&str]) -> String {
-    debug_assert!(sql.is_ascii(), "fixture SQL is ASCII-only");
-    let mut out = String::with_capacity(sql.len() + 16);
-    let bytes = sql.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b':' {
-            let mut end = index + 1;
-            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-                end += 1;
-            }
-            if end > index + 1 {
-                let name = &sql[index + 1..end];
-                if let Some(position) = params.iter().position(|param| *param == name) {
-                    out.push('$');
-                    out.push_str(&(position + 1).to_string());
-                    index = end;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[index] as char);
-        index += 1;
-    }
-    out
-}
-
-/// True for Postgres integrity-constraint violations (`23xxx`) — Django's
-/// `IntegrityError`, mapped by `handle_exception` to 400
-/// [`INVALID_PAYLOAD_BODY`]. Every other database failure is a 500.
-fn is_integrity_violation(error: &sqlx::Error) -> bool {
-    match error {
-        sqlx::Error::Database(db) => db
-            .code()
-            .as_deref()
-            .is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
-}
-
-fn db_denial(error: sqlx::Error) -> Denial {
-    if is_integrity_violation(&error) {
+/// Django's `IntegrityError` for a SeaORM failure: a class-23 violation
+/// (unique, FK, not-null, check) → 400 [`INVALID_PAYLOAD_BODY`]; every
+/// other database failure is a 500.
+fn db_denial(error: sea_orm::DbErr) -> Denial {
+    if orm_tx::is_integrity_violation(&error) {
         Denial::InvalidPayload
     } else {
         Denial::ServerError
@@ -2242,267 +2203,622 @@ pub(crate) struct InstallProject {
     pub(crate) workspace_id: Uuid,
 }
 
+/// BR3 install project lookup (`:192`): `pk` + slug scope; a miss 404s
+/// (`No Project …`).
+fn install_project_statement(project_id: Uuid, slug: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Id, projects::Column::WorkspaceId])
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(projects::Column::CreatedAt)
+}
+
 pub(crate) async fn fetch_install_project(
     pool: &PgPool,
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Option<InstallProject>, Denial> {
-    let sql = translate_placeholders(
-        queries::INSTALL_PROJECT_LOOKUP_SQL,
-        queries::INSTALL_PROJECT_LOOKUP_PARAMS,
-    );
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(&sql)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(Uuid, Uuid)> = install_project_statement(*project_id, slug)
+        .into_tuple::<(Uuid, Uuid)>()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|(_id, workspace_id)| InstallProject { workspace_id }))
 }
 
-/// BR3 install scheduler guard: the full row or `None` (disabled,
-/// foreign-workspace, or soft-deleted ids miss).
+/// BR3 install scheduler guard (`:194-199`): the full row or `None`
+/// (disabled, foreign-workspace, or soft-deleted ids miss).
+fn install_scheduler_statement(
+    scheduler_id: Uuid,
+    workspace_id: Uuid,
+) -> sea_orm::Select<schedulers::Entity> {
+    schedulers::Entity::find()
+        .select_only()
+        .columns(scheduler_row_columns())
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .filter(schedulers::Column::IsEnabled.eq(true))
+        .filter(schedulers::Column::Id.eq(scheduler_id))
+        .filter(schedulers::Column::WorkspaceId.eq(workspace_id))
+        .order_by_desc(schedulers::Column::CreatedAt)
+}
+
 async fn fetch_install_scheduler(
     pool: &PgPool,
     scheduler_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<Option<scheduler::Scheduler>, Denial> {
-    let sql = translate_placeholders(
-        queries::INSTALL_SCHEDULER_GUARD_SQL,
-        queries::INSTALL_SCHEDULER_GUARD_PARAMS,
-    );
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(scheduler_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|row| decode_scheduler(&row)).transpose()
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let model: Option<schedulers::Model> =
+        install_scheduler_statement(*scheduler_id, *workspace_id)
+            .into_model::<schedulers::Model>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    Ok(model.map(scheduler_from_model))
 }
 
-/// BR4 unique check, with or without the PATCH self-row exclusion.
+/// BR4 unique check, with or without the PATCH self-row exclusion
+/// (live bindings only; explicit-null values never reach here).
+fn binding_unique_statement(
+    project_id: Uuid,
+    scheduler_id: Uuid,
+    exclude_binding: Option<Uuid>,
+) -> sea_orm::Select<scheduler_bindings::Entity> {
+    let statement = scheduler_bindings::Entity::find()
+        .select_only()
+        .column(scheduler_bindings::Column::Id)
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .filter(scheduler_bindings::Column::ProjectId.eq(project_id))
+        .filter(scheduler_bindings::Column::SchedulerId.eq(scheduler_id));
+    let statement = match exclude_binding {
+        Some(binding_id) => statement.filter(scheduler_bindings::Column::Id.ne(binding_id)),
+        None => statement,
+    };
+    statement.limit(1)
+}
+
 async fn unique_binding_exists(
     pool: &PgPool,
     project_id: &Uuid,
     scheduler_id: &Uuid,
     exclude_binding: Option<&Uuid>,
 ) -> Result<bool, Denial> {
-    let sql = queries::binding_unique_check_sql(exclude_binding.is_some());
-    let params = if exclude_binding.is_some() {
-        queries::BINDING_UNIQUE_CHECK_PATCH_PARAMS
-    } else {
-        queries::BINDING_UNIQUE_CHECK_PARAMS
-    };
-    let sql = translate_placeholders(&sql, params);
-    let mut query = sqlx::query_as::<_, (i32,)>(&sql)
-        .bind(project_id)
-        .bind(scheduler_id);
-    if let Some(binding_id) = exclude_binding {
-        query = query.bind(binding_id);
-    }
-    let row: Option<(i32,)> = query
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let found: Option<Uuid> =
+        binding_unique_statement(*project_id, *scheduler_id, exclude_binding.copied())
+            .into_tuple::<Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    Ok(found.is_some())
 }
 
 /// BR1 binding list, newest first.
+fn binding_list_statement(
+    project_id: Uuid,
+    slug: &str,
+) -> sea_orm::Select<scheduler_bindings::Entity> {
+    scheduler_bindings::Entity::find()
+        .select_only()
+        .columns(binding_row_columns())
+        .column_as(schedulers::Column::CreatedAt, "s_created_at")
+        .column_as(schedulers::Column::UpdatedAt, "s_updated_at")
+        .column_as(schedulers::Column::CreatedById, "s_created_by_id")
+        .column_as(schedulers::Column::UpdatedById, "s_updated_by_id")
+        .column_as(schedulers::Column::DeletedAt, "s_deleted_at")
+        .column_as(schedulers::Column::Id, "s_id")
+        .column_as(schedulers::Column::WorkspaceId, "s_workspace_id")
+        .column_as(schedulers::Column::Slug, "s_slug")
+        .column_as(schedulers::Column::Name, "s_name")
+        .column_as(schedulers::Column::Description, "s_description")
+        .column_as(schedulers::Column::Prompt, "s_prompt")
+        .column_as(schedulers::Column::Source, "s_source")
+        .column_as(schedulers::Column::IsEnabled, "s_is_enabled")
+        .column_as(schedulers::Column::Color, "s_color")
+        .column_as(agent_run::Column::Id, "r_id")
+        .column_as(agent_run::Column::WorkspaceId, "r_workspace_id")
+        .column_as(agent_run::Column::OwnerId, "r_owner_id")
+        .column_as(agent_run::Column::CreatedById, "r_created_by_id")
+        .column_as(agent_run::Column::PodId, "r_pod_id")
+        .column_as(agent_run::Column::RunnerId, "r_runner_id")
+        .column_as(agent_run::Column::PinnedRunnerId, "r_pinned_runner_id")
+        .column_as(agent_run::Column::WorkItemId, "r_work_item_id")
+        .column_as(
+            agent_run::Column::SchedulerBindingId,
+            "r_scheduler_binding_id",
+        )
+        .column_as(agent_run::Column::ParentRunId, "r_parent_run_id")
+        .column_as(agent_run::Column::Status, "r_status")
+        .column_as(agent_run::Column::ExecutorKind, "r_executor_kind")
+        .column_as(agent_run::Column::DispatchAttempts, "r_dispatch_attempts")
+        .column_as(
+            agent_run::Column::CancelRequestedAt,
+            "r_cancel_requested_at",
+        )
+        .column_as(agent_run::Column::CancelReason, "r_cancel_reason")
+        .column_as(agent_run::Column::ToolPlan, "r_tool_plan")
+        .column_as(
+            agent_run::Column::TerminalHooksAppliedAt,
+            "r_terminal_hooks_applied_at",
+        )
+        .column_as(
+            agent_run::Column::TerminalCapacityReleasedAt,
+            "r_terminal_capacity_released_at",
+        )
+        .column_as(agent_run::Column::Prompt, "r_prompt")
+        .column_as(agent_run::Column::Trigger, "r_trigger")
+        .column_as(agent_run::Column::PromptManifest, "r_prompt_manifest")
+        .column_as(agent_run::Column::PhaseKind, "r_phase_kind")
+        .column_as(agent_run::Column::RunConfig, "r_run_config")
+        .column_as(
+            agent_run::Column::RequiredCapabilities,
+            "r_required_capabilities",
+        )
+        .column_as(agent_run::Column::ThreadId, "r_thread_id")
+        .column_as(agent_run::Column::AgentMetadata, "r_agent_metadata")
+        .column_as(agent_run::Column::LeaseExpiresAt, "r_lease_expires_at")
+        .column_as(agent_run::Column::DonePayload, "r_done_payload")
+        .column_as(agent_run::Column::ErrorDetails, "r_error_details")
+        .column_as(agent_run::Column::RefusalCategory, "r_refusal_category")
+        .column_as(agent_run::Column::LlmModel, "r_llm_model")
+        .column_as(agent_run::Column::Usage, "r_usage")
+        .column_as(agent_run::Column::InputTokens, "r_input_tokens")
+        .column_as(agent_run::Column::OutputTokens, "r_output_tokens")
+        .column_as(agent_run::Column::TotalTokens, "r_total_tokens")
+        .column_as(agent_run::Column::CreatedAt, "r_created_at")
+        .column_as(agent_run::Column::AssignedAt, "r_assigned_at")
+        .column_as(agent_run::Column::StartedAt, "r_started_at")
+        .column_as(agent_run::Column::EndedAt, "r_ended_at")
+        .column_as(pod::Column::Id, "p_id")
+        .column_as(pod::Column::WorkspaceId, "p_workspace_id")
+        .column_as(pod::Column::ProjectId, "p_project_id")
+        .column_as(pod::Column::Name, "p_name")
+        .column_as(pod::Column::Description, "p_description")
+        .column_as(pod::Column::CreatedById, "p_created_by_id")
+        .column_as(pod::Column::IsDefault, "p_is_default")
+        .column_as(pod::Column::DeletedAt, "p_deleted_at")
+        .column_as(pod::Column::CreatedAt, "p_created_at")
+        .column_as(pod::Column::UpdatedAt, "p_updated_at")
+        .join(
+            JoinType::InnerJoin,
+            scheduler_bindings::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            scheduler_bindings::Relation::Schedulers.def(),
+        )
+        .join(
+            JoinType::LeftJoin,
+            scheduler_bindings::Relation::AgentRun.def(),
+        )
+        .join(JoinType::LeftJoin, scheduler_bindings::Relation::Pod.def())
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .filter(scheduler_bindings::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(scheduler_bindings::Column::CreatedAt)
+}
+
 async fn fetch_binding_list(
     pool: &PgPool,
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Vec<queries::BindingListRow>, Denial> {
-    let sql = translate_placeholders(queries::BINDING_LIST_SQL, queries::BINDING_LIST_PARAMS);
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<BindingListDecoded> = binding_list_statement(*project_id, slug)
+        .into_model::<BindingListDecoded>()
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(decode_binding_list_row).collect()
+    rows.into_iter().map(BindingListDecoded::into_row).collect()
 }
 
-/// BR2 binding detail lookup (GET/PATCH/uninstall share the shape).
+/// BR2 binding detail lookup (`:237-260`; GET/PATCH/uninstall share
+/// the shape).
+fn binding_detail_statement(
+    binding_id: Uuid,
+    project_id: Uuid,
+    slug: &str,
+) -> sea_orm::Select<scheduler_bindings::Entity> {
+    scheduler_bindings::Entity::find()
+        .select_only()
+        .columns(binding_row_columns())
+        .join(
+            JoinType::InnerJoin,
+            scheduler_bindings::Relation::Workspaces.def(),
+        )
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .filter(scheduler_bindings::Column::Id.eq(binding_id))
+        .filter(scheduler_bindings::Column::ProjectId.eq(project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(scheduler_bindings::Column::CreatedAt)
+}
+
 pub(crate) async fn fetch_binding_detail(
-    executor: impl sqlx::PgExecutor<'_>,
+    conn: &mut sqlx::PgConnection,
     binding_id: &Uuid,
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Option<scheduler_binding::SchedulerBinding>, Denial> {
-    let sql = translate_placeholders(queries::BINDING_DETAIL_SQL, queries::BINDING_DETAIL_PARAMS);
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&sql)
-        .bind(binding_id)
-        .bind(project_id)
-        .bind(slug)
-        .fetch_optional(executor)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|row| decode_binding(&row)).transpose()
+    let tx_conn = orm_tx::TxConn::new(conn);
+    let model: Option<scheduler_bindings::Model> =
+        binding_detail_statement(*binding_id, *project_id, slug)
+            .into_model::<scheduler_bindings::Model>()
+            .one(&tx_conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    model.map(binding_from_model).transpose()
 }
 
 // ---------------------------------------------------------------------------
-// Row decode (fixture SELECT order → the `queries`/`db` row structs)
+// Row decode (by name → the `queries`/`db` row structs;
+// `FromQueryResult` maps by column name, never by position)
 // ---------------------------------------------------------------------------
 
-/// Column counts per BR1 segment (bindings 22 + schedulers 14 +
-/// `AGENT_RUN_COLUMNS` 39 + `POD_COLUMNS` 10 = 85; pinned in tests).
-const BINDING_COLUMN_COUNT: usize = 22;
-const SCHEDULER_COLUMN_COUNT: usize = 14;
+/// The 22 `scheduler_bindings` columns every binding read projects, in
+/// the old SQL's SELECT order (decode is by name, so order is cosmetic).
+fn binding_row_columns() -> [scheduler_bindings::Column; 22] {
+    use scheduler_bindings::Column;
+    [
+        Column::CreatedAt,
+        Column::UpdatedAt,
+        Column::CreatedById,
+        Column::UpdatedById,
+        Column::DeletedAt,
+        Column::Id,
+        Column::WorkspaceId,
+        Column::ProjectId,
+        Column::SchedulerId,
+        Column::Dtstart,
+        Column::Tzid,
+        Column::Rrule,
+        Column::Rdates,
+        Column::Exdates,
+        Column::ExtraContext,
+        Column::Enabled,
+        Column::OutcomeMode,
+        Column::NextRunAt,
+        Column::LastRunId,
+        Column::LastError,
+        Column::ActorId,
+        Column::PodId,
+    ]
+}
 
-/// Decode one `scheduler_bindings` row in fixture SELECT order
-/// (created_at … pod_id).
-pub(crate) fn decode_binding(
-    row: &sqlx::postgres::PgRow,
+/// The 14 `schedulers` columns every scheduler read projects, in the
+/// old SQL's SELECT order (decode is by name, so order is cosmetic).
+fn scheduler_row_columns() -> [schedulers::Column; 14] {
+    use schedulers::Column;
+    [
+        Column::CreatedAt,
+        Column::UpdatedAt,
+        Column::CreatedById,
+        Column::UpdatedById,
+        Column::DeletedAt,
+        Column::Id,
+        Column::WorkspaceId,
+        Column::Slug,
+        Column::Name,
+        Column::Description,
+        Column::Prompt,
+        Column::Source,
+        Column::IsEnabled,
+        Column::Color,
+    ]
+}
+
+/// One binding model in the services shape (timestamps UTC, the
+/// entity's nullable `workspace_id` fails the decode like a missed
+/// positional read — the column is `NOT NULL`, so unreachable).
+fn binding_from_model(
+    model: scheduler_bindings::Model,
 ) -> Result<scheduler_binding::SchedulerBinding, Denial> {
     Ok(scheduler_binding::SchedulerBinding {
-        created_at: row.try_get(0).map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get(1).map_err(|_| Denial::ServerError)?,
-        created_by_id: row.try_get(2).map_err(|_| Denial::ServerError)?,
-        updated_by_id: row.try_get(3).map_err(|_| Denial::ServerError)?,
-        deleted_at: row.try_get(4).map_err(|_| Denial::ServerError)?,
-        id: row.try_get(5).map_err(|_| Denial::ServerError)?,
-        workspace_id: row.try_get(6).map_err(|_| Denial::ServerError)?,
-        project_id: row.try_get(7).map_err(|_| Denial::ServerError)?,
-        scheduler_id: row.try_get(8).map_err(|_| Denial::ServerError)?,
-        dtstart: row.try_get(9).map_err(|_| Denial::ServerError)?,
-        tzid: row.try_get(10).map_err(|_| Denial::ServerError)?,
-        rrule: row.try_get(11).map_err(|_| Denial::ServerError)?,
-        rdates: row.try_get(12).map_err(|_| Denial::ServerError)?,
-        exdates: row.try_get(13).map_err(|_| Denial::ServerError)?,
-        extra_context: row.try_get(14).map_err(|_| Denial::ServerError)?,
-        enabled: row.try_get(15).map_err(|_| Denial::ServerError)?,
-        outcome_mode: row.try_get(16).map_err(|_| Denial::ServerError)?,
-        next_run_at: row.try_get(17).map_err(|_| Denial::ServerError)?,
-        last_run_id: row.try_get(18).map_err(|_| Denial::ServerError)?,
-        last_error: row.try_get(19).map_err(|_| Denial::ServerError)?,
-        actor_id: row.try_get(20).map_err(|_| Denial::ServerError)?,
-        pod_id: row.try_get(21).map_err(|_| Denial::ServerError)?,
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+        created_by_id: model.created_by_id,
+        updated_by_id: model.updated_by_id,
+        deleted_at: model.deleted_at.map(|stamp| stamp.with_timezone(&Utc)),
+        id: model.id,
+        workspace_id: model.workspace_id.ok_or(Denial::ServerError)?,
+        project_id: model.project_id,
+        scheduler_id: model.scheduler_id,
+        dtstart: model.dtstart.with_timezone(&Utc),
+        tzid: model.tzid,
+        rrule: model.rrule,
+        rdates: model.rdates,
+        exdates: model.exdates,
+        extra_context: model.extra_context,
+        enabled: model.enabled,
+        outcome_mode: model.outcome_mode,
+        next_run_at: model.next_run_at.map(|stamp| stamp.with_timezone(&Utc)),
+        last_run_id: model.last_run_id,
+        last_error: model.last_error,
+        actor_id: model.actor_id,
+        pod_id: model.pod_id,
     })
 }
 
-/// Decode one `schedulers` row in fixture SELECT order at `base`.
-fn decode_scheduler_at(
-    row: &sqlx::postgres::PgRow,
-    base: usize,
-) -> Result<scheduler::Scheduler, Denial> {
-    Ok(scheduler::Scheduler {
-        created_at: row.try_get(base).map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get(base + 1).map_err(|_| Denial::ServerError)?,
-        created_by_id: row.try_get(base + 2).map_err(|_| Denial::ServerError)?,
-        updated_by_id: row.try_get(base + 3).map_err(|_| Denial::ServerError)?,
-        deleted_at: row.try_get(base + 4).map_err(|_| Denial::ServerError)?,
-        id: row.try_get(base + 5).map_err(|_| Denial::ServerError)?,
-        workspace_id: row.try_get(base + 6).map_err(|_| Denial::ServerError)?,
-        slug: row.try_get(base + 7).map_err(|_| Denial::ServerError)?,
-        name: row.try_get(base + 8).map_err(|_| Denial::ServerError)?,
-        description: row.try_get(base + 9).map_err(|_| Denial::ServerError)?,
-        prompt: row.try_get(base + 10).map_err(|_| Denial::ServerError)?,
-        source: row.try_get(base + 11).map_err(|_| Denial::ServerError)?,
-        is_enabled: row.try_get(base + 12).map_err(|_| Denial::ServerError)?,
-        color: row.try_get(base + 13).map_err(|_| Denial::ServerError)?,
-    })
+/// One scheduler model in the services shape (timestamps UTC).
+fn scheduler_from_model(model: schedulers::Model) -> scheduler::Scheduler {
+    scheduler::Scheduler {
+        created_at: model.created_at.with_timezone(&Utc),
+        updated_at: model.updated_at.with_timezone(&Utc),
+        created_by_id: model.created_by_id,
+        updated_by_id: model.updated_by_id,
+        deleted_at: model.deleted_at.map(|stamp| stamp.with_timezone(&Utc)),
+        id: model.id,
+        workspace_id: model.workspace_id,
+        slug: model.slug,
+        name: model.name,
+        description: model.description,
+        prompt: model.prompt,
+        source: model.source,
+        is_enabled: model.is_enabled,
+        color: model.color,
+    }
 }
 
-fn decode_scheduler(row: &sqlx::postgres::PgRow) -> Result<scheduler::Scheduler, Denial> {
-    decode_scheduler_at(row, 0)
+/// One BR1 list row decoded by name: the binding columns plain, the
+/// joined columns aliased (`s_`/`r_`/`p_` — every output name is unique
+/// by construction, so no joined column can overwrite another's; the
+/// old positional layout's `#2850` class cannot recur). `last_run` /
+/// `pod` stay `Some` exactly when their joined `id` is non-NULL — the
+/// LEFT-join miss carries all-NULL legs.
+#[derive(Debug, Clone, FromQueryResult)]
+struct BindingListDecoded {
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    created_by_id: Option<uuid::Uuid>,
+    updated_by_id: Option<uuid::Uuid>,
+    deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    id: uuid::Uuid,
+    workspace_id: Option<uuid::Uuid>,
+    project_id: Option<uuid::Uuid>,
+    scheduler_id: uuid::Uuid,
+    dtstart: sea_orm::prelude::DateTimeWithTimeZone,
+    tzid: String,
+    rrule: String,
+    rdates: serde_json::Value,
+    exdates: serde_json::Value,
+    extra_context: String,
+    enabled: bool,
+    outcome_mode: String,
+    next_run_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    last_run_id: Option<uuid::Uuid>,
+    last_error: String,
+    actor_id: Option<uuid::Uuid>,
+    pod_id: Option<uuid::Uuid>,
+    s_created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    s_updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+    s_created_by_id: Option<uuid::Uuid>,
+    s_updated_by_id: Option<uuid::Uuid>,
+    s_deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    s_id: uuid::Uuid,
+    s_workspace_id: uuid::Uuid,
+    s_slug: String,
+    s_name: String,
+    s_description: String,
+    s_prompt: String,
+    s_source: String,
+    s_is_enabled: bool,
+    s_color: String,
+    r_id: Option<uuid::Uuid>,
+    r_workspace_id: Option<uuid::Uuid>,
+    r_owner_id: Option<uuid::Uuid>,
+    r_created_by_id: Option<uuid::Uuid>,
+    r_pod_id: Option<uuid::Uuid>,
+    r_runner_id: Option<uuid::Uuid>,
+    r_pinned_runner_id: Option<uuid::Uuid>,
+    r_work_item_id: Option<uuid::Uuid>,
+    r_scheduler_binding_id: Option<uuid::Uuid>,
+    r_parent_run_id: Option<uuid::Uuid>,
+    r_status: Option<String>,
+    r_executor_kind: Option<String>,
+    r_dispatch_attempts: Option<i32>,
+    r_cancel_requested_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    r_cancel_reason: Option<String>,
+    r_tool_plan: Option<serde_json::Value>,
+    r_terminal_hooks_applied_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    r_terminal_capacity_released_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    r_prompt: Option<String>,
+    r_trigger: Option<String>,
+    r_prompt_manifest: Option<serde_json::Value>,
+    r_phase_kind: Option<String>,
+    r_run_config: Option<serde_json::Value>,
+    r_required_capabilities: Option<serde_json::Value>,
+    r_thread_id: Option<String>,
+    r_agent_metadata: Option<serde_json::Value>,
+    r_lease_expires_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    r_done_payload: Option<serde_json::Value>,
+    r_error_details: Option<serde_json::Value>,
+    r_refusal_category: Option<String>,
+    r_llm_model: Option<String>,
+    r_usage: Option<serde_json::Value>,
+    r_input_tokens: Option<i64>,
+    r_output_tokens: Option<i64>,
+    r_total_tokens: Option<i64>,
+    r_created_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    r_assigned_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    r_started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    r_ended_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    p_id: Option<uuid::Uuid>,
+    p_workspace_id: Option<uuid::Uuid>,
+    p_project_id: Option<uuid::Uuid>,
+    p_name: Option<String>,
+    p_description: Option<String>,
+    p_created_by_id: Option<uuid::Uuid>,
+    p_is_default: Option<bool>,
+    p_deleted_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    p_created_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    p_updated_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
 }
 
-/// Decode one `agent_run` row in `AGENT_RUN_COLUMNS` order at `base`.
-fn decode_agent_run_at(
-    row: &sqlx::postgres::PgRow,
-    base: usize,
-) -> Result<queries::AgentRunRow, Denial> {
-    Ok(queries::AgentRunRow {
-        id: row.try_get(base).map_err(|_| Denial::ServerError)?,
-        workspace_id: row.try_get(base + 1).map_err(|_| Denial::ServerError)?,
-        owner_id: row.try_get(base + 2).map_err(|_| Denial::ServerError)?,
-        created_by_id: row.try_get(base + 3).map_err(|_| Denial::ServerError)?,
-        pod_id: row.try_get(base + 4).map_err(|_| Denial::ServerError)?,
-        runner_id: row.try_get(base + 5).map_err(|_| Denial::ServerError)?,
-        pinned_runner_id: row.try_get(base + 6).map_err(|_| Denial::ServerError)?,
-        work_item_id: row.try_get(base + 7).map_err(|_| Denial::ServerError)?,
-        scheduler_binding_id: row.try_get(base + 8).map_err(|_| Denial::ServerError)?,
-        parent_run_id: row.try_get(base + 9).map_err(|_| Denial::ServerError)?,
-        status: row.try_get(base + 10).map_err(|_| Denial::ServerError)?,
-        executor_kind: row.try_get(base + 11).map_err(|_| Denial::ServerError)?,
-        dispatch_attempts: row.try_get(base + 12).map_err(|_| Denial::ServerError)?,
-        cancel_requested_at: row.try_get(base + 13).map_err(|_| Denial::ServerError)?,
-        cancel_reason: row.try_get(base + 14).map_err(|_| Denial::ServerError)?,
-        tool_plan: row.try_get(base + 15).map_err(|_| Denial::ServerError)?,
-        terminal_hooks_applied_at: row.try_get(base + 16).map_err(|_| Denial::ServerError)?,
-        terminal_capacity_released_at: row.try_get(base + 17).map_err(|_| Denial::ServerError)?,
-        prompt: row.try_get(base + 18).map_err(|_| Denial::ServerError)?,
-        trigger: row.try_get(base + 19).map_err(|_| Denial::ServerError)?,
-        prompt_manifest: row.try_get(base + 20).map_err(|_| Denial::ServerError)?,
-        phase_kind: row.try_get(base + 21).map_err(|_| Denial::ServerError)?,
-        run_config: row.try_get(base + 22).map_err(|_| Denial::ServerError)?,
-        required_capabilities: row.try_get(base + 23).map_err(|_| Denial::ServerError)?,
-        thread_id: row.try_get(base + 24).map_err(|_| Denial::ServerError)?,
-        agent_metadata: row.try_get(base + 25).map_err(|_| Denial::ServerError)?,
-        lease_expires_at: row.try_get(base + 26).map_err(|_| Denial::ServerError)?,
-        done_payload: row.try_get(base + 27).map_err(|_| Denial::ServerError)?,
-        error_details: row.try_get(base + 28).map_err(|_| Denial::ServerError)?,
-        refusal_category: row.try_get(base + 29).map_err(|_| Denial::ServerError)?,
-        llm_model: row.try_get(base + 30).map_err(|_| Denial::ServerError)?,
-        usage: row.try_get(base + 31).map_err(|_| Denial::ServerError)?,
-        input_tokens: row.try_get(base + 32).map_err(|_| Denial::ServerError)?,
-        output_tokens: row.try_get(base + 33).map_err(|_| Denial::ServerError)?,
-        total_tokens: row.try_get(base + 34).map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get(base + 35).map_err(|_| Denial::ServerError)?,
-        assigned_at: row.try_get(base + 36).map_err(|_| Denial::ServerError)?,
-        started_at: row.try_get(base + 37).map_err(|_| Denial::ServerError)?,
-        ended_at: row.try_get(base + 38).map_err(|_| Denial::ServerError)?,
-    })
-}
-
-/// Decode one `pod` row in `POD_COLUMNS` order at `base`.
-fn decode_pod_at(row: &sqlx::postgres::PgRow, base: usize) -> Result<queries::PodRow, Denial> {
-    Ok(queries::PodRow {
-        id: row.try_get(base).map_err(|_| Denial::ServerError)?,
-        workspace_id: row.try_get(base + 1).map_err(|_| Denial::ServerError)?,
-        project_id: row.try_get(base + 2).map_err(|_| Denial::ServerError)?,
-        name: row.try_get(base + 3).map_err(|_| Denial::ServerError)?,
-        description: row.try_get(base + 4).map_err(|_| Denial::ServerError)?,
-        created_by_id: row.try_get(base + 5).map_err(|_| Denial::ServerError)?,
-        is_default: row.try_get(base + 6).map_err(|_| Denial::ServerError)?,
-        deleted_at: row.try_get(base + 7).map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get(base + 8).map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get(base + 9).map_err(|_| Denial::ServerError)?,
-    })
-}
-
-/// Decode one BR1 row: the binding, its INNER-joined scheduler, and the
-/// LEFT-joined last run / pod (`None` exactly when the joined `id` is
-/// NULL — every joined column is NULL then).
-fn decode_binding_list_row(row: &sqlx::postgres::PgRow) -> Result<queries::BindingListRow, Denial> {
-    let binding = decode_binding(row)?;
-    let scheduler_base = BINDING_COLUMN_COUNT;
-    let run_base = scheduler_base + SCHEDULER_COLUMN_COUNT;
-    let pod_base = run_base + queries::AGENT_RUN_COLUMNS.len();
-    let scheduler = decode_scheduler_at(row, scheduler_base)?;
-    let last_run = {
-        let id: Option<Uuid> = row.try_get(run_base).map_err(|_| Denial::ServerError)?;
-        if id.is_some() {
-            Some(decode_agent_run_at(row, run_base)?)
-        } else {
-            None
-        }
-    };
-    let pod = {
-        let id: Option<Uuid> = row.try_get(pod_base).map_err(|_| Denial::ServerError)?;
-        if id.is_some() {
-            Some(decode_pod_at(row, pod_base)?)
-        } else {
-            None
-        }
-    };
-    Ok(queries::BindingListRow {
-        binding,
-        scheduler,
-        last_run,
-        pod,
-    })
+impl BindingListDecoded {
+    fn into_row(self) -> Result<queries::BindingListRow, Denial> {
+        let Self {
+            r_id,
+            r_workspace_id,
+            r_owner_id,
+            r_created_by_id,
+            r_pod_id,
+            r_runner_id,
+            r_pinned_runner_id,
+            r_work_item_id,
+            r_scheduler_binding_id,
+            r_parent_run_id,
+            r_status,
+            r_executor_kind,
+            r_dispatch_attempts,
+            r_cancel_requested_at,
+            r_cancel_reason,
+            r_tool_plan,
+            r_terminal_hooks_applied_at,
+            r_terminal_capacity_released_at,
+            r_prompt,
+            r_trigger,
+            r_prompt_manifest,
+            r_phase_kind,
+            r_run_config,
+            r_required_capabilities,
+            r_thread_id,
+            r_agent_metadata,
+            r_lease_expires_at,
+            r_done_payload,
+            r_error_details,
+            r_refusal_category,
+            r_llm_model,
+            r_usage,
+            r_input_tokens,
+            r_output_tokens,
+            r_total_tokens,
+            r_created_at,
+            r_assigned_at,
+            r_started_at,
+            r_ended_at,
+            p_id,
+            p_workspace_id,
+            p_project_id,
+            p_name,
+            p_description,
+            p_created_by_id,
+            p_is_default,
+            p_deleted_at,
+            p_created_at,
+            p_updated_at,
+            ..
+        } = self;
+        let binding = scheduler_binding::SchedulerBinding {
+            created_at: self.created_at.with_timezone(&Utc),
+            updated_at: self.updated_at.with_timezone(&Utc),
+            created_by_id: self.created_by_id,
+            updated_by_id: self.updated_by_id,
+            deleted_at: self.deleted_at.map(|stamp| stamp.with_timezone(&Utc)),
+            id: self.id,
+            workspace_id: self.workspace_id.ok_or(Denial::ServerError)?,
+            project_id: self.project_id,
+            scheduler_id: self.scheduler_id,
+            dtstart: self.dtstart.with_timezone(&Utc),
+            tzid: self.tzid,
+            rrule: self.rrule,
+            rdates: self.rdates,
+            exdates: self.exdates,
+            extra_context: self.extra_context,
+            enabled: self.enabled,
+            outcome_mode: self.outcome_mode,
+            next_run_at: self.next_run_at.map(|stamp| stamp.with_timezone(&Utc)),
+            last_run_id: self.last_run_id,
+            last_error: self.last_error,
+            actor_id: self.actor_id,
+            pod_id: self.pod_id,
+        };
+        let scheduler = scheduler::Scheduler {
+            created_at: self.s_created_at.with_timezone(&Utc),
+            updated_at: self.s_updated_at.with_timezone(&Utc),
+            created_by_id: self.s_created_by_id,
+            updated_by_id: self.s_updated_by_id,
+            deleted_at: self.s_deleted_at.map(|stamp| stamp.with_timezone(&Utc)),
+            id: self.s_id,
+            workspace_id: self.s_workspace_id,
+            slug: self.s_slug,
+            name: self.s_name,
+            description: self.s_description,
+            prompt: self.s_prompt,
+            source: self.s_source,
+            is_enabled: self.s_is_enabled,
+            color: self.s_color,
+        };
+        let last_run = match r_id {
+            Some(_) => Some(queries::AgentRunRow {
+                id: r_id.ok_or(Denial::ServerError)?,
+                workspace_id: r_workspace_id.ok_or(Denial::ServerError)?,
+                owner_id: r_owner_id,
+                created_by_id: r_created_by_id.ok_or(Denial::ServerError)?,
+                pod_id: r_pod_id.ok_or(Denial::ServerError)?,
+                runner_id: r_runner_id,
+                pinned_runner_id: r_pinned_runner_id,
+                work_item_id: r_work_item_id,
+                scheduler_binding_id: r_scheduler_binding_id,
+                parent_run_id: r_parent_run_id,
+                status: r_status.ok_or(Denial::ServerError)?,
+                executor_kind: r_executor_kind.ok_or(Denial::ServerError)?,
+                dispatch_attempts: r_dispatch_attempts.ok_or(Denial::ServerError)?,
+                cancel_requested_at: r_cancel_requested_at.map(|stamp| stamp.with_timezone(&Utc)),
+                cancel_reason: r_cancel_reason.ok_or(Denial::ServerError)?,
+                tool_plan: r_tool_plan.ok_or(Denial::ServerError)?,
+                terminal_hooks_applied_at: r_terminal_hooks_applied_at
+                    .map(|stamp| stamp.with_timezone(&Utc)),
+                terminal_capacity_released_at: r_terminal_capacity_released_at
+                    .map(|stamp| stamp.with_timezone(&Utc)),
+                prompt: r_prompt.ok_or(Denial::ServerError)?,
+                trigger: r_trigger.ok_or(Denial::ServerError)?,
+                prompt_manifest: r_prompt_manifest,
+                phase_kind: r_phase_kind.ok_or(Denial::ServerError)?,
+                run_config: r_run_config.ok_or(Denial::ServerError)?,
+                required_capabilities: r_required_capabilities.ok_or(Denial::ServerError)?,
+                thread_id: r_thread_id.ok_or(Denial::ServerError)?,
+                agent_metadata: r_agent_metadata.ok_or(Denial::ServerError)?,
+                lease_expires_at: r_lease_expires_at.map(|stamp| stamp.with_timezone(&Utc)),
+                done_payload: r_done_payload,
+                error_details: r_error_details.ok_or(Denial::ServerError)?,
+                refusal_category: r_refusal_category.ok_or(Denial::ServerError)?,
+                llm_model: r_llm_model.ok_or(Denial::ServerError)?,
+                usage: r_usage.ok_or(Denial::ServerError)?,
+                input_tokens: r_input_tokens,
+                output_tokens: r_output_tokens,
+                total_tokens: r_total_tokens,
+                created_at: r_created_at.ok_or(Denial::ServerError)?.with_timezone(&Utc),
+                assigned_at: r_assigned_at.map(|stamp| stamp.with_timezone(&Utc)),
+                started_at: r_started_at.map(|stamp| stamp.with_timezone(&Utc)),
+                ended_at: r_ended_at.map(|stamp| stamp.with_timezone(&Utc)),
+            }),
+            None => None,
+        };
+        let pod = match p_id {
+            Some(_) => Some(queries::PodRow {
+                id: p_id.ok_or(Denial::ServerError)?,
+                workspace_id: p_workspace_id.ok_or(Denial::ServerError)?,
+                project_id: p_project_id.ok_or(Denial::ServerError)?,
+                name: p_name.ok_or(Denial::ServerError)?,
+                description: p_description.ok_or(Denial::ServerError)?,
+                created_by_id: p_created_by_id,
+                is_default: p_is_default.ok_or(Denial::ServerError)?,
+                deleted_at: p_deleted_at.map(|stamp| stamp.with_timezone(&Utc)),
+                created_at: p_created_at.ok_or(Denial::ServerError)?.with_timezone(&Utc),
+                updated_at: p_updated_at.ok_or(Denial::ServerError)?.with_timezone(&Utc),
+            }),
+            None => None,
+        };
+        Ok(queries::BindingListRow {
+            binding,
+            scheduler,
+            last_run,
+            pod,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2513,42 +2829,53 @@ fn decode_binding_list_row(row: &sqlx::postgres::PgRow) -> Result<queries::Bindi
 /// non-deleted row, enabled or not, in any workspace (the install guard's
 /// workspace/enabled scoping does NOT apply here).
 async fn fetch_active_scheduler_id(pool: &PgPool, id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM schedulers s WHERE s.id = $1 AND s.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let found: Option<Uuid> = schedulers::Entity::find()
+        .select_only()
+        .column(schedulers::Column::Id)
+        .filter(schedulers::Column::Id.eq(*id))
+        .filter(schedulers::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(found.is_some())
 }
 
 /// Project field queryset (`Project._default_manager`): any non-deleted
 /// row in any workspace (QUIRK-body-project-discarded: the body project
 /// need not match the URL project — it is validated, then discarded).
 async fn fetch_active_project_id(pool: &PgPool, id: &Uuid) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let found: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::Id)
+        .filter(projects::Column::Id.eq(*id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(found.is_some())
 }
 
 /// Pod field queryset (`Pod.objects.filter(deleted_at__isnull=True)`,
 /// F36-02 `pod_queryset_rule`): the active row's id/project/name, or
 /// `None` when unknown or soft-deleted (both report `does_not_exist`).
 async fn fetch_active_pod(pool: &PgPool, id: &Uuid) -> Result<Option<PodChoice>, Denial> {
-    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        r#"SELECT p.id, p.project_id, p.name FROM pod p
-           WHERE p.id = $1 AND p.deleted_at IS NULL LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(Uuid, Uuid, String)> = pod::Entity::find()
+        .select_only()
+        .columns([pod::Column::Id, pod::Column::ProjectId, pod::Column::Name])
+        .filter(pod::Column::Id.eq(*id))
+        .filter(pod::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<(Uuid, Uuid, String)>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|(id, project_id, name)| PodChoice {
         id,
         project_id,
@@ -2605,7 +2932,6 @@ fn iso_list_value(items: &[String]) -> Value {
 /// scheduler/project/workspace/actor; model defaults for omitted keys;
 /// `created_by` = request user (crum), `updated_by` NULL.
 async fn insert_binding(pool: &PgPool, install: &InstallAttrs) -> Result<SavedBinding, Denial> {
-    let sql = translate_placeholders(queries::BINDING_INSERT_SQL, queries::BINDING_INSERT_PARAMS);
     let id = Uuid::new_v4();
     let now = Utc::now();
     let attrs = &install.attrs;
@@ -2631,26 +2957,36 @@ async fn insert_binding(pool: &PgPool, install: &InstallAttrs) -> Result<SavedBi
         .as_ref()
         .and_then(|maybe| maybe.as_ref())
         .map(|pod| pod.name.clone());
-    sqlx::query(&sql)
-        .bind(id)
-        .bind(now)
-        .bind(install.actor_id)
-        .bind(install.workspace_id)
-        .bind(install.project_id)
-        .bind(install.scheduler_id)
-        .bind(dtstart)
-        .bind(&tzid)
-        .bind(&rrule)
-        .bind(iso_list_value(&rdates))
-        .bind(iso_list_value(&exdates))
-        .bind(&extra_context)
-        .bind(enabled)
-        .bind(&outcome_mode)
-        .bind(install.actor_id)
-        .bind(pod_id)
-        .execute(pool)
-        .await
-        .map_err(db_denial)?;
+    let now_stamp: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    let dtstart_stamp: sea_orm::prelude::DateTimeWithTimeZone = dtstart.into();
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    scheduler_bindings::ActiveModel {
+        id: Set(id),
+        created_at: Set(now_stamp),
+        updated_at: Set(now_stamp),
+        created_by_id: Set(Some(install.actor_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(Some(install.workspace_id)),
+        project_id: Set(Some(install.project_id)),
+        scheduler_id: Set(install.scheduler_id),
+        dtstart: Set(dtstart_stamp),
+        tzid: Set(tzid.clone()),
+        rrule: Set(rrule.clone()),
+        rdates: Set(iso_list_value(&rdates)),
+        exdates: Set(iso_list_value(&exdates)),
+        extra_context: Set(extra_context.clone()),
+        enabled: Set(enabled),
+        outcome_mode: Set(outcome_mode.clone()),
+        next_run_at: Set(None),
+        last_run_id: Set(None),
+        last_error: Set("".to_owned()),
+        actor_id: Set(Some(install.actor_id)),
+        pod_id: Set(pod_id),
+    }
+    .insert(&db)
+    .await
+    .map_err(db_denial)?;
     Ok(SavedBinding {
         row: scheduler_binding::SchedulerBinding {
             id,
@@ -2680,73 +3016,25 @@ async fn insert_binding(pool: &PgPool, install: &InstallAttrs) -> Result<SavedBi
     })
 }
 
-/// BR7 PATCH save (`:263`): writable columns (provided values, untouched
-/// ones rewritten) + `updated_at`/`updated_by` refresh.
-async fn update_binding(
-    executor: impl sqlx::PgExecutor<'_>,
-    binding_id: &Uuid,
-    current: &scheduler_binding::SchedulerBinding,
-    attrs: &BindingAttrs,
-    user_id: &Uuid,
-    stamp: &DateTime<Utc>,
-) -> Result<(), Denial> {
-    let sql = translate_placeholders(queries::BINDING_PATCH_SQL, queries::BINDING_PATCH_PARAMS);
-    let dtstart = attrs.dtstart.unwrap_or(current.dtstart);
-    let tzid = attrs.tzid.clone().unwrap_or_else(|| current.tzid.clone());
-    let rrule = attrs.rrule.clone().unwrap_or_else(|| current.rrule.clone());
-    let rdates = attrs
-        .rdates
-        .clone()
-        .map(|items| iso_list_value(&items))
-        .unwrap_or_else(|| current.rdates.clone());
-    let exdates = attrs
-        .exdates
-        .clone()
-        .map(|items| iso_list_value(&items))
-        .unwrap_or_else(|| current.exdates.clone());
-    let extra_context = attrs
-        .extra_context
-        .clone()
-        .unwrap_or_else(|| current.extra_context.clone());
-    let enabled = attrs.enabled.unwrap_or(current.enabled);
-    let outcome_mode = attrs
-        .outcome_mode
-        .clone()
-        .unwrap_or_else(|| current.outcome_mode.clone());
-    let pod_id = attrs
-        .pod
-        .as_ref()
-        .map_or(current.pod_id, |maybe| maybe.as_ref().map(|pod| pod.id));
-    sqlx::query(&sql)
-        .bind(stamp)
-        .bind(user_id)
-        .bind(dtstart)
-        .bind(&tzid)
-        .bind(&rrule)
-        .bind(&rdates)
-        .bind(&exdates)
-        .bind(&extra_context)
-        .bind(enabled)
-        .bind(&outcome_mode)
-        .bind(pod_id)
-        .bind(binding_id)
-        .execute(executor)
-        .await
-        .map_err(db_denial)?;
-    Ok(())
+/// The writable binding columns after a PATCH merge (provided values,
+/// untouched ones rewritten from the current row — `save()` semantics).
+struct MergedPatchValues {
+    dtstart: DateTime<Utc>,
+    tzid: String,
+    rrule: String,
+    rdates: Value,
+    exdates: Value,
+    extra_context: String,
+    enabled: bool,
+    outcome_mode: String,
+    pod_id: Option<Uuid>,
 }
 
-/// The in-memory row after a PATCH save (what the 200 re-renders when no
-/// recompute runs): saved values + the save stamp.
-fn patched_row(
+fn merged_patch(
     current: &scheduler_binding::SchedulerBinding,
     attrs: &BindingAttrs,
-    user_id: &Uuid,
-    stamp: &DateTime<Utc>,
-) -> scheduler_binding::SchedulerBinding {
-    scheduler_binding::SchedulerBinding {
-        updated_at: *stamp,
-        updated_by_id: Some(*user_id),
+) -> MergedPatchValues {
+    MergedPatchValues {
         dtstart: attrs.dtstart.unwrap_or(current.dtstart),
         tzid: attrs.tzid.clone().unwrap_or_else(|| current.tzid.clone()),
         rrule: attrs.rrule.clone().unwrap_or_else(|| current.rrule.clone()),
@@ -2773,27 +3061,134 @@ fn patched_row(
             .pod
             .as_ref()
             .map_or(current.pod_id, |maybe| maybe.as_ref().map(|pod| pod.id)),
+    }
+}
+
+/// BR7 PATCH save (`:263`): writable columns (provided values, untouched
+/// ones rewritten) + `updated_at`/`updated_by` refresh.
+fn binding_patch_statement(
+    stamp: sea_orm::prelude::DateTimeWithTimeZone,
+    user_id: Uuid,
+    values: &MergedPatchValues,
+    binding_id: Uuid,
+) -> sea_orm::UpdateMany<scheduler_bindings::Entity> {
+    let dtstart: sea_orm::prelude::DateTimeWithTimeZone = values.dtstart.into();
+    scheduler_bindings::Entity::update_many()
+        .col_expr(scheduler_bindings::Column::UpdatedAt, Expr::value(stamp))
+        .col_expr(
+            scheduler_bindings::Column::UpdatedById,
+            Expr::value(user_id),
+        )
+        .col_expr(scheduler_bindings::Column::Dtstart, Expr::value(dtstart))
+        .col_expr(
+            scheduler_bindings::Column::Tzid,
+            Expr::value(values.tzid.clone()),
+        )
+        .col_expr(
+            scheduler_bindings::Column::Rrule,
+            Expr::value(values.rrule.clone()),
+        )
+        .col_expr(
+            scheduler_bindings::Column::Rdates,
+            Expr::value(values.rdates.clone()),
+        )
+        .col_expr(
+            scheduler_bindings::Column::Exdates,
+            Expr::value(values.exdates.clone()),
+        )
+        .col_expr(
+            scheduler_bindings::Column::ExtraContext,
+            Expr::value(values.extra_context.clone()),
+        )
+        .col_expr(
+            scheduler_bindings::Column::Enabled,
+            Expr::value(values.enabled),
+        )
+        .col_expr(
+            scheduler_bindings::Column::OutcomeMode,
+            Expr::value(values.outcome_mode.clone()),
+        )
+        .col_expr(
+            scheduler_bindings::Column::PodId,
+            Expr::value(values.pod_id),
+        )
+        .filter(scheduler_bindings::Column::Id.eq(binding_id))
+}
+
+async fn update_binding(
+    conn: &mut sqlx::PgConnection,
+    binding_id: &Uuid,
+    current: &scheduler_binding::SchedulerBinding,
+    attrs: &BindingAttrs,
+    user_id: &Uuid,
+    stamp: &DateTime<Utc>,
+) -> Result<(), Denial> {
+    let values = merged_patch(current, attrs);
+    let stamp_value: sea_orm::prelude::DateTimeWithTimeZone = (*stamp).into();
+    let tx_conn = orm_tx::TxConn::new(conn);
+    binding_patch_statement(stamp_value, *user_id, &values, *binding_id)
+        .exec(&tx_conn)
+        .await
+        .map_err(db_denial)?;
+    Ok(())
+}
+
+/// The in-memory row after a PATCH save (what the 200 re-renders when no
+/// recompute runs): saved values + the save stamp.
+fn patched_row(
+    current: &scheduler_binding::SchedulerBinding,
+    attrs: &BindingAttrs,
+    user_id: &Uuid,
+    stamp: &DateTime<Utc>,
+) -> scheduler_binding::SchedulerBinding {
+    let values = merged_patch(current, attrs);
+    scheduler_binding::SchedulerBinding {
+        updated_at: *stamp,
+        updated_by_id: Some(*user_id),
+        dtstart: values.dtstart,
+        tzid: values.tzid,
+        rrule: values.rrule,
+        rdates: values.rdates,
+        exdates: values.exdates,
+        extra_context: values.extra_context,
+        enabled: values.enabled,
+        outcome_mode: values.outcome_mode,
+        pod_id: values.pod_id,
         ..current.clone()
     }
 }
 
 /// BR6 `next_run_at` write-back: `next_run_at` + `updated_at` only
 /// (`updated_by` is NOT rewritten).
+///
+/// Takes `impl Into<&mut PgConnection>` so callers can hand over the raw
+/// connection they hold (a pool checkout, or the `*tx` of the `sqlx`
+/// transaction the caller commits after): the statement runs on that
+/// exact connection, which is what makes the write-back part of the
+/// caller's unit of work.
+fn write_next_run_at_statement(
+    computed: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    stamp: sea_orm::prelude::DateTimeWithTimeZone,
+    binding_id: Uuid,
+) -> sea_orm::UpdateMany<scheduler_bindings::Entity> {
+    scheduler_bindings::Entity::update_many()
+        .col_expr(scheduler_bindings::Column::NextRunAt, Expr::value(computed))
+        .col_expr(scheduler_bindings::Column::UpdatedAt, Expr::value(stamp))
+        .filter(scheduler_bindings::Column::Id.eq(binding_id))
+}
+
 pub(crate) async fn write_next_run_at(
-    executor: impl sqlx::PgExecutor<'_>,
+    conn: impl Into<&mut sqlx::PgConnection>,
     binding_id: &Uuid,
     computed: Option<&DateTime<Utc>>,
     stamp: &DateTime<Utc>,
 ) -> Result<(), Denial> {
-    let sql = translate_placeholders(
-        queries::NEXT_RUN_AT_WRITEBACK_SQL,
-        queries::NEXT_RUN_AT_WRITEBACK_PARAMS,
-    );
-    sqlx::query(&sql)
-        .bind(computed)
-        .bind(stamp)
-        .bind(binding_id)
-        .execute(executor)
+    let computed: Option<sea_orm::prelude::DateTimeWithTimeZone> =
+        computed.map(|instant| (*instant).into());
+    let stamp_value: sea_orm::prelude::DateTimeWithTimeZone = (*stamp).into();
+    let tx_conn = orm_tx::TxConn::new(conn.into());
+    write_next_run_at_statement(computed, stamp_value, *binding_id)
+        .exec(&tx_conn)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2836,23 +3231,36 @@ pub(crate) async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
 /// BR8 uninstall (`:290`): `binding.delete()` soft-delete with two `now()`
 /// samples (ported quirk 5). The caller enqueues the related-objects
 /// sweep separately ([`enqueue_soft_delete`]).
+fn uninstall_binding_statement(
+    now: sea_orm::prelude::DateTimeWithTimeZone,
+    now2: sea_orm::prelude::DateTimeWithTimeZone,
+    user_id: Uuid,
+    binding_id: Uuid,
+) -> sea_orm::UpdateMany<scheduler_bindings::Entity> {
+    scheduler_bindings::Entity::update_many()
+        .col_expr(scheduler_bindings::Column::DeletedAt, Expr::value(now))
+        .col_expr(scheduler_bindings::Column::UpdatedAt, Expr::value(now2))
+        .col_expr(
+            scheduler_bindings::Column::UpdatedById,
+            Expr::value(user_id),
+        )
+        .filter(scheduler_bindings::Column::Id.eq(binding_id))
+}
+
+/// Takes `impl Into<&mut PgConnection>` (see [`write_next_run_at`]):
+/// the statement runs on exactly the connection the caller holds.
 pub(crate) async fn uninstall_binding(
-    executor: impl sqlx::PgExecutor<'_>,
+    conn: impl Into<&mut sqlx::PgConnection>,
     binding_id: &Uuid,
     user_id: &Uuid,
     now: &DateTime<Utc>,
     now2: &DateTime<Utc>,
 ) -> Result<(), Denial> {
-    let sql = translate_placeholders(
-        queries::BINDING_UNINSTALL_SQL,
-        queries::BINDING_UNINSTALL_PARAMS,
-    );
-    sqlx::query(&sql)
-        .bind(now)
-        .bind(now2)
-        .bind(user_id)
-        .bind(binding_id)
-        .execute(executor)
+    let now_stamp: sea_orm::prelude::DateTimeWithTimeZone = (*now).into();
+    let now2_stamp: sea_orm::prelude::DateTimeWithTimeZone = (*now2).into();
+    let tx_conn = orm_tx::TxConn::new(conn.into());
+    uninstall_binding_statement(now_stamp, now2_stamp, *user_id, *binding_id)
+        .exec(&tx_conn)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -2885,13 +3293,22 @@ async fn fetch_scheduler_display(
     pool: &PgPool,
     scheduler_id: &Uuid,
 ) -> Result<Option<SchedulerDisplay>, Denial> {
-    let row: Option<(String, String, String, String, String, bool)> = sqlx::query_as(
-        r#"SELECT s.slug, s.name, s.color, s.prompt, s.source, s.is_enabled FROM schedulers s WHERE s.id = $1"#,
-    )
-    .bind(scheduler_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(String, String, String, String, String, bool)> = schedulers::Entity::find()
+        .select_only()
+        .columns([
+            schedulers::Column::Slug,
+            schedulers::Column::Name,
+            schedulers::Column::Color,
+            schedulers::Column::Prompt,
+            schedulers::Column::Source,
+            schedulers::Column::IsEnabled,
+        ])
+        .filter(schedulers::Column::Id.eq(*scheduler_id))
+        .into_tuple::<(String, String, String, String, String, bool)>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.map(
         |(slug, name, color, prompt, source, is_enabled)| SchedulerDisplay {
             slug,
@@ -2906,15 +3323,15 @@ async fn fetch_scheduler_display(
 
 /// `get_run_count` (`scheduler.py:326-327`): `obj.agent_runs.count()` —
 /// `COUNT(*)` over `agent_run` for this binding (`AgentRun` has no
-/// `deleted_at`, so no scope). Param: `$1` the binding id.
+/// `deleted_at`, so no scope).
 async fn fetch_binding_run_count(pool: &PgPool, binding_id: &Uuid) -> Result<i64, Denial> {
-    let count: i64 =
-        sqlx::query_scalar(r#"SELECT COUNT(*) AS "__count" FROM "agent_run" WHERE "agent_run"."scheduler_binding_id" = $1"#)
-            .bind(binding_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(count)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let count: u64 = agent_run::Entity::find()
+        .filter(agent_run::Column::SchedulerBindingId.eq(*binding_id))
+        .count(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(count as i64)
 }
 
 /// Last-run display columns for one id (`agent_run` has no `deleted_at`
@@ -2924,13 +3341,18 @@ async fn fetch_last_run_display(
     pool: &PgPool,
     last_run_id: &Uuid,
 ) -> Result<(String, Option<DateTime<Utc>>), Denial> {
-    let row: Option<(String, Option<DateTime<Utc>>)> =
-        sqlx::query_as(r#"SELECT r.status, r.ended_at FROM agent_run r WHERE r.id = $1"#)
-            .bind(last_run_id)
-            .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(String, Option<sea_orm::prelude::DateTimeWithTimeZone>)> =
+        agent_run::Entity::find()
+            .select_only()
+            .columns([agent_run::Column::Status, agent_run::Column::EndedAt])
+            .filter(agent_run::Column::Id.eq(*last_run_id))
+            .into_tuple::<(String, Option<sea_orm::prelude::DateTimeWithTimeZone>)>()
+            .one(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
     row.ok_or(Denial::ObjectNotFound)
+        .map(|(status, ended_at)| (status, ended_at.map(|stamp| stamp.with_timezone(&Utc))))
 }
 
 /// Pod display name for one id, through the BASE manager (same
@@ -2938,9 +3360,13 @@ async fn fetch_last_run_display(
 /// render their stale name on every path — only the validation queryset
 /// (`Pod.objects`, the default manager) excludes tombstones.
 async fn fetch_pod_display(pool: &PgPool, pod_id: &Uuid) -> Result<Option<String>, Denial> {
-    let row: Option<(String,)> = sqlx::query_as(r#"SELECT p.name FROM pod p WHERE p.id = $1"#)
-        .bind(pod_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(String,)> = pod::Entity::find()
+        .select_only()
+        .column(pod::Column::Name)
+        .filter(pod::Column::Id.eq(*pod_id))
+        .into_tuple::<(String,)>()
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|row| row.0))
@@ -3434,99 +3860,326 @@ mod tests {
         }
     }
 
-    // -- Placeholder translation -------------------------------------------
+    // -- Statement shapes (SeaORM fetchers; orm-migration.md §3.2/§3.3) -----
 
-    #[test]
-    fn placeholders_translate_in_params_order() {
-        // Every statement: no `:name` survives, `$n` numbering follows the
-        // PARAMS list, and `:now`/`:now2` never collide.
-        let statements = [
-            (queries::BINDING_LIST_SQL, queries::BINDING_LIST_PARAMS),
-            (queries::BINDING_DETAIL_SQL, queries::BINDING_DETAIL_PARAMS),
-            (
-                queries::INSTALL_PROJECT_LOOKUP_SQL,
-                queries::INSTALL_PROJECT_LOOKUP_PARAMS,
-            ),
-            (
-                queries::INSTALL_SCHEDULER_GUARD_SQL,
-                queries::INSTALL_SCHEDULER_GUARD_PARAMS,
-            ),
-            (
-                queries::BINDING_UNIQUE_CHECK_SQL,
-                queries::BINDING_UNIQUE_CHECK_PARAMS,
-            ),
-            (queries::BINDING_INSERT_SQL, queries::BINDING_INSERT_PARAMS),
-            (queries::BINDING_PATCH_SQL, queries::BINDING_PATCH_PARAMS),
-            (
-                queries::NEXT_RUN_AT_WRITEBACK_SQL,
-                queries::NEXT_RUN_AT_WRITEBACK_PARAMS,
-            ),
-            (
-                queries::BINDING_UNINSTALL_SQL,
-                queries::BINDING_UNINSTALL_PARAMS,
-            ),
-        ];
-        for (sql, params) in statements {
-            let translated = translate_placeholders(sql, params);
-            for (index, name) in params.iter().enumerate() {
-                assert!(
-                    translated.contains(&format!("${}", index + 1)),
-                    "missing ${} for :{name} in {translated}",
-                    index + 1
-                );
-            }
-            // No symbolic placeholder survives (casts would show as `::`).
-            let mut rest = translated.as_str();
-            while let Some(at) = rest.find(':') {
-                let after = rest[at + 1..].chars().next().unwrap_or(' ');
-                assert!(
-                    after == ':' || !after.is_ascii_alphanumeric() && after != '_',
-                    "untranslated placeholder near {:?}",
-                    &rest[at..rest.len().min(at + 12)]
-                );
-                rest = &rest[at + 1..];
-            }
-        }
-        // The `:now`/`:now2` pair translates distinctly.
-        let uninstall = translate_placeholders(
-            queries::BINDING_UNINSTALL_SQL,
-            queries::BINDING_UNINSTALL_PARAMS,
-        );
-        assert!(uninstall.contains("$1") && uninstall.contains("$2"));
-        assert!(!uninstall.contains(":now"));
-        // The PATCH unique-check variant gains the exclusion bind.
-        let patch_check = translate_placeholders(
-            &queries::binding_unique_check_sql(true),
-            queries::BINDING_UNIQUE_CHECK_PATCH_PARAMS,
-        );
-        assert!(patch_check.contains("$3"));
+    fn binding_id() -> Uuid {
+        "68ad4deb-fc7c-4531-b5ce-376263af21e3"
+            .parse()
+            .expect("uuid")
     }
 
-    // -- BR1 column layout ---------------------------------------------------
+    fn project_id() -> Uuid {
+        "0d065023-aa70-4d7d-85da-029d7169843e"
+            .parse()
+            .expect("uuid")
+    }
 
+    fn user_id() -> Uuid {
+        "6f819bce-fba0-4ef5-9b16-187eea21a6a1"
+            .parse()
+            .expect("uuid")
+    }
+
+    /// The BR1 list keeps the old join/filter/order shape: full
+    /// projection with unique aliased outputs (`s_`/`r_`/`p_` — no
+    /// duplicated name by construction), the workspace + scheduler
+    /// inner joins, the `last_run`/`pod` left joins, live rows only,
+    /// newest first.
     #[test]
-    fn br1_segment_layout_matches_layer_consts() {
-        assert_eq!(BINDING_COLUMN_COUNT, 22);
-        assert_eq!(SCHEDULER_COLUMN_COUNT, 14);
-        assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 39);
-        assert_eq!(queries::POD_COLUMNS.len(), 10);
-        assert_eq!(
-            BINDING_COLUMN_COUNT
-                + SCHEDULER_COLUMN_COUNT
-                + queries::AGENT_RUN_COLUMNS.len()
-                + queries::POD_COLUMNS.len(),
-            85
+    fn list_statement_pins_joins_filters_and_aliases() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = binding_list_statement(project_id(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("INNER JOIN"), "list inner joins: {sql}");
+        assert!(sql.contains("LEFT JOIN"), "list left joins: {sql}");
+        assert!(
+            sql.contains("\"scheduler_bindings\""),
+            "list keeps the base table: {sql}"
         );
-        // The display columns the render reads, by layer-const position.
-        let run_base = BINDING_COLUMN_COUNT + SCHEDULER_COLUMN_COUNT;
-        let pod_base = run_base + queries::AGENT_RUN_COLUMNS.len();
-        assert_eq!(queries::AGENT_RUN_COLUMNS[0], "id");
-        assert_eq!(queries::AGENT_RUN_COLUMNS[10], "status");
-        assert_eq!(queries::AGENT_RUN_COLUMNS[38], "ended_at");
-        assert_eq!(queries::POD_COLUMNS[0], "id");
-        assert_eq!(queries::POD_COLUMNS[3], "name");
-        assert_eq!(run_base, 36);
-        assert_eq!(pod_base, 75);
+        assert!(sql.contains("\"workspaces\""), "list workspace join: {sql}");
+        assert!(sql.contains("\"schedulers\""), "list scheduler join: {sql}");
+        assert!(sql.contains("\"agent_run\""), "list last-run join: {sql}");
+        assert!(sql.contains("\"pod\""), "list pod join: {sql}");
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL"),
+            "list live rows: {sql}"
+        );
+        assert!(sql.contains("ORDER BY"), "list newest-first order: {sql}");
+        assert!(sql.contains("\"s_slug\""), "list aliases scheduler: {sql}");
+        assert!(sql.contains("\"r_status\""), "list aliases run: {sql}");
+        assert!(sql.contains("\"p_is_default\""), "list aliases pod: {sql}");
+        // The positional-reads incident class: no output name may repeat.
+        for name in [
+            "\"id\" AS \"s_id\"",
+            "\"id\" AS \"r_id\"",
+            "\"id\" AS \"p_id\"",
+        ] {
+            assert!(sql.contains(name), "list unique alias {name}: {sql}");
+        }
+    }
+
+    /// The BR2 detail keeps the old shape: the workspace inner join,
+    /// live rows only, id + project + slug scope, newest-first order.
+    #[test]
+    fn detail_statement_pins_joins_and_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = binding_detail_statement(binding_id(), project_id(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("INNER JOIN"), "detail inner join: {sql}");
+        assert!(
+            sql.contains("\"workspaces\""),
+            "detail workspace join: {sql}"
+        );
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL"),
+            "detail live rows: {sql}"
+        );
+        assert!(sql.contains("ORDER BY"), "detail order: {sql}");
+        assert!(
+            !sql.contains("_active_binding_count"),
+            "detail stays un-annotated: {sql}"
+        );
+    }
+
+    /// The install lookups keep the old shape: project (wksp join +
+    /// order) and scheduler guard (enabled + workspace + live).
+    #[test]
+    fn install_lookup_statements_pin_scopes() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let project_sql = install_project_statement(project_id(), "acme")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            project_sql.contains("INNER JOIN"),
+            "project join: {project_sql}"
+        );
+        assert!(
+            project_sql.contains("ORDER BY"),
+            "project order: {project_sql}"
+        );
+        assert!(
+            project_sql.contains("\"workspace_id\""),
+            "project reads workspace: {project_sql}"
+        );
+
+        let scheduler_sql = install_scheduler_statement(binding_id(), project_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            scheduler_sql.contains("\"deleted_at\" IS NULL"),
+            "scheduler live rows: {scheduler_sql}"
+        );
+        assert!(
+            scheduler_sql.contains("\"is_enabled\""),
+            "scheduler requires enabled: {scheduler_sql}"
+        );
+        assert!(
+            scheduler_sql.contains("\"workspace_id\""),
+            "scheduler workspace scope: {scheduler_sql}"
+        );
+        assert!(
+            scheduler_sql.contains("ORDER BY"),
+            "scheduler order: {scheduler_sql}"
+        );
+    }
+
+    /// The BR4 unique check keeps the old shape: live bindings only,
+    /// pair scope, `LIMIT 1`, and the PATCH self-row exclusion only on
+    /// PATCH.
+    #[test]
+    fn unique_statement_pins_scope_limit_and_exclusion() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let create_sql = binding_unique_statement(project_id(), binding_id(), None)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            create_sql.contains("\"deleted_at\" IS NULL"),
+            "unique live rows: {create_sql}"
+        );
+        assert!(
+            create_sql.contains("\"project_id\""),
+            "unique project scope: {create_sql}"
+        );
+        assert!(create_sql.contains("LIMIT 1"), "unique limit: {create_sql}");
+        assert!(
+            !create_sql.contains("<>"),
+            "create keeps no exclusion: {create_sql}"
+        );
+
+        let patch_sql = binding_unique_statement(project_id(), binding_id(), Some(binding_id()))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            patch_sql.contains("<>"),
+            "patch excludes the self row: {patch_sql}"
+        );
+        assert!(patch_sql.contains("LIMIT 1"), "patch limit: {patch_sql}");
+    }
+
+    /// The BR7 PATCH statement rewrites every writable column plus the
+    /// audit refresh, scoped by id.
+    #[test]
+    fn patch_statement_pins_full_column_save() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let current = scheduler_binding::SchedulerBinding {
+            id: binding_id(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            created_by_id: None,
+            updated_by_id: None,
+            deleted_at: None,
+            workspace_id: project_id(),
+            project_id: Some(project_id()),
+            scheduler_id: binding_id(),
+            dtstart: Utc::now(),
+            tzid: "UTC".to_owned(),
+            rrule: String::new(),
+            rdates: Value::Array(vec![]),
+            exdates: Value::Array(vec![]),
+            extra_context: String::new(),
+            enabled: true,
+            outcome_mode: "create_issue".to_owned(),
+            next_run_at: None,
+            last_run_id: None,
+            last_error: String::new(),
+            actor_id: None,
+            pod_id: None,
+        };
+        let attrs = BindingAttrs::default();
+        let values = merged_patch(&current, &attrs);
+        let now: sea_orm::prelude::DateTimeWithTimeZone = Utc::now().into();
+        let sql = binding_patch_statement(now, user_id(), &values, binding_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("UPDATE \"scheduler_bindings\""),
+            "patch update: {sql}"
+        );
+        for column in [
+            "\"updated_at\"",
+            "\"updated_by_id\"",
+            "\"dtstart\"",
+            "\"tzid\"",
+            "\"rrule\"",
+            "\"rdates\"",
+            "\"exdates\"",
+            "\"extra_context\"",
+            "\"enabled\"",
+            "\"outcome_mode\"",
+            "\"pod_id\"",
+        ] {
+            assert!(sql.contains(column), "patch writes {column}: {sql}");
+        }
+        assert!(sql.contains("WHERE"), "patch scope: {sql}");
+        // The PATCH save never touches run state.
+        assert!(
+            !sql.contains("\"next_run_at\""),
+            "patch spares run state: {sql}"
+        );
+        assert!(!sql.contains("\"last_run"), "patch spares last run: {sql}");
+    }
+
+    // The BR6/BR8 write-backs keep the old shape: next-run (`next_run_at`
+    // + `updated_at` only, never `updated_by`) and uninstall
+    // (`deleted_at` + `updated_at` + actor, two `now()` samples).
+    #[test]
+    fn write_back_statements_pin_cascade_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let now: sea_orm::prelude::DateTimeWithTimeZone = Utc::now().into();
+        let now2: sea_orm::prelude::DateTimeWithTimeZone = Utc::now().into();
+
+        let writeback = write_next_run_at_statement(Some(now), now2, binding_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            writeback.contains("UPDATE \"scheduler_bindings\""),
+            "writeback update: {writeback}"
+        );
+        assert!(
+            writeback.contains("\"next_run_at\""),
+            "writeback sets next_run_at: {writeback}"
+        );
+        assert!(
+            writeback.contains("\"updated_at\""),
+            "writeback stamps updated_at: {writeback}"
+        );
+        assert!(
+            !writeback.contains("\"updated_by_id\""),
+            "writeback spares the actor: {writeback}"
+        );
+
+        let uninstall = uninstall_binding_statement(now, now2, user_id(), binding_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            uninstall.contains("UPDATE \"scheduler_bindings\""),
+            "uninstall update: {uninstall}"
+        );
+        assert!(
+            uninstall.contains("\"deleted_at\""),
+            "uninstall sets deleted_at: {uninstall}"
+        );
+        assert!(
+            uninstall.contains("\"updated_at\""),
+            "uninstall stamps updated_at: {uninstall}"
+        );
+        assert!(
+            uninstall.contains("\"updated_by_id\""),
+            "uninstall sets the actor: {uninstall}"
+        );
+    }
+
+    /// Binding-runs statements keep the old join/gate/order shape:
+    /// the runner leg + private-runner gate on both, the pod/project
+    /// inner pair on the page, pod-mini aliases, newest-first order
+    /// and limit/offset.
+    #[test]
+    fn binding_runs_statements_pin_gate_joins_and_order() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let base_sql = binding_runs_base(binding_id(), user_id())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            base_sql.contains("LEFT JOIN"),
+            "base runner leg: {base_sql}"
+        );
+        assert!(
+            base_sql.contains("\"runner\""),
+            "base joins runner: {base_sql}"
+        );
+        assert!(
+            base_sql.contains("\"runner_id\""),
+            "base gates null runners: {base_sql}"
+        );
+        assert!(
+            base_sql.contains("\"created_by_id\""),
+            "base gates own runs: {base_sql}"
+        );
+
+        let page_sql = binding_runs_page_statement(binding_id(), user_id(), 20, 0)
+            .into_statement(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            page_sql.contains("INNER JOIN"),
+            "page inner joins: {page_sql}"
+        );
+        assert!(page_sql.contains("\"pod\""), "page joins pod: {page_sql}");
+        assert!(
+            page_sql.contains("\"mini_id\""),
+            "page aliases mini_id: {page_sql}"
+        );
+        assert!(
+            page_sql.contains("\"mini_project_identifier\""),
+            "page aliases identifier: {page_sql}"
+        );
+        assert!(
+            page_sql.contains("ORDER BY \"agent_run\".\"created_at\" DESC"),
+            "page newest-first order: {page_sql}"
+        );
+        assert!(page_sql.contains("LIMIT"), "page limit: {page_sql}");
+        assert!(page_sql.contains("OFFSET"), "page offset: {page_sql}");
     }
 
     // -- Render ---------------------------------------------------------------
@@ -3728,29 +4381,6 @@ mod tests {
         assert_eq!(parsed["scheduler_is_enabled"], Value::Null);
         assert_eq!(parsed["resolved_prompt"], "prompt");
         assert_eq!(parsed["run_count"], 0);
-    }
-
-    #[test]
-    fn binding_runs_sql_carries_gate_params_and_order() {
-        let count = binding_runs_count_sql();
-        assert!(
-            count.contains(
-                r#"LEFT OUTER JOIN "runner" ON ("agent_run"."runner_id" = "runner"."id")"#
-            ),
-            "{count}"
-        );
-        assert!(
-            count.contains(r#"("agent_run"."scheduler_binding_id" = $1 AND ("agent_run"."runner_id" IS NULL OR "runner"."owner_id" = $2 OR "agent_run"."created_by_id" = $3))"#),
-            "{count}"
-        );
-        let page = binding_runs_page_sql();
-        assert!(page.contains(r#""pod"."id" AS "mini_id""#), "{page}");
-        assert!(
-            page.contains(r#"ORDER BY "agent_run"."created_at" DESC LIMIT $4 OFFSET $5"#),
-            "{page}"
-        );
-        // The run image opens the SELECT so `decode_run(row, 0)` applies.
-        assert!(page.starts_with("SELECT \"agent_run\"."), "{page}");
     }
 
     #[test]

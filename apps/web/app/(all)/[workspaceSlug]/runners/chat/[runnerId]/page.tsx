@@ -39,6 +39,11 @@ interface ApprovalCapableTransport {
   setApprovalMode?: (sessionId: string, mode: TApprovalMode) => void;
   getApprovalMode?: (sessionId: string) => TApprovalMode;
   decideChatApproval?: (sessionId: string, localApprovalId: string, decision: TApprovalDecision) => Promise<void>;
+  /**
+   * A transport that serves only some runners locally (the desktop's routing
+   * transport) says which. Absent means every chat it serves has the verbs.
+   */
+  supportsLocalApprovals?: (runnerId?: string | null) => boolean;
 }
 
 const DEFAULT_APPROVAL_MODE: TApprovalMode = "full_access";
@@ -157,6 +162,22 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
 }
 
 /**
+ * Shown when a runner refuses a chat because an issue run holds its working
+ * folder. Server-routed chat shares that folder with the runner's runs, so a
+ * busy runner answers `runner_busy` instead of chatting (design
+ * built_engine_as_runner §12.1).
+ */
+export const RUNNER_BUSY_MESSAGE =
+  "This runner is busy with an issue run, which uses the same folder. Chat again when the run finishes.";
+
+/** The busy message when `event` is a runner refusing chat during a run, else `null`. */
+export function runnerBusyMessage(event: IAgentChatEvent): string | null {
+  if (event.kind !== "chat_failed") return null;
+  const code = (event.payload as { code?: unknown } | undefined)?.code;
+  return code === "runner_busy" ? RUNNER_BUSY_MESSAGE : null;
+}
+
+/**
  * What the agent is *doing*, for the activity strip — or `null` to show
  * nothing.
  *
@@ -171,6 +192,7 @@ function sessionHistoryItem(session: IAgentChatSession, activeId: string | undef
  * than the kind.
  */
 export function engineActivityLabel(event: IAgentChatEvent): string | null {
+  if (runnerBusyMessage(event)) return "Runner busy with an issue run";
   if (event.kind !== "raw") {
     const named: Record<string, string | null> = {
       chat_approval_request: "Waiting for your approval",
@@ -243,10 +265,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const transport = useMemo(() => getChatTransport(), []);
   // Approvals + mode are a built-in-engine (local transport) capability; the
   // cloud transport lacks these verbs and keeps its separate /approvals page.
-  const approvalsSupported = useMemo(
-    () => typeof (transport as ApprovalCapableTransport).decideChatApproval === "function",
-    [transport]
-  );
+  const approvalsSupported = useMemo(() => {
+    const capable = transport as ApprovalCapableTransport;
+    if (typeof capable.decideChatApproval !== "function") return false;
+    return capable.supportsLocalApprovals ? capable.supportsLocalApprovals(runnerId) : true;
+  }, [transport, runnerId]);
   const [approvalMode, setApprovalModeState] = useState<TApprovalMode>(() =>
     approvalsSupported ? readStoredApprovalMode(runnerId) : DEFAULT_APPROVAL_MODE
   );
@@ -514,6 +537,11 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       if (["turn_completed", "chat_failed", "chat_closed"].includes(event.kind)) {
         setPendingApproval(null);
       }
+      // A busy runner turned the message down; say why rather than "Failed".
+      // Only for live frames: the stream replays the session's history from
+      // the start, and an old refusal must not reappear after the run ended.
+      const busy = runnerBusyMessage(event);
+      if (busy && isRealtimeEvent(event, streamStartedAtRef.current)) setStreamError(busy);
       if (["turn_started", "turn_completed", "chat_failed", "chat_closed", "chat_warmed"].includes(event.kind)) {
         mutateSessions();
         mutateMessages();

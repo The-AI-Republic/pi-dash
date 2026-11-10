@@ -65,12 +65,9 @@ def test_machine_token_shape(api, seed, tenant_a, secret, db):
     )
     assert r.status_code == 201, r.text
     body = r.json()
-    assert set(body) == {
-        "machine_token",
-        "workspace_slug",
-        "dev_machine_id",
-        "host_label",
-    }
+    # engine_sign_in_state always present; engine_credential optional
+    assert {"machine_token", "workspace_slug", "dev_machine_id", "host_label", "engine_sign_in_state"} <= set(body)
+    assert body["engine_sign_in_state"] in ("never", "active", "expiring", "expired", "signed_out", "revoked")
     assert body["machine_token"].startswith("mt_")
     assert body["workspace_slug"] == tenant_a["workspace"]["slug"]
     assert body["dev_machine_id"] == dev_machine_id
@@ -207,3 +204,46 @@ def test_machine_token_rotation(api, seed, tenant_a, secret, db):
         )
         (revoked_at,) = cur.fetchone()
     assert revoked_at is not None, "rotation must revoke the previous token"
+
+
+def test_machine_token_exchange_expired_mt_is_generic_403(api, seed, tenant_a, secret):
+    """An mt_ caller that is idle-expired (60-day expiry, #2910) is
+    refused by the exchange exactly like a bogus key (the X-Api-Key
+    surface keeps its generic message) — before, this exchanged
+    successfully and minted a fresh token."""
+    machine = seed.dev_machine(tenant_a["user"]["id"])
+    raw = seed.machine_token(
+        tenant_a["user"]["id"], tenant_a["workspace"]["id"], machine, secret
+    )
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE machine_token SET expires_at = now() - interval '1 second'"
+            " WHERE dev_machine_id = %s",
+            (machine,),
+        )
+    r = _exchange(
+        api,
+        raw,
+        workspace_slug=tenant_a["workspace"]["slug"],
+        dev_machine_id=str(uuid.uuid4()),
+        host_label="ct80-host",
+    )
+    assert r.status_code == 403, r.text
+    assert r.json() == {"detail": "Given API token is not valid"}
+
+
+def test_machine_token_exchange_live_mt_succeeds(api, seed, tenant_a, secret):
+    """Control: a live mt_ exchanges successfully (and is rotated)."""
+    machine = seed.dev_machine(tenant_a["user"]["id"])
+    raw = seed.machine_token(
+        tenant_a["user"]["id"], tenant_a["workspace"]["id"], machine, secret
+    )
+    r = _exchange(
+        api,
+        raw,
+        workspace_slug=tenant_a["workspace"]["slug"],
+        dev_machine_id=str(uuid.uuid4()),
+        host_label="ct80-host",
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["machine_token"] not in ("", raw)

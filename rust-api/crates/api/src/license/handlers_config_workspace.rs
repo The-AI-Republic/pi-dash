@@ -113,6 +113,9 @@ use super::{
 use crate::state::AppState;
 use crate::v1_cycles_modules::json::{self, JsonFail};
 use pidash_compat::db::is_unique_violation;
+use pidash_db::entity::{file_assets, instance_configurations, users, workspaces};
+use sea_orm::sea_query::ExprTrait;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// Register the five configuration/workspace paths. Sibling license paths
 /// stay unmatched and proxy to Django; unowned methods on these paths
@@ -172,24 +175,34 @@ async fn get_configurations(
         Err(denial) => return denial.into_response(),
     };
     // `InstanceConfiguration.objects.all()` (`Meta.ordering -created_at`).
-    let sql = format!(
-        "SELECT {} FROM \"instance_configurations\" \
-         WHERE \"instance_configurations\".\"deleted_at\" IS NULL \
-         ORDER BY \"instance_configurations\".\"created_at\" DESC",
-        pidash_db::license::queries::CONFIG_COLUMNS.join(", ")
-    );
-    let rows: Vec<sqlx::postgres::PgRow> = match sqlx::query(&sql).fetch_all(&pool).await {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let configs = match instance_configurations::Entity::find()
+        .filter(instance_configurations::Column::DeletedAt.is_null())
+        .order_by_desc(instance_configurations::Column::CreatedAt)
+        .all(&db)
+        .await
+    {
         Ok(rows) => rows,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let keyring =
         pidash_services::license::encryption::Keyring::from_secret(&state.settings().secret_key);
     let registry = pidash_db::config::registry::global();
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mapped = match pidash_db::license::queries::map_config_row(row) {
-            Ok(mapped) => mapped,
-            Err(_) => return Denial::ServerError.into_response(),
+    let mut out = Vec::with_capacity(configs.len());
+    for cfg in &configs {
+        // `map_config_row` decodes from PgRow; the SeaORM row already
+        // carries the same fields, so construct the map result directly.
+        let mapped = pidash_db::license::models::instance_configuration::InstanceConfiguration {
+            id: cfg.id,
+            created_at: cfg.created_at.with_timezone(&chrono::Utc),
+            updated_at: cfg.updated_at.with_timezone(&chrono::Utc),
+            deleted_at: cfg.deleted_at.map(|d| d.with_timezone(&chrono::Utc)),
+            key: cfg.key.clone(),
+            value: cfg.value.clone(),
+            category: cfg.category.clone(),
+            is_encrypted: cfg.is_encrypted,
+            created_by_id: cfg.created_by_id,
+            updated_by_id: cfg.updated_by_id,
         };
         out.push(rendered_config_value(&mapped, &keyring, registry, &actor));
     }
@@ -2281,15 +2294,22 @@ async fn slug_exists(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Denial> {
     if slug.contains('\0') {
         return Ok(false);
     }
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM "workspaces"
-           WHERE "workspaces"."deleted_at" IS NULL
-             AND UPPER("workspaces"."slug"::text) = UPPER($1)"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use sea_orm::sea_query::{Alias, Expr, Func};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspaces::Entity::find()
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(
+            Func::upper(Expr::col((
+                Alias::new("workspaces"),
+                workspaces::Column::Slug,
+            )))
+            .cast_as(Alias::new("text"))
+            .eq(Func::upper(Expr::val(slug))),
+        )
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -2389,25 +2409,31 @@ async fn list_workspaces(
 }
 
 async fn workspace_total_count(pool: &sqlx::PgPool, search: Option<&str>) -> Result<i64, Denial> {
-    let (sql, param): (String, Option<String>) = match search {
-        Some(term) => (
-            "SELECT COUNT(*) FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND UPPER(\"workspaces\".\"name\"::text) LIKE UPPER($1))".to_owned(),
-            Some(pidash_db::license::queries::icontains_param(term)),
-        ),
-        None => (
-            "SELECT COUNT(*) FROM \"workspaces\" WHERE \"workspaces\".\"deleted_at\" IS NULL".to_owned(),
-            None,
-        ),
-    };
-    let mut query = sqlx::query_as::<_, (i64,)>(&sql);
-    if let Some(param) = param {
-        query = query.bind(param);
+    use sea_orm::sea_query::{Alias, Expr, Func};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut sel = workspaces::Entity::find().filter(workspaces::Column::DeletedAt.is_null());
+    if let Some(term) = search {
+        let param = pidash_db::license::queries::icontains_param(term);
+        // `UPPER(name::text) LIKE UPPER(param)` — use the builder func
+        // rather than stitching SQL text via binary Like.
+        sel = sel.filter(
+            Func::upper(Expr::col((
+                Alias::new("workspaces"),
+                workspaces::Column::Name,
+            )))
+            .cast_as(Alias::new("text"))
+            .binary(
+                sea_orm::sea_query::BinOper::Like,
+                Func::upper(Expr::val(param)),
+            ),
+        );
     }
-    query
-        .fetch_one(pool)
+    let count = sel
+        .count(&db)
         .await
-        .map(|row| row.0)
-        .map_err(|_| Denial::ServerError)
+        .map(|c| c as i64)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(count)
 }
 
 /// One annotated list row through `WorkspaceSerializer` (read path):
@@ -2418,16 +2444,19 @@ async fn render_workspace_row(
     row: &pidash_db::license::queries::WorkspaceListRow,
     actor: &Actor,
 ) -> Result<Value, Denial> {
-    let owner: Option<(uuid::Uuid, Option<String>, String, String)> =
-        sqlx::query_as(r#"SELECT id, email, first_name, last_name FROM users WHERE id = $1"#)
-            .bind(row.owner_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((owner_id, owner_email, first_name, last_name)) = owner else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let owner = users::Entity::find_by_id(row.owner_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(owner) = owner else {
         // The FK is non-nullable; a missing owner row cannot render.
         return Err(Denial::ServerError);
     };
+    let owner_id = owner.id;
+    let owner_email = owner.email;
+    let first_name = owner.first_name;
+    let last_name = owner.last_name;
     let resolved_logo_url =
         workspace_logo_url(pool, row.logo_asset_id, row.logo.as_deref()).await?;
     let skip_logo_url = matches!(resolved_logo_url, AssetUrl::Skip);
@@ -2489,22 +2518,19 @@ async fn workspace_logo_url(
         return Ok(fallback());
     };
     // `(id, entity_type, workspace_id, project_id, issue_id)`, unscoped.
-    type AssetRow = (
-        uuid::Uuid,
-        Option<String>,
-        Option<uuid::Uuid>,
-        Option<uuid::Uuid>,
-        Option<uuid::Uuid>,
-    );
-    let asset: Option<AssetRow> =
-        sqlx::query_as(r#"SELECT id, entity_type, workspace_id, project_id, issue_id FROM file_assets WHERE id = $1"#)
-            .bind(asset_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((id, entity_type, workspace_id, project_id, issue_id)) = asset else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let asset = file_assets::Entity::find_by_id(asset_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(asset) = asset else {
         return Ok(AssetUrl::Present(None));
     };
+    let id = asset.id;
+    let entity_type = asset.entity_type;
+    let workspace_id = asset.workspace_id;
+    let project_id = asset.project_id;
+    let issue_id = asset.issue_id;
     let slug = match workspace_id {
         None => None,
         Some(workspace_id) => asset_workspace_slug(pool, workspace_id).await?,
@@ -2525,12 +2551,12 @@ async fn asset_workspace_slug(
 ) -> Result<Option<String>, Denial> {
     // Unscoped, like the forward-FK descriptor; a missing row is the
     // `RelatedObjectDoesNotExist` path (null at the caller).
-    let row: Option<(String,)> = sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)
-        .bind(workspace_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspaces::Entity::find_by_id(workspace_id)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|row| row.0))
+    Ok(row.map(|r| r.slug))
 }
 
 // ---------------------------------------------------------------------------
@@ -2685,7 +2711,7 @@ async fn create_workspace(
     let member_view_props = default_view_props();
     let member_issue_props = default_issue_props();
     let member_result = pidash_services::domain::workspaces::members::add(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         &pidash_services::domain::workspaces::members::NewMember {
             workspace_id,
             user_id: Some(actor.id),
@@ -3680,14 +3706,14 @@ async fn unique_slug_taken(pool: &sqlx::PgPool, slug: &str) -> Result<bool, Deni
     if slug.contains('\0') {
         return Ok(false);
     }
-    let row: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM "workspaces"
-           WHERE "workspaces"."deleted_at" IS NULL AND "workspaces"."slug" = $1"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workspaces::Entity::find()
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.is_some())
 }
 
@@ -3752,12 +3778,14 @@ async fn asset_by_id(
     raw: &str,
     errors: &mut FieldErrors,
 ) -> Result<Option<uuid::Uuid>, Denial> {
-    let exists: Option<(i32,)> =
-        sqlx::query_as(r#"SELECT 1 FROM file_assets WHERE id = $1 AND deleted_at IS NULL"#)
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let exists = file_assets::Entity::find()
+        .filter(file_assets::Column::Id.eq(id))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .limit(1)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if exists.is_none() {
         field_error(
             errors,

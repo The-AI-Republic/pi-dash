@@ -223,8 +223,21 @@ export const DeviceStartResponse = z.object({
 });
 export type DeviceStartResponse = z.infer<typeof DeviceStartResponse>;
 
-export async function startDeviceGrant(client: ApiClient): Promise<DeviceStartResponse> {
-  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/start/", { json: {} });
+/**
+ * Optional start fields. `scope: "engine"` asks for an engine-only grant —
+ * the one the desktop app approves to renew this computer's built-in
+ * engine sign-in; omitted is an ordinary workspace sign-in grant.
+ */
+export interface DeviceStartOptions {
+  scope?: "engine";
+}
+
+export async function startDeviceGrant(
+  client: ApiClient,
+  options: DeviceStartOptions = {}
+): Promise<DeviceStartResponse> {
+  const json: Record<string, unknown> = options.scope ? { scope: options.scope } : {};
+  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/start/", { json });
   return client.parse(DeviceStartResponse, envelope.data, "POST /api/v1/auth/device/start/");
 }
 
@@ -236,10 +249,29 @@ export const DeviceApproveResponse = z.object({
 });
 export type DeviceApproveResponse = z.infer<typeof DeviceApproveResponse>;
 
-export async function approveDeviceCode(client: ApiClient, userCode: string): Promise<DeviceApproveResponse> {
-  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/approve/", {
-    json: { user_code: userCode },
-  });
+/**
+ * Optional approval fields. `interactive` marks a person approving on the
+ * browser device page (the server lets only that sign a signed-out built-in
+ * engine back in); omitted means the app's silent approval. `workspaceSlug`
+ * picks the grant's workspace; `devMachineId` names the computer an
+ * engine-scoped grant is for.
+ */
+export interface DeviceApproveOptions {
+  interactive?: boolean;
+  workspaceSlug?: string;
+  devMachineId?: string;
+}
+
+export async function approveDeviceCode(
+  client: ApiClient,
+  userCode: string,
+  options: DeviceApproveOptions = {}
+): Promise<DeviceApproveResponse> {
+  const json: Record<string, unknown> = { user_code: userCode };
+  if (options.interactive !== undefined) json.interactive = options.interactive;
+  if (options.workspaceSlug) json.workspace_slug = options.workspaceSlug;
+  if (options.devMachineId) json.dev_machine_id = options.devMachineId;
+  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/approve/", { json });
   return client.parse(DeviceApproveResponse, envelope.data, "POST /api/v1/auth/device/approve/");
 }
 

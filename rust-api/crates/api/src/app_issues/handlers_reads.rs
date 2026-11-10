@@ -22,15 +22,17 @@
 //! split Django owns).
 //!
 //! Reuse (merged, called not copied):
-//! - SQL builders: `super::queries_core` (sub-issue selects / scope) and
-//!   `super::queries_engage` (`meta_sql`, the identifier project / member /
-//!   lite / full statements).
+//! - Statement builders (sea-query, Batch L2): `super::queries_core`
+//!   (sub-issue select, manager scope, guest gate) and
+//!   `super::queries_engage` (`meta_select`, the identifier project / member /
+//!   lite / full statements); ordering through `super::list_engine`.
 //! - Shapes: `pidash_services::app_issues` (`issue_detail_to_representation`
 //!   for the 38-key identifier-full body, `issue_detail_base_to_representation`
 //!   for the sub-issue POST rows, `project_user_property_to_representation`,
 //!   `issue_is_actively_synced`, `order_sql`).
-//! - Row fetching / shaping: `super::{fetch_json_rows, fetch_count,
-//!   order_key, shape_row, query_last}` plus the F-07 serializer kernel.
+//! - Row fetching / shaping: `super::list_engine::fetch_rows` (the
+//!   `row_to_json` wrapper over a built select), `super::{shape_row,
+//!   query_last}` plus the F-07 serializer kernel.
 //! - The blocker fields select out of the merged D-12
 //!   `pidash_services::orchestration::blockers` row form; the ticker block
 //!   runs on the merged D-10 ticker struct + D-12 clock.
@@ -73,32 +75,35 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use pidash_db::entity::{
+    issue_types, issues, project_user_properties, projects, states, workspaces,
+};
+use pidash_services::app_issues::serializers_engage;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait, RelationTrait,
+};
 use serde_json::{Map, Value};
 
 use crate::middleware::body_limit::read_request_bytes;
 use crate::state::AppState;
 
+use super::list_engine::{self, fetch_rows};
 use super::queries_core;
 use super::queries_engage;
-use super::{
-    fetch_count, fetch_json_rows, order_key, query_last, shape_row, Binder, Denial, QueryMap,
-    NOT_FOUND_BODY,
-};
+use super::{query_last, shape_row, Denial, QueryMap, NOT_FOUND_BODY};
 use pidash_compat::response::json_response;
 use pidash_db::tasks_ticker::IssueAgentTicker;
+use pidash_services::app_issues::agent_runs::{self, RenderedAgentRun};
 use pidash_services::app_issues::serializers_assoc::{
     project_user_property_to_representation, ProjectUserPropertyRow,
 };
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
-    order_sql, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow,
-    IssueDetailRow, ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, GITHUB_ISSUE_SYNC_PROBE_SQL,
-    GIT_ISSUE_SYNC_PROBE_SQL, LATEST_AGENT_RUN_SQL,
+    order_sql, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
 };
-use pidash_services::orchestration::blockers::{
-    blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
-    RelationsSummary,
-};
+use pidash_services::orchestration::blockers::RelationsSummary;
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_types::orchestration::StateRef;
 
@@ -230,16 +235,14 @@ async fn rewrite_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
+    super::access::project_id_by_identifier(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        &upper,
     )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
     .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    .map_err(|_| Denial::ServerError)?
+    .ok_or(Denial::ProjectNotFound)
 }
 
 /// `allow_permission(allowed)` at `PROJECT` level (`app/permissions/base.py`):
@@ -253,45 +256,16 @@ async fn allow_roles(
     user_id: &uuid::Uuid,
     allowed: &[i32],
 ) -> Result<(), Denial> {
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
+    let allows = super::access::allows(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        *project_id,
+        *user_id,
+        allowed,
     )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    if role.is_some_and(|row| allowed.contains(&i32::from(row.0))) {
-        return Ok(());
-    }
-    let member: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let admin: Option<(i32,)> = sqlx::query_as(
-        r#"SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2 AND wm.role = 20
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if member.is_some() && admin.is_some() {
+    if allows {
         Ok(())
     } else {
         Err(Denial::Forbidden)
@@ -309,21 +283,17 @@ async fn entity_access(
     user_id: &uuid::Uuid,
     write: bool,
 ) -> Result<(), Response> {
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
+    let role = super::access::project_role(
+        &pidash_db::pool::sea_orm_connection(pool),
+        slug,
+        *project_id,
+        *user_id,
     )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError.into_response())?;
     let allowed = matches!(
         (write, role),
-        (false, Some(_)) | (true, Some((20,))) | (true, Some((15,)))
+        (false, Some(_)) | (true, Some(20)) | (true, Some(15))
     );
     if allowed {
         Ok(())
@@ -340,12 +310,10 @@ async fn entity_access(
 /// the datetime-free ones — because a garbage zone 500s in `initial()`
 /// before any view code runs.
 async fn actor_timezone(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    let name = super::access::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -764,23 +732,46 @@ fn default_preferences() -> Value {
     })
 }
 
-const PROPERTY_COLUMNS: &str = "id, created_at, updated_at, deleted_at, filters, display_filters, \
-    display_properties, rich_filters, preferences, sort_order, created_by_id, updated_by_id, \
-    project_id, workspace_id, user_id";
+/// The rendered `project_user_properties` columns, in render order.
+const PROPERTY_FIELDS: [project_user_properties::Column; 15] = [
+    project_user_properties::Column::Id,
+    project_user_properties::Column::CreatedAt,
+    project_user_properties::Column::UpdatedAt,
+    project_user_properties::Column::DeletedAt,
+    project_user_properties::Column::Filters,
+    project_user_properties::Column::DisplayFilters,
+    project_user_properties::Column::DisplayProperties,
+    project_user_properties::Column::RichFilters,
+    project_user_properties::Column::Preferences,
+    project_user_properties::Column::SortOrder,
+    project_user_properties::Column::CreatedById,
+    project_user_properties::Column::UpdatedById,
+    project_user_properties::Column::ProjectId,
+    project_user_properties::Column::WorkspaceId,
+    project_user_properties::Column::UserId,
+];
+
+/// The actor's live display row, newest first.
+pub(super) fn property_select(
+    user_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    project_user_properties::Entity::find()
+        .select_only()
+        .columns(PROPERTY_FIELDS)
+        .filter(project_user_properties::Column::UserId.eq(user_id))
+        .filter(project_user_properties::Column::ProjectId.eq(project_id))
+        .filter(project_user_properties::Column::DeletedAt.is_null())
+        .order_by_desc(project_user_properties::Column::CreatedAt)
+        .limit(1)
+        .into_query()
+}
 
 async fn fetch_property(
     pool: &sqlx::PgPool,
     gate: &ReadsGate,
 ) -> Result<Option<Map<String, Value>>, Denial> {
-    let mut binder = Binder::new();
-    let user = binder.bind_uuid(gate.user_id);
-    let project = binder.bind_uuid(gate.project_id);
-    let inner = format!(
-        "SELECT {PROPERTY_COLUMNS} FROM project_user_properties \
-        WHERE user_id = {user} AND project_id = {project} AND deleted_at IS NULL \
-        ORDER BY created_at DESC LIMIT 1"
-    );
-    let mut rows = fetch_json_rows(pool, &inner, binder.values()).await?;
+    let mut rows = fetch_rows(pool, property_select(gate.user_id, gate.project_id)).await?;
     Ok(rows.pop())
 }
 
@@ -795,13 +786,11 @@ async fn fetch_or_create_property(
     if let Some(row) = fetch_property(pool, gate).await? {
         return Ok(row);
     }
-    let workspace: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(gate.project_id)
-            .fetch_optional(pool)
+    let workspace =
+        super::access::project_tenant(&pidash_db::pool::sea_orm_connection(pool), gate.project_id)
             .await
             .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace else {
+    let Some((workspace_id, _)) = workspace else {
         return Err(Denial::NotFound);
     };
     let now = Utc::now();
@@ -811,7 +800,7 @@ async fn fetch_or_create_property(
     let rich = Value::Object(Map::new());
     let preferences = default_preferences();
     pidash_services::domain::projects::members::get_or_create_property(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &pidash_services::domain::projects::members::NewMemberProperty {
             workspace_id,
             project_id: gate.project_id,
@@ -951,27 +940,31 @@ async fn apply_property_patch(
     if let Some(value) = &patch.preferences {
         fields.push(("preferences", value.clone()));
     }
-    let mut sql =
-        String::from("UPDATE project_user_properties SET updated_at = $1, updated_by_id = $2");
-    for (index, (field, _)) in fields.iter().enumerate() {
-        sql.push_str(&format!(", {field} = ${}", index + 5));
-    }
-    if patch.sort_order.is_some() {
-        sql.push_str(&format!(", sort_order = ${}", fields.len() + 5));
-    }
-    sql.push_str(" WHERE user_id = $3 AND project_id = $4 AND deleted_at IS NULL");
-    let mut query = sqlx::query(&sql)
-        .bind(now)
-        .bind(gate.user_id)
-        .bind(gate.user_id)
-        .bind(gate.project_id);
-    for (_, value) in &fields {
-        query = query.bind(value);
+    use std::str::FromStr as _;
+    let mut update = project_user_properties::Entity::update_many()
+        .col_expr(project_user_properties::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            project_user_properties::Column::UpdatedById,
+            Expr::value(gate.user_id),
+        );
+    for (field, value) in &fields {
+        let column =
+            project_user_properties::Column::from_str(field).map_err(|_| Denial::ServerError)?;
+        update = update.col_expr(column, Expr::value(value.clone()));
     }
     if let Some(number) = patch.sort_order {
-        query = query.bind(number);
+        update = update.col_expr(
+            project_user_properties::Column::SortOrder,
+            Expr::value(number),
+        );
     }
-    query.execute(pool).await.map_err(|_| Denial::ServerError)?;
+    update
+        .filter(project_user_properties::Column::UserId.eq(gate.user_id))
+        .filter(project_user_properties::Column::ProjectId.eq(gate.project_id))
+        .filter(project_user_properties::Column::DeletedAt.is_null())
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1155,21 +1148,25 @@ async fn fetch_bulk_issues(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut binder = Binder::new();
-    let mut holders = Vec::with_capacity(ids.len());
-    for id in ids {
-        holders.push(binder.bind_uuid(*id));
-    }
-    let project = binder.bind_uuid(*project_id);
-    let slug_holder = binder.bind_string((*slug).to_owned());
-    let inner = format!(
-        "SELECT issue.id, issue.start_date, issue.target_date FROM issues AS issue \
-        JOIN workspaces ON workspaces.id = issue.workspace_id \
-        WHERE issue.deleted_at IS NULL AND issue.id IN ({}) \
-        AND issue.project_id = {project} AND workspaces.slug = {slug_holder}",
-        holders.join(",")
-    );
-    fetch_json_rows(pool, &inner, binder.values()).await
+    fetch_rows(pool, bulk_issues_select(slug, project_id, ids)).await
+}
+
+/// Plain `Issue.objects` (`:1147`) by id, project and workspace slug.
+pub(super) fn bulk_issues_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    ids: &[uuid::Uuid],
+) -> sea_orm::sea_query::SelectStatement {
+    let mut stmt = sea_orm::sea_query::Query::select();
+    stmt.column((list_engine::a("issue"), issues::Column::Id))
+        .column((list_engine::a("issue"), issues::Column::StartDate))
+        .column((list_engine::a("issue"), issues::Column::TargetDate))
+        .from_as(issues::Entity, list_engine::a("issue"));
+    queries_core::workspace_slug(&mut stmt, slug);
+    stmt.and_where(list_engine::col("issue", issues::Column::DeletedAt).is_null())
+        .and_where(list_engine::col("issue", issues::Column::Id).is_in(ids.iter().copied()))
+        .and_where(list_engine::col("issue", issues::Column::ProjectId).eq(*project_id));
+    stmt
 }
 
 /// `request.data.get("updates", [])` plus iteration (`:1141-1143`): a
@@ -1265,9 +1262,12 @@ async fn apply_bulk_dates(pool: &sqlx::PgPool, writes: &[BulkWrite<'_>]) -> Resu
             target_date: write.target_date,
         });
     }
-    pidash_services::domain::issues::bulk_update_issue_dates(pool, &parsed_writes)
-        .await
-        .map_err(|_| Denial::ServerError)
+    pidash_services::domain::issues::bulk_update_issue_dates(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &parsed_writes,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)
 }
 
 /// Python truthiness for the `if start_date:` / `if target_date:` guards.
@@ -1342,19 +1342,18 @@ async fn meta(
     };
     let (pool, gate) =
         resolve_allow_gate(&state, &slug, &project_raw, extension, &[20, 15, 5]).await?;
-    let mut binder = Binder::new();
-    let sql = queries_engage::meta_sql(&mut binder, &slug, gate.project_id, issue_id);
-    let mut rows = fetch_json_rows(&pool, &sql, binder.values()).await?;
+    let stmt = queries_engage::meta_select(&slug, gate.project_id, issue_id);
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let mut rows = list_engine::query_built::<queries_engage::MetaRow>(&db, &stmt).await?;
     let Some(row) = rows.pop() else {
         return Err(Denial::NotFound);
     };
-    let sequence_id = get_i32(&row, "sequence_id").ok_or(Denial::ServerError)?;
-    let identifier = get_str(&row, "identifier").ok_or(Denial::ServerError)?;
     Ok(json_response(
         StatusCode::OK,
         format!(
-            "{{\"sequence_id\":{sequence_id},\"project_identifier\":{}}}",
-            json_string(identifier)
+            "{{\"sequence_id\":{},\"project_identifier\":{}}}",
+            row.sequence_id,
+            json_string(&row.identifier)
         ),
     ))
 }
@@ -1519,9 +1518,8 @@ async fn fetch_identifier_project(
     slug: &str,
     project_identifier: &str,
 ) -> Result<Option<Map<String, Value>>, Denial> {
-    let mut binder = Binder::new();
-    let sql = queries_engage::identifier_project_sql(&mut binder, slug, project_identifier);
-    let mut rows = fetch_json_rows(pool, &sql, binder.values()).await?;
+    let stmt = queries_engage::identifier_project_select(slug, project_identifier);
+    let mut rows = fetch_rows(pool, stmt).await?;
     Ok(rows.pop())
 }
 
@@ -1531,11 +1529,12 @@ async fn fetch_identifier_member(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let mut binder = Binder::new();
-    let sql =
-        queries_engage::identifier_member_exists_sql(&mut binder, slug, *project_id, *user_id);
-    let rows = fetch_json_rows(pool, &sql, binder.values()).await?;
-    Ok(!rows.is_empty())
+    let hit = queries_engage::identifier_member_select(slug, *project_id, *user_id)
+        .into_tuple::<uuid::Uuid>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 async fn fetch_identifier_lite(
@@ -1544,9 +1543,8 @@ async fn fetch_identifier_lite(
     project_id: &uuid::Uuid,
     sequence_id: i32,
 ) -> Result<Option<Map<String, Value>>, Denial> {
-    let mut binder = Binder::new();
-    let sql = queries_engage::identifier_lite_sql(&mut binder, slug, *project_id, sequence_id);
-    let mut rows = fetch_json_rows(pool, &sql, binder.values()).await?;
+    let stmt = queries_engage::identifier_lite_select(slug, *project_id, sequence_id);
+    let mut rows = fetch_rows(pool, stmt).await?;
     Ok(rows.pop())
 }
 
@@ -1561,12 +1559,12 @@ async fn check_identifier_guest(
     user_id: &uuid::Uuid,
     created_by: Option<&str>,
 ) -> Result<(), Response> {
-    let mut binder = Binder::new();
-    let sql = queries_core::guest_view_exists_sql(&mut binder, slug, *project_id, *user_id);
-    let rows = fetch_json_rows(pool, &sql, binder.values())
+    let is_guest = queries_core::guest_view_select(slug, *project_id, *user_id)
+        .into_tuple::<uuid::Uuid>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await
-        .map_err(IntoResponse::into_response)?;
-    let is_guest = !rows.is_empty();
+        .map_err(|_| Denial::ServerError.into_response())?
+        .is_some();
     let view_all = get_bool(project, "guest_view_all_features").unwrap_or(false);
     let owned = created_by == Some(user_id.to_string()).as_deref();
     if is_guest && !view_all && !owned {
@@ -1677,71 +1675,6 @@ fn push_sort_order(body: &mut String, value: Option<&Value>) {
 // Identifier full detail (`:1312-1489`)
 // ---------------------------------------------------------------------------
 
-/// Rename one fragment column list for the full-row composite: strip the
-/// table qualifier (and quoting) and add the group prefix, so the 175
-/// colliding `created_at`/`id`/… outputs become unique JSON keys.
-fn prefixed_columns(columns: &str, table: &str, prefix: &str) -> Vec<String> {
-    let qualifier = format!("{table}.");
-    columns
-        .split(',')
-        .map(|column| {
-            column
-                .trim()
-                .strip_prefix(qualifier.as_str())
-                .unwrap_or(column.trim())
-                .replace('"', "")
-        })
-        .map(|name| format!("{prefix}{name}"))
-        .collect()
-}
-
-/// The full-statement column-alias list, derived from the same fragment
-/// consts `identifier_full_sql` embeds — in the same order (issue 34, the 9
-/// annotations, project 46, workspace 14, parent 34, state 18, ticker 20).
-/// Postgres validates the COUNT at runtime (a wrong count errors); the unit
-/// tests pin the ORDER against the consts, so transcription drift fails the
-/// build instead of silently mislabeling columns.
-fn full_row_aliases() -> Vec<String> {
-    let mut aliases = prefixed_columns(queries_core::ISSUE_COLUMNS, "issue", "i_");
-    aliases.extend(
-        [
-            "cycle_id",
-            "link_count",
-            "attachment_count",
-            "sub_issues_count",
-            "label_ids",
-            "assignee_ids",
-            "module_ids",
-            "is_subscribed",
-            "is_intake",
-        ]
-        .iter()
-        .map(|name| (*name).to_owned()),
-    );
-    aliases.extend(prefixed_columns(
-        queries_core::PROJECT_COLUMNS,
-        "projects",
-        "p_",
-    ));
-    aliases.extend(prefixed_columns(
-        queries_engage::WORKSPACE_COLUMNS,
-        "workspaces",
-        "w_",
-    ));
-    aliases.extend(prefixed_columns(
-        queries_engage::PARENT_ISSUE_COLUMNS,
-        "parent",
-        "par_",
-    ));
-    aliases.extend(prefixed_columns(queries_core::STATE_COLUMNS, "state", "s_"));
-    aliases.extend(prefixed_columns(
-        queries_engage::TICKER_COLUMNS,
-        "issue_agent_ticker",
-        "t_",
-    ));
-    aliases
-}
-
 async fn fetch_identifier_full(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -1749,14 +1682,8 @@ async fn fetch_identifier_full(
     sequence_id: i32,
     user_id: &uuid::Uuid,
 ) -> Result<Option<Map<String, Value>>, Denial> {
-    let mut binder = Binder::new();
-    let full =
-        queries_engage::identifier_full_sql(&mut binder, slug, *project_id, sequence_id, *user_id);
-    let inner = format!(
-        "SELECT * FROM ({full}) AS __f({})",
-        full_row_aliases().join(",")
-    );
-    let mut rows = fetch_json_rows(pool, &inner, binder.values()).await?;
+    let stmt = queries_engage::identifier_full_select(slug, *project_id, sequence_id, *user_id);
+    let mut rows = fetch_rows(pool, stmt).await?;
     Ok(rows.pop())
 }
 
@@ -1769,13 +1696,18 @@ fn str_refs(ids: &[String]) -> Vec<&str> {
 }
 
 /// One sync-table `.exists()` probe (`issue.py:76`).
-async fn sync_probe(pool: &sqlx::PgPool, sql: &str, issue_id: &uuid::Uuid) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+async fn sync_probe(
+    pool: &sqlx::PgPool,
+    github: bool,
+    issue_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let hit = if github {
+        serializers_engage::github_issue_synced(&db, *issue_id).await
+    } else {
+        serializers_engage::git_issue_synced(&db, *issue_id).await
+    };
+    hit.map_err(|_| Denial::ServerError)
 }
 
 /// The full path carries no `is_synced` annotation, so a set
@@ -1789,12 +1721,12 @@ async fn full_is_synced(
     let source = get_str(row, "i_external_source");
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, GIT_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, false, issue_id).await?
     } else {
         false
     };
     let github_hit = if has_source && !git_hit {
-        sync_probe(pool, GITHUB_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, true, issue_id).await?
     } else {
         false
     };
@@ -1806,141 +1738,20 @@ async fn full_is_synced(
     ))
 }
 
-/// An agent-run row plus its pre-rendered datetimes (plain `isoformat` —
-/// NOT DRF's format — via the services renderer).
-struct AgentRunOwned {
-    row: Map<String, Value>,
-    created_at: String,
-    assigned_at: Option<String>,
-    started_at: Option<String>,
-    ended_at: Option<String>,
-    live_last_event_at: Option<String>,
-    live_agent_last_activity_at: Option<String>,
-    live_updated_at: Option<String>,
-}
-
-/// The merged run statements select `runner.name` and two `llm_model`
-/// columns, which would collide under `row_to_json`; alias the duplicates
-/// (pinned by unit test).
-fn agent_run_sql_aliased(sql: &str) -> String {
-    sql.replace("runner.name", "runner.name AS runner_name")
-        .replace(
-            "runner_live_state.llm_model",
-            "runner_live_state.llm_model AS live_llm_model",
-        )
-}
-
-fn render_iso_moment(row: &Map<String, Value>, key: &str) -> Option<String> {
-    get_moment(row, key).map(pidash_services::app_issues::serialize_iso_datetime)
-}
-
-async fn fetch_agent_run(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    issue_id: &uuid::Uuid,
-) -> Result<Option<AgentRunOwned>, Denial> {
-    let mut binder = Binder::new();
-    binder.bind_uuid(*issue_id);
-    let mut rows = fetch_json_rows(pool, &agent_run_sql_aliased(sql), binder.values()).await?;
-    let Some(row) = rows.pop() else {
-        return Ok(None);
-    };
-    let created_at = render_iso_moment(&row, "created_at").ok_or(Denial::ServerError)?;
-    let live_updated_at = render_iso_moment(&row, "updated_at");
-    Ok(Some(AgentRunOwned {
-        assigned_at: render_iso_moment(&row, "assigned_at"),
-        started_at: render_iso_moment(&row, "started_at"),
-        ended_at: render_iso_moment(&row, "ended_at"),
-        live_last_event_at: render_iso_moment(&row, "last_event_at"),
-        live_agent_last_activity_at: render_iso_moment(&row, "agent_last_activity_at"),
-        live_updated_at,
-        created_at,
-        row,
-    }))
-}
-
-fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
-    let row = &run.row;
-    let live_state = run.live_updated_at.as_deref().map(|updated_at| {
-        let usage = row.get("usage").unwrap_or(&Value::Null);
-        AgentLiveStateRow {
-            observed_run_id: get_str(row, "observed_run_id"),
-            last_event_at: run.live_last_event_at.as_deref(),
-            last_event_kind: get_str(row, "last_event_kind"),
-            last_event_summary: get_str(row, "last_event_summary"),
-            agent_pid: get_i32(row, "agent_pid"),
-            agent_subprocess_alive: get_bool(row, "agent_subprocess_alive"),
-            approvals_pending: get_i32(row, "approvals_pending"),
-            usage,
-            llm_model: get_str(row, "live_llm_model"),
-            turn_count: get_i32(row, "turn_count"),
-            agent_health: get_str(row, "agent_health"),
-            agent_last_activity_at: run.live_agent_last_activity_at.as_deref(),
-            updated_at,
-        }
-    });
-    AgentRunDetailRow {
-        id: get_str(row, "id").unwrap_or_default(),
-        status: get_str(row, "status").unwrap_or_default(),
-        executor_kind: get_str(row, "executor_kind").unwrap_or_default(),
-        runner_id: get_str(row, "runner_id"),
-        runner_name: get_str(row, "runner_name"),
-        created_at: &run.created_at,
-        assigned_at: run.assigned_at.as_deref(),
-        started_at: run.started_at.as_deref(),
-        ended_at: run.ended_at.as_deref(),
-        done_payload: row.get("done_payload").filter(|value| !value.is_null()),
-        error: get_str(row, "error").unwrap_or_default(),
-        error_code: get_str(row, "error_code").unwrap_or_default(),
-        llm_model: get_str(row, "llm_model").unwrap_or_default(),
-        input_tokens: get_i64(row, "input_tokens"),
-        output_tokens: get_i64(row, "output_tokens"),
-        total_tokens: get_i64(row, "total_tokens"),
-        live_state,
-    }
-}
-
-/// One direction of the blocker fetch: the merged statement with its two
-/// `:issue_id` placeholders bound to one positional.
-async fn fetch_blocker_rows(
-    pool: &sqlx::PgPool,
-    sql: &str,
-    issue_id: &uuid::Uuid,
-) -> Result<Vec<BlockerRow>, Denial> {
-    let mut binder = Binder::new();
-    let holder = binder.bind_uuid(*issue_id);
-    let sql = sql.replace(":issue_id", &holder);
-    let rows = fetch_json_rows(pool, &sql, binder.values()).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        out.push(BlockerRow {
-            issue_id: get_str(row, "id")
-                .and_then(|text| text.parse::<uuid::Uuid>().ok())
-                .ok_or(Denial::ServerError)?,
-            sequence_id: get_i32(row, "sequence_id").ok_or(Denial::ServerError)?,
-            project_identifier: get_str(row, "identifier")
-                .ok_or(Denial::ServerError)?
-                .to_owned(),
-            state_name: get_str(row, "name").map(str::to_owned),
-            state_group: get_str(row, "group").map(str::to_owned),
-        });
-    }
-    Ok(out)
-}
-
 /// The per-instance `_blocker_summary_cache` (`:1250-1258`): one
-/// `relations_summary` call whose halves feed both blocker fields.
+/// `relations_summary` call whose halves feed both blocker fields (the
+/// SeaORM builder form in `orchestration::blockers`: both open-first
+/// capped lists plus the full-set open check, 3 statements as before).
 async fn fetch_relations_summary(
     pool: &sqlx::PgPool,
     issue_id: &uuid::Uuid,
 ) -> Result<RelationsSummary, Denial> {
-    let blocked_by = fetch_blocker_rows(pool, &blockers_sql(), issue_id).await?;
-    let blocking = fetch_blocker_rows(pool, &dependents_sql(), issue_id).await?;
-    let mut binder = Binder::new();
-    let holder = binder.bind_uuid(*issue_id);
-    let sql = has_open_blockers_sql().replace(":issue_id", &holder);
-    let open = fetch_json_rows(pool, &sql, binder.values()).await?;
-    Ok(relations_summary(&blocked_by, &blocking, !open.is_empty()))
+    pidash_services::orchestration::blockers::fetch_relations_summary(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *issue_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)
 }
 
 fn decode_ticker(row: &Map<String, Value>) -> Result<Option<IssueAgentTicker>, Denial> {
@@ -2011,11 +1822,10 @@ async fn render_full(
     let assignee_ids = get_id_list(row, "assignee_ids");
     let is_synced = full_is_synced(pool, row, issue_id).await?;
     let is_epic = probe_is_epic(pool, get_str(row, "i_type_id")).await?;
-    let latest = fetch_agent_run(pool, LATEST_AGENT_RUN_SQL, issue_id).await?;
-    let active = fetch_agent_run(pool, ACTIVE_AGENT_RUN_SQL, issue_id).await?;
-    let mut count_binder = Binder::new();
-    count_binder.bind_uuid(*issue_id);
-    let run_count = fetch_count(pool, AGENT_RUN_COUNT_SQL, count_binder.values()).await?;
+    let runs = agent_runs::issue_agent_runs(pool, *issue_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let (latest, active, run_count) = (runs.latest, runs.active, runs.count);
     let blockers = fetch_relations_summary(pool, issue_id).await?;
     let ticker_row = decode_ticker(row)?;
     let policy = ProjectClockPolicy {
@@ -2047,8 +1857,8 @@ async fn render_full(
         policy: &policy,
         state,
     });
-    let latest_row = latest.as_ref().map(agent_run_detail_row);
-    let active_row = active.as_ref().map(agent_run_detail_row);
+    let latest_row = latest.as_ref().map(RenderedAgentRun::detail_row);
+    let active_row = active.as_ref().map(RenderedAgentRun::detail_row);
     let base = IssueDetailBaseRow {
         id: req_str(row, "i_id")?,
         name: req_str(row, "i_name")?,
@@ -2067,6 +1877,7 @@ async fn render_full(
         type_id: get_str(row, "i_type_id"),
         is_epic,
         assigned_pod_id: get_str(row, "i_assigned_pod_id"),
+        assigned_runner_id: get_str(row, "i_assigned_runner_id"),
         agent_executor: get_str(row, "i_agent_executor"),
         module_ids: Some(str_refs(&module_ids)),
         label_ids: Some(str_refs(&label_ids)),
@@ -2082,6 +1893,14 @@ async fn render_full(
         archived_at: get_str(row, "i_archived_at"),
         is_synced,
     };
+    let runner_uuid = get_str(row, "i_assigned_runner_id")
+        .map(|raw| raw.parse::<uuid::Uuid>())
+        .transpose()
+        .map_err(|_| Denial::ServerError)?;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let assigned_runner_detail = super::access::fetch_assigned_runner_detail(&orm, runner_uuid)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let detail = IssueDetailRow {
         base,
         description_html: req_str(row, "i_description_html")?,
@@ -2092,6 +1911,7 @@ async fn render_full(
         active_run: active_row,
         run_count,
         blockers: &blockers,
+        assigned_runner_detail,
     };
     let view = issue_detail_to_representation(&detail);
     let body = serde_json::to_string(&view).map_err(|_| Denial::ServerError)?;
@@ -2107,12 +1927,10 @@ async fn probe_is_epic(pool: &sqlx::PgPool, type_id: Option<&str>) -> Result<boo
         return Ok(false);
     };
     let id = raw.parse::<uuid::Uuid>().map_err(|_| Denial::ServerError)?;
-    let row: Option<(bool,)> = sqlx::query_as("SELECT is_epic FROM issue_types WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    super::access::issue_type_is_epic(&pidash_db::pool::sea_orm_connection(pool), id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    row.map(|flag| flag.0).ok_or(Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)
 }
 
 /// Shared sync-probe evaluation: `external_source` short-circuits false;
@@ -2124,12 +1942,12 @@ async fn probe_synced(
 ) -> Result<bool, Denial> {
     let has_source = source.is_some_and(|text| !text.is_empty());
     let git_hit = if has_source {
-        sync_probe(pool, GIT_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, false, issue_id).await?
     } else {
         false
     };
     let github_hit = if has_source && !git_hit {
-        sync_probe(pool, GITHUB_ISSUE_SYNC_PROBE_SQL, issue_id).await?
+        sync_probe(pool, true, issue_id).await?
     } else {
         false
     };
@@ -2175,17 +1993,12 @@ async fn sub_issues_get_inner(
     query: &QueryMap,
 ) -> Result<Response, Response> {
     let order_param = query_last(query, "order_by").unwrap_or_else(|| "-created_at".to_owned());
-    let (order, order_joins) =
-        sub_issues_order(&order_param).map_err(IntoResponse::into_response)?;
-    let mut binder = Binder::new();
-    let selects = queries_core::sub_issues_selects();
-    let from_where = queries_core::sub_issues_from_where(&mut binder, slug, parent_id);
+    let mut stmt = queries_core::sub_issues_select(slug, parent_id);
     // The cycle-name traversal joins ride on the row query, so a
     // multi-linked child fans out into one row per link like Django (the
     // distribution below counts the fanned rows too).
-    let row_where = super::with_order_joins(&from_where, &order_joins);
-    let inner = format!("SELECT {selects} {row_where} {order}");
-    let rows = fetch_json_rows(pool, &inner, binder.values())
+    sub_issues_order(&mut stmt, &order_param).map_err(IntoResponse::into_response)?;
+    let rows = fetch_rows(pool, stmt)
         .await
         .map_err(IntoResponse::into_response)?;
     // The distribution reads the RAW rows (`:171-174`), before the timezone
@@ -2235,55 +2048,49 @@ async fn sub_issues_get_inner(
 /// merged `order_sql`, resolved like pilot-2's flat path. An empty param
 /// skips the port explicitly and falls back to the model ordering
 /// (`-created_at` — the same statement); an unknown field is Django's
-/// `FieldError` → generic 500.
-fn sub_issues_order(order_by_param: &str) -> Result<(String, String), Denial> {
+/// `FieldError` → generic 500. The priority/state `CASE`s sort ascending
+/// then `issue.created_at DESC`; the list annotates `Coalesce(..., 0)`
+/// counts, so count keys order `0`-style; the cycle-name key joins a fresh
+/// cycle bridge (adding its fan-out joins to the statement).
+pub(super) fn sub_issues_order(
+    stmt: &mut sea_orm::sea_query::SelectStatement,
+    order_by_param: &str,
+) -> Result<(), Denial> {
+    use sea_orm::sea_query::Order;
+    let created_desc = |stmt: &mut sea_orm::sea_query::SelectStatement| {
+        stmt.order_by(
+            (list_engine::a("issue"), issues::Column::CreatedAt),
+            Order::Desc,
+        );
+    };
     if order_by_param.is_empty() {
-        return Ok((
-            queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
-            String::new(),
-        ));
+        created_desc(stmt);
+        return Ok(());
     }
     let spec = order_sql(order_by_param, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
     });
     let out = spec.out_param.as_str();
-    if out == "priority_order"
-        || out == "-priority_order"
-        || out == "state_order"
-        || out == "-state_order"
-    {
-        // The CASE fragments are already issue-qualified; only the bare
-        // `created_at` tiebreak needs the table (Django orders the issue
-        // queryset — an unqualified `created_at` would be ambiguous over
-        // the joined tables).
-        let sql = spec
-            .order_by_sql
-            .replace("created_at DESC", "issue.created_at DESC");
-        return Ok((format!("ORDER BY {sql}"), String::new()));
+    match out {
+        "priority_order" | "-priority_order" => {
+            stmt.order_by_expr(list_engine::priority_case(), Order::Asc);
+            created_desc(stmt);
+            return Ok(());
+        }
+        "state_order" | "-state_order" => {
+            stmt.order_by_expr(list_engine::state_case(), Order::Asc);
+            created_desc(stmt);
+            return Ok(());
+        }
+        _ => {}
     }
-    // The sub-issue list annotates `Coalesce(..., 0)` counts, so its count
-    // keys order `0`-style.
-    if out == "min_values" || out == "-min_values" {
-        let key = order_key(out, order_by_param, None, false)?;
-        return Ok((
-            format!(
-                "ORDER BY {expr} {}, issue.created_at DESC",
-                if key.descending { "DESC" } else { "ASC" },
-                expr = key.expr,
-            ),
-            key.joins,
-        ));
+    let key = list_engine::order_expr(out, order_by_param, None, false)?;
+    stmt.order_by_expr(key.expr.clone(), key.order());
+    if out == "min_values" || out == "-min_values" || !order_by_param.contains("created_at") {
+        created_desc(stmt);
     }
-    let key = order_key(out, order_by_param, None, false)?;
-    let mut sql = format!(
-        "ORDER BY {expr} {}",
-        if key.descending { "DESC" } else { "ASC" },
-        expr = key.expr,
-    );
-    if !order_by_param.contains("created_at") {
-        sql.push_str(", issue.created_at DESC");
-    }
-    Ok((sql, key.joins))
+    key.joins.apply(stmt);
+    Ok(())
 }
 
 /// Insertion-ordered string→list buckets (what `defaultdict(list)` renders).
@@ -2477,7 +2284,7 @@ async fn sub_issues_post_inner(
     let parent = fetch_scoped_issue(pool, &parent_id)
         .await
         .map_err(IntoResponse::into_response)?;
-    if parent.is_none() {
+    if !parent {
         return Err(Denial::NotFound.into_response());
     }
     let object = body
@@ -2621,25 +2428,29 @@ fn parse_sub_issue_ids(object: &Map<String, Value>) -> Result<Vec<SubIssueId>, R
     }
 }
 
-/// The `issue_objects` manager scope for pk-oriented reads (same predicates
-/// as `sub_issues_from_where`, which binds parent+slug instead): live,
-/// non-triage, non-archived, non-draft.
-const SCOPED_ISSUE_FROM: &str = "FROM issues AS issue \
-    LEFT JOIN states AS state ON state.id = issue.state_id \
-    JOIN projects AS project ON project.id = issue.project_id";
-const SCOPED_ISSUE_SCOPE: &str = "issue.deleted_at IS NULL \
-    AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
-    AND issue.archived_at IS NULL AND project.archived_at IS NULL AND issue.is_draft = FALSE";
+/// The `issue_objects` manager scope (`queries_core::scoped_issues`) by
+/// id list: live, non-triage, non-archived, non-draft. No workspace or
+/// project filter (Django's scoped-manager `get(pk)` / `filter(id__in)`).
+pub(super) fn scoped_issue_ids_select(ids: &[uuid::Uuid]) -> sea_orm::sea_query::SelectStatement {
+    let mut stmt = sea_orm::sea_query::Query::select();
+    stmt.column((list_engine::a("issue"), issues::Column::Id));
+    queries_core::scoped_issues(&mut stmt);
+    stmt.and_where(list_engine::col("issue", issues::Column::Id).is_in(ids.iter().copied()));
+    stmt
+}
 
-async fn fetch_scoped_issue(
-    pool: &sqlx::PgPool,
-    id: &uuid::Uuid,
-) -> Result<Option<Map<String, Value>>, Denial> {
-    let mut binder = Binder::new();
-    let holder = binder.bind_uuid(*id);
-    let inner = format!("SELECT issue.id {SCOPED_ISSUE_FROM} WHERE {SCOPED_ISSUE_SCOPE} AND issue.id = {holder} LIMIT 1");
-    let mut rows = fetch_json_rows(pool, &inner, binder.values()).await?;
-    Ok(rows.pop())
+#[derive(sea_orm::FromQueryResult)]
+struct IdRow {
+    id: uuid::Uuid,
+}
+
+async fn fetch_scoped_issue(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<bool, Denial> {
+    let mut stmt = scoped_issue_ids_select(&[*id]);
+    stmt.limit(1);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    Ok(!list_engine::query_built::<IdRow>(&db, &stmt)
+        .await?
+        .is_empty())
 }
 
 async fn fetch_scoped_issue_ids(
@@ -2649,24 +2460,9 @@ async fn fetch_scoped_issue_ids(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut binder = Binder::new();
-    let mut holders = Vec::with_capacity(ids.len());
-    for id in ids {
-        holders.push(binder.bind_uuid(*id));
-    }
-    let inner = format!(
-        "SELECT issue.id {SCOPED_ISSUE_FROM} WHERE {SCOPED_ISSUE_SCOPE} AND issue.id IN ({})",
-        holders.join(",")
-    );
-    let rows = fetch_json_rows(pool, &inner, binder.values()).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id = get_str(row, "id")
-            .and_then(|text| text.parse::<uuid::Uuid>().ok())
-            .ok_or(Denial::ServerError)?;
-        out.push(id);
-    }
-    Ok(out)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = list_engine::query_built::<IdRow>(&db, &scoped_issue_ids_select(ids)).await?;
+    Ok(rows.into_iter().map(|row| row.id).collect())
 }
 
 /// `bulk_update(sub_issues, ["parent"])`: one statement, no signals,
@@ -2676,18 +2472,81 @@ async fn link_sub_issues(
     parent_id: &uuid::Uuid,
     found: &[uuid::Uuid],
 ) -> Result<(), Denial> {
-    pidash_services::domain::issues::link_sub_issue_parents(pool, *parent_id, found)
-        .await
-        .map_err(|_| Denial::ServerError)
+    pidash_services::domain::issues::link_sub_issue_parents(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *parent_id,
+        found,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)
 }
 
-const POST_ROW_COLUMNS: &str = "issue.id, issue.name, issue.state_id, issue.sort_order, \
-    issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority, \
-    issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id, \
-    issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id, issue.agent_executor, \
-    issue.created_at, issue.updated_at, issue.created_by_id AS created_by, \
-    issue.updated_by_id AS updated_by, issue.is_draft, issue.archived_at, \
-    issue.external_source, state.\"group\" AS state_group";
+/// The sub-issue POST rows (`:241-244`): the `IssueSerializer` columns
+/// plus `state_group`, over the manager scope, newest first.
+pub(super) fn post_rows_select(found: &[uuid::Uuid]) -> sea_orm::sea_query::SelectStatement {
+    let mut stmt = sea_orm::sea_query::Query::select();
+    let issue = |column: issues::Column| list_engine::col("issue", column);
+    let plain = |stmt: &mut sea_orm::sea_query::SelectStatement, column: issues::Column| {
+        stmt.column((list_engine::a("issue"), column));
+    };
+    for column in [
+        issues::Column::Id,
+        issues::Column::Name,
+        issues::Column::StateId,
+        issues::Column::SortOrder,
+        issues::Column::CompletedAt,
+    ] {
+        plain(&mut stmt, column);
+    }
+    stmt.expr_as(
+        issue(issues::Column::EstimatePointId),
+        list_engine::a("estimate_point"),
+    );
+    for column in [
+        issues::Column::Priority,
+        issues::Column::ComplexityScore,
+        issues::Column::StartDate,
+        issues::Column::TargetDate,
+        issues::Column::SequenceId,
+        issues::Column::ProjectId,
+        issues::Column::ParentId,
+        issues::Column::TypeId,
+        issues::Column::AssignedPodId,
+        issues::Column::AgentExecutor,
+        issues::Column::CreatedAt,
+        issues::Column::UpdatedAt,
+    ] {
+        plain(&mut stmt, column);
+    }
+    stmt.expr_as(
+        issue(issues::Column::CreatedById),
+        list_engine::a("created_by"),
+    )
+    .expr_as(
+        issue(issues::Column::UpdatedById),
+        list_engine::a("updated_by"),
+    );
+    for column in [
+        issues::Column::IsDraft,
+        issues::Column::ArchivedAt,
+        issues::Column::ExternalSource,
+    ] {
+        plain(&mut stmt, column);
+    }
+    stmt.expr_as(
+        list_engine::col("state", states::Column::Group),
+        list_engine::a("state_group"),
+    );
+    queries_core::scoped_issues(&mut stmt);
+    // Model ordering (`-created_at`): the queryset carries no explicit
+    // order, so input order is NOT preserved.
+    stmt.and_where(list_engine::col("issue", issues::Column::Id).is_in(found.iter().copied()))
+        .order_by(
+            (list_engine::a("issue"), issues::Column::CreatedAt),
+            sea_orm::sea_query::Order::Desc,
+        );
+    stmt
+}
 
 async fn fetch_post_rows(
     pool: &sqlx::PgPool,
@@ -2696,19 +2555,7 @@ async fn fetch_post_rows(
     if found.is_empty() {
         return Ok(Vec::new());
     }
-    let mut binder = Binder::new();
-    let mut holders = Vec::with_capacity(found.len());
-    for id in found {
-        holders.push(binder.bind_uuid(*id));
-    }
-    // Model ordering (`-created_at`): the queryset carries no explicit
-    // order, so input order is NOT preserved.
-    let inner = format!(
-        "SELECT {POST_ROW_COLUMNS} {SCOPED_ISSUE_FROM} WHERE {SCOPED_ISSUE_SCOPE} \
-        AND issue.id IN ({}) ORDER BY issue.created_at DESC",
-        holders.join(",")
-    );
-    fetch_json_rows(pool, &inner, binder.values()).await
+    fetch_rows(pool, post_rows_select(found)).await
 }
 
 /// `IssueSerializer(updated_sub_issues, many=True)` (`:244`): the view
@@ -2746,6 +2593,7 @@ async fn render_post_row(
         type_id: get_str(row, "type_id"),
         is_epic,
         assigned_pod_id: get_str(row, "assigned_pod_id"),
+        assigned_runner_id: get_str(row, "assigned_runner_id"),
         agent_executor: get_str(row, "agent_executor"),
         module_ids: None,
         label_ids: None,
@@ -2784,25 +2632,37 @@ async fn epic_exists(
     project_id: &uuid::Uuid,
     epic_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM issues AS issue \
-         JOIN projects AS project ON project.id = issue.project_id \
-         JOIN workspaces ON workspaces.id = issue.workspace_id \
-         LEFT JOIN states AS state ON state.id = issue.state_id \
-         JOIN issue_types ON issue_types.id = issue.type_id \
-         WHERE issue.deleted_at IS NULL AND issue.id = $1 \
-         AND issue.project_id = $2 AND workspaces.slug = $3 \
-         AND NOT (state.\"group\" = 'triage' AND state.\"group\" IS NOT NULL) \
-         AND issue.archived_at IS NULL AND project.archived_at IS NULL \
-         AND issue.is_draft = FALSE AND issue_types.is_epic",
-    )
-    .bind(epic_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.is_some())
+    let hit: Option<uuid::Uuid> = issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(
+            JoinType::InnerJoin,
+            issues::Entity::belongs_to(issue_types::Entity)
+                .from(issues::Column::TypeId)
+                .to(issue_types::Column::Id)
+                .into(),
+        )
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::Id.eq(*epic_id))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(
+            Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(issue_types::Column::IsEpic.eq(true))
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
 }
 
 /// `GET .../epics/<epic_id>/issues/` (`epics.py:216-223`): the sub-issues
@@ -2859,6 +2719,24 @@ pub async fn epic_work_items_post(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every user-properties patch field resolves to its entity column.
+    #[test]
+    fn user_property_fields_are_columns() {
+        use std::str::FromStr as _;
+        for field in [
+            "filters",
+            "display_filters",
+            "display_properties",
+            "rich_filters",
+            "preferences",
+        ] {
+            assert!(
+                project_user_properties::Column::from_str(field).is_ok(),
+                "{field}"
+            );
+        }
+    }
     use crate::app_issues::OneOrMany;
 
     fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
@@ -2948,126 +2826,48 @@ mod tests {
         assert!(!is_lite_request(&query));
     }
 
-    /// Independently re-derive the expected alias list straight from the
-    /// fragment consts: any drift in `identifier_full_sql` select order or
-    /// in `full_row_aliases` fails here instead of mislabeling columns.
-    #[test]
-    fn full_aliases_match_fragment_consts() {
-        fn stems(columns: &str, table: &str, prefix: &str) -> Vec<String> {
-            let qualifier = format!("{table}.");
-            columns
-                .split(',')
-                .map(|column| {
-                    let bare = column.trim().strip_prefix(qualifier.as_str()).unwrap();
-                    format!("{prefix}{}", bare.replace('"', ""))
-                })
-                .collect()
-        }
-        let mut expected = stems(queries_core::ISSUE_COLUMNS, "issue", "i_");
-        assert_eq!(expected.len(), 34);
-        expected.extend(
-            [
-                "cycle_id",
-                "link_count",
-                "attachment_count",
-                "sub_issues_count",
-                "label_ids",
-                "assignee_ids",
-                "module_ids",
-                "is_subscribed",
-                "is_intake",
-            ]
-            .iter()
-            .map(|name| (*name).to_string()),
-        );
-        expected.extend(stems(queries_core::PROJECT_COLUMNS, "projects", "p_"));
-        expected.extend(stems(queries_engage::WORKSPACE_COLUMNS, "workspaces", "w_"));
-        expected.extend(stems(
-            queries_engage::PARENT_ISSUE_COLUMNS,
-            "parent",
-            "par_",
-        ));
-        expected.extend(stems(queries_core::STATE_COLUMNS, "state", "s_"));
-        expected.extend(stems(
-            queries_engage::TICKER_COLUMNS,
-            "issue_agent_ticker",
-            "t_",
-        ));
-        let actual = full_row_aliases();
-        assert_eq!(actual.len(), 175);
-        assert_eq!(actual, expected);
-        // Spot the group boundaries: a shifted block fails loudly.
-        assert_eq!(actual[0], "i_created_at");
-        assert_eq!(actual[33], "i_agent_executor");
-        assert_eq!(actual[34], "cycle_id");
-        assert_eq!(actual[42], "is_intake");
-        assert_eq!(actual[43], "p_created_at");
-        assert_eq!(actual[88], "p_default_agent_executor");
-        assert_eq!(actual[89], "w_created_at");
-        assert_eq!(actual[102], "w_background_color");
-        assert_eq!(actual[103], "par_created_at");
-        assert_eq!(actual[136], "par_agent_executor");
-        assert_eq!(actual[137], "s_created_at");
-        assert_eq!(actual[154], "s_external_id");
-        assert_eq!(actual[155], "t_created_at");
-        assert_eq!(actual[174], "t_resume_parent_run_id");
-        // Unique: no `row_to_json` key collision survives.
-        let mut unique = actual.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(unique.len(), actual.len());
-    }
-
-    #[test]
-    fn agent_run_aliases_break_collisions() {
-        for sql in [LATEST_AGENT_RUN_SQL, ACTIVE_AGENT_RUN_SQL] {
-            let aliased = agent_run_sql_aliased(sql);
-            assert!(aliased.contains("runner.name AS runner_name"));
-            assert!(aliased.contains("runner_live_state.llm_model AS live_llm_model"));
-            // The run's own `llm_model` keeps its bare name.
-            assert!(
-                aliased.contains("agent_run.llm_model,")
-                    || aliased.contains("agent_run.llm_model ")
-            );
-        }
-    }
-
-    #[test]
-    fn blocker_statements_bind_one_issue() {
-        for sql in [blockers_sql(), dependents_sql(), has_open_blockers_sql()] {
-            assert_eq!(sql.matches(":issue_id").count(), 2);
-        }
-    }
-
     #[test]
     fn sub_issues_order_branches() {
-        assert_eq!(
-            sub_issues_order("").unwrap(),
-            (
-                queries_core::SUB_ISSUES_DEFAULT_ORDER.to_owned(),
-                String::new()
-            )
+        use sea_orm::DbBackend;
+        let built = |param: &str| {
+            let mut stmt = sea_orm::sea_query::Query::select();
+            stmt.column((list_engine::a("issue"), issues::Column::Id))
+                .from_as(issues::Entity, list_engine::a("issue"));
+            sub_issues_order(&mut stmt, param)
+                .map(|()| stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder))
+        };
+        let _ = DbBackend::Postgres;
+        assert!(built("")
+            .unwrap()
+            .ends_with(r#"ORDER BY "issue"."created_at" DESC"#));
+        assert!(built("-created_at")
+            .unwrap()
+            .ends_with(r#"ORDER BY "issue"."created_at" DESC"#));
+        let priority = built("priority").unwrap();
+        assert!(
+            priority.contains(r#"WHEN ("issue"."priority" = 'urgent')"#),
+            "{priority}"
         );
-        assert_eq!(
-            sub_issues_order("-created_at").unwrap(),
-            (
-                "ORDER BY issue.\"created_at\" DESC".to_owned(),
-                String::new()
-            )
+        assert!(
+            priority.ends_with(r#"END) ASC, "issue"."created_at" DESC"#),
+            "{priority}"
         );
-        let priority = sub_issues_order("priority").unwrap();
-        assert!(priority.0.contains("WHEN issue.priority = 'urgent'"));
-        assert!(priority.0.contains("issue.created_at DESC"));
-        assert!(!priority.0.contains(" created_at DESC"));
-        assert!(priority.1.is_empty());
-        let min = sub_issues_order("-labels__name").unwrap();
-        assert!(min.0.contains("MIN(l.name)"));
-        assert!(min.0.contains("issue.created_at DESC"));
-        assert!(min.1.is_empty());
-        let crossed = sub_issues_order("issue_cycle__cycle__name").unwrap();
-        assert!(crossed.0.contains("__order_c.name ASC"));
-        assert!(crossed.1.contains("LEFT JOIN cycle_issues AS __order_ci"));
-        assert!(sub_issues_order("nope").is_err());
+        let min = built("-labels__name").unwrap();
+        assert!(min.contains(r#"MIN("l"."name")"#), "{min}");
+        assert!(
+            min.ends_with(r#") DESC, "issue"."created_at" DESC"#),
+            "{min}"
+        );
+        let crossed = built("issue_cycle__cycle__name").unwrap();
+        assert!(
+            crossed.contains(r#"LEFT JOIN "cycle_issues" AS "__order_ci""#),
+            "{crossed}"
+        );
+        assert!(
+            crossed.ends_with(r#"ORDER BY "__order_c"."name" ASC, "issue"."created_at" DESC"#),
+            "{crossed}"
+        );
+        assert!(built("nope").is_err());
     }
 
     #[test]

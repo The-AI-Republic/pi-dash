@@ -109,9 +109,11 @@ use pidash_compat::py::{py_num_str, python_dumps};
 use pidash_compat::response::json_response;
 use pidash_compat::validate::push_error;
 use pidash_db::app_pages::strip::ml_strip_tags;
+use pidash_db::entity::{comment_reactions, issue_reactions, issue_votes, projects};
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::read::{self, ActorDetailView, CommentReactionView, CommentRow, CommentView};
 use pidash_services::space::{guards, queries};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -316,6 +318,20 @@ fn integrity_error(error: sqlx::Error) -> HandlerError {
     HandlerError::ServerError
 }
 
+fn db_integrity_error(error: sea_orm::DbErr) -> HandlerError {
+    let code = match &error {
+        sea_orm::DbErr::RecordNotInserted => "23000",
+        sea_orm::DbErr::RecordNotFound(_) => "23503",
+        _ => "",
+    };
+    if code == "23503" || code == "23505" || code == "23000" {
+        return HandlerError::Guard(guards::handle_exception(
+            guards::ExceptionKind::IntegrityError,
+        ));
+    }
+    HandlerError::ServerError
+}
+
 // ---------------------------------------------------------------------------
 // row_to_json fetching + field access (the project_meta shape)
 // ---------------------------------------------------------------------------
@@ -345,6 +361,7 @@ async fn fetch_optional_object(
     params: &[SqlParam<'_>],
 ) -> Result<Option<Value>, HandlerError> {
     let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
+    // raw-sql: executes pidash_services::space::queries::social builder SQL (board/reactions/votes/related reads with joins, ordering, pagination) owned as text by the queries module; rebuilding the same social joins/filters via sea-query here would duplicate those builders and risk drift — direct CRUD on reactions/votes uses SeaORM Entities below
     let mut query = sqlx::query(&sql);
     for param in params {
         query = match param {
@@ -380,6 +397,7 @@ async fn fetch_all_objects(
     params: &[SqlParam<'_>],
 ) -> Result<Vec<Value>, HandlerError> {
     let sql = format!("SELECT row_to_json(__r)::text AS __row FROM ({inner}) AS __r");
+    // raw-sql: same social builder execution as fetch_optional_object (list paths with joins/ordering/pagination) — see above; direct reads use SeaORM Entities directly
     let mut query = sqlx::query(&sql);
     for param in params {
         query = match param {
@@ -533,13 +551,14 @@ async fn project_workspace_id(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, HandlerError> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1")
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
-    row.map(|row| row.0).ok_or(HandlerError::ServerError)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let project = projects::Entity::find_by_id(*project_id)
+        .one(&db)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
+    project
+        .map(|model| model.workspace_id)
+        .ok_or(HandlerError::ServerError)
 }
 
 // ---------------------------------------------------------------------------
@@ -601,39 +620,59 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, pk: &uuid::Uuid) 
 
 /// The member side effect shared by the comment / reaction / vote creates:
 /// non-members are tracked via `ProjectPublicMember.get_or_create`
-/// (`views/issue.py:283-291` and siblings) using the jobs-layer SQL.
+/// (`views/issue.py:283-291` and siblings).
 async fn ensure_public_member(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
     workspace_id: &uuid::Uuid,
     member_id: &uuid::Uuid,
 ) -> Result<(), HandlerError> {
-    let member: Option<(i32,)> = sqlx::query_as(pidash_jobs::space::MEMBER_EXISTS_SQL)
-        .bind(project_id)
-        .bind(member_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let member = pidash_db::entity::project_members::Entity::find()
+        .filter(pidash_db::entity::project_members::Column::ProjectId.eq(*project_id))
+        .filter(pidash_db::entity::project_members::Column::MemberId.eq(*member_id))
+        .filter(pidash_db::entity::project_members::Column::IsActive.eq(true))
+        .filter(pidash_db::entity::project_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(pidash_db::entity::project_members::Column::Id)
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     if member.is_some() {
         return Ok(());
     }
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(pidash_jobs::space::PUBLIC_MEMBER_GET_SQL)
-        .bind(project_id)
-        .bind(member_id)
-        .fetch_optional(pool)
+    let existing = pidash_db::entity::project_public_members::Entity::find()
+        .filter(pidash_db::entity::project_public_members::Column::ProjectId.eq(*project_id))
+        .filter(pidash_db::entity::project_public_members::Column::MemberId.eq(*member_id))
+        .filter(pidash_db::entity::project_public_members::Column::DeletedAt.is_null())
+        .select_only()
+        .column(pidash_db::entity::project_public_members::Column::Id)
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     if existing.is_none() {
         // `created_by` is the request user (`member_id` at every call
         // site); `updated_by` stays NULL on create (`BaseModel.save`,
         // `db/models/base.py:23-43`).
-        sqlx::query(pidash_jobs::space::PUBLIC_MEMBER_INSERT_SQL)
-            .bind(uuid::Uuid::new_v4())
-            .bind(project_id)
-            .bind(workspace_id)
-            .bind(member_id)
-            .bind(member_id)
-            .execute(pool)
+        let now = chrono::Utc::now();
+        let now_fixed = now.fixed_offset();
+        let new_member = pidash_db::entity::project_public_members::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            created_at: Set(now_fixed),
+            updated_at: Set(now_fixed),
+            project_id: Set(*project_id),
+            workspace_id: Set(*workspace_id),
+            member_id: Set(*member_id),
+            created_by_id: Set(Some(*member_id)),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+        };
+        new_member
+            .insert(&db)
             .await
             .map_err(|_| HandlerError::ServerError)?;
     }
@@ -1058,12 +1097,49 @@ fn looks_like_url(value: &str) -> bool {
 /// [`check_nullable_fk`]. Soft-deletable tables probe through the manager's
 /// `deleted_at IS NULL` filter; `users` has no such column (`User` is never
 /// soft-deleted, like [`user_detail_sql`]), so its probe is unguarded.
-fn nullable_fk_sql(table: &str) -> String {
-    if table == "users" {
-        format!("SELECT id FROM {table} WHERE id = $1")
-    } else {
-        format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL")
-    }
+/// Known tables: `users`, `issues`, `issue_comments`, `descriptions`;
+/// anything else is a routing error (500), never a silent miss.
+async fn nullable_fk_exists(
+    pool: &sqlx::PgPool,
+    table: &str,
+    id: uuid::Uuid,
+) -> Result<bool, HandlerError> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let exists: Option<uuid::Uuid> = match table {
+        "users" => pidash_db::entity::users::Entity::find_by_id(id)
+            .select_only()
+            .column(pidash_db::entity::users::Column::Id)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| HandlerError::ServerError)?,
+        "issues" => pidash_db::entity::issues::Entity::find_by_id(id)
+            .filter(pidash_db::entity::issues::Column::DeletedAt.is_null())
+            .select_only()
+            .column(pidash_db::entity::issues::Column::Id)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| HandlerError::ServerError)?,
+        "issue_comments" => pidash_db::entity::issue_comments::Entity::find_by_id(id)
+            .filter(pidash_db::entity::issue_comments::Column::DeletedAt.is_null())
+            .select_only()
+            .column(pidash_db::entity::issue_comments::Column::Id)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| HandlerError::ServerError)?,
+        "descriptions" => pidash_db::entity::descriptions::Entity::find_by_id(id)
+            .filter(pidash_db::entity::descriptions::Column::DeletedAt.is_null())
+            .select_only()
+            .column(pidash_db::entity::descriptions::Column::Id)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| HandlerError::ServerError)?,
+        _ => return Err(HandlerError::ServerError),
+    };
+    Ok(exists.is_some())
 }
 
 /// A writable nullable FK input (`actor`, `parent`, `description`): absent
@@ -1083,13 +1159,8 @@ async fn check_nullable_fk(
     let Some(id) = inner else {
         return Ok(Some(None));
     };
-    let sql = nullable_fk_sql(table);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(&sql)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
-    if row.is_none() {
+    let exists = nullable_fk_exists(pool, table, id).await?;
+    if !exists {
         push_error(
             errors,
             field,
@@ -1500,15 +1571,19 @@ async fn comment_create_inner(
         edited_at,
     };
     let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
-    comment_domain::insert_comment_row(&mut *tx, &rows)
+    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(integrity_error)?;
-    comment_domain::insert_description_row(&mut *tx, &rows)
+    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
         .await
         .map_err(integrity_error)?;
-    comment_domain::link_comment_description(&mut *tx, rows.id, rows.description_id)
-        .await
-        .map_err(integrity_error)?;
+    comment_domain::link_comment_description(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        rows.id,
+        rows.description_id,
+    )
+    .await
+    .map_err(integrity_error)?;
     // The `issue_id` FK is `DEFERRABLE INITIALLY DEFERRED`, so a comment
     // on a missing issue only fails here at commit — map it the same way
     // as the inserts (`handle_exception`, `views/base.py:74-78`).
@@ -1776,7 +1851,7 @@ async fn apply_comment_update(
     let new_html = html.clone().unwrap_or(old_html.clone());
     let html_value = html.clone().or(old.comment_html.clone());
     comment_domain::save_space_comment_update(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         &comment_domain::SpaceCommentUpdate {
             id: *comment_id,
             updated_at: *now,
@@ -1841,13 +1916,16 @@ async fn apply_comment_update(
             html: &new_html,
             stripped: desc_stripped.as_deref(),
         };
-        comment_domain::insert_description_values(pool, &desc)
-            .await
-            .map_err(|_| HandlerError::ServerError)?;
+        comment_domain::insert_description_values(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &desc,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
         let description_id = desc.id;
         let relinked_at = chrono::Utc::now();
         comment_domain::relink_space_comment_description(
-            pool,
+            &pidash_db::pool::sea_orm_connection(pool),
             *comment_id,
             description_id,
             *actor_id,
@@ -1863,23 +1941,40 @@ async fn apply_comment_update(
         let description_id = uuid::Uuid::parse_str(old.description_id.as_deref().unwrap_or(""))
             .map_err(|_| HandlerError::ServerError)?;
         if html_changed {
-            comment_domain::sync_description_html(pool, description_id, &new_html)
-                .await
-                .map_err(|_| HandlerError::ServerError)?;
-        }
-        if stripped_changed {
-            comment_domain::sync_description_stripped(pool, description_id, &stripped_value)
-                .await
-                .map_err(|_| HandlerError::ServerError)?;
-        }
-        if json_changed {
-            comment_domain::sync_description_json(pool, description_id, &comment_json)
-                .await
-                .map_err(|_| HandlerError::ServerError)?;
-        }
-        comment_domain::touch_synced_description(pool, description_id, Some(*actor_id), *now)
+            comment_domain::sync_description_html(
+                &pidash_db::pool::sea_orm_connection(pool),
+                description_id,
+                &new_html,
+            )
             .await
             .map_err(|_| HandlerError::ServerError)?;
+        }
+        if stripped_changed {
+            comment_domain::sync_description_stripped(
+                &pidash_db::pool::sea_orm_connection(pool),
+                description_id,
+                &stripped_value,
+            )
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+        }
+        if json_changed {
+            comment_domain::sync_description_json(
+                &pidash_db::pool::sea_orm_connection(pool),
+                description_id,
+                &comment_json,
+            )
+            .await
+            .map_err(|_| HandlerError::ServerError)?;
+        }
+        comment_domain::touch_synced_description(
+            &pidash_db::pool::sea_orm_connection(pool),
+            description_id,
+            Some(*actor_id),
+            *now,
+        )
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     }
     Ok(())
 }
@@ -1945,9 +2040,14 @@ async fn comment_destroy_inner(
     enqueue_message(pool, publish.message()).await;
     // `comment.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
     // `save()` (`updated_at`, CRUM `updated_by`).
-    comment_domain::soft_delete_space_comment(pool, comment_id, actor.id, now)
-        .await
-        .map_err(|_| HandlerError::ServerError)?;
+    comment_domain::soft_delete_space_comment(
+        &pidash_db::pool::sea_orm_connection(pool),
+        comment_id,
+        actor.id,
+        now,
+    )
+    .await
+    .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "issuecomment", &comment_id).await;
     Ok(())
 }
@@ -2114,17 +2214,25 @@ async fn issue_reaction_create_inner(
     let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
     let now = chrono::Utc::now();
     let reaction_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO issue_reactions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, actor_id, issue_id, reaction) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $3, $6, $7)")
-        .bind(reaction_id)
-        .bind(now)
-        .bind(actor.id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(issue)
-        .bind(&reaction)
-        .execute(pool)
+    let db_ins = pidash_db::pool::sea_orm_connection(pool);
+    let now_fixed = now.fixed_offset();
+    let new_reaction = issue_reactions::ActiveModel {
+        id: Set(reaction_id),
+        created_at: Set(now_fixed),
+        updated_at: Set(now_fixed),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(workspace_id),
+        project_id: Set(project_id),
+        actor_id: Set(actor.id),
+        issue_id: Set(issue),
+        reaction: Set(reaction.clone()),
+    };
+    new_reaction
+        .insert(&db_ins)
         .await
-        .map_err(integrity_error)?;
+        .map_err(db_integrity_error)?;
     // Python order: member tracking (`:382-390`), then the delay
     // (`:391-399`).
     ensure_public_member(pool, &project_id, &workspace_id, &actor.id).await?;
@@ -2221,14 +2329,24 @@ async fn issue_reaction_destroy_inner(
     let id = uuid::Uuid::parse_str(&reaction_id).map_err(|_| HandlerError::ServerError)?;
     // `issue_reaction.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a
     // full `save()` (`updated_at`, CRUM `updated_by`).
-    sqlx::query(
-        "UPDATE issue_reactions SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(id)
-        .execute(pool)
+    let db_up = pidash_db::pool::sea_orm_connection(pool);
+    let now_fixed = now.fixed_offset();
+    issue_reactions::Entity::update_many()
+        .col_expr(
+            issue_reactions::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(Some(now_fixed)),
+        )
+        .col_expr(
+            issue_reactions::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_fixed),
+        )
+        .col_expr(
+            issue_reactions::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(Some(actor.id)),
+        )
+        .filter(issue_reactions::Column::Id.eq(id))
+        .filter(issue_reactions::Column::DeletedAt.is_null())
+        .exec(&db_up)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "issuereaction", &id).await;
@@ -2356,17 +2474,25 @@ async fn comment_reaction_create_inner(
     let comment = uuid::Uuid::parse_str(comment_id).map_err(|_| HandlerError::ServerError)?;
     let now = chrono::Utc::now();
     let reaction_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO comment_reactions (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, actor_id, comment_id, reaction) VALUES ($1, $2, $2, $3, NULL, NULL, $4, $5, $3, $6, $7)")
-        .bind(reaction_id)
-        .bind(now)
-        .bind(actor.id)
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(comment)
-        .bind(&reaction)
-        .execute(pool)
+    let db_ins2 = pidash_db::pool::sea_orm_connection(pool);
+    let now_fixed2 = now.fixed_offset();
+    let new_comment_reaction = comment_reactions::ActiveModel {
+        id: Set(reaction_id),
+        created_at: Set(now_fixed2),
+        updated_at: Set(now_fixed2),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(workspace_id),
+        project_id: Set(project_id),
+        actor_id: Set(actor.id),
+        comment_id: Set(comment),
+        reaction: Set(reaction.clone()),
+    };
+    new_comment_reaction
+        .insert(&db_ins2)
         .await
-        .map_err(integrity_error)?;
+        .map_err(db_integrity_error)?;
     ensure_public_member(pool, &project_id, &workspace_id, &actor.id).await?;
     let row = fetch_optional_object(
         pool,
@@ -2482,16 +2608,26 @@ async fn comment_reaction_destroy_inner(
     let id = uuid::Uuid::parse_str(&reaction_id).map_err(|_| HandlerError::ServerError)?;
     // `comment_reaction.delete()` (`db/mixins.py:72-77`): `deleted_at` plus
     // a full `save()` (`updated_at`, CRUM `updated_by`).
-    sqlx::query(
-        "UPDATE comment_reactions SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    let db_up2 = pidash_db::pool::sea_orm_connection(pool);
+    let now_fixed2 = now.fixed_offset();
+    comment_reactions::Entity::update_many()
+        .col_expr(
+            comment_reactions::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(Some(now_fixed2)),
+        )
+        .col_expr(
+            comment_reactions::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_fixed2),
+        )
+        .col_expr(
+            comment_reactions::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(Some(actor.id)),
+        )
+        .filter(comment_reactions::Column::Id.eq(id))
+        .filter(comment_reactions::Column::DeletedAt.is_null())
+        .exec(&db_up2)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "commentreaction", &id).await;
     Ok(())
 }
@@ -2678,44 +2814,63 @@ async fn vote_create_inner(
     let vote = parse_vote(body.as_object().ok_or(HandlerError::ServerError)?)?;
     let issue = uuid::Uuid::parse_str(issue_id).map_err(|_| HandlerError::ServerError)?;
     let now = chrono::Utc::now();
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM issue_votes WHERE issue_id = $1 AND actor_id = $2 AND project_id = $3 AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(issue)
-    .bind(actor.id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| HandlerError::ServerError)?;
+    let db_vote = pidash_db::pool::sea_orm_connection(pool);
+    let existing = issue_votes::Entity::find()
+        .filter(issue_votes::Column::IssueId.eq(issue))
+        .filter(issue_votes::Column::ActorId.eq(actor.id))
+        .filter(issue_votes::Column::ProjectId.eq(Some(project_id)))
+        .filter(issue_votes::Column::DeletedAt.is_null())
+        .select_only()
+        .column(issue_votes::Column::Id)
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db_vote)
+        .await
+        .map_err(|_| HandlerError::ServerError)?;
     match existing {
-        Some((id,)) => {
-            sqlx::query("UPDATE issue_votes SET vote = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL")
-                .bind(vote)
-                .bind(now)
-                .bind(actor.id)
-                .bind(id)
-                .execute(pool)
+        Some(id) => {
+            let now_fixed = now.fixed_offset();
+            issue_votes::Entity::update_many()
+                .col_expr(
+                    issue_votes::Column::Vote,
+                    sea_orm::sea_query::Expr::value(vote),
+                )
+                .col_expr(
+                    issue_votes::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now_fixed),
+                )
+                .col_expr(
+                    issue_votes::Column::UpdatedById,
+                    sea_orm::sea_query::Expr::value(Some(actor.id)),
+                )
+                .filter(issue_votes::Column::Id.eq(id))
+                .filter(issue_votes::Column::DeletedAt.is_null())
+                .exec(&db_vote)
                 .await
-                .map_err(integrity_error)?;
+                .map_err(db_integrity_error)?;
             id
         }
         None => {
             let workspace_id = project_workspace_id(pool, &project_id).await?;
             let id = uuid::Uuid::new_v4();
-            // `get_or_create` saves (actor/project/issue), then the
-            // assignment saves again with `updated_by` set: one insert
-            // with both audit columns is the same row.
-            sqlx::query("INSERT INTO issue_votes (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, project_id, issue_id, actor_id, vote) VALUES ($1, $2, $2, $3, $3, NULL, $4, $5, $6, $3, $7)")
-                .bind(id)
-                .bind(now)
-                .bind(actor.id)
-                .bind(workspace_id)
-                .bind(project_id)
-                .bind(issue)
-                .bind(vote)
-                .execute(pool)
+            let now_fixed = now.fixed_offset();
+            let new_vote = issue_votes::ActiveModel {
+                id: Set(id),
+                created_at: Set(now_fixed),
+                updated_at: Set(now_fixed),
+                created_by_id: Set(Some(actor.id)),
+                updated_by_id: Set(Some(actor.id)),
+                deleted_at: Set(None),
+                workspace_id: Set(workspace_id),
+                project_id: Set(project_id),
+                issue_id: Set(issue),
+                actor_id: Set(actor.id),
+                vote: Set(vote),
+            };
+            new_vote
+                .insert(&db_vote)
                 .await
-                .map_err(integrity_error)?;
+                .map_err(db_integrity_error)?;
             id
         }
     };
@@ -2829,14 +2984,24 @@ async fn vote_destroy_inner(
     let id = uuid::Uuid::parse_str(&vote_id).map_err(|_| HandlerError::ServerError)?;
     // `issue_vote.delete()` (`db/mixins.py:72-77`): `deleted_at` plus a full
     // `save()` (`updated_at`, CRUM `updated_by`).
-    sqlx::query(
-        "UPDATE issue_votes SET deleted_at = $1, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(now)
-    .bind(actor.id)
-    .bind(id)
-        .execute(pool)
+    let db_vdel = pidash_db::pool::sea_orm_connection(pool);
+    let now_fixed = now.fixed_offset();
+    issue_votes::Entity::update_many()
+        .col_expr(
+            issue_votes::Column::DeletedAt,
+            sea_orm::sea_query::Expr::value(Some(now_fixed)),
+        )
+        .col_expr(
+            issue_votes::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now_fixed),
+        )
+        .col_expr(
+            issue_votes::Column::UpdatedById,
+            sea_orm::sea_query::Expr::value(Some(actor.id)),
+        )
+        .filter(issue_votes::Column::Id.eq(id))
+        .filter(issue_votes::Column::DeletedAt.is_null())
+        .exec(&db_vdel)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     enqueue_soft_delete(pool, "issuevote", &id).await;
@@ -3288,23 +3453,160 @@ mod tests {
     }
 
     #[test]
-    fn user_reads_carry_no_soft_delete_guard() {
-        // `User` has no `deleted_at` column (`db/models/user.py:56`), so
-        // every `users` read must filter on the id alone; PIDASHCONV-237
-        // regressed all seven social paths with a guard the schema rejects.
-        // (`user_detail_sql` / `display_name_sql` moved to the read
-        // service with their own pins; see `read::comment` tests.)
-        assert_eq!(
-            nullable_fk_sql("users"),
-            "SELECT id FROM users WHERE id = $1"
-        );
-        // Soft-deletable tables keep the manager's filter.
-        for table in ["issue_comments", "descriptions"] {
-            assert_eq!(
-                nullable_fk_sql(table),
-                format!("SELECT id FROM {table} WHERE id = $1 AND deleted_at IS NULL")
-            );
+    fn member_lookup_shape_pins_filters() {
+        use sea_orm::{EntityTrait, QueryFilter, QueryTrait};
+        // The converted member probe (`ensure_project_member`): live
+        // active membership only — project, member, is_active, no
+        // soft-deleted rows.
+        let sql = pidash_db::entity::project_members::Entity::find()
+            .filter(pidash_db::entity::project_members::Column::ProjectId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::project_members::Column::MemberId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::project_members::Column::IsActive.eq(true))
+            .filter(pidash_db::entity::project_members::Column::DeletedAt.is_null())
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("project_members"));
+        assert!(sql.contains("is_active"));
+        assert!(sql.to_lowercase().contains("deleted_at"));
+    }
+
+    #[tokio::test]
+    async fn nullable_fk_issue_comments_probe_live_db() {
+        // Regression: the SeaORM conversion of `nullable_fk_exists` had no
+        // `issue_comments` arm, so every non-null comment `parent` failed
+        // FK validation (NEWPIDASH-79 run-2 review). Live-db, gated like
+        // the other DB tests; skips when `DATABASE_URL` is unset.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let stamp = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = uuid::Uuid::new_v4();
+        let workspace_id = uuid::Uuid::new_v4();
+        let project_id = uuid::Uuid::new_v4();
+        let issue_id = uuid::Uuid::new_v4();
+        let live_id = uuid::Uuid::new_v4();
+        let dead_id = uuid::Uuid::new_v4();
+        let missing_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, password, username, first_name, last_name, avatar, \
+             date_joined, created_at, updated_at, last_location, created_location, \
+             is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, token, user_timezone, \
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent, \
+             is_bot, display_name, is_email_valid, is_password_reset_required) \
+             VALUES ($1, 'x', $2, 'x', 'x', '', NOW(), NOW(), NOW(), '', '', false, false, \
+             false, true, false, false, false, 't', 'UTC', '', '', '', '', false, 'x', false, false)",
+        )
+        .bind(user_id)
+        .bind(format!("fkprobe-{stamp}"))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, created_at, updated_at, name, slug, owner_id, \
+             timezone, background_color) VALUES ($1, NOW(), NOW(), 'x', $2, $3, 'UTC', '#000')",
+        )
+        .bind(workspace_id)
+        .bind(format!("ws-fkprobe-{stamp}"))
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("seed workspace");
+        sqlx::query(
+            "INSERT INTO projects (id, created_at, updated_at, name, description, network, \
+             identifier, workspace_id, cycle_view, module_view, issue_views_view, page_view, \
+             intake_view, archive_in, close_in, logo_props, is_time_tracking_enabled, \
+             is_issue_type_enabled, guest_view_all_features, timezone, members_can_edit_states, \
+             repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, \
+             agent_ticking_enabled, is_default, agent_review_default_interval_seconds, \
+             default_agent_executor, agent_test_default_interval_seconds) \
+             VALUES ($1, NOW(), NOW(), 'x', '', 0, 'X', $2, false, false, false, false, false, \
+             0, 0, '{}', false, false, false, 'UTC', true, '', '', 0, 0, false, false, 0, 'none', 0)",
+        )
+        .bind(project_id)
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed project");
+        sqlx::query(
+            "INSERT INTO issues (id, created_at, updated_at, name, description_json, priority, \
+             sequence_id, project_id, workspace_id, description_html, sort_order, is_draft, \
+             git_work_branch, workpad, complexity_score) \
+             VALUES ($1, NOW(), NOW(), 'x', '{}', 'none', 1, $2, $3, '', 0, false, '', '', 0)",
+        )
+        .bind(issue_id)
+        .bind(project_id)
+        .bind(workspace_id)
+        .execute(&pool)
+        .await
+        .expect("seed issue");
+        for (id, deleted) in [(live_id, false), (dead_id, true)] {
+            let deleted_at: Option<chrono::DateTime<chrono::FixedOffset>> =
+                deleted.then(|| chrono::Utc::now().fixed_offset());
+            sqlx::query(
+                "INSERT INTO issue_comments (id, created_at, updated_at, comment_stripped, \
+                 attachments, issue_id, project_id, workspace_id, comment_html, comment_json, \
+                 access, speaker_type, speaker_label, labels, deleted_at) \
+                 VALUES ($1, NOW(), NOW(), 'x', '{}', $2, $3, $4, '<p></p>', '{}', 'INTERNAL', \
+                 'human', '', '{}', $5)",
+            )
+            .bind(id)
+            .bind(issue_id)
+            .bind(project_id)
+            .bind(workspace_id)
+            .bind(deleted_at)
+            .execute(&pool)
+            .await
+            .expect("seed comment");
         }
+        // Live comment probes true (the run-2 regression is gone).
+        assert!(nullable_fk_exists(&pool, "issue_comments", live_id)
+            .await
+            .expect("probe live"));
+        // Soft-deleted probes false (manager guard).
+        assert!(!nullable_fk_exists(&pool, "issue_comments", dead_id)
+            .await
+            .expect("probe dead"));
+        // A missing id probes false like any `PrimaryKeyRelatedField` miss.
+        assert!(!nullable_fk_exists(&pool, "issue_comments", missing_id)
+            .await
+            .expect("probe missing"));
+        // Unknown tables error loudly instead of silently reporting absent.
+        assert!(matches!(
+            nullable_fk_exists(&pool, "no_such_table", live_id).await,
+            Err(HandlerError::ServerError)
+        ));
+        for id in [live_id, dead_id] {
+            sqlx::query("DELETE FROM issue_comments WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("cleanup comment");
+        }
+        sqlx::query("DELETE FROM issues WHERE id = $1")
+            .bind(issue_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup issue");
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup project");
+        sqlx::query("DELETE FROM workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup workspace");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
     }
 
     #[test]

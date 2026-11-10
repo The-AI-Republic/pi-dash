@@ -188,6 +188,10 @@ export function KanbanBoard({
   };
   const groupDomain = prefs.groupBy === null ? undefined : domains[prefs.groupBy];
   const subDomain = subGroup === null ? undefined : domains[subGroup];
+  // Explicit axis order (states in workflow order, NEWPIDASH-46); axes
+  // without one keep the envelope's key order.
+  const groupOrder = prefs.groupBy === null ? undefined : refs.orders[prefs.groupBy];
+  const subOrder = subGroup === null ? undefined : refs.orders[subGroup];
   const read = useBoard(client, workspaceSlug, {
     entity,
     groupBy: prefs.groupBy,
@@ -200,6 +204,8 @@ export function KanbanBoard({
     subLabels,
     groupDomain,
     subDomain,
+    groupOrder,
+    subOrder,
   });
   const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
   const { data: details } = useQuery(projectDetailsQueryOptions(client, workspaceSlug));

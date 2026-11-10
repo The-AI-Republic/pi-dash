@@ -13,15 +13,21 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, TimeZone as _, Utc};
 use chrono_tz::Tz;
-use sea_orm::EntityTrait;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
 use serde_json::{Map, Value};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_compat::py::py_strip;
-use pidash_db::entity::issues;
+use pidash_db::entity::{
+    agent_run, estimate_points, issue_assignees, issue_labels, issue_types, issues, labels, pod,
+    project_issue_types, project_members, states, users, workspaces,
+};
 
-use crate::app_issues::{SourceIssueRow, ASSIGNEE_IDS_SQL, LABEL_IDS_SQL};
+use crate::app_issues::SourceIssueRow;
 use crate::domain::activity::TaskEnqueueHook;
 use crate::domain::issues as domain_issues;
 use crate::domain::transition::IssueTransitionHook;
@@ -793,6 +799,7 @@ struct ParsedWrite {
     state: Option<Option<Uuid>>,
     estimate_point: Option<Option<Uuid>>,
     assigned_pod: Option<Option<Uuid>>,
+    assigned_runner: Option<Option<Uuid>>,
 }
 
 /// One queued existence probe: the parsed UUID plus the raw echo for the
@@ -814,6 +821,7 @@ enum PkTable {
     Issues,
     EstimatePoints,
     Pods,
+    Runners,
 }
 
 /// Batch one table's probes: returns the ids that exist under the
@@ -822,36 +830,98 @@ async fn probe_exists(pool: &PgPool, table: PkTable, ids: &[Uuid]) -> Result<Vec
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let sql = match table {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<Uuid> = match table {
         // `User.objects` is Django's plain `UserManager` (no liveness
         // scope — deactivated users still validate).
-        PkTable::Users => r#"SELECT "id" FROM "users" WHERE "id" = ANY($1)"#,
+        PkTable::Users => {
+            users::Entity::find()
+                .select_only()
+                .column(users::Column::Id)
+                .filter(users::Column::Id.is_in(ids.to_vec()))
+                .into_tuple()
+                .all(&db)
+                .await
+        }
         PkTable::Labels => {
-            r#"SELECT "id" FROM "labels" WHERE "id" = ANY($1) AND "deleted_at" IS NULL"#
+            labels::Entity::find()
+                .select_only()
+                .column(labels::Column::Id)
+                .filter(labels::Column::Id.is_in(ids.to_vec()))
+                .filter(labels::Column::DeletedAt.is_null())
+                .into_tuple()
+                .all(&db)
+                .await
         }
         PkTable::IssueTypes => {
-            r#"SELECT "id" FROM "issue_types" WHERE "id" = ANY($1) AND "deleted_at" IS NULL"#
+            issue_types::Entity::find()
+                .select_only()
+                .column(issue_types::Column::Id)
+                .filter(issue_types::Column::Id.is_in(ids.to_vec()))
+                .filter(issue_types::Column::DeletedAt.is_null())
+                .into_tuple()
+                .all(&db)
+                .await
         }
         // `State.objects` is the triage-excluding `StateManager`
         // (`db/models/state.py:91-100`): triage ids miss here (field
         // error), never reaching `validate()`.
         PkTable::States => {
-            r#"SELECT "id" FROM "states" WHERE "id" = ANY($1) AND "deleted_at" IS NULL AND NOT ("group" = 'triage')"#
+            states::Entity::find()
+                .select_only()
+                .column(states::Column::Id)
+                .filter(states::Column::Id.is_in(ids.to_vec()))
+                .filter(states::Column::DeletedAt.is_null())
+                .filter(states::Column::Group.ne("triage"))
+                .into_tuple::<Uuid>()
+                .all(&db)
+                .await
         }
         PkTable::Issues => {
-            r#"SELECT "id" FROM "issues" WHERE "id" = ANY($1) AND "deleted_at" IS NULL"#
+            issues::Entity::find()
+                .select_only()
+                .column(issues::Column::Id)
+                .filter(issues::Column::Id.is_in(ids.to_vec()))
+                .filter(issues::Column::DeletedAt.is_null())
+                .into_tuple()
+                .all(&db)
+                .await
         }
         PkTable::EstimatePoints => {
-            r#"SELECT "id" FROM "estimate_points" WHERE "id" = ANY($1) AND "deleted_at" IS NULL"#
+            estimate_points::Entity::find()
+                .select_only()
+                .column(estimate_points::Column::Id)
+                .filter(estimate_points::Column::Id.is_in(ids.to_vec()))
+                .filter(estimate_points::Column::DeletedAt.is_null())
+                .into_tuple()
+                .all(&db)
+                .await
         }
         // `Pod.objects` is the soft-deletion `PodManager`.
-        PkTable::Pods => r#"SELECT "id" FROM "pod" WHERE "id" = ANY($1) AND "deleted_at" IS NULL"#,
-    };
-    sqlx::query_scalar(sql)
-        .bind(ids)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| db_error(error, "pk-exists"))
+        PkTable::Pods => {
+            pod::Entity::find()
+                .select_only()
+                .column(pod::Column::Id)
+                .filter(pod::Column::Id.is_in(ids.to_vec()))
+                .filter(pod::Column::DeletedAt.is_null())
+                .into_tuple()
+                .all(&db)
+                .await
+        }
+        // `Runner.objects` — the runner table carries no soft-delete
+        // column, so every row validates as existing.
+        PkTable::Runners => {
+            pidash_db::entity::runner::Entity::find()
+                .select_only()
+                .column(pidash_db::entity::runner::Column::Id)
+                .filter(pidash_db::entity::runner::Column::Id.is_in(ids.to_vec()))
+                .into_tuple()
+                .all(&db)
+                .await
+        }
+    }
+    .map_err(|error| db_error(error, "pk-exists"))?;
+    Ok(rows)
 }
 
 /// Parse one PK input (`PrimaryKeyRelatedField.to_internal_value`,
@@ -1129,6 +1199,8 @@ async fn parse_issue_write(
 
     // --- assigned_pod (PKRF Pod, allow_null) ---
     let pod_shape = parse_optional_pk(get("assigned_pod"), from_form);
+    // --- assigned_runner (PKRF Runner, allow_null) ---
+    let runner_shape = parse_optional_pk(get("assigned_runner"), from_form);
 
     // Batch the existence probes (one query per table).
     let mut assignee_ids: Vec<Uuid> = Vec::new();
@@ -1139,6 +1211,7 @@ async fn parse_issue_write(
     let mut issue_ids: Vec<Uuid> = Vec::new();
     let mut estimate_ids: Vec<Uuid> = Vec::new();
     let mut pod_ids: Vec<Uuid> = Vec::new();
+    let mut runner_ids: Vec<Uuid> = Vec::new();
     if let ListShape::Value(probes) = &assignees_shape {
         assignee_ids.extend(probes.iter().map(|probe| probe.id));
     }
@@ -1166,6 +1239,9 @@ async fn parse_issue_write(
     if let FieldParse::Value(Some(probe)) = &pod_shape {
         pod_ids.push(probe.id);
     }
+    if let FieldParse::Value(Some(probe)) = &runner_shape {
+        runner_ids.push(probe.id);
+    }
     let assignee_ids = dedup(assignee_ids);
     let label_ids = dedup(label_ids);
     let user_ids = dedup(user_ids);
@@ -1174,6 +1250,7 @@ async fn parse_issue_write(
     let issue_ids = dedup(issue_ids);
     let estimate_ids = dedup(estimate_ids);
     let pod_ids = dedup(pod_ids);
+    let runner_ids = dedup(runner_ids);
     let (
         assignees_live,
         labels_live,
@@ -1183,6 +1260,7 @@ async fn parse_issue_write(
         issues_live,
         estimates_live,
         pods_live,
+        runners_live,
     ) = tokio::join!(
         probe_exists(pool, PkTable::Users, &assignee_ids),
         probe_exists(pool, PkTable::Labels, &label_ids),
@@ -1192,6 +1270,7 @@ async fn parse_issue_write(
         probe_exists(pool, PkTable::Issues, &issue_ids),
         probe_exists(pool, PkTable::EstimatePoints, &estimate_ids),
         probe_exists(pool, PkTable::Pods, &pod_ids),
+        probe_exists(pool, PkTable::Runners, &runner_ids),
     );
     let assignees_live = assignees_live?;
     let labels_live = labels_live?;
@@ -1201,6 +1280,7 @@ async fn parse_issue_write(
     let issues_live = issues_live?;
     let estimates_live = estimates_live?;
     let pods_live = pods_live?;
+    let runners_live = runners_live?;
     let has = |live: &[Uuid], id: &Uuid| live.contains(id);
 
     // Assemble the ordered error dict (or the value). `type` wins over
@@ -1526,6 +1606,32 @@ async fn parse_issue_write(
         FieldParse::Errors(messages) => {
             entries.push((
                 "assigned_pod",
+                Value::Array(messages.into_iter().map(Value::String).collect()),
+            ));
+        }
+    }
+    // assigned_runner
+    match runner_shape {
+        FieldParse::Absent => {}
+        FieldParse::Value(None) => {
+            parsed.assigned_runner = Some(None);
+        }
+        FieldParse::Value(Some(probe)) => {
+            if has(&runners_live, &probe.id) {
+                parsed.assigned_runner = Some(Some(probe.id));
+            } else {
+                entries.push((
+                    "assigned_runner",
+                    Value::Array(vec![Value::String(format!(
+                        "Invalid pk \"{}\" - object does not exist.",
+                        probe.raw
+                    ))]),
+                ));
+            }
+        }
+        FieldParse::Errors(messages) => {
+            entries.push((
+                "assigned_runner",
                 Value::Array(messages.into_iter().map(Value::String).collect()),
             ));
         }
@@ -2252,11 +2358,10 @@ fn resolve_task_events(events: &[pulldown_cmark::Event]) -> Vec<MdEvent> {
                 }
             }
             Event::Html(content) => out.push(MdEvent::HtmlBlock(content.to_string())),
-            Event::InlineHtml(content) => {
-                if image_stack.is_empty() {
-                    out.push(MdEvent::HtmlInline(content.to_string()));
-                }
+            Event::InlineHtml(content) if image_stack.is_empty() => {
+                out.push(MdEvent::HtmlInline(content.to_string()));
             }
+            Event::InlineHtml(_) => {}
             Event::SoftBreak => {
                 if let Some(image) = image_stack.last_mut() {
                     image.2.push(' ');
@@ -2595,15 +2700,30 @@ fn non_dict_body(value: &Value) -> String {
 /// project_issue_types__project_id=..., is_default=True).first()` —
 /// unordered `.first()` (no `Meta.ordering` on `IssueType`), both tables
 /// under the soft-deletion scope.
+#[derive(Debug, Clone, FromQueryResult)]
+struct DefaultTypeRow {
+    id: Uuid,
+}
+
 async fn fetch_default_issue_type(pool: &PgPool, project_id: &Uuid) -> Result<Option<Uuid>, Error> {
-    sqlx::query_scalar(
-        r#"SELECT "it"."id" FROM "issue_types" AS "it" WHERE "it"."deleted_at" IS NULL AND "it"."is_default" AND EXISTS(SELECT 1 FROM "project_issue_types" AS "pit" WHERE "pit"."issue_type_id" = "it"."id" AND "pit"."project_id" = $1 AND "pit"."deleted_at" IS NULL) LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-default-type"))
-    .map(|row: Option<Uuid>| row)
+    // The `EXISTS` over `project_issue_types` as an `INNER JOIN`:
+    // multiplicity is unobservable behind `LIMIT 1` over `it.id` only.
+    let row = issue_types::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            issue_types::Relation::ProjectIssueTypes.def(),
+        )
+        .filter(issue_types::Column::DeletedAt.is_null())
+        .filter(issue_types::Column::IsDefault.eq(true))
+        .filter(project_issue_types::Column::ProjectId.eq(*project_id))
+        .filter(project_issue_types::Column::DeletedAt.is_null())
+        .select_only()
+        .column(issue_types::Column::Id)
+        .into_model::<DefaultTypeRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "write-default-type"))?;
+    Ok(row.map(|row| row.id))
 }
 
 /// `Issue.has_active_run` (`db/models/issue.py:232-248`):
@@ -2623,63 +2743,115 @@ const NON_TERMINAL_STATUSES: &[&str] = &[
 ];
 
 async fn issue_has_active_run(pool: &PgPool, issue_id: &Uuid) -> Result<bool, Error> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "agent_run" WHERE "work_item_id" = $1 AND "status" = ANY($2))"#,
-    )
-    .bind(issue_id)
-    .bind(NON_TERMINAL_STATUSES)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-active-run"))
-    .map(|found: Option<bool>| found.unwrap_or(false))
+    let hit = agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::WorkItemId.eq(*issue_id))
+        .filter(agent_run::Column::Status.is_in(NON_TERMINAL_STATUSES.to_vec()))
+        .into_tuple::<Uuid>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "write-active-run"))?;
+    Ok(hit.is_some())
 }
 
 /// The pod's project for the `_same_uuid` check
 /// (`serializers/issue.py:199-203`): both sides are typed UUIDs here, so
 /// the canonical-compare fallback arms are unreachable — plain equality.
+#[derive(Debug, Clone, FromQueryResult)]
+struct PodProjectRow {
+    project_id: Uuid,
+}
+
 async fn fetch_pod_project_id(pool: &PgPool, pod_id: &Uuid) -> Result<Option<Uuid>, Error> {
-    sqlx::query_scalar(r#"SELECT "project_id" FROM "pod" WHERE "id" = $1"#)
-        .bind(pod_id)
-        .fetch_optional(pool)
+    let row = pod::Entity::find_by_id(*pod_id)
+        .select_only()
+        .column(pod::Column::ProjectId)
+        .into_model::<PodProjectRow>()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
         .await
-        .map_err(|error| db_error(error, "write-pod-project"))
-        .map(|row: Option<Uuid>| row)
+        .map_err(|error| db_error(error, "write-pod-project"))?;
+    Ok(row.map(|row| row.project_id))
+}
+
+/// `assigned_runner_detail` by runner id (`issue_assignment.py`,
+/// design §14.1): `None` when pod-assigned or the runner is gone.
+async fn fetch_assigned_runner_detail(
+    pool: &PgPool,
+    runner_id: Option<Uuid>,
+) -> Result<Option<serde_json::Value>, Error> {
+    use sea_orm::EntityTrait;
+    let Some(runner_id) = runner_id else {
+        return Ok(None);
+    };
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let Some(runner) = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Error::ServerError)?
+    else {
+        return Ok(None);
+    };
+    crate::domain::issue_assignment::assigned_runner_detail(&orm, &runner)
+        .await
+        .map(Some)
+        .map_err(|_| Error::ServerError)
 }
 
 /// The `ProjectMember` filter backing the assignee allow-list
 /// (`serializers/issue.py:246-252`): active members with `role >= 15` in
 /// `ProjectMember.Meta.ordering = ("-created_at",)`.
+#[derive(Debug, Clone, FromQueryResult)]
+struct MemberIdRow {
+    member_id: Option<Uuid>,
+}
+
 async fn filter_assignee_ids(
     pool: &PgPool,
     project_id: &Uuid,
     ids: &[Uuid],
 ) -> Result<Vec<Uuid>, Error> {
-    sqlx::query_scalar(
-        r#"SELECT "member_id" FROM "project_members" WHERE "project_id" = $1 AND "is_active" AND "role" >= 15 AND "member_id" = ANY($2) AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(project_id)
-    .bind(ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "write-assignee-filter"))
+    let rows = project_members::Entity::find()
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::Role.gte(15_i16))
+        .filter(project_members::Column::MemberId.is_in(ids.to_vec()))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .order_by_desc(project_members::Column::CreatedAt)
+        .select_only()
+        .column(project_members::Column::MemberId)
+        .into_model::<MemberIdRow>()
+        .all(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "write-assignee-filter"))?;
+    Ok(rows.into_iter().filter_map(|row| row.member_id).collect())
 }
 
 /// The `Label` filter backing the label allow-list
 /// (`serializers/issue.py:255-259`), in `Label.Meta.ordering =
 /// ("-created_at",)`.
+#[derive(Debug, Clone, FromQueryResult)]
+struct LabelIdRow {
+    id: Uuid,
+}
+
 async fn filter_label_ids(
     pool: &PgPool,
     project_id: &Uuid,
     ids: &[Uuid],
 ) -> Result<Vec<Uuid>, Error> {
-    sqlx::query_scalar(
-        r#"SELECT "id" FROM "labels" WHERE "project_id" = $1 AND "id" = ANY($2) AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(project_id)
-    .bind(ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "write-label-filter"))
+    let rows = labels::Entity::find()
+        .filter(labels::Column::ProjectId.eq(*project_id))
+        .filter(labels::Column::Id.is_in(ids.to_vec()))
+        .filter(labels::Column::DeletedAt.is_null())
+        .order_by_desc(labels::Column::CreatedAt)
+        .select_only()
+        .column(labels::Column::Id)
+        .into_model::<LabelIdRow>()
+        .all(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "write-label-filter"))?;
+    Ok(rows.into_iter().map(|row| row.id).collect())
 }
 
 /// Port of `IssueSerializer.validate()` (`serializers/issue.py:182-288`),
@@ -2697,6 +2869,7 @@ async fn run_write_validate(
     workspace_id: &Uuid,
     instance: Option<&DecodedIssue>,
     from_markdown: bool,
+    user_id: Option<Uuid>,
 ) -> Result<(), Error> {
     use shape::ValidateError;
     let fail = |error: ValidateError| Error::FieldErrors(error.body().to_owned());
@@ -2705,6 +2878,47 @@ async fn run_write_validate(
     if let (Some(Some(start)), Some(Some(target))) = (parsed.start_date, parsed.target_date) {
         if start > target {
             return Err(fail(ValidateError::StartExceedsTarget));
+        }
+    }
+
+    // Executor translation (`normalize_issue_executor`,
+    // `issue_assignment.py:26-47`): unknown values already failed at
+    // field level; known values normalize to local_runner; the mid-flight
+    // refusal compares the normalized write against the stored value.
+    if let Some(executor) = &mut parsed.agent_executor {
+        match executor {
+            None => {
+                // Explicit clear: `str(None)` vs the stored value.
+                if let Some(current) = instance {
+                    if current.agent_executor.is_some()
+                        && issue_has_active_run(
+                            pool,
+                            &current.id.parse::<Uuid>().map_err(|_| Error::ServerError)?,
+                        )
+                        .await?
+                    {
+                        return Err(fail(ValidateError::ExecutorMidFlight));
+                    }
+                }
+            }
+            Some(value) => {
+                let Some(kind) = pidash_types::dispatch::normalize_executor_write(value) else {
+                    return Err(fail(ValidateError::ExecutorUnknown));
+                };
+                let normalized = kind.value().to_owned();
+                *value = normalized.clone();
+                if let Some(current) = instance {
+                    if current.agent_executor.as_deref() != Some(normalized.as_str())
+                        && issue_has_active_run(
+                            pool,
+                            &current.id.parse::<Uuid>().map_err(|_| Error::ServerError)?,
+                        )
+                        .await?
+                    {
+                        return Err(fail(ValidateError::ExecutorMidFlight));
+                    }
+                }
+            }
         }
     }
 
@@ -2729,6 +2943,30 @@ async fn run_write_validate(
                 .await?
             {
                 return Err(fail(ValidateError::PodReassignActiveRun));
+            }
+        }
+    }
+
+    // Dedicated runner (`validate_execution_target`, design §7.1): same
+    // position as Django's `validate()` — after the pod block, before
+    // the executor normalize. The E-check needs the requested pod.
+    if parsed.assigned_runner.is_some() {
+        let orm = pidash_db::pool::sea_orm_connection(pool);
+        let write = crate::domain::issue_assignment::ExecutionTargetWrite {
+            issue_id: instance.and_then(|current| current.id.parse::<Uuid>().ok()),
+            runner_present: true,
+            runner_id: parsed.assigned_runner.flatten(),
+            pod_id: parsed.assigned_pod.flatten(),
+            project_id: Some(*project_id),
+            user_id,
+        };
+        match crate::domain::issue_assignment::validate_execution_target(&orm, &write).await {
+            Ok(()) => {}
+            Err(crate::domain::issue_assignment::ValidateError::Field(error)) => {
+                return Err(fail(ValidateError::from_runner_code(error.code)));
+            }
+            Err(crate::domain::issue_assignment::ValidateError::Db(_)) => {
+                return Err(Error::ServerError);
             }
         }
     }
@@ -2780,43 +3018,50 @@ async fn run_write_validate(
     // its field's manager scope (`StateManager` excludes triage;
     // `Issue.objects` keeps drafts, archived and triage rows).
     if let Some(Some(state_id)) = parsed.state {
-        let ok: Option<bool> = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "states" WHERE "project_id" = $1 AND "id" = $2 AND "deleted_at" IS NULL AND NOT ("group" = 'triage'))"#,
-        )
-        .bind(project_id)
-        .bind(state_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "write-state-check"))?;
-        if !ok.unwrap_or(false) {
+        let hit = states::Entity::find()
+            .select_only()
+            .column(states::Column::Id)
+            .filter(states::Column::ProjectId.eq(*project_id))
+            .filter(states::Column::Id.eq(state_id))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .into_tuple::<Uuid>()
+            .one(&pidash_db::pool::sea_orm_connection(pool))
+            .await
+            .map_err(|error| db_error(error, "write-state-check"))?;
+        if hit.is_none() {
             return Err(fail(ValidateError::StateWrongProject));
         }
     }
     if let Some(Some(parent_id)) = parsed.parent {
-        let ok: Option<bool> = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "issues" WHERE "workspace_id" = $1 AND "project_id" = $2 AND "id" = $3 AND "deleted_at" IS NULL)"#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(parent_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "write-parent-check"))?;
-        if !ok.unwrap_or(false) {
+        let hit = issues::Entity::find()
+            .select_only()
+            .column(issues::Column::Id)
+            .filter(issues::Column::WorkspaceId.eq(*workspace_id))
+            .filter(issues::Column::ProjectId.eq(*project_id))
+            .filter(issues::Column::Id.eq(parent_id))
+            .filter(issues::Column::DeletedAt.is_null())
+            .into_tuple::<Uuid>()
+            .one(&pidash_db::pool::sea_orm_connection(pool))
+            .await
+            .map_err(|error| db_error(error, "write-parent-check"))?;
+        if hit.is_none() {
             return Err(fail(ValidateError::ParentWrongProject));
         }
     }
     if let Some(Some(estimate_id)) = parsed.estimate_point {
-        let ok: Option<bool> = sqlx::query_scalar(
-            r#"SELECT EXISTS(SELECT 1 FROM "estimate_points" WHERE "workspace_id" = $1 AND "project_id" = $2 AND "id" = $3 AND "deleted_at" IS NULL)"#,
-        )
-        .bind(workspace_id)
-        .bind(project_id)
-        .bind(estimate_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| db_error(error, "write-estimate-check"))?;
-        if !ok.unwrap_or(false) {
+        let hit = estimate_points::Entity::find()
+            .select_only()
+            .column(estimate_points::Column::Id)
+            .filter(estimate_points::Column::WorkspaceId.eq(*workspace_id))
+            .filter(estimate_points::Column::ProjectId.eq(*project_id))
+            .filter(estimate_points::Column::Id.eq(estimate_id))
+            .filter(estimate_points::Column::DeletedAt.is_null())
+            .into_tuple::<Uuid>()
+            .one(&pidash_db::pool::sea_orm_connection(pool))
+            .await
+            .map_err(|error| db_error(error, "write-estimate-check"))?;
+        if hit.is_none() {
             return Err(fail(ValidateError::EstimatePointWrongProject));
         }
     }
@@ -2938,6 +3183,28 @@ fn raw_truthy(value: &Value) -> bool {
 /// pair (`views/issue.py:484-503,823-841`): same filter (project, slug,
 /// source, id under the soft-deletion scope), the first in
 /// `Meta.ordering = ("-created_at",)`.
+///
+/// Both statements run through one builder below: the two-step call
+/// structure (`exists()` then `.first()`) is kept verbatim.
+fn external_dup_query(
+    project_id: &Uuid,
+    slug: &str,
+    source: Option<&str>,
+    external_id: &str,
+) -> sea_orm::Select<issues::Entity> {
+    let mut query = issues::Entity::find()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug.to_owned()))
+        .filter(issues::Column::ExternalId.eq(external_id.to_owned()))
+        .filter(issues::Column::DeletedAt.is_null());
+    match source {
+        Some(source) => query = query.filter(issues::Column::ExternalSource.eq(source.to_owned())),
+        None => query = query.filter(issues::Column::ExternalSource.is_null()),
+    }
+    query
+}
+
 async fn external_dup_first(
     pool: &PgPool,
     project_id: &Uuid,
@@ -2945,30 +3212,26 @@ async fn external_dup_first(
     source: &str,
     external_id: &str,
 ) -> Result<Option<Uuid>, Error> {
-    let exists: Option<bool> = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" = $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL)"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-dup-exists"))?;
-    if !exists.unwrap_or(false) {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let query = || external_dup_query(project_id, slug, Some(source), external_id);
+    let hit = query()
+        .select_only()
+        .column(issues::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "write-dup-exists"))?;
+    if hit.is_none() {
         return Ok(None);
     }
-    sqlx::query_scalar(
-        r#"SELECT "issues"."id" FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" = $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL ORDER BY "issues"."created_at" DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-dup-first"))
-    .map(|row: Option<Uuid>| row)
+    query()
+        .select_only()
+        .column(issues::Column::Id)
+        .order_by_desc(issues::Column::CreatedAt)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "write-dup-first"))
 }
 
 /// The 409 body (`views/issue.py:502-508,836-841`): insertion order
@@ -3021,6 +3284,10 @@ pub struct CreateOptions {
     ///
     /// [`ChainStop::Origin`]: domain_issues::ChainStop::Origin
     pub emit_model_activity: bool,
+    /// One-shot pod run (design §23.3): `pin:"pod_once"` on the
+    /// create's fire. PIDASHCONV-1723 threads it to `FireSpec`; the
+    /// MCP `pidash_create_issue` passes it.
+    pub pod_once: bool,
 }
 
 /// Per-caller options for [`update`] (design D6).
@@ -3028,6 +3295,10 @@ pub struct CreateOptions {
 pub struct UpdateOptions {
     /// Emit the `issue_activity` update leg (see [`CreateOptions`]).
     pub emit_activity: bool,
+    /// One-shot pod run (design §23.3, PIDASHCONV-1723): `pin:"pod_once"`
+    /// on the state move's fire. The MCP `pidash_update_issue` passes
+    /// it; the v1 view parses `pin` from the body and passes it here.
+    pub pod_once: bool,
 }
 
 /// The pre-resolved update target: the issue row, its rendered pre-image,
@@ -3168,6 +3439,7 @@ pub async fn create(
         &workspace_id,
         None,
         from_markdown,
+        Some(ctx.actor.user_id),
     )
     .await?;
 
@@ -3232,6 +3504,10 @@ pub async fn create(
         workpad: String::new(),
         created_via: parsed.created_via.clone().flatten(),
         assigned_pod_id: parsed.assigned_pod.flatten(),
+        // The dedicated choice (design §7.1): the v1 surface is one of
+        // the two serializers that own the write path (Django's v1
+        // `create()` validates + applies exactly like the app surface).
+        assigned_runner_id: parsed.assigned_runner.flatten(),
         agent_executor: parsed.agent_executor.clone().flatten(),
     };
     // The raw-data overrides resolve pre-save (pure), but their failures
@@ -3289,6 +3565,7 @@ pub async fn create(
                     labels: parsed.labels.clone().unwrap_or_default(),
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: options.pod_once,
                         created_by: Some(actor_id),
                         moved_by_run: None,
                         now: Utc::now(),
@@ -3321,6 +3598,20 @@ pub async fn create(
         }
         Some(_) => return Err(Error::ServerError),
     }
+    // A named dedicated choice (design §13.2): the create commit is
+    // done, so the apply stamps the runner's pod + activity in its own
+    // transaction, exactly Django's `create()` → `apply_execution_target`.
+    if parsed.assigned_runner.is_some() {
+        let runner_id = outcome.issue.assigned_runner_id;
+        crate::domain::issue_assignment::apply_execution_target(
+            &deps.orm,
+            outcome.issue.id,
+            runner_id,
+            actor_id,
+        )
+        .await
+        .map_err(|_| Error::ServerError)?;
+    }
     // The 201 renders the PRE-override in-memory instance: refetch the
     // row, then restore the insert-time `created_at` / `created_by`.
     let mut decoded = fetch_issue_for_write(&deps.pool, slug, &project_id, &new_id, &tz).await?;
@@ -3344,30 +3635,26 @@ async fn external_dup_first_nullable(
     source: Option<&str>,
     external_id: &str,
 ) -> Result<Option<Uuid>, Error> {
-    let exists: Option<bool> = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" IS NOT DISTINCT FROM $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL)"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-dup-exists"))?;
-    if !exists.unwrap_or(false) {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let query = || external_dup_query(project_id, slug, source, external_id);
+    let hit = query()
+        .select_only()
+        .column(issues::Column::Id)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "write-dup-exists"))?;
+    if hit.is_none() {
         return Ok(None);
     }
-    sqlx::query_scalar(
-        r#"SELECT "issues"."id" FROM "issues" INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id") WHERE "issues"."project_id" = $1 AND "workspaces"."slug" = $2 AND "issues"."external_source" IS NOT DISTINCT FROM $3 AND "issues"."external_id" = $4 AND "issues"."deleted_at" IS NULL ORDER BY "issues"."created_at" DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "write-dup-first"))
-    .map(|row: Option<Uuid>| row)
+    query()
+        .select_only()
+        .column(issues::Column::Id)
+        .order_by_desc(issues::Column::CreatedAt)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "write-dup-first"))
 }
 
 /// `PATCH .../issues/<pk>/` (`IssueDetailAPIEndpoint`,
@@ -3416,6 +3703,7 @@ pub async fn update(
         &workspace_id,
         Some(current),
         from_markdown,
+        Some(ctx.actor.user_id),
     )
     .await?;
 
@@ -3559,6 +3847,9 @@ pub async fn update(
     if let Some(value) = parsed.assigned_pod {
         fields.assigned_pod_id = value;
     }
+    if let Some(value) = parsed.assigned_runner {
+        fields.assigned_runner_id = value;
+    }
     fields.state_id = match parsed.state {
         Some(value) => value,
         None => base.state_id,
@@ -3596,6 +3887,7 @@ pub async fn update(
                     prev_state: prev_state_id,
                     fire: domain_issues::FireSpec {
                         dispatch_immediate: true,
+                        pod_once: options.pod_once,
                         created_by: Some(actor_id),
                         moved_by_run,
                         now: Utc::now(),
@@ -3624,12 +3916,37 @@ pub async fn update(
     if outcome.chain.stopped().is_some() {
         return Err(Error::ServerError);
     }
+    // The dedicated choice (design §13.2), before the render so the
+    // response body carries the post-apply image. The pod-only change
+    // (§13.1) clears the assignment with a "pod changed" comment.
+    let mut drain_pod = None;
+    if parsed.assigned_runner.is_some() {
+        let apply = crate::domain::issue_assignment::apply_execution_target(
+            &deps.orm,
+            outcome.issue.id,
+            outcome.issue.assigned_runner_id,
+            actor_id,
+        )
+        .await
+        .map_err(|_| Error::ServerError)?;
+        drain_pod = apply.drain_pod;
+    } else if parsed.assigned_pod.is_some() && outcome.issue.assigned_runner_id.is_some() {
+        crate::domain::issue_assignment::clear_dedicated_runner(
+            &deps.orm,
+            outcome.issue.id,
+            "pod changed",
+            Some(actor_id),
+        )
+        .await
+        .map_err(|_| Error::ServerError)?;
+    }
     let decoded = fetch_issue_for_write(&deps.pool, slug, &project_id, &pk, &tz).await?;
     let rendered =
         render_write_response(&deps.pool, &decoded, &tz, write.web_base.as_deref()).await?;
-    Ok(Outcome::ok(
-        serde_json::to_string(&rendered).map_err(|_| Error::ServerError)?,
-    ))
+    let mut outcome =
+        Outcome::ok(serde_json::to_string(&rendered).map_err(|_| Error::ServerError)?);
+    outcome.drain_pod = drain_pod;
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -3829,24 +4146,33 @@ async fn render_moved_issue_api(
     // Serializer read order (`to_representation`): assignees, labels,
     // then the blocker summary (blocked_by, blocking, has_open) — the
     // same seam reads the driver used pre-move, now past the commit.
-    let assignee_rows: Vec<(Uuid,)> = sqlx::query_as(ASSIGNEE_IDS_SQL)
-        .bind(issue.id)
-        .fetch_all(pool)
+    let assignee_ids: Vec<String> = issue_assignees::Entity::find()
+        .filter(issue_assignees::Column::IssueId.eq(issue.id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .order_by_desc(issue_assignees::Column::CreatedAt)
+        .select_only()
+        .column(issue_assignees::Column::AssigneeId)
+        .into_tuple()
+        .all(&pidash_db::pool::sea_orm_connection(pool))
         .await
-        .map_err(|_| Error::ServerError)?;
-    let assignee_ids: Vec<String> = assignee_rows
+        .map_err(|_| Error::ServerError)?
         .into_iter()
-        .map(|row| row.0.to_string())
+        .map(|id: Uuid| id.to_string())
         .collect();
-    let label_rows: Vec<(Uuid,)> = sqlx::query_as(LABEL_IDS_SQL)
-        .bind(issue.id)
-        .fetch_all(pool)
+    let label_ids: Vec<String> = issue_labels::Entity::find()
+        .filter(issue_labels::Column::IssueId.eq(issue.id))
+        .filter(issue_labels::Column::DeletedAt.is_null())
+        .order_by_desc(issue_labels::Column::CreatedAt)
+        .select_only()
+        .column(issue_labels::Column::LabelId)
+        .into_tuple()
+        .all(&pidash_db::pool::sea_orm_connection(pool))
         .await
-        .map_err(|_| Error::ServerError)?;
-    let label_ids: Vec<String> = label_rows
+        .map_err(|_| Error::ServerError)?
         .into_iter()
-        .map(|row| row.0.to_string())
+        .map(|id: Uuid| id.to_string())
         .collect();
+    // raw-sql: blocker summary kernel built by orchestration::blockers (out of scope) needs its shaped union; duplicating it here is forbidden
     let blocked_by_rows = sqlx::query(&issue_param(summary_sql(false)))
         .bind(issue.id)
         .fetch_all(pool)
@@ -3857,6 +4183,7 @@ async fn render_moved_issue_api(
         .map(map_blocker_row)
         .collect::<Result<_, _>>()
         .map_err(|_| Error::ServerError)?;
+    // raw-sql: blocker summary kernel built by orchestration::blockers (out of scope) needs its shaped union; duplicating it here is forbidden
     let blocking_rows = sqlx::query(&issue_param(summary_sql(true)))
         .bind(issue.id)
         .fetch_all(pool)
@@ -3867,6 +4194,7 @@ async fn render_moved_issue_api(
         .map(map_blocker_row)
         .collect::<Result<_, _>>()
         .map_err(|_| Error::ServerError)?;
+    // raw-sql: blocker summary kernel built by orchestration::blockers (out of scope) needs its shaped union; duplicating it here is forbidden
     let open_hit: Option<(i32,)> = sqlx::query_as(&issue_param(has_open_blockers_sql()))
         .bind(issue.id)
         .fetch_optional(pool)
@@ -3904,6 +4232,10 @@ async fn render_moved_issue_api(
     let state = issue.state_id.map(|id| id.to_string());
     let estimate_point = issue.estimate_point_id.map(|id| id.to_string());
     let assigned_pod = issue.assigned_pod_id.map(|id| id.to_string());
+    let assigned_runner = issue.assigned_runner_id.map(|id| id.to_string());
+    let assigned_runner_detail = fetch_assigned_runner_detail(pool, issue.assigned_runner_id)
+        .await
+        .map_err(|_| Error::ServerError)?;
     let created_by = issue.created_by_id.map(|id| id.to_string());
     let updated_by = issue.updated_by_id.map(|id| id.to_string());
     let url = crate::v1_work_items::shape_issue::issue_url(
@@ -3947,6 +4279,9 @@ async fn render_moved_issue_api(
         state: state.as_deref(),
         estimate_point: estimate_point.as_deref(),
         assigned_pod: assigned_pod.as_deref(),
+        assigned_runner: assigned_runner.as_deref(),
+        assigned_runner_detail: assigned_runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let input = RepresentationInput {
         row: &row,
@@ -4003,6 +4338,29 @@ fn issue_param(sql: String) -> String {
 #[cfg(test)]
 mod move_tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
+
+    #[test]
+    fn external_dup_query_scopes_project_slug_and_identity() {
+        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = external_dup_query(&project, "acme", Some("src"), "ext-1")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"FROM "issues""#), "{sql}");
+        assert!(sql.contains(r#"INNER JOIN "workspaces""#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains(r#""external_source" = 'src'"#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
+    }
+
+    #[test]
+    fn external_dup_query_with_null_source_filters_is_null() {
+        let project = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
+        let sql = external_dup_query(&project, "acme", None, "ext-1")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""external_source" IS NULL"#), "{sql}");
+    }
 
     #[test]
     fn map_move_rejection_maps_driver_failures() {
@@ -4248,7 +4606,6 @@ mod move_tests {
             },
             managed: ManagedRunnerSettings {
                 enabled: false,
-                max_per_user_project: 0,
                 queued_max_age_secs: 0,
                 graceful_stop_secs: 0,
                 sweep_interval_secs: 0,

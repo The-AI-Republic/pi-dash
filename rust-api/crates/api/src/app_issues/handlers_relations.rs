@@ -107,6 +107,16 @@ use pidash_compat::validate::push_pairs_error as push_error;
 use pidash_services::app_issues::relation_mapper::get_actual_relation;
 use pidash_services::domain::relations as relation_domain;
 
+use pidash_db::entity::{
+    git_code_review_links, github_pull_request_links, issue_links, issue_relations, issues,
+    project_members, projects, users, workspaces,
+};
+use sea_orm::sea_query::{Condition, Expr};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, QueryTrait, RelationTrait, Set,
+};
+
 // ---- owned paths ------------------------------------------------------------
 
 /// Relation collection (`app/urls/issue.py:258-262`).
@@ -322,6 +332,24 @@ fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
         .ok_or(Denial::ServerError)
 }
 
+/// The SeaORM connection over the request pool (no I/O).
+fn orm(pool: &sqlx::PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// Any read failure is the generic 500.
+fn db_denial(_: DbErr) -> Denial {
+    Denial::ServerError
+}
+
+/// [`integrity_denial`] for a SeaORM write failure.
+fn orm_integrity_denial(error: DbErr) -> Denial {
+    if pidash_db::orm_tx::is_integrity_violation(&error) {
+        return Denial::BadError("The payload is not valid".to_owned());
+    }
+    Denial::ServerError
+}
+
 /// Map a write failure the way `handle_exception` does: integrity
 /// violations (unique / FK / not-null / check) are the `IntegrityError`
 /// 400, anything else the fallback 500.
@@ -355,11 +383,14 @@ async fn actor_user_id(
     let id = raw
         .parse::<uuid::Uuid>()
         .map_err(|_| Denial::Unauthorized)?;
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM users WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
+    let exists: Option<Uuid> = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(id))
+        .into_tuple()
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
+        .map_err(db_denial)?;
     if exists.is_none() {
         return Err(Denial::Unauthorized);
     }
@@ -378,16 +409,10 @@ async fn resolve_project_id(
         return Ok(id);
     }
     let upper = raw.trim().to_uppercase();
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    super::access::project_id_by_identifier(&orm(pool), slug, &upper)
+        .await
+        .map_err(db_denial)?
+        .ok_or(Denial::ProjectNotFound)
 }
 
 /// Parse a `<uuid:>` path segment the way Django's `UUIDConverter` does:
@@ -423,18 +448,9 @@ async fn check_entity_gate(
     method: &str,
 ) -> Result<(), Denial> {
     use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
-    let role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let role = super::access::project_role(&orm(pool), slug, *project_id, *user_id)
+        .await
+        .map_err(db_denial)?;
     let scope = pidash_auth::scope::TenantScope::new(pidash_types::WorkspaceId::from(slug));
     let facts = pidash_auth::permissions::project::ProjectFacts {
         workspace: pidash_types::WorkspaceId::from(slug),
@@ -445,10 +461,10 @@ async fn check_entity_gate(
         is_workspace_admin: false,
         is_project_member: role.is_some(),
         is_project_admin: role
-            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
+            .map(|role| i32::from(role) == ROLE_ADMIN)
             .unwrap_or(false),
         has_project_admin_or_member: role
-            .map(|(role,)| [ROLE_ADMIN, ROLE_MEMBER].contains(&i32::from(role)))
+            .map(|role| [ROLE_ADMIN, ROLE_MEMBER].contains(&i32::from(role)))
             .unwrap_or(false),
         has_identifier_membership: false,
         has_project_identifier: false,
@@ -464,12 +480,10 @@ async fn check_entity_gate(
 /// is resolved per-path below — `Project.objects.get` → 404 — because
 /// each view reads it at a different point.)
 async fn actor_timezone(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Tz, Denial> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
+    let name = super::access::user_timezone(&orm(pool), *user_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (name,) = row.ok_or(Denial::ServerError)?;
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
     name.parse().map_err(|_| Denial::ServerError)
 }
 
@@ -480,13 +494,16 @@ async fn project_workspace(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|(id,)| id).ok_or(Denial::NotFound)
+    let row: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?;
+    row.ok_or(Denial::NotFound)
 }
 
 // ---------------------------------------------------------------------------
@@ -693,45 +710,21 @@ fn render_dt_str(raw: &str, tz: &Tz) -> String {
 
 /// DRF `iso-8601` UTC (`Z` suffix) for `.values()` dicts, which render
 /// through the plain JSON encoder as stored.
-fn render_dt_utc(raw: &str) -> String {
-    match chrono::DateTime::parse_from_rfc3339(raw) {
-        Ok(aware) => crate::serializer::render_datetime(&aware.with_timezone(&chrono::Utc)),
-        Err(_) => raw.to_owned(),
-    }
+fn render_dt_utc(stamp: &sea_orm::prelude::DateTimeWithTimeZone) -> String {
+    crate::serializer::render_datetime(&stamp.with_timezone(&chrono::Utc))
 }
 
-/// `logo_asset_sql` row: asset id, entity type, workspace/project/issue ids, slug.
-type LogoAssetRow = (
-    Uuid,
-    Option<String>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<String>,
-);
-/// `users` lite row: id, first/last name, avatar, avatar asset, bot flag, display name.
-type UserLiteQueryRow = (Uuid, String, String, String, Option<Uuid>, bool, String);
-/// Relation-edge row: id, related issue, type, created/updated by, stamps.
-type RelationEdgeQueryRow = (
-    Uuid,
-    Uuid,
-    String,
-    Option<Uuid>,
-    Option<Uuid>,
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-);
+/// A stored instant as the RFC 3339 text the PR / review read shapes
+/// carry (`render_dt_str` applies the actor zone once).
+fn rfc3339(stamp: &sea_orm::prelude::DateTimeWithTimeZone) -> String {
+    stamp
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
 
 // ---------------------------------------------------------------------------
 // User-lite nests (`created_by_detail`)
 // ---------------------------------------------------------------------------
-
-/// `SELECT` for the logo/cover/avatar asset row behind `*_url`
-/// properties. The asset FK traversal is `_base_manager` (a
-/// soft-deleted asset still renders its URL), so the read is unguarded.
-fn logo_asset_sql() -> String {
-    "SELECT \"a\".\"id\", \"a\".\"entity_type\", \"a\".\"workspace_id\", \"a\".\"project_id\", \"a\".\"issue_id\", \"w\".\"slug\" AS \"workspace_slug\" FROM \"file_assets\" AS \"a\" LEFT OUTER JOIN \"workspaces\" AS \"w\" ON (\"a\".\"workspace_id\" = \"w\".\"id\") WHERE (\"a\".\"id\" = $1)".to_owned()
-}
 
 /// Port of `FileAsset.asset_url` (`db/models/asset.py:80-99`):
 /// static-asset branches render `/api/assets/v2/static/<id>/`;
@@ -789,19 +782,18 @@ async fn avatar_url_of(
     let Some(asset_id) = asset_id else {
         return Ok(raw.filter(|text| !text.is_empty()));
     };
-    let row: Option<LogoAssetRow> = sqlx::query_as(&logo_asset_sql())
-        .bind(asset_id)
-        .fetch_optional(pool)
+    // The asset FK traversal is `_base_manager` (a soft-deleted asset
+    // still renders its URL), so the read is unguarded.
+    let row = super::handlers_engage::fetch_asset_url_row(&orm(pool), asset_id)
         .await
-        .map_err(|_| Denial::ServerError)?;
-    let (id, entity_type, _, project_id, issue_id, workspace_slug) =
-        row.ok_or(Denial::ServerError)?;
+        .map_err(db_denial)?
+        .ok_or(Denial::ServerError)?;
     asset_url(
-        &id.to_string(),
-        entity_type.as_deref(),
-        workspace_slug.as_deref(),
-        project_id.map(|id| id.to_string()).as_deref(),
-        issue_id.map(|id| id.to_string()).as_deref(),
+        &row.id.to_string(),
+        row.entity_type.as_deref(),
+        row.workspace_slug.as_deref(),
+        row.project_id.map(|id| id.to_string()).as_deref(),
+        row.issue_id.map(|id| id.to_string()).as_deref(),
     )
 }
 
@@ -816,6 +808,18 @@ struct UserLiteOwned {
     display_name: String,
 }
 
+/// The `users` columns behind [`UserLiteOwned`].
+#[derive(Debug, FromQueryResult)]
+struct UserLiteDb {
+    id: Uuid,
+    first_name: String,
+    last_name: String,
+    avatar: String,
+    avatar_asset_id: Option<Uuid>,
+    is_bot: bool,
+    display_name: String,
+}
+
 /// Fetch `created_by_detail` nests for the given user ids in one query.
 async fn fetch_user_lites(
     pool: &sqlx::PgPool,
@@ -825,26 +829,34 @@ async fn fetch_user_lites(
     if user_ids.is_empty() {
         return Ok(out);
     }
-    let rows: Vec<UserLiteQueryRow> = sqlx::query_as(
-        "SELECT id, first_name, last_name, avatar, avatar_asset_id, is_bot, display_name
-         FROM users WHERE id = ANY($1)",
-    )
-    .bind(user_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    for (id, first_name, last_name, avatar, avatar_asset_id, is_bot, display_name) in rows {
-        let avatar_url = avatar_url_of(pool, Some(avatar.clone()), avatar_asset_id).await?;
+    let rows = users::Entity::find()
+        .select_only()
+        .columns([
+            users::Column::Id,
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Avatar,
+            users::Column::AvatarAssetId,
+            users::Column::IsBot,
+            users::Column::DisplayName,
+        ])
+        .filter(users::Column::Id.is_in(user_ids.iter().copied()))
+        .into_model::<UserLiteDb>()
+        .all(&orm(pool))
+        .await
+        .map_err(db_denial)?;
+    for row in rows {
+        let avatar_url = avatar_url_of(pool, Some(row.avatar.clone()), row.avatar_asset_id).await?;
         out.insert(
-            id,
+            row.id,
             UserLiteOwned {
-                id: id.to_string(),
-                first_name,
-                last_name,
-                avatar,
+                id: row.id.to_string(),
+                first_name: row.first_name,
+                last_name: row.last_name,
+                avatar: row.avatar,
                 avatar_url,
-                is_bot,
-                display_name,
+                is_bot: row.is_bot,
+                display_name: row.display_name,
             },
         );
     }
@@ -904,51 +916,64 @@ async fn relation_list(
     if let Err(denial) = check_entity_gate(&pool, &slug, &project_id, &user_id, "GET").await {
         return denial.into_response();
     }
+    let db = orm(&pool);
     let mut body = Map::with_capacity(8);
     for bucket in super::queries_core::RELATION_BUCKETS {
-        let mut binder = super::Binder::new();
         // The bucket builder scopes slug + issue sides only
         // (`relation.py:42-50`): the path `project_id` never filters
         // the list (it only gates + stamps), so related rows from any
         // project in the workspace show — there is no wrapper.
-        let sql =
-            super::queries_core::relation_bucket_union_sql(&mut binder, &slug, issue_id, *bucket);
-        let rows = match super::fetch_json_rows(&pool, &sql, binder.values()).await {
+        let rows = match super::queries_core::relation_bucket_select(&slug, issue_id, *bucket)
+            .into_model::<super::queries_core::RelationBucketRow>()
+            .all(&db)
+            .await
+        {
             Ok(rows) => rows,
             Err(_) => return Denial::ServerError.into_response(),
         };
-        let shaped: Vec<Value> = rows.iter().map(shape_relation_row).collect();
+        let shaped: Vec<Value> = rows
+            .iter()
+            .map(|row| shape_relation_row(row, bucket.label))
+            .collect();
         body.insert(bucket.label.to_owned(), Value::Array(shaped));
     }
     json_response(StatusCode::OK, Value::Object(body).to_string())
 }
 
 /// Shape one relation `.values()` dict in `RELATION_ROW_FIELDS` order:
-/// plain-encoder UTC datetimes, `py_float` sort order, UUIDs as strings.
-fn shape_relation_row(row: &Map<String, Value>) -> Value {
-    let source = row;
+/// plain-encoder UTC datetimes, `py_float` sort order, UUIDs as strings,
+/// the two id lists sorted (Postgres sorts a `DISTINCT` aggregate's input)
+/// and `[]` when empty, and the bucket's `relation_type` literal.
+fn shape_relation_row(row: &super::queries_core::RelationBucketRow, label: &str) -> Value {
+    let uuid = |id: &Uuid| Value::String(id.to_string());
+    let opt_uuid = |id: &Option<Uuid>| id.as_ref().map(uuid).unwrap_or(Value::Null);
+    let ids = |ids: &Option<Vec<Uuid>>| {
+        let sorted: std::collections::BTreeSet<Uuid> = ids.iter().flatten().copied().collect();
+        Value::Array(sorted.iter().map(uuid).collect())
+    };
     let mut out = Map::with_capacity(super::queries_core::RELATION_ROW_FIELDS.len());
     for field in super::queries_core::RELATION_ROW_FIELDS {
         let value = match *field {
-            "created_at" | "updated_at" => source
-                .get(*field)
-                .and_then(Value::as_str)
-                .map(render_dt_utc)
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-            "sort_order" => source
-                .get("sort_order")
-                .and_then(Value::as_f64)
-                .map(|float| {
-                    serde_json::from_str::<Value>(&crate::paginator::py_float_str(float))
-                        .unwrap_or(Value::Null)
-                })
-                .unwrap_or(Value::Null),
-            // The union emits raw column names; the `.values()` wire keys
-            // drop the `_id` suffix on the two actor FKs.
-            "created_by" => source.get("created_by_id").cloned().unwrap_or(Value::Null),
-            "updated_by" => source.get("updated_by_id").cloned().unwrap_or(Value::Null),
-            _ => source.get(*field).cloned().unwrap_or(Value::Null),
+            "id" => uuid(&row.id),
+            "name" => Value::String(row.name.clone()),
+            "state_id" => opt_uuid(&row.state_id),
+            "sort_order" => {
+                serde_json::from_str::<Value>(&crate::paginator::py_float_str(row.sort_order))
+                    .unwrap_or(Value::Null)
+            }
+            "priority" => Value::String(row.priority.clone()),
+            "sequence_id" => Value::Number(row.sequence_id.into()),
+            "project_id" => uuid(&row.project_id),
+            "created_at" => Value::String(render_dt_utc(&row.created_at)),
+            "updated_at" => Value::String(render_dt_utc(&row.updated_at)),
+            // The `.values()` wire keys drop the `_id` suffix on the two
+            // actor FKs.
+            "created_by" => opt_uuid(&row.created_by_id),
+            "updated_by" => opt_uuid(&row.updated_by_id),
+            "label_ids" => ids(&row.label_ids),
+            "assignee_ids" => ids(&row.assignee_ids),
+            "relation_type" => Value::String(label.to_owned()),
+            other => unreachable!("relation row field {other}"),
         };
         out.insert((*field).to_owned(), value);
     }
@@ -1078,7 +1103,12 @@ async fn relation_create(
                 relation_type: stored_type,
             });
         }
-        if let Err(error) = relation_domain::relate_rows_or_nothing(&pool, &rows).await {
+        if let Err(error) = relation_domain::relate_rows_or_nothing(
+            &pidash_db::pool::sea_orm_connection(&pool),
+            &rows,
+        )
+        .await
+        {
             return integrity_denial(error).into_response();
         }
     }
@@ -1203,14 +1233,21 @@ async fn fetch_issues_by_id(
     if ids.is_empty() {
         return Ok(out);
     }
-    let rows: Vec<(Uuid, Uuid, i32, String, Option<Uuid>, String)> = sqlx::query_as(
-        "SELECT id, project_id, sequence_id, name, state_id, priority
-         FROM issues WHERE id = ANY($1)",
-    )
-    .bind(ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let rows: Vec<(Uuid, Uuid, i32, String, Option<Uuid>, String)> = issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::ProjectId,
+            issues::Column::SequenceId,
+            issues::Column::Name,
+            issues::Column::StateId,
+            issues::Column::Priority,
+        ])
+        .filter(issues::Column::Id.is_in(ids.iter().copied()))
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(db_denial)?;
     for (id, project_id, sequence_id, name, state_id, priority) in rows {
         out.insert(
             id,
@@ -1429,17 +1466,11 @@ async fn remove_relation(
     );
     shape.insert(
         "created_at".to_owned(),
-        Value::String(crate::serializer::render_datetime_in(
-            &edge.created_at.fixed_offset(),
-            &tz,
-        )),
+        Value::String(crate::serializer::render_datetime_in(&edge.created_at, &tz)),
     );
     shape.insert(
         "updated_at".to_owned(),
-        Value::String(crate::serializer::render_datetime_in(
-            &edge.updated_at.fixed_offset(),
-            &tz,
-        )),
+        Value::String(crate::serializer::render_datetime_in(&edge.updated_at, &tz)),
     );
     shape.insert(
         "updated_by".to_owned(),
@@ -1450,9 +1481,15 @@ async fn remove_relation(
     let current_instance = python_dumps(&Value::Object(shape));
     // `.delete()` first (soft row + fan-out), then the activity row.
     let now = chrono::Utc::now();
-    if relation_domain::soft_delete_relation_row(&pool, edge.id, user_id, now, now)
-        .await
-        .is_err()
+    if relation_domain::soft_delete_relation_row(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        edge.id,
+        user_id,
+        now,
+        now,
+    )
+    .await
+    .is_err()
     {
         return Denial::ServerError.into_response();
     }
@@ -1475,60 +1512,81 @@ async fn remove_relation(
 }
 
 /// One live relation edge for the removal path.
+#[derive(Debug, FromQueryResult)]
 struct RelationEdgeRow {
     id: uuid::Uuid,
     related_issue_id: uuid::Uuid,
     relation_type: String,
     created_by_id: Option<uuid::Uuid>,
     updated_by_id: Option<uuid::Uuid>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    created_at: sea_orm::prelude::DateTimeWithTimeZone,
+    updated_at: sea_orm::prelude::DateTimeWithTimeZone,
+}
+
+/// `<column> IS NOT DISTINCT FROM <id>`: equality, or `IS NULL` for a
+/// `None` filter value.
+fn same_issue(column: issue_relations::Column, id: Option<Uuid>) -> sea_orm::sea_query::SimpleExpr {
+    match id {
+        Some(id) => column.eq(id),
+        None => column.is_null(),
+    }
 }
 
 /// Newest live edge in either direction (`Meta.ordering = -created_at`,
 /// `.first()`).
+fn relation_edge_select(
+    slug: &str,
+    issue_id: Uuid,
+    related_id: Option<Uuid>,
+) -> sea_orm::Select<issue_relations::Entity> {
+    issue_relations::Entity::find()
+        .select_only()
+        .columns([
+            issue_relations::Column::Id,
+            issue_relations::Column::RelatedIssueId,
+            issue_relations::Column::RelationType,
+            issue_relations::Column::CreatedById,
+            issue_relations::Column::UpdatedById,
+            issue_relations::Column::CreatedAt,
+            issue_relations::Column::UpdatedAt,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            issue_relations::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_relations::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(issue_relations::Column::IssueId.eq(issue_id))
+                        .add(same_issue(
+                            issue_relations::Column::RelatedIssueId,
+                            related_id,
+                        )),
+                )
+                .add(
+                    Condition::all()
+                        .add(same_issue(issue_relations::Column::IssueId, related_id))
+                        .add(issue_relations::Column::RelatedIssueId.eq(issue_id)),
+                ),
+        )
+        .order_by_desc(issue_relations::Column::CreatedAt)
+        .limit(1)
+}
+
 async fn fetch_relation_edge(
     pool: &sqlx::PgPool,
     slug: &str,
     issue_id: &uuid::Uuid,
     related_id: Option<uuid::Uuid>,
 ) -> Result<Option<RelationEdgeRow>, Denial> {
-    let row: Option<RelationEdgeQueryRow> = sqlx::query_as(
-        r#"SELECT r.id, r.related_issue_id, r.relation_type,
-                      r.created_by_id, r.updated_by_id, r.created_at, r.updated_at
-               FROM issue_relations r JOIN workspaces w ON w.id = r.workspace_id
-               WHERE w.slug = $1 AND r.deleted_at IS NULL
-                 AND ((r.issue_id = $2 AND r.related_issue_id IS NOT DISTINCT FROM $3)
-                      OR (r.issue_id IS NOT DISTINCT FROM $3 AND r.related_issue_id = $2))
-               ORDER BY r.created_at DESC LIMIT 1"#,
-    )
-    .bind(slug)
-    .bind(issue_id)
-    .bind(related_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(
-        |(
-            id,
-            related_issue_id,
-            relation_type,
-            created_by_id,
-            updated_by_id,
-            created_at,
-            updated_at,
-        )| {
-            RelationEdgeRow {
-                id,
-                related_issue_id,
-                relation_type,
-                created_by_id,
-                updated_by_id,
-                created_at,
-                updated_at,
-            }
-        },
-    ))
+    relation_edge_select(slug, *issue_id, related_id)
+        .into_model::<RelationEdgeRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)
 }
 
 // ---------------------------------------------------------------------------
@@ -2191,7 +2249,27 @@ fn render_link_row(
     Value::Object(out)
 }
 
-/// Scoped link list (`link.py:26-35` + `queries_core::link_list_sql`).
+impl From<issue_links::Model> for IssueLinkOwned {
+    fn from(row: issue_links::Model) -> Self {
+        let utc = |stamp: sea_orm::prelude::DateTimeWithTimeZone| stamp.with_timezone(&chrono::Utc);
+        Self {
+            id: row.id,
+            created_by_id: row.created_by_id,
+            created_at: utc(row.created_at),
+            updated_at: utc(row.updated_at),
+            deleted_at: row.deleted_at.map(utc),
+            title: row.title,
+            url: row.url,
+            metadata: row.metadata,
+            updated_by_id: row.updated_by_id,
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            issue_id: row.issue_id,
+        }
+    }
+}
+
+/// Scoped link list (`link.py:26-35` + `queries_core::link_list_select`).
 async fn fetch_scoped_links(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2199,13 +2277,11 @@ async fn fetch_scoped_links(
     issue_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Vec<IssueLinkOwned>, Denial> {
-    let mut binder = super::Binder::new();
-    let sql =
-        super::queries_core::link_list_sql(&mut binder, slug, *project_id, *issue_id, *user_id);
-    let rows = super::fetch_json_rows(pool, &sql, binder.values())
+    let rows = super::queries_core::link_list_select(slug, *project_id, *issue_id, *user_id)
+        .all(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(link_owned_from_json).collect()
+        .map_err(db_denial)?;
+    Ok(rows.into_iter().map(IssueLinkOwned::from).collect())
 }
 
 /// Scoped link detail: the same scope plus the pk (`get_object` over
@@ -2218,22 +2294,34 @@ async fn fetch_scoped_link(
     pk: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Option<IssueLinkOwned>, Denial> {
-    let mut binder = super::Binder::new();
-    let list =
-        super::queries_core::link_list_sql(&mut binder, slug, *project_id, *issue_id, *user_id);
-    // The list SQL ends in `ORDER BY`: the pk predicate wraps it, it is
-    // not appended.
-    let marker = binder.bind_uuid(*pk);
-    let sql = format!("SELECT * FROM ({list}) AS scoped WHERE scoped.id = {marker} LIMIT 1");
-    let rows = super::fetch_json_rows(pool, &sql, binder.values())
+    let row = super::queries_core::link_list_select(slug, *project_id, *issue_id, *user_id)
+        .filter(issue_links::Column::Id.eq(*pk))
+        .limit(1)
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    rows.first().map(link_owned_from_json).transpose()
+        .map_err(db_denial)?;
+    Ok(row.map(IssueLinkOwned::from))
 }
 
 /// Unscoped link read (`IssueLink.objects.get(workspace__slug,
 /// project_id=, issue_id=, id=)` on the default manager): what the
 /// custom `partial_update`/`destroy` use (member/archived-blind).
+fn plain_link_select(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    pk: Uuid,
+) -> sea_orm::Select<issue_links::Entity> {
+    issue_links::Entity::find()
+        .join(JoinType::InnerJoin, issue_links::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issue_links::Column::ProjectId.eq(project_id))
+        .filter(issue_links::Column::IssueId.eq(issue_id))
+        .filter(issue_links::Column::Id.eq(pk))
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
 async fn fetch_plain_link(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2241,74 +2329,36 @@ async fn fetch_plain_link(
     issue_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<Option<IssueLinkOwned>, Denial> {
-    let mut binder = super::Binder::new();
-    let slug_m = binder.bind_string(slug.to_owned());
-    let project_m = binder.bind_uuid(*project_id);
-    let issue_m = binder.bind_uuid(*issue_id);
-    let pk_m = binder.bind_uuid(*pk);
-    // Plain columns: `fetch_json_rows` applies its own `row_to_json`.
-    let sql = format!("SELECT l.id, l.created_at, l.created_by_id, l.deleted_at, l.issue_id, l.metadata, l.project_id, l.title, l.updated_at, l.updated_by_id, l.url, l.workspace_id FROM issue_links l JOIN workspaces w ON w.id = l.workspace_id WHERE w.slug = {slug_m} AND l.project_id = {project_m} AND l.issue_id = {issue_m} AND l.id = {pk_m} AND l.deleted_at IS NULL LIMIT 1");
-    let rows = super::fetch_json_rows(pool, &sql, binder.values())
+    let row = plain_link_select(slug, *project_id, *issue_id, *pk)
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    rows.first().map(link_owned_from_json).transpose()
+        .map_err(db_denial)?;
+    Ok(row.map(IssueLinkOwned::from))
 }
 
-fn link_owned_from_json(row: &Map<String, Value>) -> Result<IssueLinkOwned, Denial> {
-    let o = row;
-    let req_uuid = |key: &str| -> Result<uuid::Uuid, Denial> {
-        o.get(key)
-            .and_then(Value::as_str)
-            .and_then(|text| text.parse::<uuid::Uuid>().ok())
-            .ok_or(Denial::ServerError)
-    };
-    let opt_uuid = |key: &str| -> Result<Option<uuid::Uuid>, Denial> {
-        match o.get(key) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(text)) => text
-                .parse::<uuid::Uuid>()
-                .map(Some)
-                .map_err(|_| Denial::ServerError),
-            Some(_) => Err(Denial::ServerError),
-        }
-    };
-    let req_dt = |key: &str| -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-        o.get(key)
-            .and_then(Value::as_str)
-            .and_then(|text| {
-                chrono::DateTime::parse_from_rfc3339(text)
-                    .ok()
-                    .map(|aware| aware.with_timezone(&chrono::Utc))
-            })
-            .ok_or(Denial::ServerError)
-    };
-    let opt_dt = |key: &str| -> Result<Option<chrono::DateTime<chrono::Utc>>, Denial> {
-        match o.get(key) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(text)) => chrono::DateTime::parse_from_rfc3339(text)
-                .map(|aware| Some(aware.with_timezone(&chrono::Utc)))
-                .map_err(|_| Denial::ServerError),
-            Some(_) => Err(Denial::ServerError),
-        }
-    };
-    Ok(IssueLinkOwned {
-        id: req_uuid("id")?,
-        created_by_id: opt_uuid("created_by_id")?,
-        created_at: req_dt("created_at")?,
-        updated_at: req_dt("updated_at")?,
-        deleted_at: opt_dt("deleted_at")?,
-        title: o.get("title").and_then(Value::as_str).map(str::to_owned),
-        url: o
-            .get("url")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or(Denial::ServerError)?,
-        metadata: o.get("metadata").cloned().unwrap_or(Value::Null),
-        updated_by_id: opt_uuid("updated_by_id")?,
-        project_id: req_uuid("project_id")?,
-        workspace_id: req_uuid("workspace_id")?,
-        issue_id: req_uuid("issue_id")?,
-    })
+/// The link save (`serializer.save()` on update / partial update): the
+/// writable fields plus the `auto_now` / CRUM audit.
+async fn save_link(
+    pool: &sqlx::PgPool,
+    row: &IssueLinkOwned,
+    now: chrono::DateTime<chrono::Utc>,
+    actor: Uuid,
+    pk: Uuid,
+) -> Result<(), Denial> {
+    issue_links::Entity::update_many()
+        .col_expr(issue_links::Column::Title, Expr::value(row.title.clone()))
+        .col_expr(issue_links::Column::Url, Expr::value(row.url.clone()))
+        .col_expr(
+            issue_links::Column::Metadata,
+            Expr::value(row.metadata.clone()),
+        )
+        .col_expr(issue_links::Column::UpdatedAt, Expr::value(now))
+        .col_expr(issue_links::Column::UpdatedById, Expr::value(actor))
+        .filter(issue_links::Column::Id.eq(pk))
+        .exec(&orm(pool))
+        .await
+        .map_err(orm_integrity_denial)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2415,43 +2465,36 @@ async fn link_create(
     };
     // `create()` dup probe (`issue.py:836-847`): same URL + issue, live
     // rows only.
-    let dupe: Option<(i32,)> = match sqlx::query_as(
-        "SELECT 1 FROM issue_links
-         WHERE url = $1 AND issue_id = $2 AND deleted_at IS NULL LIMIT 1",
-    )
-    .bind(&url)
-    .bind(issue_id)
-    .fetch_optional(&pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    if dupe.is_some() {
-        return Denial::BadError("URL already exists for this Issue".to_owned()).into_response();
+    match link_dupe_exists(&pool, &url, &issue_id, None).await {
+        Ok(true) => {
+            return Denial::BadError("URL already exists for this Issue".to_owned()).into_response()
+        }
+        Ok(false) => {}
+        Err(denial) => return denial.into_response(),
     }
     let now = chrono::Utc::now();
     let id = uuid::Uuid::new_v4();
     let metadata = metadata.unwrap_or(Value::Object(Map::new()));
-    if let Err(error) = sqlx::query(
-        r#"INSERT INTO issue_links
-           (id, created_at, updated_at, title, url, metadata, created_by_id,
-            updated_by_id, issue_id, project_id, workspace_id)
-           VALUES ($1, $2, $2, $3, $4, $5, $6, NULL, $7, $8, $9)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(title.clone().unwrap_or(None))
-    .bind(&url)
-    .bind(&metadata)
-    .bind(user_id)
-    .bind(issue_id)
-    .bind(project_id)
-    .bind(workspace_id)
-    .execute(&pool)
+    // `deleted_at` keeps its column default; `updated_by` is `NULL`
+    // on create (CRUM stamps only `created_by`).
+    if let Err(error) = issue_links::Entity::insert(issue_links::ActiveModel {
+        id: Set(id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        title: Set(title.clone().unwrap_or(None)),
+        url: Set(url.clone()),
+        metadata: Set(metadata.clone()),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        issue_id: Set(issue_id),
+        project_id: Set(project_id),
+        workspace_id: Set(workspace_id),
+        ..Default::default()
+    })
+    .exec_without_returning(&orm(&pool))
     .await
     {
-        return integrity_denial(error).into_response();
+        return orm_integrity_denial(error).into_response();
     }
     enqueue_args(
         &pool,
@@ -2677,20 +2720,8 @@ async fn link_update(
     }
     row.updated_at = now;
     row.updated_by_id = Some(ctx.user_id);
-    if let Err(error) = sqlx::query(
-        "UPDATE issue_links SET title = $1, url = $2, metadata = $3,
-                updated_at = $4, updated_by_id = $5 WHERE id = $6",
-    )
-    .bind(row.title.clone())
-    .bind(&row.url)
-    .bind(&row.metadata)
-    .bind(now)
-    .bind(ctx.user_id)
-    .bind(ctx.pk)
-    .execute(&ctx.pool)
-    .await
-    {
-        return integrity_denial(error).into_response();
+    if let Err(denial) = save_link(&ctx.pool, &row, now, ctx.user_id, ctx.pk).await {
+        return denial.into_response();
     }
     let creator_ids: Vec<uuid::Uuid> = row.created_by_id.into_iter().collect();
     let lites = match fetch_user_lites(&ctx.pool, &creator_ids).await {
@@ -2779,20 +2810,8 @@ async fn link_partial_update(
     let now = chrono::Utc::now();
     row.updated_at = now;
     row.updated_by_id = Some(ctx.user_id);
-    if let Err(error) = sqlx::query(
-        "UPDATE issue_links SET title = $1, url = $2, metadata = $3,
-                updated_at = $4, updated_by_id = $5 WHERE id = $6",
-    )
-    .bind(row.title.clone())
-    .bind(&row.url)
-    .bind(&row.metadata)
-    .bind(now)
-    .bind(ctx.user_id)
-    .bind(ctx.pk)
-    .execute(&ctx.pool)
-    .await
-    {
-        return integrity_denial(error).into_response();
+    if let Err(denial) = save_link(&ctx.pool, &row, now, ctx.user_id, ctx.pk).await {
+        return denial.into_response();
     }
     enqueue_args(
         &ctx.pool,
@@ -2907,20 +2926,38 @@ async fn link_destroy(
     )
     .await;
     let now = chrono::Utc::now();
-    if let Err(error) = sqlx::query(
-        "UPDATE issue_links SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-    )
-    .bind(now)
-    .bind(ctx.user_id)
-    .bind(ctx.pk)
-    .execute(&ctx.pool)
-    .await
+    if issue_links::Entity::update_many()
+        .col_expr(issue_links::Column::DeletedAt, Expr::value(now))
+        .col_expr(issue_links::Column::UpdatedAt, Expr::value(now))
+        .col_expr(issue_links::Column::UpdatedById, Expr::value(ctx.user_id))
+        .filter(issue_links::Column::Id.eq(ctx.pk))
+        .exec(&orm(&ctx.pool))
+        .await
+        .is_err()
     {
-        let _ = error;
         return Denial::ServerError.into_response();
     }
     enqueue_soft_delete(&ctx.pool, "issuelink", &ctx.pk).await;
     empty_response(StatusCode::NO_CONTENT)
+}
+
+/// The dup probe statement: same URL + issue, live rows, optionally
+/// excluding one pk.
+fn link_dupe_select(
+    url: &str,
+    issue_id: Uuid,
+    exclude: Option<Uuid>,
+) -> sea_orm::Select<issue_links::Entity> {
+    issue_links::Entity::find()
+        .select_only()
+        .column(issue_links::Column::Id)
+        .filter(issue_links::Column::Url.eq(url))
+        .filter(issue_links::Column::IssueId.eq(issue_id))
+        .apply_if(exclude, |query, pk| {
+            query.filter(issue_links::Column::Id.ne(pk))
+        })
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .limit(1)
 }
 
 /// The `IssueLinkSerializer` dup probe: same URL + live issue row,
@@ -2931,30 +2968,11 @@ async fn link_dupe_exists(
     issue_id: &uuid::Uuid,
     exclude: Option<&uuid::Uuid>,
 ) -> Result<bool, Denial> {
-    let row: Option<(i32,)> = match exclude {
-        Some(pk) => {
-            sqlx::query_as(
-                "SELECT 1 FROM issue_links
-                 WHERE url = $1 AND issue_id = $2 AND id != $3 AND deleted_at IS NULL LIMIT 1",
-            )
-            .bind(url)
-            .bind(issue_id)
-            .bind(pk)
-            .fetch_optional(pool)
-            .await
-        }
-        None => {
-            sqlx::query_as(
-                "SELECT 1 FROM issue_links
-                 WHERE url = $1 AND issue_id = $2 AND deleted_at IS NULL LIMIT 1",
-            )
-            .bind(url)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await
-        }
-    }
-    .map_err(|_| Denial::ServerError)?;
+    let row: Option<Uuid> = link_dupe_select(url, *issue_id, exclude.copied())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?;
     Ok(row.is_some())
 }
 
@@ -2962,42 +2980,71 @@ async fn link_dupe_exists(
 // PR links + code reviews: list SQL + shapes
 // ---------------------------------------------------------------------------
 
-/// `GithubPullRequestLinkViewSet.get_queryset` (`github_pr.py:37-48`) as
-/// `row_to_json`: member join (no `deleted_at` guard — bug 7), archived
-/// guard, `-created_at`, `.distinct()`. Same scope shape as
-/// `queries_core::link_list_sql`.
-fn pr_link_list_sql(
-    binder: &mut super::Binder,
+/// `GithubPullRequestLinkViewSet.get_queryset` (`github_pr.py:37-48`):
+/// every link column, `DISTINCT` over an unfiltered project-member join
+/// (it only requires the project to have a membership row; no
+/// `deleted_at` guard — bug 7), archived guard, `-created_at`. Same scope
+/// shape as `queries_core::link_list_select`.
+fn pr_link_list_select(
     slug: &str,
-    project_id: &uuid::Uuid,
-    issue_id: &uuid::Uuid,
-) -> String {
-    let slug_m = binder.bind_string(slug.to_owned());
-    let project_m = binder.bind_uuid(*project_id);
-    let issue_m = binder.bind_uuid(*issue_id);
-    // Plain columns: `fetch_json_rows` applies its own `row_to_json`
-    // wrapper. (A `row_to_json` here double-encodes and the parser sees
-    // `{"row_to_json": {...}}` instead of the row.)
-    format!(
-        "SELECT DISTINCT link.id, link.created_at, link.updated_at, link.deleted_at, link.url, link.title, link.state, link.merged, link.draft, link.repo_owner, link.repo_name, link.pr_number, link.pr_updated_at, link.created_by_id, link.updated_by_id, link.project_id, link.workspace_id, link.issue_id FROM github_pull_request_links AS link INNER JOIN project_members AS member ON (link.project_id = member.project_id) INNER JOIN projects AS project ON (link.project_id = project.id) INNER JOIN workspaces AS ws ON (link.workspace_id = ws.id) WHERE (link.deleted_at IS NULL AND link.issue_id = {issue_m} AND link.project_id = {project_m} AND project.archived_at IS NULL AND ws.slug = {slug_m}) ORDER BY link.created_at DESC",
-    )
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> sea_orm::Select<github_pull_request_links::Entity> {
+    github_pull_request_links::Entity::find()
+        .distinct()
+        .join(
+            JoinType::InnerJoin,
+            github_pull_request_links::Entity::belongs_to(project_members::Entity)
+                .from(github_pull_request_links::Column::ProjectId)
+                .to(project_members::Column::ProjectId)
+                .into(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_pull_request_links::Relation::Projects.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_pull_request_links::Relation::Workspaces.def(),
+        )
+        .filter(github_pull_request_links::Column::DeletedAt.is_null())
+        .filter(github_pull_request_links::Column::IssueId.eq(issue_id))
+        .filter(github_pull_request_links::Column::ProjectId.eq(project_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(github_pull_request_links::Column::CreatedAt)
 }
 
 /// `GitCodeReviewLinkViewSet.get_queryset` (`git_code_review.py:33-44`),
 /// same scope shape.
-fn review_link_list_sql(
-    binder: &mut super::Binder,
+fn review_link_list_select(
     slug: &str,
-    project_id: &uuid::Uuid,
-    issue_id: &uuid::Uuid,
-) -> String {
-    let slug_m = binder.bind_string(slug.to_owned());
-    let project_m = binder.bind_uuid(*project_id);
-    let issue_m = binder.bind_uuid(*issue_id);
-    // Plain columns (see `pr_link_list_sql`): the fetch helper wraps.
-    format!(
-        "SELECT DISTINCT link.id, link.created_at, link.updated_at, link.deleted_at, link.provider, link.host_url, link.namespace, link.repo_name, link.repo_external_id, link.external_id, link.external_iid, link.url, link.title, link.state, link.merged, link.draft, link.metadata, link.remote_updated_at, link.created_by_id, link.updated_by_id, link.project_id, link.workspace_id, link.issue_id FROM git_code_review_links AS link INNER JOIN project_members AS member ON (link.project_id = member.project_id) INNER JOIN projects AS project ON (link.project_id = project.id) INNER JOIN workspaces AS ws ON (link.workspace_id = ws.id) WHERE (link.deleted_at IS NULL AND link.issue_id = {issue_m} AND link.project_id = {project_m} AND project.archived_at IS NULL AND ws.slug = {slug_m}) ORDER BY link.created_at DESC",
-    )
+    project_id: Uuid,
+    issue_id: Uuid,
+) -> sea_orm::Select<git_code_review_links::Entity> {
+    git_code_review_links::Entity::find()
+        .distinct()
+        .join(
+            JoinType::InnerJoin,
+            git_code_review_links::Entity::belongs_to(project_members::Entity)
+                .from(git_code_review_links::Column::ProjectId)
+                .to(project_members::Column::ProjectId)
+                .into(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_code_review_links::Relation::Projects.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_code_review_links::Relation::Workspaces.def(),
+        )
+        .filter(git_code_review_links::Column::DeletedAt.is_null())
+        .filter(git_code_review_links::Column::IssueId.eq(issue_id))
+        .filter(git_code_review_links::Column::ProjectId.eq(project_id))
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .order_by_desc(git_code_review_links::Column::CreatedAt)
 }
 
 /// Owned PR-link row for the read shape.
@@ -3041,87 +3088,51 @@ struct ReviewLinkOwned {
     created_by_id: Option<uuid::Uuid>,
 }
 
-fn json_str(row: &Map<String, Value>, key: &str) -> Result<String, Denial> {
-    row.get(key)
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or(Denial::ServerError)
-}
-
-fn json_opt_str(row: &Map<String, Value>, key: &str) -> Option<String> {
-    row.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn json_opt_uuid(row: &Map<String, Value>, key: &str) -> Result<Option<uuid::Uuid>, Denial> {
-    match row.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => text
-            .parse::<uuid::Uuid>()
-            .map(Some)
-            .map_err(|_| Denial::ServerError),
-        Some(_) => Err(Denial::ServerError),
+impl From<github_pull_request_links::Model> for PrLinkOwned {
+    fn from(row: github_pull_request_links::Model) -> Self {
+        Self {
+            id: row.id.to_string(),
+            issue_id: row.issue_id.to_string(),
+            repo_owner: row.repo_owner,
+            repo_name: row.repo_name,
+            pr_number: row.pr_number,
+            url: row.url,
+            title: row.title,
+            state: row.state,
+            merged: row.merged,
+            draft: row.draft,
+            pr_updated_at: row.pr_updated_at.as_ref().map(rfc3339),
+            created_at: rfc3339(&row.created_at),
+            updated_at: rfc3339(&row.updated_at),
+            created_by_id: row.created_by_id,
+        }
     }
 }
 
-fn pr_owned_from_json(row: &Map<String, Value>) -> Result<PrLinkOwned, Denial> {
-    let o = row;
-    Ok(PrLinkOwned {
-        id: json_str(o, "id")?,
-        issue_id: json_str(o, "issue_id")?,
-        repo_owner: json_str(o, "repo_owner")?,
-        repo_name: json_str(o, "repo_name")?,
-        pr_number: o
-            .get("pr_number")
-            .and_then(Value::as_i64)
-            .and_then(|number| i32::try_from(number).ok())
-            .ok_or(Denial::ServerError)?,
-        url: json_str(o, "url")?,
-        title: json_str(o, "title")?,
-        state: json_str(o, "state")?,
-        merged: o
-            .get("merged")
-            .and_then(Value::as_bool)
-            .ok_or(Denial::ServerError)?,
-        draft: o
-            .get("draft")
-            .and_then(Value::as_bool)
-            .ok_or(Denial::ServerError)?,
-        pr_updated_at: json_opt_str(o, "pr_updated_at"),
-        created_at: json_str(o, "created_at")?,
-        updated_at: json_str(o, "updated_at")?,
-        created_by_id: json_opt_uuid(o, "created_by_id")?,
-    })
-}
-
-fn review_owned_from_json(row: &Map<String, Value>) -> Result<ReviewLinkOwned, Denial> {
-    let o = row;
-    Ok(ReviewLinkOwned {
-        id: json_str(o, "id")?,
-        issue_id: json_str(o, "issue_id")?,
-        provider: json_str(o, "provider")?,
-        host_url: json_str(o, "host_url")?,
-        namespace: json_str(o, "namespace")?,
-        repo_name: json_str(o, "repo_name")?,
-        repo_external_id: json_str(o, "repo_external_id")?,
-        external_id: json_str(o, "external_id")?,
-        external_iid: json_str(o, "external_iid")?,
-        url: json_str(o, "url")?,
-        title: json_str(o, "title")?,
-        state: json_str(o, "state")?,
-        merged: o
-            .get("merged")
-            .and_then(Value::as_bool)
-            .ok_or(Denial::ServerError)?,
-        draft: o
-            .get("draft")
-            .and_then(Value::as_bool)
-            .ok_or(Denial::ServerError)?,
-        remote_updated_at: json_opt_str(o, "remote_updated_at"),
-        metadata: o.get("metadata").cloned().unwrap_or(Value::Null),
-        created_at: json_str(o, "created_at")?,
-        updated_at: json_str(o, "updated_at")?,
-        created_by_id: json_opt_uuid(o, "created_by_id")?,
-    })
+impl From<git_code_review_links::Model> for ReviewLinkOwned {
+    fn from(row: git_code_review_links::Model) -> Self {
+        Self {
+            id: row.id.to_string(),
+            issue_id: row.issue_id.to_string(),
+            provider: row.provider,
+            host_url: row.host_url,
+            namespace: row.namespace,
+            repo_name: row.repo_name,
+            repo_external_id: row.repo_external_id,
+            external_id: row.external_id,
+            external_iid: row.external_iid,
+            url: row.url,
+            title: row.title,
+            state: row.state,
+            merged: row.merged,
+            draft: row.draft,
+            remote_updated_at: row.remote_updated_at.as_ref().map(rfc3339),
+            metadata: row.metadata,
+            created_at: rfc3339(&row.created_at),
+            updated_at: rfc3339(&row.updated_at),
+            created_by_id: row.created_by_id,
+        }
+    }
 }
 
 /// `GithubPullRequestLinkSerializer` read shape through the
@@ -3254,19 +3265,13 @@ async fn pr_list(
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
     };
-    let mut binder = super::Binder::new();
-    let sql = pr_link_list_sql(&mut binder, &slug, &project_id, &issue_id);
-    let rows = match super::fetch_json_rows(&pool, &sql, binder.values()).await {
-        Ok(rows) => rows,
+    let owned: Vec<PrLinkOwned> = match pr_link_list_select(&slug, project_id, issue_id)
+        .all(&orm(&pool))
+        .await
+    {
+        Ok(rows) => rows.into_iter().map(PrLinkOwned::from).collect(),
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let mut owned: Vec<PrLinkOwned> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        match pr_owned_from_json(row) {
-            Ok(row) => owned.push(row),
-            Err(denial) => return denial.into_response(),
-        }
-    }
     let creator_ids: Vec<uuid::Uuid> = owned.iter().filter_map(|row| row.created_by_id).collect();
     let lites = match fetch_user_lites(&pool, &creator_ids).await {
         Ok(lites) => lites,
@@ -3312,19 +3317,13 @@ async fn review_list(
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
     };
-    let mut binder = super::Binder::new();
-    let sql = review_link_list_sql(&mut binder, &slug, &project_id, &issue_id);
-    let rows = match super::fetch_json_rows(&pool, &sql, binder.values()).await {
-        Ok(rows) => rows,
+    let owned: Vec<ReviewLinkOwned> = match review_link_list_select(&slug, project_id, issue_id)
+        .all(&orm(&pool))
+        .await
+    {
+        Ok(rows) => rows.into_iter().map(ReviewLinkOwned::from).collect(),
         Err(_) => return Denial::ServerError.into_response(),
     };
-    let mut owned: Vec<ReviewLinkOwned> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        match review_owned_from_json(row) {
-            Ok(row) => owned.push(row),
-            Err(denial) => return denial.into_response(),
-        }
-    }
     let creator_ids: Vec<uuid::Uuid> = owned.iter().filter_map(|row| row.created_by_id).collect();
     let lites = match fetch_user_lites(&pool, &creator_ids).await {
         Ok(lites) => lites,
@@ -3373,9 +3372,18 @@ use pidash_db::integrations::git_models::git_repository::GitRepository;
 use pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink;
 use pidash_services::integrations::code_reviews::{LegacyLinkUpdate, LinkWriteError};
 
-/// Map a sqlx failure into the integrations store error.
-fn git_store_error(context: &str, error: sqlx::Error) -> GitStoreError {
+/// Map a SeaORM failure into the integrations store error.
+fn git_store_error(context: &str, error: DbErr) -> GitStoreError {
     GitStoreError::Db(format!("{context}: {error}"))
+}
+
+/// True when a SeaORM write failed on a unique violation (SQLSTATE 23505).
+fn is_orm_unique_violation(error: &DbErr) -> bool {
+    match error {
+        DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner)) => is_unique_violation(inner),
+        _ => false,
+    }
 }
 
 /// The live `CodeReviewStore`: pool + request actor (CRUM). Audit
@@ -3383,148 +3391,24 @@ fn git_store_error(context: &str, error: sqlx::Error) -> GitStoreError {
 /// leaves stamping to the executing layer, exactly where Python does it
 /// — and the delete methods soft-delete (`SoftDeleteModel.delete`) with
 /// the `soft_delete_related_objects` fan-out inline, preserving the
-/// update-then-enqueue order of `mixins.py:71-78`.
+/// update-then-enqueue order of `mixins.py:71-78`. Every statement is the
+/// SeaORM twin beside its SQL constant in `pidash_services::integrations`.
 struct ReviewStore {
     pool: sqlx::PgPool,
+    db: DatabaseConnection,
     actor: uuid::Uuid,
 }
 
 impl ReviewStore {
     fn new(pool: sqlx::PgPool, actor: uuid::Uuid) -> Self {
-        Self { pool, actor }
+        let db = orm(&pool);
+        Self { pool, db, actor }
     }
 }
 
-fn review_link_from_row(row: &sqlx::postgres::PgRow) -> Result<GitCodeReviewLink, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("review link map", error))
-        };
-    }
-    Ok(GitCodeReviewLink {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        project_id: req!("project_id", Uuid)?,
-        workspace_id: req!("workspace_id", Uuid)?,
-        issue_id: req!("issue_id", Uuid)?,
-        provider: req!("provider", String)?,
-        host_url: req!("host_url", String)?,
-        namespace: req!("namespace", String)?,
-        repo_name: req!("repo_name", String)?,
-        repo_external_id: req!("repo_external_id", String)?,
-        external_id: req!("external_id", String)?,
-        external_iid: req!("external_iid", String)?,
-        url: req!("url", String)?,
-        title: req!("title", String)?,
-        state: req!("state", String)?,
-        merged: req!("merged", bool)?,
-        draft: req!("draft", bool)?,
-        remote_updated_at: req!("remote_updated_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        metadata: req!("metadata", Value)?,
-    })
-}
-
-fn legacy_link_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GithubPullRequestLink, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("legacy link map", error))
-        };
-    }
-    Ok(GithubPullRequestLink {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        project_id: req!("project_id", Uuid)?,
-        workspace_id: req!("workspace_id", Uuid)?,
-        issue_id: req!("issue_id", Uuid)?,
-        repo_owner: req!("repo_owner", String)?,
-        repo_name: req!("repo_name", String)?,
-        pr_number: req!("pr_number", i32)?,
-        url: req!("url", String)?,
-        title: req!("title", String)?,
-        state: req!("state", String)?,
-        merged: req!("merged", bool)?,
-        draft: req!("draft", bool)?,
-        pr_updated_at: req!("pr_updated_at", Option<chrono::DateTime<chrono::Utc>>)?,
-    })
-}
-
-fn provider_account_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GitProviderAccount, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("account map", error))
-        };
-    }
-    Ok(GitProviderAccount {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        workspace_id: req!("workspace_id", Uuid)?,
-        provider: req!("provider", String)?,
-        host_url: req!("host_url", String)?,
-        auth_type: req!("auth_type", String)?,
-        external_account_id: req!("external_account_id", String)?,
-        external_account_login: req!("external_account_login", String)?,
-        display_name: req!("display_name", String)?,
-        capabilities: req!("capabilities", Value)?,
-        credential_config: req!("credential_config", Value)?,
-        workspace_integration_id: req!("workspace_integration_id", Option<Uuid>)?,
-        status: req!("status", String)?,
-        verified_at: req!("verified_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        last_check_error: req!("last_check_error", String)?,
-        metadata: req!("metadata", Value)?,
-    })
-}
-
-fn repository_from_row(row: &sqlx::postgres::PgRow) -> Result<GitRepository, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("repository map", error))
-        };
-    }
-    Ok(GitRepository {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        provider: req!("provider", String)?,
-        host_url: req!("host_url", String)?,
-        external_id: req!("external_id", String)?,
-        namespace: req!("namespace", String)?,
-        name: req!("name", String)?,
-        full_name: req!("full_name", String)?,
-        web_url: req!("web_url", String)?,
-        clone_url_http: req!("clone_url_http", String)?,
-        clone_url_ssh: req!("clone_url_ssh", String)?,
-        default_branch: req!("default_branch", String)?,
-        is_private: req!("is_private", bool)?,
-        metadata: req!("metadata", Value)?,
-    })
-}
+use pidash_services::integrations::accounts::orm as accounts_orm;
+use pidash_services::integrations::code_reviews::orm as reviews_orm;
+use pidash_services::integrations::repositories::orm as repos_orm;
 
 impl CodeReviewStore for ReviewStore {
     async fn review_issue_exists(
@@ -3533,15 +3417,9 @@ impl CodeReviewStore for ReviewStore {
         project_id: Uuid,
         workspace_slug: &str,
     ) -> Result<bool, GitStoreError> {
-        let row: Option<(i32,)> =
-            sqlx::query_as(pidash_services::integrations::code_reviews::ISSUE_EXISTS_SQL)
-                .bind(issue_id)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("review issue exists", error))?;
-        Ok(row.is_some())
+        reviews_orm::issue_exists(&self.db, issue_id, project_id, workspace_slug)
+            .await
+            .map_err(|error| git_store_error("review issue exists", error))
     }
 
     async fn find_legacy_link(
@@ -3550,15 +3428,9 @@ impl CodeReviewStore for ReviewStore {
         repo_name_lower: &str,
         pr_number: i32,
     ) -> Result<Option<GithubPullRequestLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_FIND_SQL)
-                .bind(repo_owner_lower)
-                .bind(repo_name_lower)
-                .bind(pr_number)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("legacy link find", error))?;
-        row.map(|row| legacy_link_from_row(&row)).transpose()
+        reviews_orm::find_legacy_link(&self.db, repo_owner_lower, repo_name_lower, pr_number)
+            .await
+            .map_err(|error| git_store_error("legacy link find", error))
     }
 
     async fn find_path_review_link(
@@ -3569,17 +3441,16 @@ impl CodeReviewStore for ReviewStore {
         repo_name_lower: &str,
         external_iid: &str,
     ) -> Result<Option<GitCodeReviewLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::PATH_REVIEW_LINK_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(namespace_lower)
-                .bind(repo_name_lower)
-                .bind(external_iid)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("path review link find", error))?;
-        row.map(|row| review_link_from_row(&row)).transpose()
+        reviews_orm::find_path_review_link(
+            &self.db,
+            provider,
+            host_url,
+            namespace_lower,
+            repo_name_lower,
+            external_iid,
+        )
+        .await
+        .map_err(|error| git_store_error("path review link find", error))
     }
 
     async fn find_repo_scope_link(
@@ -3589,16 +3460,15 @@ impl CodeReviewStore for ReviewStore {
         external_iid: &str,
         repo_external_id: &str,
     ) -> Result<Option<GitCodeReviewLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::REPO_SCOPE_LINK_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(external_iid)
-                .bind(repo_external_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("repo scope link find", error))?;
-        row.map(|row| review_link_from_row(&row)).transpose()
+        reviews_orm::find_repo_scope_link(
+            &self.db,
+            provider,
+            host_url,
+            external_iid,
+            repo_external_id,
+        )
+        .await
+        .map_err(|error| git_store_error("repo scope link find", error))
     }
 
     async fn find_path_empty_repo_link(
@@ -3609,17 +3479,16 @@ impl CodeReviewStore for ReviewStore {
         namespace_lower: &str,
         repo_name_lower: &str,
     ) -> Result<Option<GitCodeReviewLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::PATH_EMPTY_REPO_LINK_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(external_iid)
-                .bind(namespace_lower)
-                .bind(repo_name_lower)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("path empty repo link find", error))?;
-        row.map(|row| review_link_from_row(&row)).transpose()
+        reviews_orm::find_path_empty_repo_link(
+            &self.db,
+            provider,
+            host_url,
+            external_iid,
+            namespace_lower,
+            repo_name_lower,
+        )
+        .await
+        .map_err(|error| git_store_error("path empty repo link find", error))
     }
 
     async fn find_binding_review(
@@ -3631,60 +3500,19 @@ impl CodeReviewStore for ReviewStore {
         namespace: &str,
         repo_name: &str,
     ) -> Result<Option<(GitProviderAccount, GitRepository)>, GitStoreError> {
-        // `SELECT pa.*, r.*`: duplicate names resolve to the account
-        // half by name, so the account maps by name and the repository
-        // by position (past the 20 account columns, in table order —
-        // pinned against `information_schema`).
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::BINDING_FOR_REVIEW_SQL)
-                .bind(workspace_slug)
-                .bind(project_id)
-                .bind(provider)
-                .bind(host_url)
-                .bind(namespace)
-                .bind(repo_name)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("binding review find", error))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let account = provider_account_from_row(&row)?;
-        let repo = {
-            use sqlx::Row as _;
-            macro_rules! at {
-                ($pos:literal, $ty:ty) => {
-                    row.try_get::<$ty, _>(20 + $pos)
-                        .map_err(|error| git_store_error("binding repo map", error))
-                };
-            }
-            // `git_repositories` table order: created_at, updated_at,
-            // deleted_at, id, provider, host_url, external_id,
-            // namespace, name, full_name, web_url, clone_url_http,
-            // clone_url_ssh, default_branch, is_private, metadata,
-            // created_by_id, updated_by_id.
-            GitRepository {
-                created_at: at!(0, chrono::DateTime<chrono::Utc>)?,
-                updated_at: at!(1, chrono::DateTime<chrono::Utc>)?,
-                deleted_at: at!(2, Option<chrono::DateTime<chrono::Utc>>)?,
-                id: at!(3, Uuid)?,
-                provider: at!(4, String)?,
-                host_url: at!(5, String)?,
-                external_id: at!(6, String)?,
-                namespace: at!(7, String)?,
-                name: at!(8, String)?,
-                full_name: at!(9, String)?,
-                web_url: at!(10, String)?,
-                clone_url_http: at!(11, String)?,
-                clone_url_ssh: at!(12, String)?,
-                default_branch: at!(13, String)?,
-                is_private: at!(14, bool)?,
-                metadata: at!(15, Value)?,
-                created_by_id: at!(16, Option<Uuid>)?,
-                updated_by_id: at!(17, Option<Uuid>)?,
-            }
-        };
-        Ok(Some((account, repo)))
+        // The account and repository halves decode by prefixed name
+        // (`pa_` / `r_`), never by position.
+        reviews_orm::find_binding_review(
+            &self.db,
+            workspace_slug,
+            project_id,
+            provider,
+            host_url,
+            namespace,
+            repo_name,
+        )
+        .await
+        .map_err(|error| git_store_error("binding review find", error))
     }
 
     async fn find_review_issue_workspace(
@@ -3692,14 +3520,9 @@ impl CodeReviewStore for ReviewStore {
         project_id: Uuid,
         workspace_slug: &str,
     ) -> Result<Option<Uuid>, GitStoreError> {
-        let row: Option<(Uuid,)> =
-            sqlx::query_as(pidash_services::integrations::code_reviews::REVIEW_ISSUE_WORKSPACE_SQL)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("review issue workspace", error))?;
-        Ok(row.map(|row| row.0))
+        reviews_orm::review_issue_workspace(&self.db, project_id, workspace_slug)
+            .await
+            .map_err(|error| git_store_error("review issue workspace", error))
     }
 
     async fn find_review_repository(
@@ -3709,89 +3532,52 @@ impl CodeReviewStore for ReviewStore {
         namespace: &str,
         repo_name: &str,
     ) -> Result<Option<GitRepository>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::REVIEW_REPOSITORY_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(namespace)
-                .bind(repo_name)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("review repository find", error))?;
-        row.map(|row| repository_from_row(&row)).transpose()
+        reviews_orm::find_review_repository(&self.db, provider, host_url, namespace, repo_name)
+            .await
+            .map_err(|error| git_store_error("review repository find", error))
     }
 
     async fn find_review_project_workspace(
         &self,
         project_id: Uuid,
     ) -> Result<Option<Uuid>, GitStoreError> {
-        let row: Option<(Uuid,)> = sqlx::query_as(
-            pidash_services::integrations::code_reviews::REVIEW_PROJECT_WORKSPACE_SQL,
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("review project workspace", error))?;
-        Ok(row.map(|row| row.0))
+        reviews_orm::review_project_workspace(&self.db, project_id)
+            .await
+            .map_err(|error| git_store_error("review project workspace", error))
     }
 
     async fn insert_code_review_link(
         &self,
         row: NewCodeReviewLink,
     ) -> Result<GitCodeReviewLink, LinkWriteError> {
-        let outcome =
-            sqlx::query(pidash_services::integrations::code_reviews::CODE_REVIEW_LINK_INSERT_SQL)
-                .bind(row.id)
-                .bind(row.created_at)
-                .bind(row.updated_at)
-                .bind(Some(self.actor))
-                .bind(None::<Uuid>)
-                .bind(row.project_id)
-                .bind(row.workspace_id)
-                .bind(row.issue_id)
-                .bind(&row.provider)
-                .bind(&row.host_url)
-                .bind(&row.namespace)
-                .bind(&row.repo_name)
-                .bind(&row.repo_external_id)
-                .bind(&row.external_id)
-                .bind(&row.external_iid)
-                .bind(&row.url)
-                .bind(&row.title)
-                .bind(&row.state)
-                .bind(row.merged)
-                .bind(row.draft)
-                .bind(row.remote_updated_at)
-                .bind(&row.metadata)
-                .execute(&self.pool)
-                .await;
-        match outcome {
-            Ok(_) => Ok(GitCodeReviewLink {
-                id: row.id,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                created_by_id: Some(self.actor),
-                updated_by_id: None,
-                deleted_at: None,
-                project_id: row.project_id,
-                workspace_id: row.workspace_id,
-                issue_id: row.issue_id,
-                provider: row.provider,
-                host_url: row.host_url,
-                namespace: row.namespace,
-                repo_name: row.repo_name,
-                repo_external_id: row.repo_external_id,
-                external_id: row.external_id,
-                external_iid: row.external_iid,
-                url: row.url,
-                title: row.title,
-                state: row.state,
-                merged: row.merged,
-                draft: row.draft,
-                remote_updated_at: row.remote_updated_at,
-                metadata: row.metadata,
-            }),
-            Err(error) if is_unique_violation(&error) => Err(LinkWriteError::Conflict),
+        let link = GitCodeReviewLink {
+            id: row.id,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            created_by_id: Some(self.actor),
+            updated_by_id: None,
+            deleted_at: None,
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            issue_id: row.issue_id,
+            provider: row.provider,
+            host_url: row.host_url,
+            namespace: row.namespace,
+            repo_name: row.repo_name,
+            repo_external_id: row.repo_external_id,
+            external_id: row.external_id,
+            external_iid: row.external_iid,
+            url: row.url,
+            title: row.title,
+            state: row.state,
+            merged: row.merged,
+            draft: row.draft,
+            remote_updated_at: row.remote_updated_at,
+            metadata: row.metadata,
+        };
+        match reviews_orm::insert_code_review_link(&self.db, &link).await {
+            Ok(()) => Ok(link),
+            Err(error) if is_orm_unique_violation(&error) => Err(LinkWriteError::Conflict),
             Err(error) => Err(LinkWriteError::Store(GitStoreError::Db(format!(
                 "code review link insert: {error}"
             )))),
@@ -3802,28 +3588,7 @@ impl CodeReviewStore for ReviewStore {
         &self,
         row: NewLegacyLink,
     ) -> Result<GithubPullRequestLink, GitStoreError> {
-        sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_INSERT_SQL)
-            .bind(row.id)
-            .bind(row.created_at)
-            .bind(row.updated_at)
-            .bind(Some(self.actor))
-            .bind(None::<Uuid>)
-            .bind(row.project_id)
-            .bind(row.workspace_id)
-            .bind(row.issue_id)
-            .bind(&row.repo_owner)
-            .bind(&row.repo_name)
-            .bind(row.pr_number)
-            .bind(&row.url)
-            .bind(&row.title)
-            .bind(&row.state)
-            .bind(row.merged)
-            .bind(row.draft)
-            .bind(row.pr_updated_at)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| git_store_error("legacy link insert", error))?;
-        Ok(GithubPullRequestLink {
+        let link = GithubPullRequestLink {
             id: row.id,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -3842,7 +3607,11 @@ impl CodeReviewStore for ReviewStore {
             merged: row.merged,
             draft: row.draft,
             pr_updated_at: row.pr_updated_at,
-        })
+        };
+        reviews_orm::insert_legacy_link(&self.db, &link)
+            .await
+            .map_err(|error| git_store_error("legacy link insert", error))?;
+        Ok(link)
     }
 
     async fn update_legacy_link(
@@ -3850,65 +3619,31 @@ impl CodeReviewStore for ReviewStore {
         id: Uuid,
         update: LegacyLinkUpdate,
     ) -> Result<GithubPullRequestLink, GitStoreError> {
-        sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_UPDATE_SQL)
-            .bind(id)
-            .bind(&update.url)
-            .bind(&update.title)
-            .bind(&update.state)
-            .bind(update.merged)
-            .bind(update.draft)
-            .bind(update.pr_updated_at)
-            .bind(update.updated_at)
-            .execute(&self.pool)
+        reviews_orm::update_legacy_link(&self.db, id, &update)
             .await
             .map_err(|error| git_store_error("legacy link update", error))?;
         // `existing.save(update_fields=[...])` mutates in place; reread
         // the row for the caller.
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    project_id, workspace_id, issue_id, repo_owner, repo_name, pr_number,
-                    url, title, state, merged, draft, pr_updated_at
-             FROM github_pull_request_links WHERE id = $1 LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("legacy link reread", error))?;
-        row.map(|row| legacy_link_from_row(&row))
-            .transpose()?
+        reviews_orm::legacy_link_by_id(&self.db, id)
+            .await
+            .map_err(|error| git_store_error("legacy link reread", error))?
             .ok_or(GitStoreError::NotFound("legacy link"))
     }
 
     async fn delete_code_review_link(&self, id: Uuid) -> Result<(), GitStoreError> {
         // Instance `.delete()` (`mixins.py:71-78`): soft row, then the
         // fan-out — the port delegates the write mechanics here.
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "UPDATE git_code_review_links
-             SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-        )
-        .bind(now)
-        .bind(self.actor)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| git_store_error("review link delete", error))?;
+        reviews_orm::soft_delete_code_review_link(&self.db, id, self.actor, chrono::Utc::now())
+            .await
+            .map_err(|error| git_store_error("review link delete", error))?;
         enqueue_soft_delete(&self.pool, "gitcodereviewlink", &id).await;
         Ok(())
     }
 
     async fn delete_legacy_link(&self, id: Uuid) -> Result<(), GitStoreError> {
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "UPDATE github_pull_request_links
-             SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-        )
-        .bind(now)
-        .bind(self.actor)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| git_store_error("legacy link delete", error))?;
+        reviews_orm::soft_delete_legacy_link(&self.db, id, self.actor, chrono::Utc::now())
+            .await
+            .map_err(|error| git_store_error("legacy link delete", error))?;
         enqueue_soft_delete(&self.pool, "githubpullrequestlink", &id).await;
         Ok(())
     }
@@ -3921,15 +3656,9 @@ impl GitStore for ReviewStore {
         provider: &str,
         host_url: &str,
     ) -> Result<Vec<GitProviderAccount>, GitStoreError> {
-        let rows: Vec<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::accounts::PROVIDER_ACCOUNT_LIST_SQL)
-                .bind(workspace_id)
-                .bind(provider)
-                .bind(host_url)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|error| git_store_error("account list", error))?;
-        rows.iter().map(provider_account_from_row).collect()
+        accounts_orm::list_provider_accounts(&self.db, workspace_id, provider, host_url)
+            .await
+            .map_err(|error| git_store_error("account list", error))
     }
 
     async fn get_provider_account(
@@ -3939,41 +3668,16 @@ impl GitStore for ReviewStore {
         host_url: &str,
         account_id: Uuid,
     ) -> Result<Option<GitProviderAccount>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::accounts::PROVIDER_ACCOUNT_GET_SQL)
-                .bind(workspace_id)
-                .bind(provider)
-                .bind(host_url)
-                .bind(account_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("account get", error))?;
-        row.map(|row| provider_account_from_row(&row)).transpose()
+        accounts_orm::get_provider_account(&self.db, workspace_id, provider, host_url, account_id)
+            .await
+            .map_err(|error| git_store_error("account get", error))
     }
 
     async fn insert_provider_account(
         &self,
         row: NewProviderAccount,
     ) -> Result<GitProviderAccount, GitStoreError> {
-        sqlx::query(pidash_services::integrations::accounts::PROVIDER_ACCOUNT_INSERT_SQL)
-            .bind(row.id)
-            .bind(row.created_at)
-            .bind(row.updated_at)
-            .bind(row.created_by_id)
-            .bind(row.updated_by_id)
-            .bind(row.workspace_id)
-            .bind(&row.provider)
-            .bind(&row.host_url)
-            .bind(&row.auth_type)
-            .bind(&row.external_account_id)
-            .bind(&row.external_account_login)
-            .bind(&row.display_name)
-            .bind(&row.capabilities)
-            .bind(&row.credential_config)
-            .bind(&row.status)
-            .bind(row.verified_at)
-            .bind(&row.metadata)
-            .execute(&self.pool)
+        accounts_orm::insert_provider_account(&self.db, &row)
             .await
             .map_err(|error| git_store_error("account insert", error))?;
         Ok(GitProviderAccount {
@@ -4006,16 +3710,9 @@ impl GitStore for ReviewStore {
         host_url: &str,
         external_id: &str,
     ) -> Result<Option<GitRepository>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            pidash_services::integrations::repositories::REPOSITORY_FIND_BY_EXTERNAL_SQL,
-        )
-        .bind(provider)
-        .bind(host_url)
-        .bind(external_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("repository find external", error))?;
-        row.map(|row| repository_from_row(&row)).transpose()
+        repos_orm::find_repository_by_external(&self.db, provider, host_url, external_id)
+            .await
+            .map_err(|error| git_store_error("repository find external", error))
     }
 
     async fn find_repository_by_full_name(
@@ -4024,16 +3721,9 @@ impl GitStore for ReviewStore {
         host_url: &str,
         full_name: &str,
     ) -> Result<Option<GitRepository>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            pidash_services::integrations::repositories::REPOSITORY_FIND_BY_FULL_NAME_SQL,
-        )
-        .bind(provider)
-        .bind(host_url)
-        .bind(full_name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("repository find full name", error))?;
-        row.map(|row| repository_from_row(&row)).transpose()
+        repos_orm::find_repository_by_full_name(&self.db, provider, host_url, full_name)
+            .await
+            .map_err(|error| git_store_error("repository find full name", error))
     }
 
     async fn update_repository(
@@ -4042,55 +3732,17 @@ impl GitStore for ReviewStore {
         defaults: RepositoryDefaults,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<GitRepository, GitStoreError> {
-        sqlx::query(pidash_services::integrations::repositories::REPOSITORY_UPDATE_SQL)
-            .bind(id)
-            .bind(&defaults.external_id)
-            .bind(&defaults.namespace)
-            .bind(&defaults.name)
-            .bind(&defaults.full_name)
-            .bind(&defaults.web_url)
-            .bind(&defaults.clone_url_http)
-            .bind(&defaults.clone_url_ssh)
-            .bind(&defaults.default_branch)
-            .bind(defaults.is_private)
-            .bind(&defaults.metadata)
-            .bind(now)
-            .execute(&self.pool)
+        repos_orm::update_repository(&self.db, id, &defaults, now)
             .await
             .map_err(|error| git_store_error("repository update", error))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    provider, host_url, external_id, namespace, name, full_name, web_url,
-                    clone_url_http, clone_url_ssh, default_branch, is_private, metadata
-             FROM git_repositories WHERE id = $1 LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("repository reread", error))?;
-        row.map(|row| repository_from_row(&row))
-            .transpose()?
+        repos_orm::repository_by_id(&self.db, id)
+            .await
+            .map_err(|error| git_store_error("repository reread", error))?
             .ok_or(GitStoreError::NotFound("repository"))
     }
 
     async fn insert_repository(&self, row: NewRepository) -> Result<GitRepository, GitStoreError> {
-        sqlx::query(pidash_services::integrations::repositories::REPOSITORY_INSERT_SQL)
-            .bind(row.id)
-            .bind(row.created_at)
-            .bind(row.updated_at)
-            .bind(&row.provider)
-            .bind(&row.host_url)
-            .bind(&row.defaults.external_id)
-            .bind(&row.defaults.namespace)
-            .bind(&row.defaults.name)
-            .bind(&row.defaults.full_name)
-            .bind(&row.defaults.web_url)
-            .bind(&row.defaults.clone_url_http)
-            .bind(&row.defaults.clone_url_ssh)
-            .bind(&row.defaults.default_branch)
-            .bind(row.defaults.is_private)
-            .bind(&row.defaults.metadata)
-            .execute(&self.pool)
+        repos_orm::insert_repository(&self.db, &row)
             .await
             .map_err(|error| git_store_error("repository insert", error))?;
         Ok(GitRepository {
@@ -4116,13 +3768,9 @@ impl GitStore for ReviewStore {
     }
 
     async fn find_workspace_id(&self, slug: &str) -> Result<Option<Uuid>, GitStoreError> {
-        let row: Option<(Uuid,)> =
-            sqlx::query_as(pidash_services::integrations::repositories::WORKSPACE_ID_SQL)
-                .bind(slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("workspace id", error))?;
-        Ok(row.map(|row| row.0))
+        repos_orm::workspace_id(&self.db, slug)
+            .await
+            .map_err(|error| git_store_error("workspace id", error))
     }
 
     async fn find_project(
@@ -4131,21 +3779,9 @@ impl GitStore for ReviewStore {
         project_id: Uuid,
     ) -> Result<Option<pidash_services::integrations::repositories::ProjectRef>, GitStoreError>
     {
-        let row: Option<(Uuid, Uuid, String, String)> =
-            sqlx::query_as(pidash_services::integrations::repositories::PROJECT_GET_SQL)
-                .bind(project_id)
-                .bind(workspace_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("project get", error))?;
-        Ok(row.map(|(id, workspace_id, repo_url, base_branch)| {
-            pidash_services::integrations::repositories::ProjectRef {
-                id,
-                workspace_id,
-                repo_url,
-                base_branch,
-            }
-        }))
+        repos_orm::project(&self.db, workspace_id, project_id)
+            .await
+            .map_err(|error| git_store_error("project get", error))
     }
 
     async fn apply_bind(
@@ -4159,51 +3795,52 @@ impl GitStore for ReviewStore {
             .pool
             .begin()
             .await
-            .map_err(|error| git_store_error("bind tx", error))?;
-        sqlx::query(pidash_services::integrations::repositories::BINDING_DELETE_SQL)
-            .bind(plan.project_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| git_store_error("bind delete", error))?;
-        sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_DELETE_SQL)
-            .bind(plan.project_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| git_store_error("bind sync delete", error))?;
+            .map_err(|error| GitStoreError::Db(format!("bind tx: {error}")))?;
         let id = Uuid::new_v4();
         let mut metadata = Map::new();
         metadata.insert("raw_url".to_owned(), Value::String(plan.raw_url.clone()));
-        sqlx::query(pidash_services::integrations::repositories::BINDING_INSERT_SQL)
-            .bind(id)
-            .bind(plan.now)
-            .bind(plan.now)
-            .bind(plan.actor_id)
-            .bind(plan.actor_id)
-            .bind(plan.project_id)
-            .bind(plan.workspace_id)
-            .bind(plan.repository_id)
-            .bind(plan.provider_account_id)
-            .bind(plan.actor_id)
-            .bind(false)
-            .bind(&plan.clone_auth_mode)
-            .bind(Value::Object(metadata.clone()))
-            .execute(&mut *tx)
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            repos_orm::delete_project_bindings(&conn, plan.project_id)
+                .await
+                .map_err(|error| git_store_error("bind delete", error))?;
+            repos_orm::delete_project_github_syncs(&conn, plan.project_id)
+                .await
+                .map_err(|error| git_store_error("bind sync delete", error))?;
+            repos_orm::insert_binding(
+                &conn,
+                repos_orm::NewBinding {
+                    id,
+                    now: plan.now,
+                    created_by_id: plan.actor_id,
+                    updated_by_id: plan.actor_id,
+                    project_id: plan.project_id,
+                    workspace_id: plan.workspace_id,
+                    repository_id: plan.repository_id,
+                    provider_account_id: plan.provider_account_id,
+                    actor_id: plan.actor_id,
+                    is_sync_enabled: false,
+                    clone_auth_mode: &plan.clone_auth_mode,
+                    metadata: Value::Object(metadata.clone()),
+                },
+            )
             .await
             .map_err(|error| git_store_error("bind insert", error))?;
+        }
         // `project.save(update_fields=...)`: only the changed columns
         // plus `updated_at` (`services.py:341-348`).
         pidash_services::domain::projects::save_bind_project_update(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             plan.project_id,
             plan.repo_url_update.as_deref(),
             plan.base_branch_update.as_deref(),
             plan.now,
         )
         .await
-        .map_err(|error| git_store_error("bind project update", error))?;
+        .map_err(|error| GitStoreError::Db(format!("bind project update: {error}")))?;
         tx.commit()
             .await
-            .map_err(|error| git_store_error("bind commit", error))?;
+            .map_err(|error| GitStoreError::Db(format!("bind commit: {error}")))?;
         Ok(
             pidash_db::integrations::git_models::git_repository_binding::GitRepositoryBinding {
                 id,
@@ -4232,91 +3869,9 @@ impl GitStore for ReviewStore {
         workspace_slug: &str,
     ) -> Result<Option<pidash_services::integrations::repositories::BindingView>, GitStoreError>
     {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::repositories::BINDING_GET_SQL)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("binding get", error))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        use sqlx::Row as _;
-        macro_rules! req {
-            ($key:literal, $ty:ty) => {
-                row.try_get::<$ty, _>($key)
-                    .map_err(|error| git_store_error("binding map", error))
-            };
-        }
-        let binding =
-            pidash_db::integrations::git_models::git_repository_binding::GitRepositoryBinding {
-                id: req!("b_id", Uuid)?,
-                created_at: req!("b_created_at", chrono::DateTime<chrono::Utc>)?,
-                updated_at: req!("b_updated_at", chrono::DateTime<chrono::Utc>)?,
-                created_by_id: req!("b_created_by_id", Option<Uuid>)?,
-                updated_by_id: req!("b_updated_by_id", Option<Uuid>)?,
-                deleted_at: req!("b_deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                project_id: req!("b_project_id", Uuid)?,
-                workspace_id: req!("b_workspace_id", Uuid)?,
-                repository_id: req!("b_repository_id", Uuid)?,
-                provider_account_id: req!("b_provider_account_id", Uuid)?,
-                actor_id: req!("b_actor_id", Uuid)?,
-                is_sync_enabled: req!("b_is_sync_enabled", bool)?,
-                clone_auth_mode: req!("b_clone_auth_mode", String)?,
-                last_synced_at: req!("b_last_synced_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                last_sync_error: req!("b_last_sync_error", String)?,
-                metadata: req!("b_metadata", Value)?,
-            };
-        let repository = GitRepository {
-            id: req!("r_id", Uuid)?,
-            created_at: req!("r_created_at", chrono::DateTime<chrono::Utc>)?,
-            updated_at: req!("r_updated_at", chrono::DateTime<chrono::Utc>)?,
-            created_by_id: req!("r_created_by_id", Option<Uuid>)?,
-            updated_by_id: req!("r_updated_by_id", Option<Uuid>)?,
-            deleted_at: req!("r_deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-            provider: req!("r_provider", String)?,
-            host_url: req!("r_host_url", String)?,
-            external_id: req!("r_external_id", String)?,
-            namespace: req!("r_namespace", String)?,
-            name: req!("r_name", String)?,
-            full_name: req!("r_full_name", String)?,
-            web_url: req!("r_web_url", String)?,
-            clone_url_http: req!("r_clone_url_http", String)?,
-            clone_url_ssh: req!("r_clone_url_ssh", String)?,
-            default_branch: req!("r_default_branch", String)?,
-            is_private: req!("r_is_private", bool)?,
-            metadata: req!("r_metadata", Value)?,
-        };
-        let account = GitProviderAccount {
-            id: req!("a_id", Uuid)?,
-            created_at: req!("a_created_at", chrono::DateTime<chrono::Utc>)?,
-            updated_at: req!("a_updated_at", chrono::DateTime<chrono::Utc>)?,
-            created_by_id: req!("a_created_by_id", Option<Uuid>)?,
-            updated_by_id: req!("a_updated_by_id", Option<Uuid>)?,
-            deleted_at: req!("a_deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-            workspace_id: req!("a_workspace_id", Uuid)?,
-            provider: req!("a_provider", String)?,
-            host_url: req!("a_host_url", String)?,
-            auth_type: req!("a_auth_type", String)?,
-            external_account_id: req!("a_external_account_id", String)?,
-            external_account_login: req!("a_external_account_login", String)?,
-            display_name: req!("a_display_name", String)?,
-            capabilities: req!("a_capabilities", Value)?,
-            credential_config: req!("a_credential_config", Value)?,
-            workspace_integration_id: req!("a_workspace_integration_id", Option<Uuid>)?,
-            status: req!("a_status", String)?,
-            verified_at: req!("a_verified_at", Option<chrono::DateTime<chrono::Utc>>)?,
-            last_check_error: req!("a_last_check_error", String)?,
-            metadata: req!("a_metadata", Value)?,
-        };
-        Ok(Some(
-            pidash_services::integrations::repositories::BindingView {
-                binding,
-                repository,
-                account,
-            },
-        ))
+        repos_orm::binding_view(&self.db, project_id, workspace_slug)
+            .await
+            .map_err(|error| git_store_error("binding get", error))
     }
 
     async fn set_binding_sync(
@@ -4328,53 +3883,13 @@ impl GitStore for ReviewStore {
         pidash_db::integrations::git_models::git_repository_binding::GitRepositoryBinding,
         GitStoreError,
     > {
-        sqlx::query(pidash_services::integrations::repositories::BINDING_SET_SYNC_SQL)
-            .bind(binding_id)
-            .bind(enabled)
-            .bind(now)
-            .execute(&self.pool)
+        repos_orm::set_binding_sync(&self.db, binding_id, enabled, now)
             .await
             .map_err(|error| git_store_error("binding set sync", error))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    project_id, workspace_id, repository_id, provider_account_id, actor_id,
-                    is_sync_enabled, clone_auth_mode, last_synced_at, last_sync_error, metadata
-             FROM git_repository_bindings WHERE id = $1 LIMIT 1",
-        )
-        .bind(binding_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("binding reread", error))?;
-        let Some(row) = row else {
-            return Err(GitStoreError::NotFound("binding"));
-        };
-        use sqlx::Row as _;
-        macro_rules! req {
-            ($key:literal, $ty:ty) => {
-                row.try_get::<$ty, _>($key)
-                    .map_err(|error| git_store_error("binding map", error))
-            };
-        }
-        Ok(
-            pidash_db::integrations::git_models::git_repository_binding::GitRepositoryBinding {
-                id: req!("id", Uuid)?,
-                created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-                updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-                created_by_id: req!("created_by_id", Option<Uuid>)?,
-                updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-                deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                project_id: req!("project_id", Uuid)?,
-                workspace_id: req!("workspace_id", Uuid)?,
-                repository_id: req!("repository_id", Uuid)?,
-                provider_account_id: req!("provider_account_id", Uuid)?,
-                actor_id: req!("actor_id", Uuid)?,
-                is_sync_enabled: req!("is_sync_enabled", bool)?,
-                clone_auth_mode: req!("clone_auth_mode", String)?,
-                last_synced_at: req!("last_synced_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                last_sync_error: req!("last_sync_error", String)?,
-                metadata: req!("metadata", Value)?,
-            },
-        )
+        repos_orm::binding_by_id(&self.db, binding_id)
+            .await
+            .map_err(|error| git_store_error("binding reread", error))?
+            .ok_or(GitStoreError::NotFound("binding"))
     }
 
     async fn set_github_syncs_enabled(
@@ -4383,21 +3898,13 @@ impl GitStore for ReviewStore {
         workspace_slug: &str,
         enabled: bool,
     ) -> Result<u64, GitStoreError> {
-        let done =
-            sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_SET_ENABLED_SQL)
-                .bind(enabled)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .execute(&self.pool)
-                .await
-                .map_err(|error| git_store_error("github syncs set enabled", error))?;
-        Ok(done.rows_affected())
+        repos_orm::set_project_github_syncs_enabled(&self.db, project_id, workspace_slug, enabled)
+            .await
+            .map_err(|error| git_store_error("github syncs set enabled", error))
     }
 
     async fn delete_binding(&self, binding_id: Uuid) -> Result<(), GitStoreError> {
-        sqlx::query(pidash_services::integrations::repositories::BINDING_DELETE_ONE_SQL)
-            .bind(binding_id)
-            .execute(&self.pool)
+        repos_orm::delete_binding(&self.db, binding_id)
             .await
             .map_err(|error| git_store_error("binding delete", error))?;
         Ok(())
@@ -4407,12 +3914,9 @@ impl GitStore for ReviewStore {
         &self,
         project_id: Uuid,
     ) -> Result<u64, GitStoreError> {
-        let done = sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_DELETE_SQL)
-            .bind(project_id)
-            .execute(&self.pool)
+        repos_orm::delete_project_github_syncs(&self.db, project_id)
             .await
-            .map_err(|error| git_store_error("github syncs delete", error))?;
-        Ok(done.rows_affected())
+            .map_err(|error| git_store_error("github syncs delete", error))
     }
 }
 
@@ -4694,56 +4198,12 @@ async fn pr_create(
 /// Re-read one PR link for the create response (the serializer reads
 /// the saved instance, whose audit columns the store stamped).
 async fn fetch_pr_owned(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<PrLinkOwned, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT id, issue_id, repo_owner, repo_name, pr_number, url, title, state,
-                  merged, draft, pr_updated_at, created_at, updated_at, created_by_id
-           FROM github_pull_request_links WHERE id = $1 LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Err(Denial::ServerError);
-    };
-    use sqlx::Row as _;
-    // Raw RFC3339 instants; `render_pr_row` applies the actor zone once.
-    let opt_dt = |key: &str| -> Result<Option<String>, Denial> {
-        row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(key)
-            .map(|stamp| {
-                stamp.map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-            })
-            .map_err(|_| Denial::ServerError)
-    };
-    let req_dt = |key: &str| -> Result<String, Denial> {
-        row.try_get::<chrono::DateTime<chrono::Utc>, _>(key)
-            .map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-            .map_err(|_| Denial::ServerError)
-    };
-    Ok(PrLinkOwned {
-        id: row
-            .try_get::<Uuid, _>("id")
-            .map_err(|_| Denial::ServerError)?
-            .to_string(),
-        issue_id: row
-            .try_get::<Uuid, _>("issue_id")
-            .map_err(|_| Denial::ServerError)?
-            .to_string(),
-        repo_owner: row.try_get("repo_owner").map_err(|_| Denial::ServerError)?,
-        repo_name: row.try_get("repo_name").map_err(|_| Denial::ServerError)?,
-        pr_number: row.try_get("pr_number").map_err(|_| Denial::ServerError)?,
-        url: row.try_get("url").map_err(|_| Denial::ServerError)?,
-        title: row.try_get("title").map_err(|_| Denial::ServerError)?,
-        state: row.try_get("state").map_err(|_| Denial::ServerError)?,
-        merged: row.try_get("merged").map_err(|_| Denial::ServerError)?,
-        draft: row.try_get("draft").map_err(|_| Denial::ServerError)?,
-        pr_updated_at: opt_dt("pr_updated_at")?,
-        created_at: req_dt("created_at")?,
-        updated_at: req_dt("updated_at")?,
-        created_by_id: row
-            .try_get("created_by_id")
-            .map_err(|_| Denial::ServerError)?,
-    })
+    github_pull_request_links::Entity::find_by_id(*id)
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?
+        .map(PrLinkOwned::from)
+        .ok_or(Denial::ServerError)
 }
 
 /// `DELETE github-pull-requests/{pk}/` (`github_pr.py:66-73`):
@@ -4830,15 +4290,13 @@ async fn fetch_scoped_pr(
     issue_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<Option<PrLinkOwned>, Denial> {
-    let mut binder = super::Binder::new();
-    let list = pr_link_list_sql(&mut binder, slug, project_id, issue_id);
-    // Wraps: the list SQL ends in `ORDER BY`.
-    let marker = binder.bind_uuid(*pk);
-    let sql = format!("SELECT * FROM ({list}) AS scoped WHERE scoped.id = {marker} LIMIT 1");
-    let rows = super::fetch_json_rows(pool, &sql, binder.values())
+    let row = pr_link_list_select(slug, *project_id, *issue_id)
+        .filter(github_pull_request_links::Column::Id.eq(*pk))
+        .limit(1)
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    rows.first().map(pr_owned_from_json).transpose()
+        .map_err(db_denial)?;
+    Ok(row.map(PrLinkOwned::from))
 }
 
 /// Scoped review-link detail: the list scope plus the pk.
@@ -4849,15 +4307,13 @@ async fn fetch_scoped_review(
     issue_id: &uuid::Uuid,
     pk: &uuid::Uuid,
 ) -> Result<Option<ReviewLinkOwned>, Denial> {
-    let mut binder = super::Binder::new();
-    let list = review_link_list_sql(&mut binder, slug, project_id, issue_id);
-    // Wraps: the list SQL ends in `ORDER BY`.
-    let marker = binder.bind_uuid(*pk);
-    let sql = format!("SELECT * FROM ({list}) AS scoped WHERE scoped.id = {marker} LIMIT 1");
-    let rows = super::fetch_json_rows(pool, &sql, binder.values())
+    let row = review_link_list_select(slug, *project_id, *issue_id)
+        .filter(git_code_review_links::Column::Id.eq(*pk))
+        .limit(1)
+        .one(&orm(pool))
         .await
-        .map_err(|_| Denial::ServerError)?;
-    rows.first().map(review_owned_from_json).transpose()
+        .map_err(db_denial)?;
+    Ok(row.map(ReviewLinkOwned::from))
 }
 
 /// `POST code-reviews/` (`git_code_review.py:46-65`): same body rules
@@ -4987,67 +4443,12 @@ async fn fetch_review_owned(
     pool: &sqlx::PgPool,
     id: &uuid::Uuid,
 ) -> Result<ReviewLinkOwned, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT id, issue_id, provider, host_url, namespace, repo_name, repo_external_id,
-                  external_id, external_iid, url, title, state, merged, draft,
-                  remote_updated_at, metadata, created_at, updated_at, created_by_id
-           FROM git_code_review_links WHERE id = $1 LIMIT 1"#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Err(Denial::ServerError);
-    };
-    use sqlx::Row as _;
-    let opt_dt = |key: &str| -> Result<Option<String>, Denial> {
-        row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(key)
-            .map(|stamp| {
-                stamp.map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-            })
-            .map_err(|_| Denial::ServerError)
-    };
-    let req_dt = |key: &str| -> Result<String, Denial> {
-        row.try_get::<chrono::DateTime<chrono::Utc>, _>(key)
-            .map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-            .map_err(|_| Denial::ServerError)
-    };
-    Ok(ReviewLinkOwned {
-        id: row
-            .try_get::<Uuid, _>("id")
-            .map_err(|_| Denial::ServerError)?
-            .to_string(),
-        issue_id: row
-            .try_get::<Uuid, _>("issue_id")
-            .map_err(|_| Denial::ServerError)?
-            .to_string(),
-        provider: row.try_get("provider").map_err(|_| Denial::ServerError)?,
-        host_url: row.try_get("host_url").map_err(|_| Denial::ServerError)?,
-        namespace: row.try_get("namespace").map_err(|_| Denial::ServerError)?,
-        repo_name: row.try_get("repo_name").map_err(|_| Denial::ServerError)?,
-        repo_external_id: row
-            .try_get("repo_external_id")
-            .map_err(|_| Denial::ServerError)?,
-        external_id: row
-            .try_get("external_id")
-            .map_err(|_| Denial::ServerError)?,
-        external_iid: row
-            .try_get("external_iid")
-            .map_err(|_| Denial::ServerError)?,
-        url: row.try_get("url").map_err(|_| Denial::ServerError)?,
-        title: row.try_get("title").map_err(|_| Denial::ServerError)?,
-        state: row.try_get("state").map_err(|_| Denial::ServerError)?,
-        merged: row.try_get("merged").map_err(|_| Denial::ServerError)?,
-        draft: row.try_get("draft").map_err(|_| Denial::ServerError)?,
-        remote_updated_at: opt_dt("remote_updated_at")?,
-        metadata: row.try_get("metadata").map_err(|_| Denial::ServerError)?,
-        created_at: req_dt("created_at")?,
-        updated_at: req_dt("updated_at")?,
-        created_by_id: row
-            .try_get("created_by_id")
-            .map_err(|_| Denial::ServerError)?,
-    })
+    git_code_review_links::Entity::find_by_id(*id)
+        .one(&orm(pool))
+        .await
+        .map_err(db_denial)?
+        .map(ReviewLinkOwned::from)
+        .ok_or(Denial::ServerError)
 }
 
 /// `DELETE code-reviews/{pk}/` (`git_code_review.py:67-74`): scoped
@@ -5646,36 +5047,25 @@ mod tests {
 
     #[test]
     fn relation_row_shape_follows_field_order() {
-        let mut row = Map::new();
-        for field in super::super::queries_core::RELATION_ROW_FIELDS {
-            let value = match *field {
-                "created_at" | "updated_at" => {
-                    Value::String("2026-10-05T05:08:56.003889+00:00".to_owned())
-                }
-                "sort_order" => serde_json::json!(0.0),
-                "sequence_id" => serde_json::json!(3),
-                "label_ids" | "assignee_ids" => serde_json::json!([]),
-                "state_id" => Value::Null,
-                _ => Value::String("00000000-0000-0000-0000-000000000000".to_owned()),
-            };
-            row.insert((*field).to_owned(), value);
-        }
-        // `name`/`priority`/`relation_type` are strings, not uuids.
-        row.insert("name".to_owned(), Value::String("N".to_owned()));
-        row.insert("priority".to_owned(), Value::String("high".to_owned()));
-        row.insert(
-            "relation_type".to_owned(),
-            Value::String("relates_to".to_owned()),
-        );
-        // The union emits raw `*_id` actor columns, not the wire keys.
-        row.remove("created_by");
-        row.remove("updated_by");
-        row.insert(
-            "created_by_id".to_owned(),
-            Value::String("11111111-1111-1111-1111-111111111111".to_owned()),
-        );
-        row.insert("updated_by_id".to_owned(), Value::Null);
-        let shaped = shape_relation_row(&row);
+        let stamp = chrono::DateTime::parse_from_rfc3339("2026-10-05T05:08:56.003889+00:00")
+            .expect("stamp");
+        let (low, high) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let row = super::super::queries_core::RelationBucketRow {
+            id: Uuid::nil(),
+            name: "N".to_owned(),
+            state_id: None,
+            sort_order: 0.0,
+            priority: "high".to_owned(),
+            sequence_id: 3,
+            project_id: Uuid::nil(),
+            created_at: stamp,
+            updated_at: stamp,
+            created_by_id: Some(Uuid::from_u128(0x11111111_1111_1111_1111_111111111111)),
+            updated_by_id: None,
+            label_ids: Some(vec![high, low]),
+            assignee_ids: None,
+        };
+        let shaped = shape_relation_row(&row, "relates_to");
         let keys: Vec<&str> = shaped
             .as_object()
             .expect("obj")
@@ -5697,6 +5087,18 @@ mod tests {
             Some("11111111-1111-1111-1111-111111111111")
         );
         assert_eq!(shaped.get("updated_by"), Some(&Value::Null));
+        assert_eq!(shaped.get("state_id"), Some(&Value::Null));
+        assert_eq!(shaped.get("sequence_id"), Some(&serde_json::json!(3)));
+        // Sorted like Postgres's DISTINCT aggregate; NULL aggregate → [].
+        assert_eq!(
+            shaped.get("label_ids"),
+            Some(&serde_json::json!([low.to_string(), high.to_string()]))
+        );
+        assert_eq!(shaped.get("assignee_ids"), Some(&serde_json::json!([])));
+        assert_eq!(
+            shaped.get("relation_type").and_then(Value::as_str),
+            Some("relates_to")
+        );
     }
 
     // -- activity kwargs ------------------------------------------------------
@@ -5777,6 +5179,470 @@ mod tests {
             ))
             .1,
             r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#
+        );
+    }
+
+    // -- live SeaORM statements ------------------------------------------------
+
+    /// A one-connection pool with constraint-free temp copies of `tables`
+    /// shadowing `public`, or `None` (skip) without `DATABASE_URL`.
+    async fn live_temp_pool(tables: &[&str]) -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in tables {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        Some(pool)
+    }
+
+    async fn seed(pool: &sqlx::PgPool, statements: &[String]) {
+        for sql in statements {
+            sqlx::query(sql).execute(pool).await.expect(sql);
+        }
+    }
+
+    /// Relation buckets, the removal edge, and the user-lite nests.
+    #[tokio::test]
+    async fn live_relation_reads() {
+        let Some(pool) = live_temp_pool(&[
+            "workspaces",
+            "projects",
+            "states",
+            "issues",
+            "issue_relations",
+            "issue_labels",
+            "issue_assignees",
+            "users",
+            "project_members",
+            "file_assets",
+        ])
+        .await
+        else {
+            return;
+        };
+        let (ws, other_ws, project, archived) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (backlog, triage) = (Uuid::new_v4(), Uuid::new_v4());
+        let (me, blocker, dup_a, dup_b, triaged, drafted, in_archived) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (active_user, inactive_user, asset) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (label_a, label_b) = (Uuid::from_u128(5), Uuid::from_u128(3));
+        let issue_cols = "id, created_at, updated_at, name, priority, sequence_id, sort_order, \
+                          project_id, workspace_id, state_id, is_draft, deleted_at, archived_at";
+        let rel = |id: Uuid,
+                   issue: Uuid,
+                   related: Uuid,
+                   kind: &str,
+                   ws: Uuid,
+                   ago: i32,
+                   gone: bool| {
+            format!(
+                "INSERT INTO issue_relations (id, created_at, updated_at, relation_type, issue_id, \
+                 related_issue_id, project_id, workspace_id, created_by_id, deleted_at) VALUES \
+                 ('{id}', now() - interval '{ago} minutes', now(), '{kind}', '{issue}', '{related}', \
+                 '{project}', '{ws}', '{active_user}', {})",
+                if gone { "now()" } else { "NULL" }
+            )
+        };
+        let (edge_old, edge_new) = (Uuid::new_v4(), Uuid::new_v4());
+        seed(
+            &pool,
+            &[
+                format!(
+                    "INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme'), ('{other_ws}', 'other')"
+                ),
+                format!(
+                    "INSERT INTO projects (id, workspace_id, archived_at) VALUES ('{project}', '{ws}', NULL), \
+                     ('{archived}', '{ws}', now())"
+                ),
+                format!(
+                    "INSERT INTO states (id, \"group\") VALUES ('{backlog}', 'backlog'), ('{triage}', 'triage')"
+                ),
+                format!(
+                    "INSERT INTO issues ({issue_cols}) VALUES \
+                     ('{me}', now(), now(), 'Me', 'none', 1, 1.0, '{project}', '{ws}', '{backlog}', false, NULL, NULL), \
+                     ('{blocker}', '2026-10-05T05:08:56.003889+00', now(), 'Blocker', 'high', 2, 65535.5, '{project}', '{ws}', NULL, false, NULL, NULL), \
+                     ('{dup_a}', now(), now(), 'DupA', 'low', 3, 2.0, '{project}', '{ws}', '{backlog}', false, NULL, NULL), \
+                     ('{dup_b}', now(), now(), 'DupB', 'low', 4, 3.0, '{project}', '{ws}', '{backlog}', false, NULL, NULL), \
+                     ('{triaged}', now(), now(), 'Tri', 'low', 5, 4.0, '{project}', '{ws}', '{triage}', false, NULL, NULL), \
+                     ('{drafted}', now(), now(), 'Draft', 'low', 6, 5.0, '{project}', '{ws}', '{backlog}', true, NULL, NULL), \
+                     ('{in_archived}', now(), now(), 'Arch', 'low', 7, 6.0, '{archived}', '{ws}', '{backlog}', false, NULL, NULL)"
+                ),
+                // `blocker` is blocked by `me`: the `blocking` bucket lists
+                // `issue_id` where `related_issue_id` is the current issue.
+                rel(Uuid::new_v4(), blocker, me, "blocked_by", ws, 5, false),
+                // Duplicates in both directions, plus a tombstone and a
+                // cross-workspace row that never count.
+                rel(edge_old, me, dup_a, "duplicate", ws, 30, false),
+                rel(edge_new, dup_b, me, "duplicate", ws, 1, false),
+                rel(Uuid::new_v4(), me, blocker, "duplicate", ws, 2, true),
+                rel(Uuid::new_v4(), me, blocker, "duplicate", other_ws, 3, false),
+                // Filtered targets: triage state, draft, archived project.
+                rel(Uuid::new_v4(), me, triaged, "relates_to", ws, 4, false),
+                rel(Uuid::new_v4(), me, drafted, "relates_to", ws, 4, false),
+                rel(Uuid::new_v4(), me, in_archived, "relates_to", ws, 4, false),
+                format!(
+                    "INSERT INTO issue_labels (id, issue_id, label_id, deleted_at) VALUES \
+                     (gen_random_uuid(), '{blocker}', '{label_a}', NULL), \
+                     (gen_random_uuid(), '{blocker}', '{label_a}', NULL), \
+                     (gen_random_uuid(), '{blocker}', '{label_b}', NULL), \
+                     (gen_random_uuid(), '{blocker}', '{}', now()), \
+                     (gen_random_uuid(), '{blocker}', NULL, NULL)",
+                    Uuid::new_v4()
+                ),
+                format!(
+                    "INSERT INTO issue_assignees (id, issue_id, assignee_id, deleted_at) VALUES \
+                     (gen_random_uuid(), '{blocker}', '{active_user}', NULL), \
+                     (gen_random_uuid(), '{blocker}', '{inactive_user}', NULL)"
+                ),
+                format!(
+                    "INSERT INTO users (id, first_name, last_name, avatar, avatar_asset_id, is_bot, \
+                     display_name) VALUES \
+                     ('{active_user}', 'A', 'U', 'raw.png', NULL, false, 'au'), \
+                     ('{inactive_user}', 'I', 'U', '', '{asset}', true, 'iu')"
+                ),
+                // Two active rows (any project) fan the old join out; the
+                // inactive user's only row is inactive.
+                format!(
+                    "INSERT INTO project_members (id, project_id, member_id, is_active) VALUES \
+                     (gen_random_uuid(), '{project}', '{active_user}', true), \
+                     (gen_random_uuid(), '{archived}', '{active_user}', true), \
+                     (gen_random_uuid(), '{project}', '{inactive_user}', false)"
+                ),
+                format!(
+                    "INSERT INTO file_assets (id, entity_type, workspace_id) VALUES \
+                     ('{asset}', 'USER_AVATAR', '{ws}')"
+                ),
+            ],
+        )
+        .await;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let bucket = |label: &str| {
+            *super::super::queries_core::RELATION_BUCKETS
+                .iter()
+                .find(|bucket| bucket.label == label)
+                .expect("bucket")
+        };
+        let rows = |label: &'static str| {
+            let db = db.clone();
+            async move {
+                super::super::queries_core::relation_bucket_select("acme", me, bucket(label))
+                    .into_model::<super::super::queries_core::RelationBucketRow>()
+                    .all(&db)
+                    .await
+                    .expect("bucket rows")
+            }
+        };
+        let blocking = rows("blocking").await;
+        assert_eq!(blocking.len(), 1);
+        let shaped = shape_relation_row(&blocking[0], "blocking");
+        assert_eq!(shaped["id"], Value::String(blocker.to_string()));
+        assert_eq!(shaped["state_id"], Value::Null);
+        assert_eq!(shaped["sort_order"].to_string(), "65535.5");
+        assert_eq!(shaped["created_at"], "2026-10-05T05:08:56.003889Z");
+        assert_eq!(
+            shaped["label_ids"],
+            serde_json::json!([label_b.to_string(), label_a.to_string()])
+        );
+        assert_eq!(
+            shaped["assignee_ids"],
+            serde_json::json!([active_user.to_string()])
+        );
+        assert!(rows("blocked_by").await.is_empty());
+        let mut dups: Vec<Uuid> = rows("duplicate").await.iter().map(|row| row.id).collect();
+        dups.sort();
+        let mut want = vec![dup_a, dup_b];
+        want.sort();
+        assert_eq!(dups, want);
+        let dup = rows("duplicate").await;
+        assert!(dup
+            .iter()
+            .all(|row| row.label_ids.is_none() && row.assignee_ids.is_none()));
+        assert!(rows("relates_to").await.is_empty());
+        // The wrong slug sees nothing.
+        assert!(super::super::queries_core::relation_bucket_select(
+            "other",
+            me,
+            bucket("duplicate")
+        )
+        .into_model::<super::super::queries_core::RelationBucketRow>()
+        .all(&db)
+        .await
+        .expect("other slug")
+        .is_empty());
+
+        // Removal edge: either direction, newest first; a NULL target misses.
+        let edge = fetch_relation_edge(&pool, "acme", &me, Some(dup_a))
+            .await
+            .expect("edge")
+            .expect("found");
+        assert_eq!((edge.id, edge.related_issue_id), (edge_old, dup_a));
+        assert_eq!(edge.relation_type, "duplicate");
+        assert_eq!(edge.created_by_id, Some(active_user));
+        let reverse = fetch_relation_edge(&pool, "acme", &me, Some(dup_b))
+            .await
+            .expect("edge")
+            .expect("found");
+        assert_eq!((reverse.id, reverse.related_issue_id), (edge_new, me));
+        assert!(fetch_relation_edge(&pool, "acme", &me, None)
+            .await
+            .expect("null")
+            .is_none());
+        // The tombstoned and cross-workspace duplicates never match.
+        assert!(fetch_relation_edge(&pool, "acme", &me, Some(blocker))
+            .await
+            .expect("blocker")
+            .is_some_and(|edge| edge.relation_type == "blocked_by"));
+
+        // Issues by id and the user-lite nests (raw avatar vs asset URL).
+        let infos = fetch_issues_by_id(&pool, &[blocker, dup_a])
+            .await
+            .expect("issues");
+        assert_eq!(infos[&blocker].sequence_id, 2);
+        assert_eq!(infos[&blocker].state_id, None);
+        assert_eq!(infos[&dup_a].priority, "low");
+        let lites = fetch_user_lites(&pool, &[active_user, inactive_user])
+            .await
+            .expect("lites");
+        assert_eq!(lites[&active_user].avatar_url.as_deref(), Some("raw.png"));
+        assert_eq!(
+            lites[&inactive_user].avatar_url,
+            Some(format!("/api/assets/v2/static/{asset}/"))
+        );
+        assert!(lites[&inactive_user].is_bot);
+        assert_eq!(
+            project_workspace(&pool, &project).await.expect("workspace"),
+            ws
+        );
+    }
+
+    /// Link, PR-link and review-link scopes plus the link writes.
+    #[tokio::test]
+    async fn live_link_reads_and_writes() {
+        let Some(pool) = live_temp_pool(&[
+            "workspaces",
+            "projects",
+            "project_members",
+            "issue_links",
+            "github_pull_request_links",
+            "git_code_review_links",
+        ])
+        .await
+        else {
+            return;
+        };
+        let (ws, project, archived, lonely) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (member, stranger, issue) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (old_link, new_link, gone_link, arch_link) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (pr, pr_lonely, review) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let link = |id: Uuid, project: Uuid, url: &str, ago: i32, gone: bool| {
+            format!(
+                "INSERT INTO issue_links (id, created_at, updated_at, title, url, metadata, \
+                 created_by_id, issue_id, project_id, workspace_id, deleted_at) VALUES ('{id}', \
+                 now() - interval '{ago} minutes', now(), NULL, '{url}', '{{\"k\": 1.0}}', \
+                 '{member}', '{issue}', '{project}', '{ws}', {})",
+                if gone { "now()" } else { "NULL" }
+            )
+        };
+        let pr_row = |id: Uuid, project: Uuid| {
+            format!(
+                "INSERT INTO github_pull_request_links (id, created_at, updated_at, repo_owner, \
+                 repo_name, pr_number, url, title, state, merged, draft, pr_updated_at, \
+                 created_by_id, issue_id, project_id, workspace_id) VALUES ('{id}', now(), now(), \
+                 'o', 'r', 7, 'https://github.com/o/r/pull/7', 'T', 'open', false, true, \
+                 '2026-01-02T03:04:05+00', '{member}', '{issue}', '{project}', '{ws}')"
+            )
+        };
+        seed(
+            &pool,
+            &[
+                format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+                format!(
+                    "INSERT INTO projects (id, archived_at) VALUES ('{project}', NULL), \
+                     ('{archived}', now()), ('{lonely}', NULL)"
+                ),
+                // Two active rows for the member (one tombstoned: bug 7) fan
+                // the join out; DISTINCT folds them.
+                format!(
+                    "INSERT INTO project_members (id, project_id, member_id, is_active, deleted_at) \
+                     VALUES (gen_random_uuid(), '{project}', '{member}', true, NULL), \
+                     (gen_random_uuid(), '{project}', '{member}', true, now()), \
+                     (gen_random_uuid(), '{project}', '{stranger}', false, NULL), \
+                     (gen_random_uuid(), '{archived}', '{member}', true, NULL)"
+                ),
+                link(old_link, project, "https://a.example", 10, false),
+                link(new_link, project, "https://b.example", 1, false),
+                link(gone_link, project, "https://c.example", 2, true),
+                link(arch_link, archived, "https://d.example", 3, false),
+                pr_row(pr, project),
+                pr_row(pr_lonely, lonely),
+                format!(
+                    "INSERT INTO git_code_review_links (id, created_at, updated_at, provider, \
+                     host_url, namespace, repo_name, repo_external_id, external_id, external_iid, \
+                     url, title, state, merged, draft, remote_updated_at, metadata, created_by_id, \
+                     issue_id, project_id, workspace_id) VALUES ('{review}', now(), now(), \
+                     'gitlab', 'https://gitlab.com', 'g', 'r', '1', '2', '3', 'https://gitlab.com/g/r/-/merge_requests/3', \
+                     'MR', 'open', false, false, NULL, '{{\"a\": [1]}}', NULL, '{issue}', '{project}', '{ws}')"
+                ),
+            ],
+        )
+        .await;
+
+        let listed = fetch_scoped_links(&pool, "acme", &project, &issue, &member)
+            .await
+            .expect("links");
+        assert_eq!(
+            listed.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![new_link, old_link]
+        );
+        assert_eq!(listed[0].metadata, serde_json::json!({"k": 1.0}));
+        assert_eq!(listed[0].title, None);
+        assert_eq!(listed[0].created_by_id, Some(member));
+        assert!(
+            fetch_scoped_links(&pool, "acme", &project, &issue, &stranger)
+                .await
+                .expect("stranger")
+                .is_empty()
+        );
+        assert!(
+            fetch_scoped_links(&pool, "acme", &archived, &issue, &member)
+                .await
+                .expect("archived")
+                .is_empty()
+        );
+        assert!(
+            fetch_scoped_link(&pool, "acme", &project, &issue, &old_link, &member)
+                .await
+                .expect("one")
+                .is_some()
+        );
+        assert!(
+            fetch_scoped_link(&pool, "acme", &project, &issue, &gone_link, &member)
+                .await
+                .expect("gone")
+                .is_none()
+        );
+        // The plain read is member/archived-blind.
+        assert!(
+            fetch_plain_link(&pool, "acme", &archived, &issue, &arch_link)
+                .await
+                .expect("plain")
+                .is_some()
+        );
+        assert!(
+            fetch_plain_link(&pool, "nope", &archived, &issue, &arch_link)
+                .await
+                .expect("plain slug")
+                .is_none()
+        );
+        // Dup probe: live rows only, optionally excluding self.
+        assert!(link_dupe_exists(&pool, "https://a.example", &issue, None)
+            .await
+            .expect("dupe"));
+        assert!(
+            !link_dupe_exists(&pool, "https://a.example", &issue, Some(&old_link))
+                .await
+                .expect("self")
+        );
+        assert!(!link_dupe_exists(&pool, "https://c.example", &issue, None)
+            .await
+            .expect("tombstone"));
+        // Save: writable fields plus audit.
+        let mut row = fetch_plain_link(&pool, "acme", &project, &issue, &old_link)
+            .await
+            .expect("plain")
+            .expect("found");
+        row.title = Some("New".to_owned());
+        row.url = "https://e.example".to_owned();
+        row.metadata = serde_json::json!({});
+        let now = chrono::Utc::now();
+        save_link(&pool, &row, now, stranger, old_link)
+            .await
+            .expect("save");
+        let saved = fetch_plain_link(&pool, "acme", &project, &issue, &old_link)
+            .await
+            .expect("reread")
+            .expect("found");
+        assert_eq!(saved.title.as_deref(), Some("New"));
+        assert_eq!(saved.url, "https://e.example");
+        assert_eq!(saved.updated_by_id, Some(stranger));
+        assert_eq!(saved.metadata, serde_json::json!({}));
+
+        // PR / review scopes: any membership row in the project, DISTINCT.
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let prs = pr_link_list_select("acme", project, issue)
+            .all(&db)
+            .await
+            .expect("prs");
+        assert_eq!(prs.len(), 1);
+        let owned = PrLinkOwned::from(prs[0].clone());
+        assert_eq!(owned.pr_number, 7);
+        assert_eq!(
+            owned.pr_updated_at.as_deref(),
+            Some("2026-01-02T03:04:05.000000Z")
+        );
+        assert!(pr_link_list_select("acme", lonely, issue)
+            .all(&db)
+            .await
+            .expect("lonely")
+            .is_empty());
+        assert!(fetch_scoped_pr(&pool, "acme", &project, &issue, &pr)
+            .await
+            .expect("scoped pr")
+            .is_some());
+        assert_eq!(
+            fetch_pr_owned(&pool, &pr_lonely).await.expect("owned").id,
+            pr_lonely.to_string()
+        );
+        let reviews = review_link_list_select("acme", project, issue)
+            .all(&db)
+            .await
+            .expect("reviews");
+        assert_eq!(reviews.len(), 1);
+        let review_owned = fetch_scoped_review(&pool, "acme", &project, &issue, &review)
+            .await
+            .expect("scoped review")
+            .expect("found");
+        assert_eq!(review_owned.metadata, serde_json::json!({"a": [1]}));
+        assert_eq!(review_owned.remote_updated_at, None);
+        assert!(
+            fetch_scoped_review(&pool, "acme", &archived, &issue, &review)
+                .await
+                .expect("archived")
+                .is_none()
         );
     }
 }

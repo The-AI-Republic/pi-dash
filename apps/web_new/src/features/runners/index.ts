@@ -26,10 +26,15 @@ export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes 
 export type { ApprovalModeCarryInput } from "./runtime/approvalModes.js";
 export { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
 export {
-  CREDENTIAL_RENEW_BEFORE_MS,
-  connectProject,
+  canSignOutComputer,
+  compatibleHello,
+  currentDiscovery,
+  daemonAccountKey,
+  discoverDaemon,
+  discoveryProblem,
   disposeRuntimeForSignOut,
   EngineUnavailableError,
+  engineActionFor,
   ensureChatRuntime,
   getRuntimeAccount,
   HEARTBEAT_POLL_ATTEMPTS,
@@ -37,23 +42,50 @@ export {
   MANAGED_RUNNER_KIND,
   prepareAgentRun,
   refreshRuntime,
+  renewEngineIfAllowed,
   resumeRuntime,
+  setUpDaemon,
+  signInWorkspace,
+  turnOnEngineForProject,
 } from "./runtime/service.js";
-export type { AgentRunTarget, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
+export type { AgentRunTarget, DaemonSetUpStep, EngineAction, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
+export { migrateLegacyTrees } from "./runtime/desktop-migration.js";
+export type { MigrationOutcome, MigrationDeps } from "./runtime/desktop-migration.js";
+export {
+  dismissNotices,
+  emptyNotices,
+  folderKey,
+  getServerRunner,
+  hasNotices,
+  loadNotices,
+  podKey,
+  recordNotices,
+  replaceKey,
+  setPodWork,
+  subscribeNotices,
+} from "./runtime/desktop-notices.js";
+export type { DesktopNotices } from "./runtime/desktop-notices.js";
+export {
+  declineReplace,
+  errorText as replaceErrorText,
+  findReplacePrompt,
+  offerReplace,
+  registerReplacePrompt,
+  replaceMachine,
+  replacePromptOpen,
+  setReplacePromptOpen,
+  subscribeReplacePromptOpen,
+} from "./runtime/desktop-replace.js";
+export type { ReplaceCandidate, ReplaceOutcome, ReplacePrompt, ReplaceDeps } from "./runtime/desktop-replace.js";
+export { MigrationNoticesDialog } from "./runtime/MigrationNoticesDialog.js";
+export { ReplaceMachineDialog } from "./runtime/ReplaceMachineDialog.js";
+export { registerSetUpPrompt, requestDaemonSetup } from "./runtime/setupPrompt.js";
+export type { SetUpReason, SetUpRequest } from "./runtime/setupPrompt.js";
 export { confirmRuntimeSignOut, registerSignOutPrompt } from "./runtime/signOutPrompt.js";
 export { RuntimeSignOutDialog } from "./runtime/SignOutDialog.js";
 export { registerRuntimeSignOutLifecycle, RuntimeSignOutLifecycle } from "./runtime/SignOutLifecycle.js";
-export {
-  AVAILABILITY_POLL_INTERVAL_MS,
-  matchProjectIdentifier,
-  RUNTIME_CONNECTED_TEXT,
-  RUNTIME_PREPARING_TEXT,
-  RUNTIME_REFRESH_INTERVAL_MS,
-  RUNTIME_WAITING_TEXT,
-  RuntimeSupervisor,
-  selectRuntimeNotice,
-} from "./runtime/Supervisor.js";
-export type { RuntimeNoticeInput, RuntimeSupervisorProps } from "./runtime/Supervisor.js";
+export { RUNTIME_REFRESH_INTERVAL_MS, RuntimeSupervisor } from "./runtime/Supervisor.js";
+export type { RuntimeSupervisorProps } from "./runtime/Supervisor.js";
 
 export { decideProjectRunnersAccess, decideWorkspaceRunnersAccess, type RunnersAccess } from "./access.js";
 export { buildRunnersAreaValue, RunnersAreaProvider, useRunnersArea, type RunnersAreaValue } from "./area.js";

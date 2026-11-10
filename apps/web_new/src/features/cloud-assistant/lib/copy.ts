@@ -87,7 +87,32 @@ export const SIGN_IN_FAILED_BODY = "OpenAI reported that the sign-in could not f
 export const SIGN_IN_TIMEOUT_TITLE = "ChatGPT sign-in did not finish";
 export const SIGN_IN_TIMEOUT_BODY = "No answer arrived from OpenAI before the five-minute window ended.";
 
+export const TURN_FREE_QUOTA_EXHAUSTED_PREFIX = "Daily free limit reached, resets at";
+export const TURN_FREE_QUOTA_EXHAUSTED_DETAIL = "Daily free limit reached, resets at";
+export const TURN_PAID_MODEL_TITLE = "This model needs credit";
+export const TURN_PAID_MODEL_DETAIL =
+  "This model needs credit. The free model deepseek/deepseek-v4.1-flash-1017 is included on every plan.";
+export const TURN_PAID_MODEL_SWITCH_ACTION = "Switch to free model";
+export const TURN_PAID_MODEL_TOPUP_ACTION = "Top up wallet";
+export const TURN_WALLET_DETAIL = "Your OpenHub wallet is out of credits. Top up to keep using the assistant.";
+export const TURN_WALLET_TOPUP_ACTION = "Top up wallet";
+export const TURN_FREE_LANE_BUSY_DETAIL = "Too many free requests at once. Try again in a moment.";
+export const TURN_FREE_QUOTA_UNAVAILABLE_DETAIL = "Free quota is unavailable right now. Try again shortly.";
+export const TURN_RETRYABLE_FALLBACK = "Try again in a moment.";
+
 export const TOOL_SERVERS_HEADING = "Tool servers (MCP)";
 export const TOOL_SERVERS_INTRO =
   "Servers listed here are offered to the assistant as tools. Give each one a name and the address it answers on.";
 export const APPS_POINTER = "Looking for apps? Open Apps in the sidebar to browse, install and connect them.";
+
+// Free-quota model badges (NEWPIDASH-150, PRIVATEPI1-138). The free list
+// comes from the usage-meter contract, never hardcoded here.
+export const FREE_BADGE = "Free";
+export const USES_CREDIT_BADGE = "Uses credit";
+export const NEEDS_CREDIT_BADGE = "Needs credit";
+export const TOP_UP_LABEL = "Top up";
+export const NEEDS_CREDIT_NOTICE =
+  "This model needs credit on the free plan. Switch to a free model, or top up to use it.";
+export const MODEL_BLOCKED_TITLE = "Model needs credit";
+export const MODEL_BLOCKED_BODY =
+  "Free plans can use free models only. Switch to a free model or top up to use this one.";

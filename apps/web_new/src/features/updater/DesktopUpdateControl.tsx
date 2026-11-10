@@ -24,8 +24,11 @@ export function updateControlName(version: string): string {
   return `${UPDATE_CONTROL_LABEL} ${version}`;
 }
 
-export function updateReadyHint(version: string, currentVersion: string): string {
-  return `Update to ${version} — you're on ${currentVersion}. The app restarts when it's done.`;
+export function updateReadyHint(version: string, currentVersion: string, notes?: string): string {
+  const base = `Update to ${version} — you're on ${currentVersion}.`;
+  const trimmed = notes?.trim();
+  const withNotes = trimmed ? `${base}\n\n${trimmed}` : base;
+  return `${withNotes} The app restarts when it's done.`;
 }
 
 export function updateInstallingHint(version: string): string {
@@ -50,7 +53,11 @@ export function DesktopUpdateControlView({ state }: DesktopUpdateControlViewProp
   return (
     <div data-testid="desktop-update-control" className="relative flex shrink-0 items-center">
       <Tooltip
-        content={busy ? updateInstallingHint(update.version) : updateReadyHint(update.version, update.currentVersion)}
+        content={
+          busy
+            ? updateInstallingHint(update.version)
+            : updateReadyHint(update.version, update.currentVersion, update.notes)
+        }
       >
         <IconButton
           label={name}

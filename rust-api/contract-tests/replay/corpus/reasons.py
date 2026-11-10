@@ -35,11 +35,19 @@ Proxied pairs need no entry: the check verifies them live against
 
 EXCLUDED = {}
 
-MISSING_FIX = {
-    # NOTE (rebase): PIDASHCONV-827 landed — the two instance-admin
-    # pairs now exist as proxied routes, so the MISSING entries were
-    # removed (proxied pairs carry the generic PROXIED reason).
-}
+MISSING_FIX = {}
 
 OWNED_UNCOVERED = {
+    ("/api/v1/runner/dev-machines/{}/", "PATCH"): (
+        "NEWPIDASH-52: daemon machine PATCH landed without a replay session; "
+        "covered by runner/test_engine_machine.py contract tests on both "
+        "halves instead. Delete this entry when batch 4 adds the runner "
+        "corpus session."
+    ),
+    ("/api/v1/runner/dev-machines/{}/merge-into/", "POST"): (
+        "NEWPIDASH-52: daemon merge-into landed without a replay session; "
+        "covered by runner/test_engine_machine.py contract tests on both "
+        "halves instead. Delete this entry when batch 4 adds the runner "
+        "corpus session."
+    ),
 }

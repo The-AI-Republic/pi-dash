@@ -20,9 +20,12 @@
 //! `pidash_services::integrations::code_reviews` (D-05) kernels. This
 //! module owns the HTTP shell (API-key auth, the slug→UUID rewrite,
 //! permission wiring, body parsing, the paginated envelope) plus the two
-//! sqlx store implementations the kernels are seamed over — the same
+//! SeaORM store implementations the kernels are seamed over — the same
 //! split the D-26 app-surface handlers use, mirroring their store and
-//! transport implementations (which are private to that surface).
+//! transport implementations (which are private to that surface). The
+//! list / detail querysets are SeaORM selects over the link entities
+//! (`pr_link_scope`, `review_link_scope`); the store runs the `*::orm`
+//! twins beside the `pidash_services::integrations` SQL constants.
 //!
 //! Request order (preserved, not redesigned): API-key authentication,
 //! then the slug→UUID rewrite (`api/views/base.py:51-98`, skipped for
@@ -78,13 +81,20 @@ use crate::state::AppState;
 use crate::v1_projects::handlers_project::{
     envelope, preamble, project_base_facts, query_last, rewrite_project_id, Preamble, QueryMap,
 };
-use pidash_compat::db::{is_integrity_error, is_unique_violation};
+use pidash_compat::db::is_unique_violation;
 use pidash_compat::response::{json_created, json_ok, no_content};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
 use pidash_services::operations;
-use pidash_services::read;
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait,
+};
+
+use pidash_db::entity::{
+    git_code_review_links, github_pull_request_links, project_members, projects, workspaces,
+};
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -428,107 +438,231 @@ fn parse_json_body(raw: &[u8]) -> Result<Map<String, Value>, Denial> {
 }
 
 // ---------------------------------------------------------------------------
-// List / detail SQL (Q2 semantics, executable `$n` binds)
+// List / detail statements (Q2 semantics, SeaORM)
 // ---------------------------------------------------------------------------
-// (The PR-link list/detail SQL moved to `pidash_services::read::pr_links`
-// with their fetchers, PIDASHCONV-1661; the review-link SQL stays here.)
 
-/// Review-link list rows (`git_code_review.py:32-44`, fixture
-/// `code_review_list_queryset`): same join-span shape as
-/// `read::PR_LIST_SQL`.
-const REVIEW_LIST_SQL: &str = r#"SELECT DISTINCT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."provider", "git_code_review_links"."host_url", "git_code_review_links"."namespace", "git_code_review_links"."repo_name", "git_code_review_links"."repo_external_id", "git_code_review_links"."external_id", "git_code_review_links"."external_iid", "git_code_review_links"."url", "git_code_review_links"."title", "git_code_review_links"."state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at", "git_code_review_links"."metadata" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "projects"."archived_at" IS NULL) ORDER BY "git_code_review_links"."created_at" DESC"#;
+/// `GithubPullRequestLinkViewSet.get_queryset` scope (`github_pr.py:37-48`,
+/// fixture `pr_list_queryset`): `INNER JOIN`s to `workspaces`, `projects`
+/// and the project's `project_members` rows, the slug / project / issue
+/// predicates, and an *active* membership row for the caller (no
+/// `deleted_at` guard on the membership, Q2 ported bug 7). The list adds
+/// `DISTINCT` (the membership join can fan out), the archived-project
+/// guard and `-created_at`; the detail adds the pk and `LIMIT 1` with no
+/// archived guard and no `DISTINCT` (ported bug 5).
+fn pr_link_scope(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    actor_id: Uuid,
+) -> sea_orm::Select<github_pull_request_links::Entity> {
+    github_pull_request_links::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            github_pull_request_links::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            github_pull_request_links::Relation::Projects.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .filter(github_pull_request_links::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(github_pull_request_links::Column::ProjectId.eq(project_id))
+        .filter(github_pull_request_links::Column::IssueId.eq(issue_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(actor_id))
+}
+
+/// PR-link list rows (`github_pr.py:51-56`): the scope, `DISTINCT`, the
+/// archived-project guard, `-created_at`.
+fn pr_link_list_select(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    actor_id: Uuid,
+) -> sea_orm::Select<github_pull_request_links::Entity> {
+    pr_link_scope(slug, project_id, issue_id, actor_id)
+        .distinct()
+        .filter(projects::Column::ArchivedAt.is_null())
+        .order_by_desc(github_pull_request_links::Column::CreatedAt)
+}
+
+/// PR-link detail scope + pk (`github_pr.py:97-100`): `Meta.ordering`
+/// then the `.get()`'s single row.
+fn pr_link_detail_select(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    actor_id: Uuid,
+    pk: Uuid,
+) -> sea_orm::Select<github_pull_request_links::Entity> {
+    pr_link_scope(slug, project_id, issue_id, actor_id)
+        .filter(github_pull_request_links::Column::Id.eq(pk))
+        .order_by_desc(github_pull_request_links::Column::CreatedAt)
+        .limit(1)
+}
+
+/// `GitCodeReviewLinkViewSet.get_queryset` scope (`git_code_review.py:32-44`,
+/// fixture `code_review_list_queryset`): the same join-span shape as
+/// [`pr_link_scope`].
+fn review_link_scope(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    actor_id: Uuid,
+) -> sea_orm::Select<git_code_review_links::Entity> {
+    git_code_review_links::Entity::find()
+        .join(
+            JoinType::InnerJoin,
+            git_code_review_links::Relation::Workspaces.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            git_code_review_links::Relation::Projects.def(),
+        )
+        .join(
+            JoinType::InnerJoin,
+            projects::Relation::ProjectMembers.def(),
+        )
+        .filter(git_code_review_links::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(git_code_review_links::Column::ProjectId.eq(project_id))
+        .filter(git_code_review_links::Column::IssueId.eq(issue_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::MemberId.eq(actor_id))
+}
+
+/// Review-link list rows: the scope, `DISTINCT`, the archived-project
+/// guard, `-created_at`.
+fn review_link_list_select(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    actor_id: Uuid,
+) -> sea_orm::Select<git_code_review_links::Entity> {
+    review_link_scope(slug, project_id, issue_id, actor_id)
+        .distinct()
+        .filter(projects::Column::ArchivedAt.is_null())
+        .order_by_desc(git_code_review_links::Column::CreatedAt)
+}
 
 /// Review-link detail scope + pk (`git_code_review.py:86-98`, fixture
-/// `code_review_detail_queryset`): same shape as `read::PR_DETAIL_SQL`.
-const REVIEW_DETAIL_SQL: &str = r#"SELECT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."provider", "git_code_review_links"."host_url", "git_code_review_links"."namespace", "git_code_review_links"."repo_name", "git_code_review_links"."repo_external_id", "git_code_review_links"."external_id", "git_code_review_links"."external_iid", "git_code_review_links"."url", "git_code_review_links"."title", "git_code_review_links"."state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at", "git_code_review_links"."metadata" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "git_code_review_links"."id" = $5) ORDER BY "git_code_review_links"."created_at" DESC LIMIT 1"#;
+/// `code_review_detail_queryset`).
+fn review_link_detail_select(
+    slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    actor_id: Uuid,
+    pk: Uuid,
+) -> sea_orm::Select<git_code_review_links::Entity> {
+    review_link_scope(slug, project_id, issue_id, actor_id)
+        .filter(git_code_review_links::Column::Id.eq(pk))
+        .order_by_desc(git_code_review_links::Column::CreatedAt)
+        .limit(1)
+}
+
+/// The pre-delete PR-link read shape (the `github_client` store mapper's
+/// field set: `pr_number` widened to `i64`, `pr_updated_at` rendered
+/// RFC 3339 with microseconds and `Z`).
+fn pr_link_row_of(
+    row: &github_pull_request_links::Model,
+) -> pidash_services::app_issues::pr_links::PrLinkRow {
+    pidash_services::app_issues::pr_links::PrLinkRow {
+        id: row.id,
+        project_id: row.project_id,
+        issue_id: row.issue_id,
+        repo_owner: row.repo_owner.clone(),
+        repo_name: row.repo_name.clone(),
+        pr_number: i64::from(row.pr_number),
+        url: row.url.clone(),
+        title: row.title.clone(),
+        state: row.state.clone(),
+        merged: row.merged,
+        draft: row.draft,
+        pr_updated_at: row.pr_updated_at.map(|stamp| {
+            stamp
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+        }),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Row rendering (S3 shapes)
 // ---------------------------------------------------------------------------
 
-/// Render one review-link row through `GitCodeReviewLinkSerializer` (S3).
-fn render_review_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Denial> {
+/// Render one PR-link row through `GithubPullRequestLinkSerializer` (S3
+/// `render_pr_link`): full field set, no `fields=`/`expand=` (the view
+/// passes neither). The `operations::pull_requests::render_pr_row` shape
+/// over the decoded link.
+fn render_pr_row(link: &GithubPullRequestLink, tz: &Tz) -> Result<Value, Denial> {
     use pidash_services::v1_work_items::shape_links as shape;
-    use sqlx::Row as _;
-    let dt = |key: &str| -> Result<String, Denial> {
-        row.try_get::<chrono::DateTime<chrono::Utc>, _>(key)
-            .map(|stamp| crate::serializer::render_datetime_in(&stamp, tz))
-            .map_err(|error| db_error(error, "review row datetime"))
+    let dt = |stamp: &chrono::DateTime<chrono::Utc>| {
+        pidash_compat::datetime::render_datetime_in(stamp, tz)
     };
-    let dt_opt = |key: &str| -> Result<Option<String>, Denial> {
-        row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(key)
-            .map(|stamp| stamp.map(|stamp| crate::serializer::render_datetime_in(&stamp, tz)))
-            .map_err(|error| db_error(error, "review row datetime"))
+    let id = link.id.to_string();
+    let issue = link.issue_id.to_string();
+    let created_by = link.created_by_id.map(|id| id.to_string());
+    let pr_updated_at = link.pr_updated_at.as_ref().map(dt);
+    let created_at = dt(&link.created_at);
+    let updated_at = dt(&link.updated_at);
+    let shape_row = shape::PrLinkRow {
+        id: &id,
+        issue: &issue,
+        repo_owner: &link.repo_owner,
+        repo_name: &link.repo_name,
+        pr_number: link.pr_number,
+        url: &link.url,
+        title: &link.title,
+        state: &link.state,
+        merged: link.merged,
+        draft: link.draft,
+        pr_updated_at: pr_updated_at.as_deref(),
+        created_at: &created_at,
+        updated_at: &updated_at,
+        created_by: created_by.as_deref(),
     };
-    let id: Uuid = row
-        .try_get("id")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let issue_id: Uuid = row
-        .try_get("issue_id")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let created_by: Option<Uuid> = row
-        .try_get("created_by_id")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let metadata: Value = row
-        .try_get("metadata")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let id = id.to_string();
-    let issue = issue_id.to_string();
-    let created_by = created_by.map(|id| id.to_string());
-    let remote_updated_at = dt_opt("remote_updated_at")?;
-    let created_at = dt("created_at")?;
-    let updated_at = dt("updated_at")?;
-    let provider: String = row
-        .try_get("provider")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let host_url: String = row
-        .try_get("host_url")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let namespace: String = row
-        .try_get("namespace")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let repo_name: String = row
-        .try_get("repo_name")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let repo_external_id: String = row
-        .try_get("repo_external_id")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let external_id: String = row
-        .try_get("external_id")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let external_iid: String = row
-        .try_get("external_iid")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let url: String = row
-        .try_get("url")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let title: String = row
-        .try_get("title")
-        .map_err(|error| db_error(error, "review row map"))?;
-    let state: String = row
-        .try_get("state")
-        .map_err(|error| db_error(error, "review row map"))?;
+    let map = shape::render_pr_link(&shape::PrLinkShowInput {
+        row: &shape_row,
+        fields: None,
+        expand: &[],
+        expansions: &[],
+    })
+    .map_err(|error| db_error(error, "pr row render"))?;
+    Ok(Value::Object(map))
+}
+
+/// Render one review-link row through `GitCodeReviewLinkSerializer` (S3).
+fn render_review_row(link: &GitCodeReviewLink, tz: &Tz) -> Result<Value, Denial> {
+    use pidash_services::v1_work_items::shape_links as shape;
+    let dt =
+        |stamp: &chrono::DateTime<chrono::Utc>| crate::serializer::render_datetime_in(stamp, tz);
+    let id = link.id.to_string();
+    let issue = link.issue_id.to_string();
+    let created_by = link.created_by_id.map(|id| id.to_string());
+    let remote_updated_at = link.remote_updated_at.as_ref().map(dt);
+    let created_at = dt(&link.created_at);
+    let updated_at = dt(&link.updated_at);
     let shape_row = shape::ReviewLinkRow {
         id: &id,
         issue: &issue,
-        provider: &provider,
-        host_url: &host_url,
-        namespace: &namespace,
-        repo_name: &repo_name,
-        repo_external_id: &repo_external_id,
-        external_id: &external_id,
-        external_iid: &external_iid,
-        url: &url,
-        title: &title,
-        state: &state,
-        merged: row
-            .try_get("merged")
-            .map_err(|error| db_error(error, "review row map"))?,
-        draft: row
-            .try_get("draft")
-            .map_err(|error| db_error(error, "review row map"))?,
+        provider: &link.provider,
+        host_url: &link.host_url,
+        namespace: &link.namespace,
+        repo_name: &link.repo_name,
+        repo_external_id: &link.repo_external_id,
+        external_id: &link.external_id,
+        external_iid: &link.external_iid,
+        url: &link.url,
+        title: &link.title,
+        state: &link.state,
+        merged: link.merged,
+        draft: link.draft,
         remote_updated_at: remote_updated_at.as_deref(),
-        metadata: &metadata,
+        metadata: &link.metadata,
         created_at: &created_at,
         updated_at: &updated_at,
         created_by: created_by.as_deref(),
@@ -544,7 +678,7 @@ fn render_review_row(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<Value, Deni
 }
 
 // ---------------------------------------------------------------------------
-// Stores: the `pr_links` + `code_reviews` seams over sqlx
+// Stores: the `pr_links` + `code_reviews` seams over SeaORM
 // ---------------------------------------------------------------------------
 
 use pidash_services::integrations::accounts::{
@@ -573,19 +707,28 @@ use pidash_db::integrations::git_models::git_repository::GitRepository;
 use pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink;
 use pidash_services::integrations::code_reviews::{LegacyLinkUpdate, LinkWriteError};
 
-/// Map a sqlx failure into the integrations store error.
-fn git_store_error(context: &str, error: sqlx::Error) -> GitStoreError {
+/// Map a database failure into the integrations store error.
+fn git_store_error<E: std::fmt::Display>(context: &str, error: E) -> GitStoreError {
     GitStoreError::Db(format!("{context}: {error}"))
 }
 
 /// Map a link-write failure: integrity violations carry the payload
 /// marker (Python's `IntegrityError` 400), anything else the generic
 /// store error (500).
-fn git_write_error(context: &str, error: sqlx::Error) -> GitStoreError {
-    if is_integrity_error(&error) {
+fn git_write_error(context: &str, error: DbErr) -> GitStoreError {
+    if pidash_db::orm_tx::is_integrity_violation(&error) {
         GitStoreError::Db(format!("{REVIEW_PAYLOAD_INVALID}: {context}: {error}"))
     } else {
         git_store_error(context, error)
+    }
+}
+
+/// True when a SeaORM write failed on a unique violation (SQLSTATE 23505).
+fn is_orm_unique_violation(error: &DbErr) -> bool {
+    match error {
+        DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner)) => is_unique_violation(inner),
+        _ => false,
     }
 }
 
@@ -593,148 +736,26 @@ fn git_write_error(context: &str, error: sqlx::Error) -> GitStoreError {
 /// columns follow `BaseModel.save`. The delete methods soft-delete
 /// (`SoftDeleteModel.delete`) with the `soft_delete_related_objects`
 /// fan-out inline, preserving the update-then-enqueue order of
-/// `mixins.py:71-78`.
+/// `mixins.py:71-78`. Every statement is the SeaORM twin beside its SQL
+/// constant in `pidash_services::integrations` (`*::orm`), run on the
+/// pool's SeaORM connection; the bind transaction stays an sqlx
+/// transaction bridged through `TxConn`.
 struct ReviewStore {
     pool: sqlx::PgPool,
+    db: DatabaseConnection,
     actor: uuid::Uuid,
 }
 
 impl ReviewStore {
     fn new(pool: sqlx::PgPool, actor: uuid::Uuid) -> Self {
-        Self { pool, actor }
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        Self { pool, db, actor }
     }
 }
 
-fn review_link_from_row(row: &sqlx::postgres::PgRow) -> Result<GitCodeReviewLink, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("review link map", error))
-        };
-    }
-    Ok(GitCodeReviewLink {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        project_id: req!("project_id", Uuid)?,
-        workspace_id: req!("workspace_id", Uuid)?,
-        issue_id: req!("issue_id", Uuid)?,
-        provider: req!("provider", String)?,
-        host_url: req!("host_url", String)?,
-        namespace: req!("namespace", String)?,
-        repo_name: req!("repo_name", String)?,
-        repo_external_id: req!("repo_external_id", String)?,
-        external_id: req!("external_id", String)?,
-        external_iid: req!("external_iid", String)?,
-        url: req!("url", String)?,
-        title: req!("title", String)?,
-        state: req!("state", String)?,
-        merged: req!("merged", bool)?,
-        draft: req!("draft", bool)?,
-        remote_updated_at: req!("remote_updated_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        metadata: req!("metadata", Value)?,
-    })
-}
-
-fn legacy_link_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GithubPullRequestLink, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("legacy link map", error))
-        };
-    }
-    Ok(GithubPullRequestLink {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        project_id: req!("project_id", Uuid)?,
-        workspace_id: req!("workspace_id", Uuid)?,
-        issue_id: req!("issue_id", Uuid)?,
-        repo_owner: req!("repo_owner", String)?,
-        repo_name: req!("repo_name", String)?,
-        pr_number: req!("pr_number", i32)?,
-        url: req!("url", String)?,
-        title: req!("title", String)?,
-        state: req!("state", String)?,
-        merged: req!("merged", bool)?,
-        draft: req!("draft", bool)?,
-        pr_updated_at: req!("pr_updated_at", Option<chrono::DateTime<chrono::Utc>>)?,
-    })
-}
-
-fn provider_account_from_row(
-    row: &sqlx::postgres::PgRow,
-) -> Result<GitProviderAccount, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("account map", error))
-        };
-    }
-    Ok(GitProviderAccount {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        workspace_id: req!("workspace_id", Uuid)?,
-        provider: req!("provider", String)?,
-        host_url: req!("host_url", String)?,
-        auth_type: req!("auth_type", String)?,
-        external_account_id: req!("external_account_id", String)?,
-        external_account_login: req!("external_account_login", String)?,
-        display_name: req!("display_name", String)?,
-        capabilities: req!("capabilities", Value)?,
-        credential_config: req!("credential_config", Value)?,
-        workspace_integration_id: req!("workspace_integration_id", Option<Uuid>)?,
-        status: req!("status", String)?,
-        verified_at: req!("verified_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        last_check_error: req!("last_check_error", String)?,
-        metadata: req!("metadata", Value)?,
-    })
-}
-
-fn repository_from_row(row: &sqlx::postgres::PgRow) -> Result<GitRepository, GitStoreError> {
-    use sqlx::Row as _;
-    macro_rules! req {
-        ($key:literal, $ty:ty) => {
-            row.try_get::<$ty, _>($key)
-                .map_err(|error| git_store_error("repository map", error))
-        };
-    }
-    Ok(GitRepository {
-        id: req!("id", Uuid)?,
-        created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-        updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-        created_by_id: req!("created_by_id", Option<Uuid>)?,
-        updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-        deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-        provider: req!("provider", String)?,
-        host_url: req!("host_url", String)?,
-        external_id: req!("external_id", String)?,
-        namespace: req!("namespace", String)?,
-        name: req!("name", String)?,
-        full_name: req!("full_name", String)?,
-        web_url: req!("web_url", String)?,
-        clone_url_http: req!("clone_url_http", String)?,
-        clone_url_ssh: req!("clone_url_ssh", String)?,
-        default_branch: req!("default_branch", String)?,
-        is_private: req!("is_private", bool)?,
-        metadata: req!("metadata", Value)?,
-    })
-}
+use pidash_services::integrations::accounts::orm as accounts_orm;
+use pidash_services::integrations::code_reviews::orm as reviews_orm;
+use pidash_services::integrations::repositories::orm as repos_orm;
 
 impl CodeReviewStore for ReviewStore {
     async fn review_issue_exists(
@@ -743,15 +764,9 @@ impl CodeReviewStore for ReviewStore {
         project_id: Uuid,
         workspace_slug: &str,
     ) -> Result<bool, GitStoreError> {
-        let row: Option<(i32,)> =
-            sqlx::query_as(pidash_services::integrations::code_reviews::ISSUE_EXISTS_SQL)
-                .bind(issue_id)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("review issue exists", error))?;
-        Ok(row.is_some())
+        reviews_orm::issue_exists(&self.db, issue_id, project_id, workspace_slug)
+            .await
+            .map_err(|error| git_store_error("review issue exists", error))
     }
 
     async fn find_legacy_link(
@@ -760,15 +775,9 @@ impl CodeReviewStore for ReviewStore {
         repo_name_lower: &str,
         pr_number: i32,
     ) -> Result<Option<GithubPullRequestLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_FIND_SQL)
-                .bind(repo_owner_lower)
-                .bind(repo_name_lower)
-                .bind(pr_number)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("legacy link find", error))?;
-        row.map(|row| legacy_link_from_row(&row)).transpose()
+        reviews_orm::find_legacy_link(&self.db, repo_owner_lower, repo_name_lower, pr_number)
+            .await
+            .map_err(|error| git_store_error("legacy link find", error))
     }
 
     async fn find_path_review_link(
@@ -779,17 +788,16 @@ impl CodeReviewStore for ReviewStore {
         repo_name_lower: &str,
         external_iid: &str,
     ) -> Result<Option<GitCodeReviewLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::PATH_REVIEW_LINK_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(namespace_lower)
-                .bind(repo_name_lower)
-                .bind(external_iid)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("path review link find", error))?;
-        row.map(|row| review_link_from_row(&row)).transpose()
+        reviews_orm::find_path_review_link(
+            &self.db,
+            provider,
+            host_url,
+            namespace_lower,
+            repo_name_lower,
+            external_iid,
+        )
+        .await
+        .map_err(|error| git_store_error("path review link find", error))
     }
 
     async fn find_repo_scope_link(
@@ -799,16 +807,15 @@ impl CodeReviewStore for ReviewStore {
         external_iid: &str,
         repo_external_id: &str,
     ) -> Result<Option<GitCodeReviewLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::REPO_SCOPE_LINK_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(external_iid)
-                .bind(repo_external_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("repo scope link find", error))?;
-        row.map(|row| review_link_from_row(&row)).transpose()
+        reviews_orm::find_repo_scope_link(
+            &self.db,
+            provider,
+            host_url,
+            external_iid,
+            repo_external_id,
+        )
+        .await
+        .map_err(|error| git_store_error("repo scope link find", error))
     }
 
     async fn find_path_empty_repo_link(
@@ -819,17 +826,16 @@ impl CodeReviewStore for ReviewStore {
         namespace_lower: &str,
         repo_name_lower: &str,
     ) -> Result<Option<GitCodeReviewLink>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::PATH_EMPTY_REPO_LINK_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(external_iid)
-                .bind(namespace_lower)
-                .bind(repo_name_lower)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("path empty repo link find", error))?;
-        row.map(|row| review_link_from_row(&row)).transpose()
+        reviews_orm::find_path_empty_repo_link(
+            &self.db,
+            provider,
+            host_url,
+            external_iid,
+            namespace_lower,
+            repo_name_lower,
+        )
+        .await
+        .map_err(|error| git_store_error("path empty repo link find", error))
     }
 
     async fn find_binding_review(
@@ -841,60 +847,19 @@ impl CodeReviewStore for ReviewStore {
         namespace: &str,
         repo_name: &str,
     ) -> Result<Option<(GitProviderAccount, GitRepository)>, GitStoreError> {
-        // `SELECT pa.*, r.*`: duplicate names resolve to the account
-        // half by name, so the account maps by name and the repository
-        // by position (past the 20 account columns, in table order —
-        // pinned against `information_schema`).
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::BINDING_FOR_REVIEW_SQL)
-                .bind(workspace_slug)
-                .bind(project_id)
-                .bind(provider)
-                .bind(host_url)
-                .bind(namespace)
-                .bind(repo_name)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("binding review find", error))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let account = provider_account_from_row(&row)?;
-        let repo = {
-            use sqlx::Row as _;
-            macro_rules! at {
-                ($pos:literal, $ty:ty) => {
-                    row.try_get::<$ty, _>(20 + $pos)
-                        .map_err(|error| git_store_error("binding repo map", error))
-                };
-            }
-            // `git_repositories` table order: created_at, updated_at,
-            // deleted_at, id, provider, host_url, external_id,
-            // namespace, name, full_name, web_url, clone_url_http,
-            // clone_url_ssh, default_branch, is_private, metadata,
-            // created_by_id, updated_by_id.
-            GitRepository {
-                created_at: at!(0, chrono::DateTime<chrono::Utc>)?,
-                updated_at: at!(1, chrono::DateTime<chrono::Utc>)?,
-                deleted_at: at!(2, Option<chrono::DateTime<chrono::Utc>>)?,
-                id: at!(3, Uuid)?,
-                provider: at!(4, String)?,
-                host_url: at!(5, String)?,
-                external_id: at!(6, String)?,
-                namespace: at!(7, String)?,
-                name: at!(8, String)?,
-                full_name: at!(9, String)?,
-                web_url: at!(10, String)?,
-                clone_url_http: at!(11, String)?,
-                clone_url_ssh: at!(12, String)?,
-                default_branch: at!(13, String)?,
-                is_private: at!(14, bool)?,
-                metadata: at!(15, Value)?,
-                created_by_id: at!(16, Option<Uuid>)?,
-                updated_by_id: at!(17, Option<Uuid>)?,
-            }
-        };
-        Ok(Some((account, repo)))
+        // The account and repository halves decode by prefixed name
+        // (`pa_` / `r_`), never by position.
+        reviews_orm::find_binding_review(
+            &self.db,
+            workspace_slug,
+            project_id,
+            provider,
+            host_url,
+            namespace,
+            repo_name,
+        )
+        .await
+        .map_err(|error| git_store_error("binding review find", error))
     }
 
     async fn find_review_issue_workspace(
@@ -902,14 +867,9 @@ impl CodeReviewStore for ReviewStore {
         project_id: Uuid,
         workspace_slug: &str,
     ) -> Result<Option<Uuid>, GitStoreError> {
-        let row: Option<(Uuid,)> =
-            sqlx::query_as(pidash_services::integrations::code_reviews::REVIEW_ISSUE_WORKSPACE_SQL)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("review issue workspace", error))?;
-        Ok(row.map(|row| row.0))
+        reviews_orm::review_issue_workspace(&self.db, project_id, workspace_slug)
+            .await
+            .map_err(|error| git_store_error("review issue workspace", error))
     }
 
     async fn find_review_repository(
@@ -919,89 +879,52 @@ impl CodeReviewStore for ReviewStore {
         namespace: &str,
         repo_name: &str,
     ) -> Result<Option<GitRepository>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::code_reviews::REVIEW_REPOSITORY_FIND_SQL)
-                .bind(provider)
-                .bind(host_url)
-                .bind(namespace)
-                .bind(repo_name)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("review repository find", error))?;
-        row.map(|row| repository_from_row(&row)).transpose()
+        reviews_orm::find_review_repository(&self.db, provider, host_url, namespace, repo_name)
+            .await
+            .map_err(|error| git_store_error("review repository find", error))
     }
 
     async fn find_review_project_workspace(
         &self,
         project_id: Uuid,
     ) -> Result<Option<Uuid>, GitStoreError> {
-        let row: Option<(Uuid,)> = sqlx::query_as(
-            pidash_services::integrations::code_reviews::REVIEW_PROJECT_WORKSPACE_SQL,
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("review project workspace", error))?;
-        Ok(row.map(|row| row.0))
+        reviews_orm::review_project_workspace(&self.db, project_id)
+            .await
+            .map_err(|error| git_store_error("review project workspace", error))
     }
 
     async fn insert_code_review_link(
         &self,
         row: NewCodeReviewLink,
     ) -> Result<GitCodeReviewLink, LinkWriteError> {
-        let outcome =
-            sqlx::query(pidash_services::integrations::code_reviews::CODE_REVIEW_LINK_INSERT_SQL)
-                .bind(row.id)
-                .bind(row.created_at)
-                .bind(row.updated_at)
-                .bind(Some(self.actor))
-                .bind(None::<Uuid>)
-                .bind(row.project_id)
-                .bind(row.workspace_id)
-                .bind(row.issue_id)
-                .bind(&row.provider)
-                .bind(&row.host_url)
-                .bind(&row.namespace)
-                .bind(&row.repo_name)
-                .bind(&row.repo_external_id)
-                .bind(&row.external_id)
-                .bind(&row.external_iid)
-                .bind(&row.url)
-                .bind(&row.title)
-                .bind(&row.state)
-                .bind(row.merged)
-                .bind(row.draft)
-                .bind(row.remote_updated_at)
-                .bind(&row.metadata)
-                .execute(&self.pool)
-                .await;
-        match outcome {
-            Ok(_) => Ok(GitCodeReviewLink {
-                id: row.id,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-                created_by_id: Some(self.actor),
-                updated_by_id: None,
-                deleted_at: None,
-                project_id: row.project_id,
-                workspace_id: row.workspace_id,
-                issue_id: row.issue_id,
-                provider: row.provider,
-                host_url: row.host_url,
-                namespace: row.namespace,
-                repo_name: row.repo_name,
-                repo_external_id: row.repo_external_id,
-                external_id: row.external_id,
-                external_iid: row.external_iid,
-                url: row.url,
-                title: row.title,
-                state: row.state,
-                merged: row.merged,
-                draft: row.draft,
-                remote_updated_at: row.remote_updated_at,
-                metadata: row.metadata,
-            }),
-            Err(error) if is_unique_violation(&error) => Err(LinkWriteError::Conflict),
+        let link = GitCodeReviewLink {
+            id: row.id,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            created_by_id: Some(self.actor),
+            updated_by_id: None,
+            deleted_at: None,
+            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            issue_id: row.issue_id,
+            provider: row.provider,
+            host_url: row.host_url,
+            namespace: row.namespace,
+            repo_name: row.repo_name,
+            repo_external_id: row.repo_external_id,
+            external_id: row.external_id,
+            external_iid: row.external_iid,
+            url: row.url,
+            title: row.title,
+            state: row.state,
+            merged: row.merged,
+            draft: row.draft,
+            remote_updated_at: row.remote_updated_at,
+            metadata: row.metadata,
+        };
+        match reviews_orm::insert_code_review_link(&self.db, &link).await {
+            Ok(()) => Ok(link),
+            Err(error) if is_orm_unique_violation(&error) => Err(LinkWriteError::Conflict),
             Err(error) => Err(LinkWriteError::Store(git_write_error(
                 "code review link insert",
                 error,
@@ -1013,28 +936,7 @@ impl CodeReviewStore for ReviewStore {
         &self,
         row: NewLegacyLink,
     ) -> Result<GithubPullRequestLink, GitStoreError> {
-        sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_INSERT_SQL)
-            .bind(row.id)
-            .bind(row.created_at)
-            .bind(row.updated_at)
-            .bind(Some(self.actor))
-            .bind(None::<Uuid>)
-            .bind(row.project_id)
-            .bind(row.workspace_id)
-            .bind(row.issue_id)
-            .bind(&row.repo_owner)
-            .bind(&row.repo_name)
-            .bind(row.pr_number)
-            .bind(&row.url)
-            .bind(&row.title)
-            .bind(&row.state)
-            .bind(row.merged)
-            .bind(row.draft)
-            .bind(row.pr_updated_at)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| git_write_error("legacy link insert", error))?;
-        Ok(GithubPullRequestLink {
+        let link = GithubPullRequestLink {
             id: row.id,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -1053,7 +955,11 @@ impl CodeReviewStore for ReviewStore {
             merged: row.merged,
             draft: row.draft,
             pr_updated_at: row.pr_updated_at,
-        })
+        };
+        reviews_orm::insert_legacy_link(&self.db, &link)
+            .await
+            .map_err(|error| git_write_error("legacy link insert", error))?;
+        Ok(link)
     }
 
     async fn update_legacy_link(
@@ -1061,65 +967,31 @@ impl CodeReviewStore for ReviewStore {
         id: Uuid,
         update: LegacyLinkUpdate,
     ) -> Result<GithubPullRequestLink, GitStoreError> {
-        sqlx::query(pidash_services::integrations::code_reviews::LEGACY_LINK_UPDATE_SQL)
-            .bind(id)
-            .bind(&update.url)
-            .bind(&update.title)
-            .bind(&update.state)
-            .bind(update.merged)
-            .bind(update.draft)
-            .bind(update.pr_updated_at)
-            .bind(update.updated_at)
-            .execute(&self.pool)
+        reviews_orm::update_legacy_link(&self.db, id, &update)
             .await
             .map_err(|error| git_write_error("legacy link update", error))?;
         // `existing.save(update_fields=[...])` mutates in place; reread
         // the row for the caller.
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    project_id, workspace_id, issue_id, repo_owner, repo_name, pr_number,
-                    url, title, state, merged, draft, pr_updated_at
-             FROM github_pull_request_links WHERE id = $1 LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("legacy link reread", error))?;
-        row.map(|row| legacy_link_from_row(&row))
-            .transpose()?
+        reviews_orm::legacy_link_by_id(&self.db, id)
+            .await
+            .map_err(|error| git_store_error("legacy link reread", error))?
             .ok_or(GitStoreError::NotFound("legacy link"))
     }
 
     async fn delete_code_review_link(&self, id: Uuid) -> Result<(), GitStoreError> {
         // Instance `.delete()` (`mixins.py:71-78`): soft row, then the
         // fan-out — the port delegates the write mechanics here.
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "UPDATE git_code_review_links
-             SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-        )
-        .bind(now)
-        .bind(self.actor)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| git_store_error("review link delete", error))?;
+        reviews_orm::soft_delete_code_review_link(&self.db, id, self.actor, chrono::Utc::now())
+            .await
+            .map_err(|error| git_store_error("review link delete", error))?;
         enqueue_soft_delete(&self.pool, "gitcodereviewlink", &id).await;
         Ok(())
     }
 
     async fn delete_legacy_link(&self, id: Uuid) -> Result<(), GitStoreError> {
-        let now = chrono::Utc::now();
-        sqlx::query(
-            "UPDATE github_pull_request_links
-             SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-        )
-        .bind(now)
-        .bind(self.actor)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| git_store_error("legacy link delete", error))?;
+        reviews_orm::soft_delete_legacy_link(&self.db, id, self.actor, chrono::Utc::now())
+            .await
+            .map_err(|error| git_store_error("legacy link delete", error))?;
         enqueue_soft_delete(&self.pool, "githubpullrequestlink", &id).await;
         Ok(())
     }
@@ -1132,15 +1004,9 @@ impl GitStore for ReviewStore {
         provider: &str,
         host_url: &str,
     ) -> Result<Vec<GitProviderAccount>, GitStoreError> {
-        let rows: Vec<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::accounts::PROVIDER_ACCOUNT_LIST_SQL)
-                .bind(workspace_id)
-                .bind(provider)
-                .bind(host_url)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|error| git_store_error("account list", error))?;
-        rows.iter().map(provider_account_from_row).collect()
+        accounts_orm::list_provider_accounts(&self.db, workspace_id, provider, host_url)
+            .await
+            .map_err(|error| git_store_error("account list", error))
     }
 
     async fn get_provider_account(
@@ -1150,41 +1016,16 @@ impl GitStore for ReviewStore {
         host_url: &str,
         account_id: Uuid,
     ) -> Result<Option<GitProviderAccount>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::accounts::PROVIDER_ACCOUNT_GET_SQL)
-                .bind(workspace_id)
-                .bind(provider)
-                .bind(host_url)
-                .bind(account_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("account get", error))?;
-        row.map(|row| provider_account_from_row(&row)).transpose()
+        accounts_orm::get_provider_account(&self.db, workspace_id, provider, host_url, account_id)
+            .await
+            .map_err(|error| git_store_error("account get", error))
     }
 
     async fn insert_provider_account(
         &self,
         row: NewProviderAccount,
     ) -> Result<GitProviderAccount, GitStoreError> {
-        sqlx::query(pidash_services::integrations::accounts::PROVIDER_ACCOUNT_INSERT_SQL)
-            .bind(row.id)
-            .bind(row.created_at)
-            .bind(row.updated_at)
-            .bind(row.created_by_id)
-            .bind(row.updated_by_id)
-            .bind(row.workspace_id)
-            .bind(&row.provider)
-            .bind(&row.host_url)
-            .bind(&row.auth_type)
-            .bind(&row.external_account_id)
-            .bind(&row.external_account_login)
-            .bind(&row.display_name)
-            .bind(&row.capabilities)
-            .bind(&row.credential_config)
-            .bind(&row.status)
-            .bind(row.verified_at)
-            .bind(&row.metadata)
-            .execute(&self.pool)
+        accounts_orm::insert_provider_account(&self.db, &row)
             .await
             .map_err(|error| git_store_error("account insert", error))?;
         Ok(GitProviderAccount {
@@ -1217,16 +1058,9 @@ impl GitStore for ReviewStore {
         host_url: &str,
         external_id: &str,
     ) -> Result<Option<GitRepository>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            pidash_services::integrations::repositories::REPOSITORY_FIND_BY_EXTERNAL_SQL,
-        )
-        .bind(provider)
-        .bind(host_url)
-        .bind(external_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("repository find external", error))?;
-        row.map(|row| repository_from_row(&row)).transpose()
+        repos_orm::find_repository_by_external(&self.db, provider, host_url, external_id)
+            .await
+            .map_err(|error| git_store_error("repository find external", error))
     }
 
     async fn find_repository_by_full_name(
@@ -1235,16 +1069,9 @@ impl GitStore for ReviewStore {
         host_url: &str,
         full_name: &str,
     ) -> Result<Option<GitRepository>, GitStoreError> {
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            pidash_services::integrations::repositories::REPOSITORY_FIND_BY_FULL_NAME_SQL,
-        )
-        .bind(provider)
-        .bind(host_url)
-        .bind(full_name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("repository find full name", error))?;
-        row.map(|row| repository_from_row(&row)).transpose()
+        repos_orm::find_repository_by_full_name(&self.db, provider, host_url, full_name)
+            .await
+            .map_err(|error| git_store_error("repository find full name", error))
     }
 
     async fn update_repository(
@@ -1253,55 +1080,17 @@ impl GitStore for ReviewStore {
         defaults: RepositoryDefaults,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<GitRepository, GitStoreError> {
-        sqlx::query(pidash_services::integrations::repositories::REPOSITORY_UPDATE_SQL)
-            .bind(id)
-            .bind(&defaults.external_id)
-            .bind(&defaults.namespace)
-            .bind(&defaults.name)
-            .bind(&defaults.full_name)
-            .bind(&defaults.web_url)
-            .bind(&defaults.clone_url_http)
-            .bind(&defaults.clone_url_ssh)
-            .bind(&defaults.default_branch)
-            .bind(defaults.is_private)
-            .bind(&defaults.metadata)
-            .bind(now)
-            .execute(&self.pool)
+        repos_orm::update_repository(&self.db, id, &defaults, now)
             .await
             .map_err(|error| git_store_error("repository update", error))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    provider, host_url, external_id, namespace, name, full_name, web_url,
-                    clone_url_http, clone_url_ssh, default_branch, is_private, metadata
-             FROM git_repositories WHERE id = $1 LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("repository reread", error))?;
-        row.map(|row| repository_from_row(&row))
-            .transpose()?
+        repos_orm::repository_by_id(&self.db, id)
+            .await
+            .map_err(|error| git_store_error("repository reread", error))?
             .ok_or(GitStoreError::NotFound("repository"))
     }
 
     async fn insert_repository(&self, row: NewRepository) -> Result<GitRepository, GitStoreError> {
-        sqlx::query(pidash_services::integrations::repositories::REPOSITORY_INSERT_SQL)
-            .bind(row.id)
-            .bind(row.created_at)
-            .bind(row.updated_at)
-            .bind(&row.provider)
-            .bind(&row.host_url)
-            .bind(&row.defaults.external_id)
-            .bind(&row.defaults.namespace)
-            .bind(&row.defaults.name)
-            .bind(&row.defaults.full_name)
-            .bind(&row.defaults.web_url)
-            .bind(&row.defaults.clone_url_http)
-            .bind(&row.defaults.clone_url_ssh)
-            .bind(&row.defaults.default_branch)
-            .bind(row.defaults.is_private)
-            .bind(&row.defaults.metadata)
-            .execute(&self.pool)
+        repos_orm::insert_repository(&self.db, &row)
             .await
             .map_err(|error| git_store_error("repository insert", error))?;
         Ok(GitRepository {
@@ -1327,13 +1116,9 @@ impl GitStore for ReviewStore {
     }
 
     async fn find_workspace_id(&self, slug: &str) -> Result<Option<Uuid>, GitStoreError> {
-        let row: Option<(Uuid,)> =
-            sqlx::query_as(pidash_services::integrations::repositories::WORKSPACE_ID_SQL)
-                .bind(slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("workspace id", error))?;
-        Ok(row.map(|row| row.0))
+        repos_orm::workspace_id(&self.db, slug)
+            .await
+            .map_err(|error| git_store_error("workspace id", error))
     }
 
     async fn find_project(
@@ -1342,21 +1127,9 @@ impl GitStore for ReviewStore {
         project_id: Uuid,
     ) -> Result<Option<pidash_services::integrations::repositories::ProjectRef>, GitStoreError>
     {
-        let row: Option<(Uuid, Uuid, String, String)> =
-            sqlx::query_as(pidash_services::integrations::repositories::PROJECT_GET_SQL)
-                .bind(project_id)
-                .bind(workspace_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("project get", error))?;
-        Ok(row.map(|(id, workspace_id, repo_url, base_branch)| {
-            pidash_services::integrations::repositories::ProjectRef {
-                id,
-                workspace_id,
-                repo_url,
-                base_branch,
-            }
-        }))
+        repos_orm::project(&self.db, workspace_id, project_id)
+            .await
+            .map_err(|error| git_store_error("project get", error))
     }
 
     async fn apply_bind(
@@ -1371,40 +1144,41 @@ impl GitStore for ReviewStore {
             .begin()
             .await
             .map_err(|error| git_store_error("bind tx", error))?;
-        sqlx::query(pidash_services::integrations::repositories::BINDING_DELETE_SQL)
-            .bind(plan.project_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| git_store_error("bind delete", error))?;
-        sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_DELETE_SQL)
-            .bind(plan.project_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| git_store_error("bind sync delete", error))?;
         let id = Uuid::new_v4();
         let mut metadata = Map::new();
         metadata.insert("raw_url".to_owned(), Value::String(plan.raw_url.clone()));
-        sqlx::query(pidash_services::integrations::repositories::BINDING_INSERT_SQL)
-            .bind(id)
-            .bind(plan.now)
-            .bind(plan.now)
-            .bind(plan.actor_id)
-            .bind(plan.actor_id)
-            .bind(plan.project_id)
-            .bind(plan.workspace_id)
-            .bind(plan.repository_id)
-            .bind(plan.provider_account_id)
-            .bind(plan.actor_id)
-            .bind(false)
-            .bind(&plan.clone_auth_mode)
-            .bind(Value::Object(metadata.clone()))
-            .execute(&mut *tx)
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            repos_orm::delete_project_bindings(&conn, plan.project_id)
+                .await
+                .map_err(|error| git_store_error("bind delete", error))?;
+            repos_orm::delete_project_github_syncs(&conn, plan.project_id)
+                .await
+                .map_err(|error| git_store_error("bind sync delete", error))?;
+            repos_orm::insert_binding(
+                &conn,
+                repos_orm::NewBinding {
+                    id,
+                    now: plan.now,
+                    created_by_id: plan.actor_id,
+                    updated_by_id: plan.actor_id,
+                    project_id: plan.project_id,
+                    workspace_id: plan.workspace_id,
+                    repository_id: plan.repository_id,
+                    provider_account_id: plan.provider_account_id,
+                    actor_id: plan.actor_id,
+                    is_sync_enabled: false,
+                    clone_auth_mode: &plan.clone_auth_mode,
+                    metadata: Value::Object(metadata.clone()),
+                },
+            )
             .await
             .map_err(|error| git_store_error("bind insert", error))?;
+        }
         // `project.save(update_fields=...)`: only the changed columns
         // plus `updated_at` (`services.py:341-348`).
         pidash_services::domain::projects::save_bind_project_update(
-            &mut *tx,
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
             plan.project_id,
             plan.repo_url_update.as_deref(),
             plan.base_branch_update.as_deref(),
@@ -1443,91 +1217,9 @@ impl GitStore for ReviewStore {
         workspace_slug: &str,
     ) -> Result<Option<pidash_services::integrations::repositories::BindingView>, GitStoreError>
     {
-        let row: Option<sqlx::postgres::PgRow> =
-            sqlx::query(pidash_services::integrations::repositories::BINDING_GET_SQL)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| git_store_error("binding get", error))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        use sqlx::Row as _;
-        macro_rules! req {
-            ($key:literal, $ty:ty) => {
-                row.try_get::<$ty, _>($key)
-                    .map_err(|error| git_store_error("binding map", error))
-            };
-        }
-        let binding =
-            pidash_db::integrations::git_models::git_repository_binding::GitRepositoryBinding {
-                id: req!("b_id", Uuid)?,
-                created_at: req!("b_created_at", chrono::DateTime<chrono::Utc>)?,
-                updated_at: req!("b_updated_at", chrono::DateTime<chrono::Utc>)?,
-                created_by_id: req!("b_created_by_id", Option<Uuid>)?,
-                updated_by_id: req!("b_updated_by_id", Option<Uuid>)?,
-                deleted_at: req!("b_deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                project_id: req!("b_project_id", Uuid)?,
-                workspace_id: req!("b_workspace_id", Uuid)?,
-                repository_id: req!("b_repository_id", Uuid)?,
-                provider_account_id: req!("b_provider_account_id", Uuid)?,
-                actor_id: req!("b_actor_id", Uuid)?,
-                is_sync_enabled: req!("b_is_sync_enabled", bool)?,
-                clone_auth_mode: req!("b_clone_auth_mode", String)?,
-                last_synced_at: req!("b_last_synced_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                last_sync_error: req!("b_last_sync_error", String)?,
-                metadata: req!("b_metadata", Value)?,
-            };
-        let repository = GitRepository {
-            id: req!("r_id", Uuid)?,
-            created_at: req!("r_created_at", chrono::DateTime<chrono::Utc>)?,
-            updated_at: req!("r_updated_at", chrono::DateTime<chrono::Utc>)?,
-            created_by_id: req!("r_created_by_id", Option<Uuid>)?,
-            updated_by_id: req!("r_updated_by_id", Option<Uuid>)?,
-            deleted_at: req!("r_deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-            provider: req!("r_provider", String)?,
-            host_url: req!("r_host_url", String)?,
-            external_id: req!("r_external_id", String)?,
-            namespace: req!("r_namespace", String)?,
-            name: req!("r_name", String)?,
-            full_name: req!("r_full_name", String)?,
-            web_url: req!("r_web_url", String)?,
-            clone_url_http: req!("r_clone_url_http", String)?,
-            clone_url_ssh: req!("r_clone_url_ssh", String)?,
-            default_branch: req!("r_default_branch", String)?,
-            is_private: req!("r_is_private", bool)?,
-            metadata: req!("r_metadata", Value)?,
-        };
-        let account = GitProviderAccount {
-            id: req!("a_id", Uuid)?,
-            created_at: req!("a_created_at", chrono::DateTime<chrono::Utc>)?,
-            updated_at: req!("a_updated_at", chrono::DateTime<chrono::Utc>)?,
-            created_by_id: req!("a_created_by_id", Option<Uuid>)?,
-            updated_by_id: req!("a_updated_by_id", Option<Uuid>)?,
-            deleted_at: req!("a_deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-            workspace_id: req!("a_workspace_id", Uuid)?,
-            provider: req!("a_provider", String)?,
-            host_url: req!("a_host_url", String)?,
-            auth_type: req!("a_auth_type", String)?,
-            external_account_id: req!("a_external_account_id", String)?,
-            external_account_login: req!("a_external_account_login", String)?,
-            display_name: req!("a_display_name", String)?,
-            capabilities: req!("a_capabilities", Value)?,
-            credential_config: req!("a_credential_config", Value)?,
-            workspace_integration_id: req!("a_workspace_integration_id", Option<Uuid>)?,
-            status: req!("a_status", String)?,
-            verified_at: req!("a_verified_at", Option<chrono::DateTime<chrono::Utc>>)?,
-            last_check_error: req!("a_last_check_error", String)?,
-            metadata: req!("a_metadata", Value)?,
-        };
-        Ok(Some(
-            pidash_services::integrations::repositories::BindingView {
-                binding,
-                repository,
-                account,
-            },
-        ))
+        repos_orm::binding_view(&self.db, project_id, workspace_slug)
+            .await
+            .map_err(|error| git_store_error("binding get", error))
     }
 
     async fn set_binding_sync(
@@ -1539,53 +1231,13 @@ impl GitStore for ReviewStore {
         pidash_db::integrations::git_models::git_repository_binding::GitRepositoryBinding,
         GitStoreError,
     > {
-        sqlx::query(pidash_services::integrations::repositories::BINDING_SET_SYNC_SQL)
-            .bind(binding_id)
-            .bind(enabled)
-            .bind(now)
-            .execute(&self.pool)
+        repos_orm::set_binding_sync(&self.db, binding_id, enabled, now)
             .await
             .map_err(|error| git_store_error("binding set sync", error))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-            "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    project_id, workspace_id, repository_id, provider_account_id, actor_id,
-                    is_sync_enabled, clone_auth_mode, last_synced_at, last_sync_error, metadata
-             FROM git_repository_bindings WHERE id = $1 LIMIT 1",
-        )
-        .bind(binding_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| git_store_error("binding reread", error))?;
-        let Some(row) = row else {
-            return Err(GitStoreError::NotFound("binding"));
-        };
-        use sqlx::Row as _;
-        macro_rules! req {
-            ($key:literal, $ty:ty) => {
-                row.try_get::<$ty, _>($key)
-                    .map_err(|error| git_store_error("binding map", error))
-            };
-        }
-        Ok(
-            pidash_db::integrations::git_models::git_repository_binding::GitRepositoryBinding {
-                id: req!("id", Uuid)?,
-                created_at: req!("created_at", chrono::DateTime<chrono::Utc>)?,
-                updated_at: req!("updated_at", chrono::DateTime<chrono::Utc>)?,
-                created_by_id: req!("created_by_id", Option<Uuid>)?,
-                updated_by_id: req!("updated_by_id", Option<Uuid>)?,
-                deleted_at: req!("deleted_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                project_id: req!("project_id", Uuid)?,
-                workspace_id: req!("workspace_id", Uuid)?,
-                repository_id: req!("repository_id", Uuid)?,
-                provider_account_id: req!("provider_account_id", Uuid)?,
-                actor_id: req!("actor_id", Uuid)?,
-                is_sync_enabled: req!("is_sync_enabled", bool)?,
-                clone_auth_mode: req!("clone_auth_mode", String)?,
-                last_synced_at: req!("last_synced_at", Option<chrono::DateTime<chrono::Utc>>)?,
-                last_sync_error: req!("last_sync_error", String)?,
-                metadata: req!("metadata", Value)?,
-            },
-        )
+        repos_orm::binding_by_id(&self.db, binding_id)
+            .await
+            .map_err(|error| git_store_error("binding reread", error))?
+            .ok_or(GitStoreError::NotFound("binding"))
     }
 
     async fn set_github_syncs_enabled(
@@ -1594,21 +1246,13 @@ impl GitStore for ReviewStore {
         workspace_slug: &str,
         enabled: bool,
     ) -> Result<u64, GitStoreError> {
-        let done =
-            sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_SET_ENABLED_SQL)
-                .bind(enabled)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .execute(&self.pool)
-                .await
-                .map_err(|error| git_store_error("github syncs set enabled", error))?;
-        Ok(done.rows_affected())
+        repos_orm::set_project_github_syncs_enabled(&self.db, project_id, workspace_slug, enabled)
+            .await
+            .map_err(|error| git_store_error("github syncs set enabled", error))
     }
 
     async fn delete_binding(&self, binding_id: Uuid) -> Result<(), GitStoreError> {
-        sqlx::query(pidash_services::integrations::repositories::BINDING_DELETE_ONE_SQL)
-            .bind(binding_id)
-            .execute(&self.pool)
+        repos_orm::delete_binding(&self.db, binding_id)
             .await
             .map_err(|error| git_store_error("binding delete", error))?;
         Ok(())
@@ -1618,12 +1262,9 @@ impl GitStore for ReviewStore {
         &self,
         project_id: Uuid,
     ) -> Result<u64, GitStoreError> {
-        let done = sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_DELETE_SQL)
-            .bind(project_id)
-            .execute(&self.pool)
+        repos_orm::delete_project_github_syncs(&self.db, project_id)
             .await
-            .map_err(|error| git_store_error("github syncs delete", error))?;
-        Ok(done.rows_affected())
+            .map_err(|error| git_store_error("github syncs delete", error))
     }
 }
 
@@ -1674,8 +1315,7 @@ use pidash_services::integrations::adapters_gitlab::{
     GitLabAdapter, GitLabConfig, GitLabRequest, GitLabResponse, GitLabTransport,
 };
 use pidash_services::integrations::github_client::{
-    pr_link_row_from, LiveGithubClient, PoolPrStore, PrLinksSurface, TransportContext,
-    TransportGuard,
+    LiveGithubClient, PoolPrStore, PrLinksSurface, TransportContext, TransportGuard,
 };
 use pidash_types::integrations::registry::UnknownProvider;
 use pidash_types::integrations::GitProviderError;
@@ -1820,12 +1460,6 @@ impl AdapterSource for V1Adapters<'_> {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
-
-/// Re-read one review link by id for the create response.
-const REVIEW_OWNED_SQL: &str = r#"SELECT id, issue_id, provider, host_url, namespace, repo_name, repo_external_id,
-              external_id, external_iid, url, title, state, merged, draft,
-              remote_updated_at, metadata, created_at, updated_at, created_by_id
-       FROM git_code_review_links WHERE id = $1 LIMIT 1"#;
 
 /// `GET .../work-items/<issue_id>/github/pull-requests/`
 /// (`github_pr.py:51-56`): the member-scoped queryset, `-created_at`,
@@ -2010,32 +1644,24 @@ pub async fn review_destroy(
     }
 }
 
-/// Inputs for [`paginated_list`]: the list scope plus the statement and
-/// the row renderer.
-struct ListScope<'a> {
-    pool: &'a sqlx::PgPool,
-    slug: &'a str,
-    project_id: &'a uuid::Uuid,
-    issue_id: &'a uuid::Uuid,
-    actor_id: &'a uuid::Uuid,
-    tz: &'a Tz,
-    query: &'a QueryMap,
-    sql: &'a str,
-    render: fn(&sqlx::postgres::PgRow, &Tz) -> Result<Value, Denial>,
-}
-
 /// Shared paginated-list core (`BasePaginator.paginate` with the default
-/// `OffsetPaginator`, `utils/paginator.py:654-760`): per_page/cursor
-/// parsing, the offset window over the evaluated rows, the 12-key
-/// envelope. `render` shapes one row.
-async fn paginated_list(scope: ListScope<'_>) -> Result<Response, Denial> {
-    let per_page = crate::paginator::parse_per_page(
-        query_last(scope.query, "per_page").as_deref(),
-        1000,
-        1000,
-    )
-    .map_err(page_denial)?;
-    let cursor_raw = query_last(scope.query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
+/// `OffsetPaginator`, `utils/paginator.py:654-760`) over the evaluated
+/// queryset rows: per_page/cursor parsing, then `fetch` (the list
+/// statement runs only once the params parsed, as before), the offset
+/// window, the 12-key envelope. `render` shapes one row.
+async fn paginated_list<T, F>(
+    query: &QueryMap,
+    tz: &Tz,
+    fetch: F,
+    render: fn(&T, &Tz) -> Result<Value, Denial>,
+) -> Result<Response, Denial>
+where
+    F: std::future::Future<Output = Result<Vec<T>, Denial>>,
+{
+    let per_page =
+        crate::paginator::parse_per_page(query_last(query, "per_page").as_deref(), 1000, 1000)
+            .map_err(page_denial)?;
+    let cursor_raw = query_last(query, "cursor").unwrap_or_else(|| format!("{per_page}:0:0"));
     let cursor = crate::paginator::Cursor::from_string(&cursor_raw).map_err(page_denial)?;
     let window = crate::paginator::offset_window(
         per_page,
@@ -2045,14 +1671,7 @@ async fn paginated_list(scope: ListScope<'_>) -> Result<Response, Denial> {
         None,
     )
     .map_err(page_denial)?;
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(scope.sql)
-        .bind(scope.slug)
-        .bind(scope.project_id)
-        .bind(scope.issue_id)
-        .bind(scope.actor_id)
-        .fetch_all(scope.pool)
-        .await
-        .map_err(|error| db_error(error, "pr-links list"))?;
+    let rows = fetch.await?;
     let total_count = rows.len() as i64;
     // `queryset[offset:stop]` over the evaluated rows.
     let start = (window.offset as usize).min(rows.len());
@@ -2072,7 +1691,7 @@ async fn paginated_list(scope: ListScope<'_>) -> Result<Response, Denial> {
     let page_rows = &window_rows[..trim];
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
-        rendered.push((scope.render)(row, scope.tz)?);
+        rendered.push(render(row, tz)?);
     }
     let next = crate::paginator::next_cursor(per_page, cursor.offset, has_more);
     let prev = crate::paginator::prev_cursor(per_page, cursor.offset);
@@ -2111,17 +1730,22 @@ pub async fn pr_list_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
-    paginated_list(ListScope {
-        pool: &pre.pool,
-        slug,
-        project_id: &project_id,
-        issue_id: &issue_id,
-        actor_id: &pre.actor.id,
-        tz: &timezone,
+    let db = pidash_db::pool::sea_orm_connection(&pre.pool);
+    paginated_list(
         query,
-        sql: read::PR_LIST_SQL,
-        render: |row, tz| operations::pull_requests::render_pr_row(row, tz).map_err(Denial::from),
-    })
+        &timezone,
+        async {
+            let rows = pr_link_list_select(slug, project_id, issue_id, pre.actor.id)
+                .all(&db)
+                .await
+                .map_err(|error| db_error(error, "pr-links list"))?;
+            Ok(rows
+                .into_iter()
+                .map(GithubPullRequestLink::from)
+                .collect::<Vec<_>>())
+        },
+        render_pr_row,
+    )
     .await
 }
 
@@ -2149,17 +1773,22 @@ pub async fn review_list_inner(
     )
     .await?;
     let timezone = activate_timezone(pre.actor.timezone.as_deref())?;
-    paginated_list(ListScope {
-        pool: &pre.pool,
-        slug,
-        project_id: &project_id,
-        issue_id: &issue_id,
-        actor_id: &pre.actor.id,
-        tz: &timezone,
+    let db = pidash_db::pool::sea_orm_connection(&pre.pool);
+    paginated_list(
         query,
-        sql: REVIEW_LIST_SQL,
-        render: render_review_row,
-    })
+        &timezone,
+        async {
+            let rows = review_link_list_select(slug, project_id, issue_id, pre.actor.id)
+                .all(&db)
+                .await
+                .map_err(|error| db_error(error, "pr-links list"))?;
+            Ok(rows
+                .into_iter()
+                .map(GitCodeReviewLink::from)
+                .collect::<Vec<_>>())
+        },
+        render_review_row,
+    )
     .await
 }
 
@@ -2248,21 +1877,16 @@ pub async fn pr_destroy_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> =
-        read::fetch_pr_detail_row(&pre.pool, slug, &project_id, &issue_id, &pre.actor.id, &pk)
-            .await
-            .map_err(|error| match error {
-                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
-                read::Error::Db(err) => {
-                    let (site, source) = err.split();
-                    db_error(source, site)
-                }
-            })?;
+    let db = pidash_db::pool::sea_orm_connection(&pre.pool);
+    let row = pr_link_detail_select(slug, project_id, issue_id, pre.actor.id, pk)
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "pr detail fetch"))?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
     let store = PoolPrStore::new(pre.pool.clone(), PrLinksSurface::PrLinks);
-    let link = pr_link_row_from(&row).map_err(|_| Denial::ServerError)?;
+    let link = pr_link_row_of(&row);
     let now = chrono::Utc::now();
     let outcome = match pidash_services::app_issues::pr_links::detach_pull_request_link(
         &store,
@@ -2369,15 +1993,16 @@ pub async fn review_create_inner(
             return Err(Denial::ServerError);
         }
     };
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(REVIEW_OWNED_SQL)
-        .bind(link.id)
-        .fetch_optional(&pre.pool)
-        .await
-        .map_err(|error| db_error(error, "review create reread"))?;
-    let Some(row) = row else {
+    // Re-read the saved link by id for the create response (any manager
+    // scope, as the `.get(pk)` on the saved instance).
+    let saved =
+        reviews_orm::review_link_by_id(&pidash_db::pool::sea_orm_connection(&pre.pool), link.id)
+            .await
+            .map_err(|error| db_error(error, "review create reread"))?;
+    let Some(saved) = saved else {
         return Err(Denial::ServerError);
     };
-    let shape = render_review_row(&row, &timezone)?;
+    let shape = render_review_row(&saved, &timezone)?;
     let text = serde_json::to_string(&shape).map_err(|_| Denial::ServerError)?;
     if created {
         Ok(json_created(text))
@@ -2416,20 +2041,15 @@ pub async fn review_destroy_inner(
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(REVIEW_DETAIL_SQL)
-        .bind(slug)
-        .bind(project_id)
-        .bind(issue_id)
-        .bind(pre.actor.id)
-        .bind(pk)
-        .fetch_optional(&pre.pool)
+    let row = review_link_detail_select(slug, project_id, issue_id, pre.actor.id, pk)
+        .one(&pidash_db::pool::sea_orm_connection(&pre.pool))
         .await
         .map_err(|error| db_error(error, "review detail fetch"))?;
     let Some(row) = row else {
         return Err(Denial::NotFound);
     };
     let store = ReviewStore::new(pre.pool.clone(), pre.actor.id);
-    let link = review_link_from_row(&row).map_err(|_| Denial::ServerError)?;
+    let link = GitCodeReviewLink::from(row);
     if pidash_services::integrations::code_reviews::detach_code_review_link(&store, &link)
         .await
         .is_err()
@@ -2613,5 +2233,523 @@ mod tests {
         ));
         assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    // -- SeaORM statements ---------------------------------------------------
+
+    use sea_orm::{DbBackend, QueryTrait};
+
+    fn ids() -> (Uuid, Uuid, Uuid, Uuid) {
+        (
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid"),
+            Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("uuid"),
+            Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("uuid"),
+            Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("uuid"),
+        )
+    }
+
+    #[test]
+    fn pr_link_list_pins_scope_distinct_archived_guard_and_order() {
+        let (project, issue, actor, _) = ids();
+        let sql = pr_link_list_select("acme", project, issue, actor)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.starts_with("SELECT DISTINCT "), "{sql}");
+        assert!(
+            sql.contains(r#"INNER JOIN "workspaces" ON "github_pull_request_links"."workspace_id" = "workspaces"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"INNER JOIN "projects" ON "github_pull_request_links"."project_id" = "projects"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""github_pull_request_links"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""workspaces"."slug" = 'acme'"#), "{sql}");
+        assert!(
+            sql.contains(r#""project_members"."is_active" = TRUE"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#""project_members"."member_id" = '33333333-3333-3333-3333-333333333333'"#
+            ),
+            "{sql}"
+        );
+        // No `deleted_at` guard on the membership row (Q2 ported bug 7).
+        assert!(!sql.contains(r#""project_members"."deleted_at""#), "{sql}");
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "github_pull_request_links"."created_at" DESC"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn pr_link_detail_pins_pk_no_distinct_no_archived_guard_limit_one() {
+        let (project, issue, actor, pk) = ids();
+        let sql = pr_link_detail_select("acme", project, issue, actor, pk)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with("SELECT \"github_pull_request_links\""),
+            "{sql}"
+        );
+        assert!(!sql.contains("DISTINCT"), "{sql}");
+        assert!(!sql.contains("archived_at"), "{sql}");
+        assert!(
+            sql.contains(
+                r#""github_pull_request_links"."id" = '44444444-4444-4444-4444-444444444444'"#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""project_members"."member_id" = "#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "github_pull_request_links"."created_at" DESC LIMIT 1"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn review_link_statements_mirror_the_pr_link_shape() {
+        let (project, issue, actor, pk) = ids();
+        let list = review_link_list_select("acme", project, issue, actor)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(list.starts_with("SELECT DISTINCT "), "{list}");
+        assert!(
+            list.contains(r#"INNER JOIN "project_members" ON "projects"."id" = "project_members"."project_id""#),
+            "{list}"
+        );
+        assert!(
+            list.contains(r#""git_code_review_links"."deleted_at" IS NULL"#),
+            "{list}"
+        );
+        assert!(
+            list.contains(
+                r#""git_code_review_links"."issue_id" = '22222222-2222-2222-2222-222222222222'"#
+            ),
+            "{list}"
+        );
+        assert!(
+            list.contains(r#""projects"."archived_at" IS NULL"#),
+            "{list}"
+        );
+        assert!(
+            list.ends_with(r#"ORDER BY "git_code_review_links"."created_at" DESC"#),
+            "{list}"
+        );
+        let detail = review_link_detail_select("acme", project, issue, actor, pk)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!detail.contains("DISTINCT"), "{detail}");
+        assert!(!detail.contains("archived_at"), "{detail}");
+        assert!(
+            detail.contains(
+                r#""git_code_review_links"."id" = '44444444-4444-4444-4444-444444444444'"#
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.ends_with(r#"ORDER BY "git_code_review_links"."created_at" DESC LIMIT 1"#),
+            "{detail}"
+        );
+    }
+
+    fn pr_link_fixture() -> GithubPullRequestLink {
+        let (project, issue, actor, pk) = ids();
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .expect("rfc3339")
+                .with_timezone(&chrono::Utc)
+        };
+        GithubPullRequestLink {
+            id: pk,
+            created_at: at("2024-03-04T05:06:07.123456Z"),
+            updated_at: at("2024-03-05T05:06:07Z"),
+            created_by_id: Some(actor),
+            updated_by_id: None,
+            deleted_at: None,
+            project_id: project,
+            workspace_id: Uuid::nil(),
+            issue_id: issue,
+            repo_owner: "octo".to_owned(),
+            repo_name: "repo".to_owned(),
+            pr_number: 42,
+            url: "https://github.com/octo/repo/pull/42".to_owned(),
+            title: "Fix".to_owned(),
+            state: "open".to_owned(),
+            merged: false,
+            draft: true,
+            pr_updated_at: Some(at("2024-03-06T05:06:07.000001Z")),
+        }
+    }
+
+    #[test]
+    fn pr_link_row_of_widens_pr_number_and_renders_micros_z() {
+        let link = pr_link_fixture();
+        let model = github_pull_request_links::Model {
+            created_at: link.created_at.into(),
+            updated_at: link.updated_at.into(),
+            deleted_at: None,
+            id: link.id,
+            repo_owner: link.repo_owner.clone(),
+            repo_name: link.repo_name.clone(),
+            pr_number: link.pr_number,
+            url: link.url.clone(),
+            title: link.title.clone(),
+            state: link.state.clone(),
+            merged: link.merged,
+            draft: link.draft,
+            pr_updated_at: link.pr_updated_at.map(Into::into),
+            created_by_id: link.created_by_id,
+            issue_id: link.issue_id,
+            project_id: link.project_id,
+            updated_by_id: None,
+            workspace_id: link.workspace_id,
+        };
+        let row = pr_link_row_of(&model);
+        assert_eq!(row.pr_number, 42_i64);
+        assert_eq!(
+            row.pr_updated_at.as_deref(),
+            Some("2024-03-06T05:06:07.000001Z")
+        );
+        assert_eq!(
+            (row.id, row.project_id, row.issue_id),
+            (link.id, link.project_id, link.issue_id)
+        );
+        assert_eq!(row.state, "open");
+        assert!(row.draft && !row.merged);
+    }
+
+    #[test]
+    fn render_pr_row_renders_the_serializer_fields_in_the_request_zone() {
+        let link = pr_link_fixture();
+        let tz: Tz = "Asia/Tokyo".parse().expect("zone");
+        let rendered = render_pr_row(&link, &tz).expect("render");
+        let map = rendered.as_object().expect("object");
+        assert_eq!(map["id"], Value::String(link.id.to_string()));
+        assert_eq!(map["issue"], Value::String(link.issue_id.to_string()));
+        assert_eq!(map["pr_number"], Value::from(42));
+        assert_eq!(map["created_by"], Value::String(ids().2.to_string()));
+        assert_eq!(
+            map["created_at"],
+            Value::String("2024-03-04T14:06:07.123456+09:00".to_owned())
+        );
+        assert_eq!(
+            map["pr_updated_at"],
+            Value::String("2024-03-06T14:06:07.000001+09:00".to_owned())
+        );
+        let utc = render_pr_row(&link, &chrono_tz::UTC).expect("render");
+        assert_eq!(
+            utc["updated_at"],
+            Value::String("2024-03-05T05:06:07Z".to_owned())
+        );
+    }
+
+    /// The list / detail scopes and the store wiring against constraint-free
+    /// temp copies on a one-connection pool.
+    #[tokio::test]
+    async fn live_link_scopes_and_store() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "projects",
+            "project_members",
+            "issues",
+            "github_pull_request_links",
+            "git_code_review_links",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        // The duplicate-key arm needs a key.
+        sqlx::query("ALTER TABLE git_code_review_links ADD PRIMARY KEY (id)")
+            .execute(&pool)
+            .await
+            .expect("pk");
+        let (ws, project, archived_project, issue, other_issue, actor, stranger) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (pr_old, pr_new, pr_dead, pr_other, pr_archived, review, review_dead) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let pr_row = |id: Uuid, project_id: Uuid, issue_id: Uuid, created: &str, deleted: &str| {
+            format!(
+                "INSERT INTO github_pull_request_links (id, created_at, updated_at, deleted_at, \
+                 repo_owner, repo_name, pr_number, url, title, state, merged, draft, \
+                 issue_id, project_id, workspace_id) VALUES ('{id}', '{created}', '{created}', \
+                 {deleted}, 'octo', 'repo', 7, 'https://x', 'T', 'open', false, false, \
+                 '{issue_id}', '{project_id}', '{ws}')"
+            )
+        };
+        let review_row = |id: Uuid, deleted: &str| {
+            format!(
+                "INSERT INTO git_code_review_links (id, created_at, updated_at, deleted_at, \
+                 provider, host_url, namespace, repo_name, repo_external_id, external_id, \
+                 external_iid, url, title, state, merged, draft, metadata, issue_id, \
+                 project_id, workspace_id) VALUES ('{id}', now(), now(), {deleted}, 'gitlab', \
+                 'https://gitlab.com', 'grp', 'repo', '9', '77', '3', 'https://x', 'T', \
+                 'opened', false, false, '{{}}', '{issue}', '{project}', '{ws}')"
+            )
+        };
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, archived_at, deleted_at) VALUES \
+                 ('{project}', '{ws}', NULL, NULL), ('{archived_project}', '{ws}', now(), NULL)"
+            ),
+            // Two active rows for the actor on the project: the join fans
+            // out and `DISTINCT` must fold it back.
+            format!(
+                "INSERT INTO project_members (id, project_id, member_id, workspace_id, is_active) VALUES \
+                 (gen_random_uuid(), '{project}', '{actor}', '{ws}', true), \
+                 (gen_random_uuid(), '{project}', '{actor}', '{ws}', true), \
+                 (gen_random_uuid(), '{project}', '{stranger}', '{ws}', false), \
+                 (gen_random_uuid(), '{archived_project}', '{actor}', '{ws}', true)"
+            ),
+            format!(
+                "INSERT INTO issues (id, project_id, workspace_id, deleted_at) VALUES \
+                 ('{issue}', '{project}', '{ws}', NULL)"
+            ),
+            pr_row(pr_old, project, issue, "2024-01-01T00:00:00Z", "NULL"),
+            pr_row(pr_new, project, issue, "2024-02-01T00:00:00Z", "NULL"),
+            pr_row(pr_dead, project, issue, "2024-03-01T00:00:00Z", "now()"),
+            pr_row(pr_other, project, other_issue, "2024-03-01T00:00:00Z", "NULL"),
+            pr_row(pr_archived, archived_project, issue, "2024-03-01T00:00:00Z", "NULL"),
+            review_row(review, "NULL"),
+            review_row(review_dead, "now()"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+
+        // PR-link list: newest first, no duplicate from the membership
+        // fan-out, dead / other-issue rows out.
+        let listed: Vec<Uuid> = pr_link_list_select("acme", project, issue, actor)
+            .all(&db)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(listed, vec![pr_new, pr_old]);
+        assert!(pr_link_list_select("acme", project, issue, stranger)
+            .all(&db)
+            .await
+            .expect("list")
+            .is_empty());
+        assert!(pr_link_list_select("nope", project, issue, actor)
+            .all(&db)
+            .await
+            .expect("list")
+            .is_empty());
+        // Archived project: the list guards, the detail does not (bug 5).
+        assert!(pr_link_list_select("acme", archived_project, issue, actor)
+            .all(&db)
+            .await
+            .expect("list")
+            .is_empty());
+        let archived_hit =
+            pr_link_detail_select("acme", archived_project, issue, actor, pr_archived)
+                .one(&db)
+                .await
+                .expect("detail");
+        assert_eq!(archived_hit.map(|row| row.id), Some(pr_archived));
+        let hit = pr_link_detail_select("acme", project, issue, actor, pr_old)
+            .one(&db)
+            .await
+            .expect("detail")
+            .expect("found");
+        assert_eq!(pr_link_row_of(&hit).pr_number, 7);
+        assert!(
+            pr_link_detail_select("acme", project, issue, actor, pr_dead)
+                .one(&db)
+                .await
+                .expect("detail")
+                .is_none()
+        );
+        assert!(
+            pr_link_detail_select("acme", project, issue, stranger, pr_old)
+                .one(&db)
+                .await
+                .expect("detail")
+                .is_none()
+        );
+
+        // Review links: same scope semantics.
+        let reviews: Vec<Uuid> = review_link_list_select("acme", project, issue, actor)
+            .all(&db)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(reviews, vec![review]);
+        let detail = review_link_detail_select("acme", project, issue, actor, review)
+            .one(&db)
+            .await
+            .expect("detail")
+            .map(GitCodeReviewLink::from)
+            .expect("found");
+        assert_eq!((detail.id, detail.external_iid.as_str()), (review, "3"));
+        assert!(
+            review_link_detail_select("acme", project, issue, actor, review_dead)
+                .one(&db)
+                .await
+                .expect("detail")
+                .is_none()
+        );
+
+        // Store wiring over the same connection.
+        let store = ReviewStore {
+            pool: pool.clone(),
+            db: pidash_db::pool::sea_orm_connection(&pool),
+            actor,
+        };
+        assert!(store
+            .review_issue_exists(issue, project, "acme")
+            .await
+            .expect("exists"));
+        assert!(!store
+            .review_issue_exists(other_issue, project, "acme")
+            .await
+            .expect("exists"));
+        let now = chrono::Utc::now();
+        let legacy_id = Uuid::new_v4();
+        let inserted = store
+            .insert_legacy_link(NewLegacyLink {
+                id: legacy_id,
+                created_at: now,
+                updated_at: now,
+                created_by_id: None,
+                updated_by_id: None,
+                project_id: project,
+                workspace_id: ws,
+                issue_id: issue,
+                repo_owner: "octo".to_owned(),
+                repo_name: "mirror".to_owned(),
+                pr_number: 9,
+                url: "https://github.com/octo/mirror/pull/9".to_owned(),
+                title: "Nine".to_owned(),
+                state: "open".to_owned(),
+                merged: false,
+                draft: false,
+                pr_updated_at: None,
+            })
+            .await
+            .expect("insert legacy");
+        assert_eq!(inserted.created_by_id, Some(actor));
+        let found = store
+            .find_legacy_link("octo", "mirror", 9)
+            .await
+            .expect("find")
+            .expect("found");
+        assert_eq!((found.id, found.created_by_id), (legacy_id, Some(actor)));
+        let updated = store
+            .update_legacy_link(
+                legacy_id,
+                LegacyLinkUpdate {
+                    url: found.url.clone(),
+                    title: "Nine!".to_owned(),
+                    state: "closed".to_owned(),
+                    merged: true,
+                    draft: false,
+                    pr_updated_at: Some(now),
+                    updated_at: now,
+                },
+            )
+            .await
+            .expect("update");
+        assert_eq!(
+            (
+                updated.title.as_str(),
+                updated.state.as_str(),
+                updated.merged
+            ),
+            ("Nine!", "closed", true)
+        );
+        assert_eq!(
+            updated.pr_updated_at.map(|stamp| stamp.timestamp_micros()),
+            Some(now.timestamp_micros())
+        );
+        let new_review = |id: Uuid| NewCodeReviewLink {
+            id,
+            created_at: now,
+            updated_at: now,
+            created_by_id: None,
+            updated_by_id: None,
+            project_id: project,
+            workspace_id: ws,
+            issue_id: issue,
+            provider: "gitlab".to_owned(),
+            host_url: "https://gitlab.com".to_owned(),
+            namespace: "grp".to_owned(),
+            repo_name: "repo".to_owned(),
+            repo_external_id: "9".to_owned(),
+            external_id: "78".to_owned(),
+            external_iid: "4".to_owned(),
+            url: "https://gitlab.com/grp/repo/-/merge_requests/4".to_owned(),
+            title: "Four".to_owned(),
+            state: "opened".to_owned(),
+            merged: false,
+            draft: false,
+            remote_updated_at: None,
+            metadata: Value::Object(Map::new()),
+        };
+        let review_id = Uuid::new_v4();
+        let link = store
+            .insert_code_review_link(new_review(review_id))
+            .await
+            .expect("insert review");
+        assert_eq!(link.created_by_id, Some(actor));
+        // The same pk again: the unique violation is the `Conflict` arm.
+        assert!(matches!(
+            store.insert_code_review_link(new_review(review_id)).await,
+            Err(LinkWriteError::Conflict)
+        ));
+        let path_hit = store
+            .find_path_review_link("gitlab", "https://gitlab.com", "grp", "repo", "4")
+            .await
+            .expect("find")
+            .expect("found");
+        assert_eq!(path_hit.id, review_id);
+        assert_eq!(
+            store
+                .find_review_project_workspace(project)
+                .await
+                .expect("ws"),
+            Some(ws)
+        );
     }
 }

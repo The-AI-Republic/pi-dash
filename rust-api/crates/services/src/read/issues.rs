@@ -3,53 +3,36 @@
 //! Verbatim moves of the `pidash-api` handler helpers (OVL-05,
 //! PIDASHCONV-1543); the handlers call these and map [`Error`](super::Error)
 //! onto their denial type.
+//!
+//! SeaORM conversion (READ-1): scalar, transactional and workpad
+//! reads go through entities with typed rows.
 
 use chrono::{DateTime, Utc};
+use pidash_db::entity::{issues, projects, states, workspaces};
+use pidash_db::orm_tx::TxConn;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{DbError, Error};
-use crate::orchestration::blockers::{
-    has_open_blockers_sql, relations_summary, summary_sql, BlockerRow, RelationsSummary,
-};
+use crate::orchestration::blockers::{fetch_relations_summary, RelationsSummary};
 
 /// The cached blocker summary (`relations_summary(obj)`): both direction
 /// lists plus the open-blockers `Exists`, in that order. Moved from
-/// `api::app_issues::handlers_core`.
+/// `api::app_issues::handlers_core`; the statements are the SeaORM
+/// builder form in `orchestration::blockers`.
 pub async fn fetch_blocker_summary(
     pool: &PgPool,
     issue_id: &Uuid,
 ) -> Result<RelationsSummary, Error> {
-    let fetch_list = async |blocking: bool| -> Result<Vec<BlockerRow>, Error> {
-        let sql = summary_sql(blocking).replace(":issue_id", "$1");
-        type BlockerTuple = (Uuid, i32, String, Option<String>, Option<String>);
-        let rows: Vec<BlockerTuple> = sqlx::query_as(&sql)
-            .bind(issue_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| DbError::new("fetch-blocker-summary", error))?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(issue_id, sequence_id, project_identifier, state_name, state_group)| BlockerRow {
-                    issue_id,
-                    sequence_id,
-                    project_identifier,
-                    state_name,
-                    state_group,
-                },
-            )
-            .collect())
-    };
-    let blocked_by = fetch_list(false).await?;
-    let blocking = fetch_list(true).await?;
-    let open_sql = has_open_blockers_sql().replace(":issue_id", "$1");
-    let open: Option<(i32,)> = sqlx::query_as(&open_sql)
-        .bind(issue_id)
-        .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    fetch_relations_summary(&db, *issue_id)
         .await
-        .map_err(|error| DbError::new("fetch-blocker-summary-open", error))?;
-    Ok(relations_summary(&blocked_by, &blocking, open.is_some()))
+        .map_err(|error| DbError::from_orm("fetch-blocker-summary", error).into())
 }
 
 /// `IssueCommentSerializer.get_url` (`serializers/issue.py:994-999`):
@@ -63,27 +46,28 @@ pub async fn comment_url(
     issue_id: &Uuid,
     web_base: Option<&str>,
 ) -> Result<Option<String>, Error> {
-    let slug: Option<String> =
-        sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| DbError::new("comment-url-slug", error))?
-            .flatten();
-    let identifier: Option<String> =
-        sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| DbError::new("comment-url-ident", error))?
-            .flatten();
-    let sequence: Option<i32> =
-        sqlx::query_scalar(r#"SELECT "sequence_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| DbError::new("comment-url-seq", error))?
-            .flatten();
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let slug: Option<String> = workspaces::Entity::find_by_id(*workspace_id)
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .into_tuple::<String>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-url-slug", error))?;
+    let identifier: Option<String> = projects::Entity::find_by_id(*project_id)
+        .select_only()
+        .column(projects::Column::Identifier)
+        .into_tuple::<String>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-url-ident", error))?;
+    let sequence: Option<i32> = issues::Entity::find_by_id(*issue_id)
+        .select_only()
+        .column(issues::Column::SequenceId)
+        .into_tuple::<i32>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("comment-url-seq", error))?;
     Ok(crate::v1_work_items::shape_issue::issue_url(
         web_base,
         slug.as_deref(),
@@ -113,28 +97,34 @@ pub async fn resolve_workpad_state(
         }
         return Ok((Some(state_id), None));
     }
-    let found: Option<(Uuid, String)> = sqlx::query_as(
-        r#"SELECT "id", "group" FROM "states"
-           WHERE "deleted_at" IS NULL AND "group" != 'triage' AND NOT ("is_triage")
-             AND "project_id" = $1 AND "default"
-           ORDER BY "sequence" LIMIT 1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(&mut **txn)
-    .await
-    .map_err(|error| DbError::new("workpad-default-state", error))?;
+    let conn = TxConn::new(&mut *txn);
+    let found: Option<(Uuid, String)> = states::Entity::find()
+        .filter(states::Column::DeletedAt.is_null())
+        .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsTriage.eq(false))
+        .filter(states::Column::ProjectId.eq(*project_id))
+        .filter(states::Column::Default.eq(true))
+        .order_by_asc(states::Column::Sequence)
+        .select_only()
+        .columns([states::Column::Id, states::Column::Group])
+        .into_tuple::<(Uuid, String)>()
+        .one(&conn)
+        .await
+        .map_err(|error| DbError::from_orm("workpad-default-state", error))?;
     let found = match found {
         Some(found) => Some(found),
-        None => sqlx::query_as(
-            r#"SELECT "id", "group" FROM "states"
-                   WHERE "deleted_at" IS NULL AND "group" != 'triage' AND NOT ("is_triage")
-                     AND "project_id" = $1
-                   ORDER BY "sequence" LIMIT 1"#,
-        )
-        .bind(project_id)
-        .fetch_optional(&mut **txn)
-        .await
-        .map_err(|error| DbError::new("workpad-random-state", error))?,
+        None => states::Entity::find()
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsTriage.eq(false))
+            .filter(states::Column::ProjectId.eq(*project_id))
+            .order_by_asc(states::Column::Sequence)
+            .select_only()
+            .columns([states::Column::Id, states::Column::Group])
+            .into_tuple::<(Uuid, String)>()
+            .one(&conn)
+            .await
+            .map_err(|error| DbError::from_orm("workpad-random-state", error))?,
     };
     // The `completed_at` recompute lives in the `else` arm of the
     // `self.state is None` branch (`issue.py:300-308`): a stateless issue
@@ -147,6 +137,45 @@ pub async fn resolve_workpad_state(
     }
 }
 
+/// The two columns the workpad GET reads: the issue's workpad body
+/// and its `updated_at` (decoded by name; `updated_at` keeps the
+/// `DateTime<Utc>` instant the old `PgRow` read produced).
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct WorkpadDbRow {
+    pub workpad: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The scoped workpad statement (`views/issue.py:3275-3279`): the
+/// live, non-triage, unarchived, non-draft issue in the slug's
+/// project. One statement, same join and scope as the old hand SQL
+/// (LEFT join on `states`, INNER on `projects`/`workspaces`, the
+/// null-safe triage exclusion).
+fn workpad_select(
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((states::Entity, states::Column::Group))
+                .is_null()
+                .or(Expr::col((states::Entity, states::Column::Group)).ne("triage")),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::Id.eq(*issue_id))
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .select_only()
+        .columns([issues::Column::Workpad, issues::Column::UpdatedAt])
+}
+
 /// `GET .../workpad/` (`views/issue.py:3275-3279`): the scoped
 /// workpad read — live, non-triage, unarchived, non-draft issue in the
 /// slug's project. Moved from `v1_work_items::handlers_relations`
@@ -156,28 +185,13 @@ pub async fn fetch_workpad(
     slug: &str,
     project_id: &Uuid,
     issue_id: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Error> {
-    let row = sqlx::query(
-        r#"SELECT "issues"."workpad", "issues"."updated_at"
-           FROM "issues"
-           LEFT OUTER JOIN "states" ON ("issues"."state_id" = "states"."id")
-           INNER JOIN "projects" ON ("issues"."project_id" = "projects"."id")
-           INNER JOIN "workspaces" ON ("issues"."workspace_id" = "workspaces"."id")
-           WHERE ("issues"."deleted_at" IS NULL
-             AND NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)
-             AND NOT ("issues"."archived_at" IS NOT NULL)
-             AND NOT ("projects"."archived_at" IS NOT NULL)
-             AND NOT ("issues"."is_draft")
-             AND "workspaces"."slug" = $1
-             AND "issues"."project_id" = $2
-             AND "issues"."id" = $3)"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("workpad-get", error))?;
+) -> Result<Option<WorkpadDbRow>, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = workpad_select(slug, project_id, issue_id)
+        .into_model::<WorkpadDbRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("workpad-get", error))?;
     Ok(row)
 }
 
@@ -190,14 +204,15 @@ pub async fn fetch_workpad(
 pub async fn fetch_workpad_by_id(
     pool: &PgPool,
     issue_id: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Error> {
-    let row = sqlx::query(
-        r#"SELECT "issues"."workpad", "issues"."updated_at" FROM "issues" WHERE "issues"."id" = $1"#,
-    )
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DbError::new("workpad-by-id", error))?;
+) -> Result<Option<WorkpadDbRow>, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = issues::Entity::find_by_id(*issue_id)
+        .select_only()
+        .columns([issues::Column::Workpad, issues::Column::UpdatedAt])
+        .into_model::<WorkpadDbRow>()
+        .one(&db)
+        .await
+        .map_err(|error| DbError::from_orm("workpad-by-id", error))?;
     Ok(row)
 }
 
@@ -228,6 +243,74 @@ fn now_utc() -> DateTime<Utc> {
 fn trunc_micros(dt: DateTime<Utc>) -> DateTime<Utc> {
     let nanos = dt.timestamp_subsec_nanos();
     dt - chrono::Duration::nanoseconds(i64::from(nanos % 1000))
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{DbBackend, QueryTrait};
+
+    use super::*;
+
+    #[test]
+    fn workpad_statement_keeps_scoped_join_shape() {
+        let sql = workpad_select("acme", &Uuid::nil(), &Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with(r#"SELECT "issues"."workpad", "issues"."updated_at" FROM "issues""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"JOIN "projects" ON "issues"."project_id" = "projects"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#""issues"."archived_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""issues"."is_draft" = FALSE"#), "{sql}");
+        assert!(sql.contains(r#""workspaces"."slug" = "#), "{sql}");
+    }
+
+    #[test]
+    fn workpad_state_queries_scope_to_live_non_triage() {
+        let sql = states::Entity::find()
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsTriage.eq(false))
+            .filter(states::Column::ProjectId.eq(Uuid::nil()))
+            .filter(states::Column::Default.eq(true))
+            .order_by_asc(states::Column::Sequence)
+            .select_only()
+            .columns([states::Column::Id, states::Column::Group])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""states"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#""states"."is_triage" = FALSE"#), "{sql}");
+        assert!(sql.contains(r#""states"."default" = TRUE"#), "{sql}");
+        assert!(sql.contains(r#"ORDER BY "states"."sequence" ASC"#), "{sql}");
+    }
+
+    #[test]
+    fn comment_url_queries_are_unscoped() {
+        let sql = workspaces::Entity::find_by_id(Uuid::nil())
+            .select_only()
+            .column(workspaces::Column::Slug)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#""workspaces"."slug""#), "{sql}");
+        assert!(!sql.contains("deleted_at"), "{sql}");
+    }
 }
 
 #[cfg(test)]
@@ -394,7 +477,6 @@ mod live {
 
     #[tokio::test]
     async fn workpad_reads_hit_and_miss() {
-        use sqlx::Row as _;
         let Some(db) = pool().await else { return };
         let world = seed_world(&db).await;
         let row = fetch_workpad(
@@ -406,10 +488,8 @@ mod live {
         .await
         .expect("scoped hit")
         .expect("row");
-        let body: String = row.try_get("workpad").expect("workpad");
-        assert_eq!(body, "");
-        let _updated: chrono::DateTime<chrono::Utc> =
-            row.try_get("updated_at").expect("updated_at");
+        assert_eq!(row.workpad, "");
+        let _updated: chrono::DateTime<chrono::Utc> = row.updated_at;
         let missing = fetch_workpad(
             &db,
             &world.workspace_slug,
@@ -423,8 +503,7 @@ mod live {
             .await
             .expect("by-id hit")
             .expect("row");
-        let body: String = row.try_get("workpad").expect("workpad");
-        assert_eq!(body, "");
+        assert_eq!(row.workpad, "");
         let missing = fetch_workpad_by_id(&db, &Uuid::new_v4())
             .await
             .expect("by-id miss");

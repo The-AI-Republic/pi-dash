@@ -306,7 +306,7 @@ describe("WaitingBanner", () => {
 
   it("names the runner, the reason and the three actions", async () => {
     const { queryClient } = harness();
-    renderBanner(queryClient);
+    renderBanner(queryClient, waitingIssue({ wait: { pin_kind: "locality" }, activeRun: { pin_kind: "locality" } }));
     const banner = await screen.findByText(/Waiting for runner gpu-box/);
     expect(banner.textContent).toContain("offline, last seen");
     expect(await screen.findByRole("button", { name: /Run on any runner in WEB_pod once/ })).toBeInTheDocument();
@@ -314,9 +314,18 @@ describe("WaitingBanner", () => {
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeInTheDocument();
   });
 
+  it("offers no release for a dedicated pin", async () => {
+    const { queryClient } = harness();
+    renderBanner(queryClient);
+    await screen.findByText(/Waiting for runner gpu-box/);
+    expect(screen.queryByRole("button", { name: /Run on any runner in/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change runner" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeInTheDocument();
+  });
+
   it("releases the run to the pod with one POST", async () => {
     const { calls, queryClient } = harness();
-    renderBanner(queryClient);
+    renderBanner(queryClient, waitingIssue({ wait: { pin_kind: "locality" }, activeRun: { pin_kind: "locality" } }));
     fireEvent.click(await screen.findByRole("button", { name: /Run on any runner in/ }));
     await waitFor(() =>
       expect(calls.some((call) => call.url.endsWith(`/api/runners/runs/${RUN}/release-pin/`))).toBe(true)
@@ -326,14 +335,17 @@ describe("WaitingBanner", () => {
 
   it("toasts when the release fails", async () => {
     const { queryClient } = harness({ releaseStatus: 500 });
-    renderBanner(queryClient);
+    renderBanner(queryClient, waitingIssue({ wait: { pin_kind: "locality" }, activeRun: { pin_kind: "locality" } }));
     fireEvent.click(await screen.findByRole("button", { name: /Run on any runner in/ }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RELEASE_RUN_FAILED_TITLE, expect.any(String)));
   });
 
   it("disables the release while the run is not releasable", async () => {
     const { queryClient } = harness();
-    renderBanner(queryClient, waitingIssue({ wait: { releasable: false } }));
+    renderBanner(
+      queryClient,
+      waitingIssue({ wait: { pin_kind: "locality", releasable: false }, activeRun: { pin_kind: "locality" } })
+    );
     expect(await screen.findByRole("button", { name: /Run on any runner in/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Change runner" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeEnabled();
@@ -391,16 +403,29 @@ describe("WaitingBanner", () => {
 
   it("disables every action for read-only viewers", async () => {
     const { queryClient } = harness();
-    renderBanner(queryClient, waitingIssue(), true);
+    renderBanner(
+      queryClient,
+      waitingIssue({ wait: { pin_kind: "locality" }, activeRun: { pin_kind: "locality" } }),
+      true
+    );
     await screen.findByText(/Waiting for runner gpu-box/);
     expect(screen.getByRole("button", { name: /Run on any runner in/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Change runner" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
   });
 
+  it("disables the two dedicated actions for read-only viewers", async () => {
+    const { queryClient } = harness();
+    renderBanner(queryClient, waitingIssue(), true);
+    await screen.findByText(/Waiting for runner gpu-box/);
+    expect(screen.queryByRole("button", { name: /Run on any runner in/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change runner" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
+  });
+
   it("falls back to the pod wording without a pod name", async () => {
     const { queryClient } = harness();
-    const issue = waitingIssue();
+    const issue = waitingIssue({ wait: { pin_kind: "locality" }, activeRun: { pin_kind: "locality" } });
     issue.assigned_pod_id = "99999999-9999-4999-8999-999999999999";
     renderBanner(queryClient, issue);
     expect(await screen.findByRole("button", { name: "Run on any runner in the pod once" })).toBeInTheDocument();

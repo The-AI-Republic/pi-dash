@@ -15,6 +15,10 @@ const { contractMocks } = vi.hoisted(() => ({
     rotateDevMachine: vi.fn(),
     revokeDevMachine: vi.fn(),
     deleteDevMachine: vi.fn(),
+    updateDevMachine: vi.fn(),
+    signOutDevMachineEngine: vi.fn(),
+    mergeDevMachineInto: vi.fn(),
+    listRunners: vi.fn(),
   },
 }));
 
@@ -26,11 +30,16 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
 const {
   DEV_MACHINES_POLL_INTERVAL_MS,
+  devMachineRunnersQueryOptions,
   devMachinesQueryOptions,
   useDeleteDevMachine,
+  useDevMachineRunners,
   useDevMachines,
+  useMergeDevMachine,
   useRevokeDevMachine,
   useRotateDevMachine,
+  useSignOutDevMachineEngine,
+  useUpdateDevMachine,
 } = await import("./devMachines.js");
 const { runnersKeys } = await import("./keys.js");
 
@@ -61,6 +70,22 @@ describe("devMachinesQueryOptions", () => {
     expect(options.retry).toBe(false);
     await options.queryFn?.({} as never);
     expect(contractMocks.listDevMachines).toHaveBeenCalledWith(client, "ws-id");
+  });
+});
+
+describe("devMachineRunnersQueryOptions", () => {
+  it("reads every runner, engines included, inside the machines subtree", async () => {
+    contractMocks.listRunners.mockResolvedValue([]);
+    const options = devMachineRunnersQueryOptions(client, "acme", "ws-id");
+    expect(options.queryKey.slice(0, runnersKeys.devMachines("acme").length)).toEqual(runnersKeys.devMachines("acme"));
+    await options.queryFn?.({} as never);
+    expect(contractMocks.listRunners).toHaveBeenCalledWith(client, "ws-id", { includeBundled: true });
+  });
+
+  it("waits for the workspace id", () => {
+    const queryClient = new QueryClient();
+    renderHook(() => useDevMachineRunners("acme", undefined), { wrapper: wrapper(queryClient) });
+    expect(contractMocks.listRunners).not.toHaveBeenCalled();
   });
 });
 
@@ -104,6 +129,31 @@ describe("dev machine writers", () => {
     expect(contractMocks.deleteDevMachine).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id");
     expect(invalidate).toHaveBeenCalledTimes(3);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: runnersKeys.all("acme") });
+  });
+
+  it("writes settings, engine sign-out and merges, invalidating the subtree", async () => {
+    contractMocks.updateDevMachine.mockResolvedValue({ id: "m-1" });
+    contractMocks.signOutDevMachineEngine.mockResolvedValue({ id: "m-1" });
+    contractMocks.mergeDevMachineInto.mockResolvedValue({ id: "m-2" });
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(
+      () => ({
+        update: useUpdateDevMachine("acme", "ws-id"),
+        signOut: useSignOutDevMachineEngine("acme", "ws-id"),
+        merge: useMergeDevMachine("acme"),
+      }),
+      { wrapper: wrapper(queryClient) }
+    );
+    await result.current.update.mutateAsync({ machineId: "m-1", patch: { label: "Studio" } });
+    await result.current.signOut.mutateAsync("m-1");
+    await result.current.merge.mutateAsync({ sourceId: "m-1", targetId: "m-2" });
+    expect(contractMocks.updateDevMachine).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id", {
+      label: "Studio",
+    });
+    expect(contractMocks.signOutDevMachineEngine).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id");
+    expect(contractMocks.mergeDevMachineInto).toHaveBeenCalledWith(expect.anything(), "m-1", "m-2");
+    expect(invalidate).toHaveBeenCalledTimes(3);
   });
 
   it("rejects on a failed write so the caller can toast", async () => {

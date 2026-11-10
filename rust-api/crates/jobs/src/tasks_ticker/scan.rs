@@ -29,8 +29,9 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, SecondsFormat, Utc};
-use sea_query::{Condition, Expr, Order, PostgresQueryBuilder, Query};
+use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DbBackend};
+use sea_query::{Condition, Expr, Order, PostgresQueryBuilder, Query, SelectStatement};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -100,13 +101,6 @@ pub fn beat_entries() -> Vec<BeatEntry> {
         .collect()
 }
 
-/// Render `now` the way the fixture goldens record it: whole seconds, explicit
-/// `+00:00` offset. The literal is generated from our own clock, never from
-/// caller input, so inlining it into the sea-query statement is safe.
-fn now_literal(now: &DateTime<Utc>) -> String {
-    now.to_rfc3339_opts(SecondsFormat::Secs, false)
-}
-
 /// Due-ticker id set (`agent_ticker.py:57-69`).
 ///
 /// `enabled AND next_run_at <= now AND (pending_entry OR project pool = -1
@@ -116,8 +110,7 @@ fn now_literal(now: &DateTime<Utc>) -> String {
 /// infinite — [`pidash_db::tasks_ticker::models::INFINITE_MAX_TICKS`]); the
 /// two must agree or a waited issue is admitted here and refused in
 /// `fire_tick`. A row owing a pending entry is admitted regardless of cap.
-pub fn due_tickers_sql(now: &DateTime<Utc>) -> String {
-    let now = now_literal(now);
+pub fn due_tickers_stmt(now: &DateTime<Utc>) -> SelectStatement {
     let mut query = Query::select();
     query
         .column(("issue_agent_ticker", "id"))
@@ -132,7 +125,9 @@ pub fn due_tickers_sql(now: &DateTime<Utc>) -> String {
         )
         .and_where(Expr::col(("issue_agent_ticker", "deleted_at")).is_null())
         .and_where(Expr::col(("issue_agent_ticker", "enabled")).eq(true))
-        .and_where(Expr::col(("issue_agent_ticker", "next_run_at")).lte(now))
+        .and_where(
+            Expr::col(("issue_agent_ticker", "next_run_at")).lte(Expr::val(now.fixed_offset())),
+        )
         .cond_where(
             Condition::any()
                 .add(Expr::col(("issue_agent_ticker", "pending_entry")).eq(true))
@@ -150,7 +145,11 @@ pub fn due_tickers_sql(now: &DateTime<Utc>) -> String {
                 ),
         )
         .order_by(("issue_agent_ticker", "next_run_at"), Order::Asc);
-    query.to_string(PostgresQueryBuilder)
+    query.to_owned()
+}
+
+pub fn due_tickers_sql(now: &DateTime<Utc>) -> String {
+    due_tickers_stmt(now).to_string(PostgresQueryBuilder)
 }
 
 /// Due-binding id set (`scheduler.py:115-128`).
@@ -164,8 +163,7 @@ pub fn due_tickers_sql(now: &DateTime<Utc>) -> String {
 /// The scheduler/project `deleted_at` guards cover the async-cascade window
 /// where a binding is still un-tombstoned but its parent is not
 /// (`db/mixins.py soft_delete_related_objects.delay`).
-pub fn due_bindings_sql(now: &DateTime<Utc>) -> String {
-    let now = now_literal(now);
+pub fn due_bindings_stmt(now: &DateTime<Utc>) -> SelectStatement {
     let mut query = Query::select();
     query
         .column(("scheduler_bindings", "id"))
@@ -185,11 +183,18 @@ pub fn due_bindings_sql(now: &DateTime<Utc>) -> String {
         .and_where(Expr::col(("schedulers", "is_enabled")).eq(true))
         .cond_where(
             Condition::any()
-                .add(Expr::col(("scheduler_bindings", "next_run_at")).lte(now))
+                .add(
+                    Expr::col(("scheduler_bindings", "next_run_at"))
+                        .lte(Expr::val(now.fixed_offset())),
+                )
                 .add(Expr::col(("scheduler_bindings", "next_run_at")).is_null()),
         )
         .order_by(("scheduler_bindings", "next_run_at"), Order::Asc);
-    query.to_string(PostgresQueryBuilder)
+    query.to_owned()
+}
+
+pub fn due_bindings_sql(now: &DateTime<Utc>) -> String {
+    due_bindings_stmt(now).to_string(PostgresQueryBuilder)
 }
 
 /// One fire job per due id: `fire_*.delay(str(id))` is `args=[str(id)]`,
@@ -212,11 +217,37 @@ pub fn fire_message(task: &str, id: &Uuid) -> TaskMessage {
     TaskMessage::new(task, args, kwargs)
 }
 
+/// A SeaORM read failure as the sqlx error the old read raised: the wrapped
+/// sqlx error when there is one (so Postgres codes still classify), otherwise
+/// its message (cf. `tools_exec::orm_error`).
+fn sea_err_to_sqlx(error: sea_orm::DbErr) -> sqlx::Error {
+    match error {
+        sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(inner))
+        | sea_orm::DbErr::Conn(sea_orm::RuntimeErr::SqlxError(inner)) => inner,
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::Timeout) => {
+            sqlx::Error::PoolTimedOut
+        }
+        sea_orm::DbErr::ConnectionAcquire(sea_orm::ConnAcquireErr::ConnectionClosed) => {
+            sqlx::Error::PoolClosed
+        }
+        other => sqlx::Error::Protocol(other.to_string()),
+    }
+}
+
 /// Run one scanner end to end: select the due ids, enqueue one fire job per
 /// id, return the fan-out count (mirrors the Python `return len(due_ids)`,
 /// including the log line only when something fired).
-async fn run_scan(pool: &PgPool, sql: &str, fire_task: &str) -> Result<usize, Error> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(sql).fetch_all(pool).await?;
+async fn run_scan(pool: &PgPool, stmt: &SelectStatement, fire_task: &str) -> Result<usize, Error> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(sea_err_to_sqlx)?;
+    let mut ids: Vec<Uuid> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        ids.push(row.try_get::<Uuid>("", "id").map_err(sea_err_to_sqlx)?);
+    }
     for id in &ids {
         enqueue(pool, &fire_job(fire_task, id)).await?;
     }
@@ -233,7 +264,7 @@ async fn run_scan(pool: &PgPool, sql: &str, fire_task: &str) -> Result<usize, Er
 /// Fan out `fire_tick` tasks for every due ticker row
 /// (`agent_ticker.py:42-74`). Returns the number of fan-outs.
 pub async fn scan_due_tickers(pool: &PgPool, now: &DateTime<Utc>) -> Result<usize, Error> {
-    run_scan(pool, &due_tickers_sql(now), FIRE_TICK_TASK).await
+    run_scan(pool, &due_tickers_stmt(now), FIRE_TICK_TASK).await
 }
 
 /// Enqueue one `fire_tick` task for a ticker
@@ -256,7 +287,7 @@ pub async fn scan_due_bindings(pool: &PgPool, now: &DateTime<Utc>) -> Result<usi
     if !scheduler_enabled() {
         return Ok(0);
     }
-    run_scan(pool, &due_bindings_sql(now), FIRE_SCHEDULER_BINDING_TASK).await
+    run_scan(pool, &due_bindings_stmt(now), FIRE_SCHEDULER_BINDING_TASK).await
 }
 
 /// Register the two local scan handlers. The pool is captured by the
@@ -362,7 +393,7 @@ mod tests {
             // golden has none either (pinned below).
             "issue_agent_ticker.deleted_at is null",
             "issue_agent_ticker.enabled = true",
-            "issue_agent_ticker.next_run_at <= '2026-09-28t12:00:00+00:00'",
+            "issue_agent_ticker.next_run_at <= '2026-09-28 12:00:00.000000 +00:00'",
             // The three admission arms: pending entry, infinite pool,
             // under-cap. Exactly two ORs.
             "issue_agent_ticker.pending_entry = true",
@@ -431,7 +462,7 @@ mod tests {
             "schedulers.is_enabled = true",
             // NULL next_run_at = never fired = due immediately; Postgres
             // excludes NULLs from `<=`, hence the explicit OR.
-            "scheduler_bindings.next_run_at <= '2026-09-28t12:00:00+00:00'",
+            "scheduler_bindings.next_run_at <= '2026-09-28 12:00:00.000000 +00:00'",
             "scheduler_bindings.next_run_at is null",
             "order by scheduler_bindings.next_run_at asc",
         ] {
@@ -451,14 +482,12 @@ mod tests {
         );
     }
 
-    // The frozen instant renders whole-second with an explicit offset and
-    // matches the fixture clock both rows files record.
+    // The frozen instant pins the fixture clocks both rows files record.
     #[test]
-    fn now_literal_matches_fixture_clock() {
-        assert_eq!(now_literal(&frozen()), "2026-09-28T12:00:00+00:00");
+    fn frozen_matches_fixture_clock() {
         assert_eq!(
-            now_literal(&frozen()).parse::<DateTime<Utc>>().unwrap(),
-            frozen()
+            frozen().to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+            "2026-09-28T12:00:00+00:00"
         );
         for name in [
             "scanners/scan_due_tickers.rows.json",
@@ -631,6 +660,67 @@ mod tests {
             FIRE_SCHEDULER_BINDING_TASK,
             "pi_dash.bgtasks.scheduler.fire_scheduler_binding"
         );
+    }
+
+    // SeaORM execution binds `now` as a parameter (never an inlined
+    // literal), while the shape string keeps the recorded literal for the
+    // fixture goldens. Both forms come from one builder, so they cannot
+    // drift: the literal SQL and the built SQL agree on every predicate.
+    #[test]
+    fn scan_statements_bind_now_as_parameter() {
+        use sea_orm::DbBackend;
+        for stmt in [due_tickers_stmt(&frozen()), due_bindings_stmt(&frozen())] {
+            let built = DbBackend::Postgres.build(&stmt);
+            assert!(
+                built.sql.contains("$1"),
+                "built SQL binds now as $1:\n{}",
+                built.sql
+            );
+            assert!(
+                !built.sql.contains("2026-09-28"),
+                "built SQL must not inline the clock literal:\n{}",
+                built.sql
+            );
+            // The shape string still carries the recorded literal.
+            let shape = stmt.to_string(sea_query::PostgresQueryBuilder);
+            assert!(
+                shape.contains("2026-09-28 12:00:00.000000 +00:00"),
+                "shape keeps literal:\n{shape}"
+            );
+        }
+    }
+
+    // NEWPIDASH-136: due-scans must bind `now` as timestamptz, not text.
+    // The SQL-text fixtures above cannot catch a wrong bind type — a String
+    // renders as `'...'` and passes, but Postgres rejects
+    // `timestamptz <= text` at execution (every scan failed, nothing fired).
+    // This test executes both statements against a real migrated Postgres
+    // (via `DATABASE_URL`) and fails pre-fix with
+    // `operator does not exist: timestamp with time zone <= text`.
+    // Follows the repo live-db convention (`assistant/sweep.rs`): skips
+    // when `DATABASE_URL` is unset; when set it must point at a migrated
+    // scratch database (print the target before any destructive SQL).
+    #[tokio::test]
+    async fn due_scans_bind_now_as_timestamptz_on_postgres() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        for stmt in [due_tickers_stmt(&frozen()), due_bindings_stmt(&frozen())] {
+            let built = DbBackend::Postgres.build(&stmt);
+            let result = db.query_all(built).await;
+            let rows = result.expect(
+                "due scan must execute (timestamptz bind, not text): operator does not exist: timestamp with time zone <= text",
+            );
+            // Empty is fine on a quiet scratch DB; the proof is executing
+            // without the operator error, not the row count.
+            let _ = rows;
+        }
+        pool.close().await;
     }
 
     // Registry layer: the two scan names are locally owned once

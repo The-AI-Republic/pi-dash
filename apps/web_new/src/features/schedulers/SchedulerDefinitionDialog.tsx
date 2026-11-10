@@ -9,6 +9,7 @@ import { Button, Dialog, Input, Switch, Textarea } from "@pidash/kit";
 import * as React from "react";
 
 import { schedulerFieldError, useCreateScheduler, useUpdateScheduler } from "./api.js";
+import { SchedulerColorField } from "./SchedulerColorField.js";
 import {
   deriveSchedulerHandle,
   emptySchedulerDefinition,
@@ -160,13 +161,11 @@ function SchedulerDefinitionForm({
         rows={6}
         onChange={(event) => change("prompt", event.target.value)}
       />
-      <Input
-        label="Color"
-        type="color"
+      <SchedulerColorField
         value={value.color}
         disabled={mutation.isPending}
-        {...errorProp(errors.color)}
-        onChange={(event) => change("color", event.target.value)}
+        error={errors.color}
+        onChange={(color) => change("color", color)}
       />
       <div className="flex items-center justify-between gap-(--space-4) rounded-(--radius-control) border border-(--border) p-(--space-4)">
         <div>

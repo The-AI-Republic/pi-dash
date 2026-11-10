@@ -452,7 +452,7 @@ pub async fn active_session_id_for_machine<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let id: Option<uuid::Uuid> = sqlx::query_scalar(machine_session::ACTIVE_ID_SQL)
+    let id: Option<uuid::Uuid> = sqlx::query_scalar(machine_session::ACTIVE_ID_SQL) // raw-sql: executor-generic over sqlx::Executor; callers pass both &PgPool and &mut PgConnection from outside-scope files (api orchestration/runner_open/teardown, jobs runner_enroll tx arm), so SeaORM ConnectionTrait conversion needs coordinated caller migration.
         .bind(dev_machine_id)
         .fetch_optional(ex)
         .await?;

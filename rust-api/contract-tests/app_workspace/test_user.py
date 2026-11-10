@@ -560,6 +560,60 @@ def test_deactivate(user_api, world):
         assert (prof[0], prof[1]) == (False, False)
 
 
+def test_deactivate_revokes_engine_credentials(user_api, world):
+    """Account deactivate ("sign out everywhere") revokes the user's
+    live engine credentials with reason ``user_signed_out`` (state
+    ``signed_out``) on every machine holding one (#2910). The rows are
+    seeded directly; credential issuance is the device-flow issue."""
+    import secrets
+
+    from _harness.settings import secret_key
+    from _harness.tokens import fingerprint, hash_token
+
+    user_id = world["user"]["id"]
+    machine_id = str(uuid.uuid4())
+    cred_id = str(uuid.uuid4())
+    raw = "ec_" + secrets.token_urlsafe(32)
+    with world["db"].connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO dev_machine
+                   (id, owner_id, host_label, label, visibility, provisioning,
+                    engine_sign_in_state, engine_credential_expires_at,
+                    created_at, updated_at)
+                   VALUES (%s,%s,'engine-host','engine-host',0,'manual','active',
+                    now() + interval '14 days', now(), now())""",
+                (machine_id, user_id),
+            )
+            cur.execute(
+                """INSERT INTO engine_credential
+                   (id, user_id, dev_machine_id, token_hash, fingerprint,
+                    created_at, expires_at, revoked_reason)
+                   VALUES (%s,%s,%s,%s,%s, now(), now() + interval '14 days', '')""",
+                (
+                    cred_id,
+                    user_id,
+                    machine_id,
+                    hash_token(raw, secret_key()),
+                    fingerprint(raw),
+                ),
+            )
+        conn.commit()
+    res = user_api.delete("/api/users/me/")
+    assert res.status_code == 204
+    with world["db"].connect() as conn:
+        cred = conn.execute(
+            "select revoked_reason, revoked_at from engine_credential where id = %s;",
+            (cred_id,),
+        ).fetchone()
+        assert cred[0] == "user_signed_out"
+        assert cred[1] is not None
+        machine = conn.execute(
+            "select engine_sign_in_state from dev_machine where id = %s;", (machine_id,)
+        ).fetchone()
+        assert machine[0] == "signed_out"
+
+
 def test_deactivate_instance_admin_blocked(user_api, world):
     inst = world["db"].make_instance()
     world["db"].make_admin(inst["id"], world["user"]["id"])

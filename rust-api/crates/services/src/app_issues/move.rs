@@ -275,37 +275,16 @@ impl MoveOptions {
 
 /// `issues` columns in `_meta` order (the `SourceIssueRow` projection,
 /// shared by the three issue SELECTs).
-pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\"";
+pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\"";
 
 /// `agent_run` columns in `_meta` order (the `HandoffRunRow` projection).
 pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
 
-/// Source-issue fetch (`:140`): `Issue.issue_objects.get(workspace__slug,
-/// project_id, pk)`. Full row; `issue_objects` scope (soft-delete +
-/// triage/archived/draft exclusions — the `states` conjunct rides a LEFT
-/// JOIN, so it carries Django's NULL-tolerant `.exclude()` spelling and
-/// stateless rows are kept, verbatim: F18-11 stmt 0) + the `projects` join
-/// for `project__archived_at` + the `workspaces` join for the slug. `$1`
-/// slug, `$2` project id, `$3` pk. (Django's `.get()` `LIMIT 21`
-/// collapses to 1: the pk lookup returns at most one row.)
-pub(crate) const SOURCE_ISSUE_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1";
-
-/// Locked re-fetch (`:182-184`): [`SOURCE_ISSUE_SQL`] with
+/// Locked re-fetch (`:182-184`): the source-issue fetch with
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
 /// (a bare `FOR UPDATE` would ask Postgres to lock the nullable side of
 /// the `states` outer join and 500).
-pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
-
-/// `Project.resolve` pk arm (`project.py:197-199`): minimal projection
-/// (`id`, `workspace_id`, `identifier` — the only columns the move
-/// reads); `workspace__slug` join; explicit `deleted_at` guard;
-/// `-created_at` ordering. `$1` pk, `$2` slug.
-pub(crate) const PROJECT_RESOLVE_BY_PK_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
-
-/// `Project.resolve` identifier arm (`project.py:206-211`): exact
-/// equality on the stripped, upper-cased input (never `iexact`, so the
-/// composite btree is used). `$1` identifier, `$2` slug.
-pub(crate) const PROJECT_RESOLVE_BY_IDENTIFIER_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = $2 AND \"projects\".\"identifier\" = $1) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
+pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
 
 /// Target-membership probe (`:146-152`): active `role >= MEMBER`
 /// membership. `$1` slug, `$2` target project id, `$3` actor id.
@@ -327,11 +306,6 @@ pub const ASSIGNEE_IDS_SQL: &str = "SELECT \"issue_assignees\".\"assignee_id\" F
 /// `labels` id list (`issue.py:466-468`). `$1` issue id.
 pub const LABEL_IDS_SQL: &str = "SELECT \"issue_labels\".\"label_id\" FROM \"issue_labels\" WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $1) ORDER BY \"issue_labels\".\"created_at\" DESC";
 
-/// Outstanding-work lock (`:192-199`): full rows, newest first, `FOR
-/// UPDATE` (no `SKIP LOCKED` — the move waits). `AgentRun` extends plain
-/// `models.Model`: no soft-delete scope. `$1` issue id.
-pub(crate) const HANDOFF_RUNS_LOCK_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"work_item_id\" = $1 AND \"agent_run\".\"status\" IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input')) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE";
-
 // ---------------------------------------------------------------------------
 // Covered-table SQL (moved to [`crate::domain::issues_move`],
 // PIDASHCONV-1630, per design D7): the literals live in domain/; these
@@ -343,13 +317,6 @@ pub use crate::domain::issues_move::{
     ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL, CHILDREN_DETACH_SQL, RELATION_DELETE_SQL,
     SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL,
 };
-
-/// Inert-run close (`:282-284`): `$1` run id, `$2` end stamp.
-pub(crate) const INERT_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $2 WHERE \"agent_run\".\"id\" = $1";
-
-/// Executing-parent barrier (`:302`): `$1` run id, `$2` run_config with
-/// the handoff marker merged.
-pub(crate) const HANDOFF_PARENT_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancel_requested', \"run_config\" = $2 WHERE \"agent_run\".\"id\" = $1";
 
 /// Label wipe (`:325`, soft). `$1` deleted stamp, `$2` issue.
 pub const LABEL_DELETE_SQL: &str = "UPDATE \"issue_labels\" SET \"deleted_at\" = $1 WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $2)";
@@ -367,10 +334,331 @@ pub const COMMENT_IDS_SQL: &str = "SELECT \"issue_comments\".\"id\" FROM \"issue
 /// Moved comment description ids (`:332-334`). `$1` issue.
 pub const DESCRIPTION_IDS_SQL: &str = "SELECT \"issue_comments\".\"description_id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1 AND \"issue_comments\".\"description_id\" IS NOT NULL) ORDER BY \"issue_comments\".\"created_at\" DESC";
 
-/// Final refetch (`:393`): `issue_objects` scope + `select_related`
-/// joins; minimal projection (full issue row + the url parts the
-/// handler re-renders). `$1` pk.
-pub(crate) const MOVED_ISSUE_REFETCH_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", \"workspaces\".\"slug\", \"projects\".\"identifier\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"id\" = $1) LIMIT 1";
+// ---------------------------------------------------------------------------
+// SeaORM builders (the domain move store runs these; the SQL texts above
+// stay for the other callers until they migrate)
+// ---------------------------------------------------------------------------
+
+/// SeaORM statements for the move store reads and locks, decoded by
+/// name. Each mirrors the constant of the same name.
+pub mod orm {
+    use pidash_db::app_project::models::project::ProjectLookup;
+    use pidash_db::entity::{
+        agent_run, issue_assignees, issue_comments, issue_labels, issues, project_members,
+        projects, states, workspaces,
+    };
+    use sea_orm::sea_query::{Alias, Expr, LockType, Order, Query, SelectStatement};
+    use uuid::Uuid;
+
+    /// The `SourceIssueRow` columns (the full row minus the JSON,
+    /// stripped-text and workpad columns nothing reads).
+    pub const SOURCE_ROW_COLUMNS: [issues::Column; 32] = [
+        issues::Column::Id,
+        issues::Column::CreatedAt,
+        issues::Column::UpdatedAt,
+        issues::Column::CreatedById,
+        issues::Column::UpdatedById,
+        issues::Column::DeletedAt,
+        issues::Column::ProjectId,
+        issues::Column::WorkspaceId,
+        issues::Column::ParentId,
+        issues::Column::StateId,
+        issues::Column::Point,
+        issues::Column::EstimatePointId,
+        issues::Column::Name,
+        issues::Column::DescriptionHtml,
+        issues::Column::DescriptionBinary,
+        issues::Column::Priority,
+        issues::Column::ComplexityScore,
+        issues::Column::StartDate,
+        issues::Column::TargetDate,
+        issues::Column::SequenceId,
+        issues::Column::SortOrder,
+        issues::Column::CompletedAt,
+        issues::Column::ArchivedAt,
+        issues::Column::IsDraft,
+        issues::Column::ExternalSource,
+        issues::Column::ExternalId,
+        issues::Column::TypeId,
+        issues::Column::GitWorkBranch,
+        issues::Column::CreatedVia,
+        issues::Column::AssignedPodId,
+        issues::Column::AssignedRunnerId,
+        issues::Column::AgentExecutor,
+    ];
+
+    /// `Issue.issue_objects` over the source-row columns: INNER
+    /// `projects`, LEFT `states` (the NULL-tolerant triage exclusion),
+    /// INNER `workspaces`; live, unarchived, non-draft rows of
+    /// unarchived projects.
+    fn issue_objects() -> SelectStatement {
+        let group = || Expr::col((states::Entity, states::Column::Group));
+        Query::select()
+            .columns(SOURCE_ROW_COLUMNS.map(|column| (issues::Entity, column)))
+            .from(issues::Entity)
+            .inner_join(
+                projects::Entity,
+                Expr::col((issues::Entity, issues::Column::ProjectId))
+                    .equals((projects::Entity, projects::Column::Id)),
+            )
+            .left_join(
+                states::Entity,
+                Expr::col((issues::Entity, issues::Column::StateId))
+                    .equals((states::Entity, states::Column::Id)),
+            )
+            .inner_join(
+                workspaces::Entity,
+                Expr::col((issues::Entity, issues::Column::WorkspaceId))
+                    .equals((workspaces::Entity, workspaces::Column::Id)),
+            )
+            .and_where(Expr::col((issues::Entity, issues::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((issues::Entity, issues::Column::ArchivedAt)).is_null())
+            .and_where(
+                Expr::col((issues::Entity, issues::Column::IsDraft))
+                    .eq(true)
+                    .not(),
+            )
+            .and_where(group().eq("triage").and(group().is_not_null()).not())
+            .and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
+            .to_owned()
+    }
+
+    /// The source-issue fetch (`:140`, `Issue.issue_objects.get(workspace__slug, project_id, pk)`): the scoped source issue by slug,
+    /// project and pk.
+    pub fn source_issue_select(slug: &str, project_id: Uuid, pk: Uuid) -> SelectStatement {
+        issue_objects()
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+            .and_where(Expr::col((issues::Entity, issues::Column::ProjectId)).eq(project_id))
+            .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(pk))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::SOURCE_ISSUE_LOCK_SQL`]: the same row, `FOR UPDATE OF
+    /// "issues"` (never the nullable `states` side).
+    pub fn source_issue_lock_select(slug: &str, project_id: Uuid, pk: Uuid) -> SelectStatement {
+        source_issue_select(slug, project_id, pk)
+            .lock_with_tables(LockType::Update, [issues::Entity])
+            .to_owned()
+    }
+
+    /// The final refetch (`:393`): the scoped row by pk plus
+    /// `slug` and `identifier` for the url.
+    pub fn moved_issue_refetch_select(pk: Uuid) -> SelectStatement {
+        issue_objects()
+            .column((workspaces::Entity, workspaces::Column::Slug))
+            .column((projects::Entity, projects::Column::Identifier))
+            .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(pk))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// `Project.resolve` (`project.py:197-211`; pk arm or exact
+    /// upper-cased identifier, never `iexact`): `id`,
+    /// `workspace_id`, `identifier` of the live project, newest first.
+    pub fn project_resolve_select(slug: &str, lookup: &ProjectLookup) -> SelectStatement {
+        let mut select = Query::select();
+        select
+            .columns([
+                (projects::Entity, projects::Column::Id),
+                (projects::Entity, projects::Column::WorkspaceId),
+                (projects::Entity, projects::Column::Identifier),
+            ])
+            .from(projects::Entity)
+            .inner_join(
+                workspaces::Entity,
+                Expr::col((projects::Entity, projects::Column::WorkspaceId))
+                    .equals((workspaces::Entity, workspaces::Column::Id)),
+            )
+            .and_where(Expr::col((projects::Entity, projects::Column::DeletedAt)).is_null());
+        match lookup {
+            ProjectLookup::Pk(id) => select
+                .and_where(Expr::col((projects::Entity, projects::Column::Id)).eq(*id))
+                .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug)),
+            ProjectLookup::Identifier(identifier) => select
+                .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+                .and_where(
+                    Expr::col((projects::Entity, projects::Column::Identifier))
+                        .eq(identifier.as_str()),
+                ),
+        };
+        select
+            .order_by((projects::Entity, projects::Column::CreatedAt), Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::MEMBER_EXISTS_SQL`]: an active `role >= MEMBER` live
+    /// membership (`SELECT 1 AS a ... LIMIT 1`).
+    pub fn member_exists_select(slug: &str, project_id: Uuid, member_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(Expr::val(1), Alias::new("a"))
+            .from(project_members::Entity)
+            .inner_join(
+                workspaces::Entity,
+                Expr::col((
+                    project_members::Entity,
+                    project_members::Column::WorkspaceId,
+                ))
+                .equals((workspaces::Entity, workspaces::Column::Id)),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::DeletedAt)).is_null(),
+            )
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::ProjectId))
+                    .eq(project_id),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::MemberId))
+                    .eq(member_id),
+            )
+            .and_where(Expr::col((project_members::Entity, project_members::Column::Role)).gte(15))
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::IsActive)).into(),
+            )
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::WORKSPACE_SLUG_SQL`]: the live workspace's slug.
+    pub fn workspace_slug_select(workspace_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((workspaces::Entity, workspaces::Column::Slug))
+            .from(workspaces::Entity)
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::Id)).eq(workspace_id))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::PROJECT_IDENTIFIER_SQL`]: the live project's identifier.
+    pub fn project_identifier_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((projects::Entity, projects::Column::Identifier))
+            .from(projects::Entity)
+            .and_where(Expr::col((projects::Entity, projects::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((projects::Entity, projects::Column::Id)).eq(project_id))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::ASSIGNEE_IDS_SQL`]: live `assignee_id`s, `-created_at`.
+    pub fn assignee_ids_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((issue_assignees::Entity, issue_assignees::Column::AssigneeId))
+            .from(issue_assignees::Entity)
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::DeletedAt)).is_null(),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::IssueId)).eq(issue_id),
+            )
+            .order_by(
+                (issue_assignees::Entity, issue_assignees::Column::CreatedAt),
+                Order::Desc,
+            )
+            .to_owned()
+    }
+
+    /// [`super::LABEL_IDS_SQL`]: live `label_id`s, `-created_at`.
+    pub fn label_ids_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((issue_labels::Entity, issue_labels::Column::LabelId))
+            .from(issue_labels::Entity)
+            .and_where(Expr::col((issue_labels::Entity, issue_labels::Column::DeletedAt)).is_null())
+            .and_where(
+                Expr::col((issue_labels::Entity, issue_labels::Column::IssueId)).eq(issue_id),
+            )
+            .order_by(
+                (issue_labels::Entity, issue_labels::Column::CreatedAt),
+                Order::Desc,
+            )
+            .to_owned()
+    }
+
+    /// The outstanding statuses the handoff lock takes (`:192-199`).
+    pub const HANDOFF_STATUSES: [&str; 8] = [
+        "queued",
+        "assigned",
+        "waiting_for_worktree",
+        "running",
+        "cancel_requested",
+        "awaiting_approval",
+        "awaiting_reauth",
+        "paused_awaiting_input",
+    ];
+
+    /// The outstanding-work lock (`:192-199`): the outstanding runs,
+    /// newest first, `FOR UPDATE` (no `SKIP LOCKED`: the move waits;
+    /// `AgentRun` has no soft-delete scope). Projects the
+    /// `HandoffRunRow` columns.
+    pub fn handoff_runs_lock_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (agent_run::Entity, agent_run::Column::Id),
+                (agent_run::Entity, agent_run::Column::Status),
+                (agent_run::Entity, agent_run::Column::RunnerId),
+                (agent_run::Entity, agent_run::Column::PodId),
+                (agent_run::Entity, agent_run::Column::CreatedById),
+                (agent_run::Entity, agent_run::Column::RunConfig),
+                (agent_run::Entity, agent_run::Column::Trigger),
+            ])
+            .from(agent_run::Entity)
+            .and_where(Expr::col((agent_run::Entity, agent_run::Column::WorkItemId)).eq(issue_id))
+            .and_where(
+                Expr::col((agent_run::Entity, agent_run::Column::Status)).is_in(HANDOFF_STATUSES),
+            )
+            .order_by(
+                (agent_run::Entity, agent_run::Column::CreatedAt),
+                Order::Desc,
+            )
+            .lock(LockType::Update)
+            .to_owned()
+    }
+
+    /// [`super::COMMENT_IDS_SQL`]: the live comment ids, `-created_at`.
+    pub fn comment_ids_select(issue_id: Uuid) -> SelectStatement {
+        comments_of(issue_id)
+            .column((issue_comments::Entity, issue_comments::Column::Id))
+            .to_owned()
+    }
+
+    /// [`super::DESCRIPTION_IDS_SQL`]: the live comments' non-NULL
+    /// description ids, `-created_at`.
+    pub fn description_ids_select(issue_id: Uuid) -> SelectStatement {
+        comments_of(issue_id)
+            .column((
+                issue_comments::Entity,
+                issue_comments::Column::DescriptionId,
+            ))
+            .and_where(
+                Expr::col((
+                    issue_comments::Entity,
+                    issue_comments::Column::DescriptionId,
+                ))
+                .is_not_null(),
+            )
+            .to_owned()
+    }
+
+    fn comments_of(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .from(issue_comments::Entity)
+            .and_where(
+                Expr::col((issue_comments::Entity, issue_comments::Column::DeletedAt)).is_null(),
+            )
+            .and_where(
+                Expr::col((issue_comments::Entity, issue_comments::Column::IssueId)).eq(issue_id),
+            )
+            .order_by(
+                (issue_comments::Entity, issue_comments::Column::CreatedAt),
+                Order::Desc,
+            )
+            .to_owned()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Project/workspace repoints (`:336-351`)
@@ -451,6 +739,7 @@ pub struct SourceIssueRow {
     pub parent_id: Option<Uuid>,
     pub estimate_point_id: Option<Uuid>,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub type_id: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -527,9 +816,9 @@ pub struct MovedIssueFields {
     pub assigned_pod_id: Option<Uuid>,
     /// `Some` exactly under `stamp_updated_by`: the actor the store
     /// writes to `updated_by_id`
-    /// ([`ISSUE_MOVE_UPDATE_STAMP_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_STAMP_SQL)).
+    /// ([`issue_move_update`](crate::domain::issues_move::issue_move_update)).
     /// `None` runs
-    /// [`ISSUE_MOVE_UPDATE_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_SQL)
+    /// [`issue_move_update`](crate::domain::issues_move::issue_move_update)
     /// verbatim.
     pub updated_by_id: Option<Uuid>,
 }
@@ -560,7 +849,7 @@ pub struct MovedIssueRow {
 /// precedent).
 #[allow(async_fn_in_trait)]
 pub trait MoveStore {
-    /// Source fetch ([`SOURCE_ISSUE_SQL`], `:140`).
+    /// Source fetch ([`orm::source_issue_select`], `:140`).
     async fn source_issue(
         &self,
         slug: &str,
@@ -569,7 +858,7 @@ pub trait MoveStore {
     ) -> Result<Option<SourceIssueRow>, StoreError>;
 
     /// `Project.resolve` (`:141`): the pool picks
-    /// [`PROJECT_RESOLVE_BY_PK_SQL`] / [`PROJECT_RESOLVE_BY_IDENTIFIER_SQL`]
+    /// [`orm::project_resolve_select`]
     /// by the lookup (classified here via `classify_lookup`).
     async fn resolve_project(
         &self,
@@ -628,6 +917,13 @@ pub trait MoveStore {
     /// Uncapped open-blocker flag (`blockers::has_open_blockers_sql`).
     async fn representation_has_open_blockers(&self, issue_id: Uuid) -> Result<bool, StoreError>;
 
+    /// `assigned_runner_detail` for the `current_instance` render
+    /// (design §14.1): `None` when pod-assigned or the runner is gone.
+    async fn representation_assigned_runner_detail(
+        &self,
+        runner_id: Option<Uuid>,
+    ) -> Result<Option<serde_json::Value>, StoreError>;
+
     /// Default non-triage state (`dispatch::tools::CREATE_SAVE_DEFAULT_STATE_SQL`).
     async fn target_default_state(
         &self,
@@ -653,7 +949,7 @@ pub trait MoveStore {
     /// computed here.
     async fn advisory_lock_project(&self, lock_key: i64) -> Result<(), StoreError>;
 
-    /// Outstanding-work lock ([`HANDOFF_RUNS_LOCK_SQL`], `:192-199`).
+    /// Outstanding-work lock ([`orm::handoff_runs_lock_select`], `:192-199`).
     async fn lock_handoff_runs(&self, issue_id: Uuid) -> Result<Vec<HandoffRunRow>, StoreError>;
 
     /// Target sequence max (`dispatch::tools::CREATE_SEQ_SCAN_SQL`,
@@ -669,9 +965,9 @@ pub trait MoveStore {
     ) -> Result<Option<PodRow>, StoreError>;
 
     /// Issue save
-    /// ([`ISSUE_MOVE_UPDATE_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_SQL),
+    /// ([`issue_move_update`](crate::domain::issues_move::issue_move_update),
     /// `:223-235`; the
-    /// [`ISSUE_MOVE_UPDATE_STAMP_SQL`](crate::domain::issues_move::ISSUE_MOVE_UPDATE_STAMP_SQL)
+    /// the same builder
     /// text when
     /// `fields.updated_by_id` is `Some`).
     async fn save_moved_issue(
@@ -681,7 +977,7 @@ pub trait MoveStore {
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StoreError>;
 
-    /// One inert-run close ([`INERT_RUN_UPDATE_SQL`], `:278-286`), in
+    /// One inert-run close ([`inert_run_update`](crate::domain::issues_move::inert_run_update), `:278-286`), in
     /// list order.
     async fn cancel_inert_run(
         &self,
@@ -689,7 +985,7 @@ pub trait MoveStore {
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StoreError>;
 
-    /// Executing-parent barrier ([`HANDOFF_PARENT_UPDATE_SQL`], `:288-306`):
+    /// Executing-parent barrier ([`handoff_parent_update`](crate::domain::issues_move::handoff_parent_update), `:288-306`):
     /// `run_config` arrives with the handoff marker merged here.
     async fn mark_handoff_parent(&self, run_id: Uuid, run_config: &Value)
         -> Result<(), StoreError>;
@@ -797,7 +1093,7 @@ pub trait MoveStore {
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StoreError>;
 
-    /// Final refetch ([`MOVED_ISSUE_REFETCH_SQL`], `:393`).
+    /// Final refetch ([`orm::moved_issue_refetch_select`], `:393`).
     async fn moved_issue(&self, pk: Uuid) -> Result<Option<MovedIssueRow>, StoreError>;
 }
 
@@ -1286,6 +1582,10 @@ async fn render_current_instance<S: MoveStore>(
     let state_s = issue.state_id.map(|id| id.to_string());
     let estimate_s = issue.estimate_point_id.map(|id| id.to_string());
     let pod_s = issue.assigned_pod_id.map(|id| id.to_string());
+    let runner_s = issue.assigned_runner_id.map(|id| id.to_string());
+    let runner_detail = store
+        .representation_assigned_runner_detail(issue.assigned_runner_id)
+        .await?;
     let created_by_s = issue.created_by_id.map(|id| id.to_string());
     let updated_by_s = issue.updated_by_id.map(|id| id.to_string());
     let created_at_s = serialize_drf_datetime(issue.created_at);
@@ -1362,6 +1662,9 @@ async fn render_current_instance<S: MoveStore>(
         state: state_s.as_deref(),
         estimate_point: estimate_s.as_deref(),
         assigned_pod: pod_s.as_deref(),
+        assigned_runner: runner_s.as_deref(),
+        assigned_runner_detail: runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let input = RepresentationInput {
         row: &row,
@@ -1665,7 +1968,6 @@ pub async fn move_work_item_to_project<S: MoveStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::issues_move::ISSUE_MOVE_UPDATE_SQL;
     use pidash_db::runner_sessions::RunnerSession;
     use std::cell::RefCell;
 
@@ -1699,6 +2001,7 @@ mod tests {
             parent_id: Some(uuid(0x31)),
             estimate_point_id: Some(uuid(0x32)),
             assigned_pod_id: Some(uuid(0x33)),
+            assigned_runner_id: None,
             type_id: Some("bug".to_owned()),
             created_at: now(),
             updated_at: now(),
@@ -1920,6 +2223,14 @@ mod tests {
         ) -> Result<bool, StoreError> {
             self.log("representation_has_open_blockers");
             Ok(self.open_blockers)
+        }
+
+        async fn representation_assigned_runner_detail(
+            &self,
+            _runner_id: Option<Uuid>,
+        ) -> Result<Option<serde_json::Value>, StoreError> {
+            self.log("representation_assigned_runner_detail");
+            Ok(None)
         }
 
         async fn target_default_state(
@@ -2369,7 +2680,7 @@ mod tests {
             MoveResult::AlreadyThere(_) => panic!("expected a move"),
         };
         let calls = store.calls.borrow();
-        let head = &calls[..13];
+        let head = &calls[..14];
         assert_eq!(
             head,
             [
@@ -2383,13 +2694,14 @@ mod tests {
                 "representation_blocked_by",
                 "representation_blocking",
                 "representation_has_open_blockers",
+                "representation_assigned_runner_detail",
                 "target_default_state",
                 "lock_source_issue",
                 "advisory_lock_project",
             ]
         );
         assert_eq!(
-            &calls[13..26],
+            &calls[14..27],
             [
                 "lock_handoff_runs",
                 "max_target_sequence",
@@ -2407,12 +2719,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            &calls[26..28],
+            &calls[27..29],
             ["moved_comment_ids", "moved_description_ids"]
         );
-        assert_eq!(calls[28..40], ["repoint_related"; 12]);
-        assert_eq!(&calls[40..], ["moved_issue"]);
-        assert_eq!(calls.len(), 41);
+        assert_eq!(calls[29..41], ["repoint_related"; 12]);
+        assert_eq!(&calls[41..], ["moved_issue"]);
+        assert_eq!(calls.len(), 42);
 
         // Repoint order is Python's call order.
         assert_eq!(*store.repoints.borrow(), REPOINT_ORDER);
@@ -3017,26 +3329,59 @@ mod tests {
         assert!(MEMBER_EXISTS_SQL.contains("\"role\" >= 15"));
         assert!(ASSIGNEE_PRUNE_SQL.contains("\"role\" >= 15"));
         // Lock forms.
+        let render = |select: sea_orm::sea_query::SelectStatement| {
+            select.to_string(sea_orm::sea_query::PostgresQueryBuilder)
+        };
+        let source = render(orm::source_issue_select("acme", Uuid::nil(), Uuid::nil()));
+        let locked = render(orm::source_issue_lock_select(
+            "acme",
+            Uuid::nil(),
+            Uuid::nil(),
+        ));
+        let handoff = render(orm::handoff_runs_lock_select(Uuid::nil()));
+        // Lock forms.
         assert!(SOURCE_ISSUE_LOCK_SQL.contains("FOR UPDATE OF \"issues\""));
         assert!(
-            HANDOFF_RUNS_LOCK_SQL.contains("ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE")
+            locked.ends_with("LIMIT 1 FOR UPDATE OF \"issues\""),
+            "{locked}"
         );
-        assert!(!HANDOFF_RUNS_LOCK_SQL.contains("SKIP LOCKED"));
+        assert!(!source.contains("FOR UPDATE"), "{source}");
+        assert!(
+            handoff.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE"),
+            "{handoff}"
+        );
+        assert!(!handoff.contains("SKIP LOCKED"));
         // The handoff status set matches the module const.
         for status in PROJECT_MOVE_HANDOFF_STATUSES {
-            assert!(HANDOFF_RUNS_LOCK_SQL.contains(status.value()), "{status:?}");
+            assert!(
+                handoff.contains(&format!("'{}'", status.value())),
+                "{status:?}"
+            );
         }
         assert_eq!(PROJECT_MOVE_HANDOFF_STATUSES.len(), 8);
+        assert_eq!(orm::HANDOFF_STATUSES.len(), 8);
         // RESOLVE arms: pk vs exact-identifier equality.
-        assert!(PROJECT_RESOLVE_BY_PK_SQL.contains("\"projects\".\"id\" = $1"));
-        assert!(PROJECT_RESOLVE_BY_IDENTIFIER_SQL.contains("\"projects\".\"identifier\" = $1"));
-        assert!(!PROJECT_RESOLVE_BY_IDENTIFIER_SQL.contains("LOWER("));
-        // The save writes exactly the update_fields, in order.
-        let set = &ISSUE_MOVE_UPDATE_SQL[ISSUE_MOVE_UPDATE_SQL.find("SET ").unwrap()
-            ..ISSUE_MOVE_UPDATE_SQL.find(" WHERE").unwrap()];
-        assert_eq!(
-            set,
-            "SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9"
+        let by_pk = render(orm::project_resolve_select(
+            "acme",
+            &ProjectLookup::Pk(Uuid::nil()),
+        ));
+        assert!(by_pk.contains("\"projects\".\"id\" = '00000000-0000-0000-0000-000000000000'"));
+        let by_identifier = render(orm::project_resolve_select(
+            "acme",
+            &ProjectLookup::Identifier("ACME".to_owned()),
+        ));
+        assert!(by_identifier.contains("\"projects\".\"identifier\" = 'ACME'"));
+        assert!(!by_identifier.contains("LOWER("));
+        for sql in [&by_pk, &by_identifier] {
+            assert!(sql.contains("\"projects\".\"deleted_at\" IS NULL"), "{sql}");
+            assert!(
+                sql.ends_with("ORDER BY \"projects\".\"created_at\" DESC LIMIT 1"),
+                "{sql}"
+            );
+        }
+        assert!(
+            render(orm::member_exists_select("acme", Uuid::nil(), Uuid::nil()))
+                .contains("\"project_members\".\"role\" >= 15")
         );
         // All 12 repoints set the same pair.
         assert_eq!(REPOINT_ORDER.len(), 12);
@@ -3079,10 +3424,18 @@ mod tests {
         // NULL-tolerant semantics (F18-11 stmt 0); the bare
         // `NOT ("states"."group" = 'triage')` evaluates to NULL on the
         // LEFT OUTER JOIN states and drops stateless issues.
+        let render = |select: sea_orm::sea_query::SelectStatement| {
+            select.to_string(sea_orm::sea_query::PostgresQueryBuilder)
+        };
         for sql in [
-            SOURCE_ISSUE_SQL,
-            SOURCE_ISSUE_LOCK_SQL,
-            MOVED_ISSUE_REFETCH_SQL,
+            render(orm::source_issue_select("acme", Uuid::nil(), Uuid::nil())),
+            render(orm::source_issue_lock_select(
+                "acme",
+                Uuid::nil(),
+                Uuid::nil(),
+            )),
+            render(orm::moved_issue_refetch_select(Uuid::nil())),
+            SOURCE_ISSUE_LOCK_SQL.to_owned(),
         ] {
             assert!(
                 sql.contains(

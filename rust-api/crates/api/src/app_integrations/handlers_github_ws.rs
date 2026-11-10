@@ -283,18 +283,11 @@ async fn gate_workspace(
     let Gate::Workspace { roles: allowed } = gate else {
         return Err(Denial::ServerError);
     };
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(actor_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let role = row.map(|row| row.0 as i32);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::workspace_role(&db, slug, *actor_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .map(i32::from);
     let facts = AllowFacts {
         workspace: WorkspaceId::from(slug),
         authenticated: true,
@@ -315,13 +308,11 @@ async fn gate_workspace(
 /// `get_object_or_404(Workspace, slug=slug)`: the live row's id (default
 /// manager, so soft-deleted slugs 404 with the DRF detail body).
 async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, slug)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::NotFoundDetail)
 }
 
 /// `_feature_enabled()` (`github.py:82-83`): `GITHUB_SYNC_ENABLED`,
@@ -353,17 +344,29 @@ async fn workspace_integration(
     pool: &sqlx::PgPool,
     workspace_id: &uuid::Uuid,
 ) -> Result<Option<WorkspaceIntegrationRow>, Denial> {
-    let row: Option<(uuid::Uuid, Value)> = sqlx::query_as(
-        r#"SELECT wi.id, wi.config FROM workspace_integrations wi
-           JOIN integrations i ON i.id = wi.integration_id
-           WHERE wi.workspace_id = $1 AND i.provider = 'github'
-           AND wi.deleted_at IS NULL AND i.deleted_at IS NULL
-           ORDER BY wi.id ASC LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{integrations, workspace_integrations};
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(uuid::Uuid, Value)> = workspace_integrations::Entity::find()
+        .select_only()
+        .column(workspace_integrations::Column::Id)
+        .column(workspace_integrations::Column::Config)
+        .join(
+            JoinType::InnerJoin,
+            workspace_integrations::Relation::Integrations.def(),
+        )
+        .filter(workspace_integrations::Column::WorkspaceId.eq(*workspace_id))
+        .filter(integrations::Column::Provider.eq("github"))
+        .filter(workspace_integrations::Column::DeletedAt.is_null())
+        .filter(integrations::Column::DeletedAt.is_null())
+        .order_by_asc(workspace_integrations::Column::Id)
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(row.map(|row| WorkspaceIntegrationRow {
         id: row.0,
         config: row.1,
@@ -538,7 +541,10 @@ async fn disconnect_write(
     wi: &WorkspaceIntegrationRow,
 ) -> Result<(), Denial> {
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    apply_disconnect(&mut tx, workspace_id, wi).await?;
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        apply_disconnect(&conn, workspace_id, wi).await?;
+    }
     tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(())
 }
@@ -552,10 +558,12 @@ async fn disconnect_write(
 /// - PAT `GitProviderAccount`s to REVOKED with the stamp and an emptied
 ///   `credential_config`.
 async fn apply_disconnect(
-    ex: &mut sqlx::PgConnection,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     wi: &WorkspaceIntegrationRow,
 ) -> Result<(), Denial> {
+    use pidash_db::entity::{github_repository_syncs, workspace_integrations};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     // `config = wi.config or {}` (`github.py:513`): a truthy non-object
     // fails the item assignment below (`TypeError` → 500), like Python.
     let mut config = match config_or_empty(&wi.config)? {
@@ -564,78 +572,101 @@ async fn apply_disconnect(
     };
     config["token"] = Value::String(String::new());
     config["disconnected_at"] = Value::String(now_iso());
-    sqlx::query(r#"UPDATE workspace_integrations SET config = $1 WHERE id = $2"#)
-        .bind(&config)
-        .bind(wi.id)
-        .execute(&mut *ex)
+    workspace_integrations::Entity::update_many()
+        .col_expr(
+            workspace_integrations::Column::Config,
+            sea_orm::sea_query::Expr::value(config),
+        )
+        .filter(workspace_integrations::Column::Id.eq(wi.id))
+        .exec(db)
         .await
         .map_err(|_| Denial::ServerError)?;
     // `QuerySet.update()` runs through the default manager, so soft-deleted
     // rows are untouched (`deleted_at IS NULL`).
-    sqlx::query(
-        r#"UPDATE github_repository_syncs
-           SET is_sync_enabled = false, last_sync_error = $1
-           WHERE workspace_integration_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(DISCONNECT_ERROR)
-    .bind(wi.id)
-    .execute(&mut *ex)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    github_repository_syncs::Entity::update_many()
+        .col_expr(
+            github_repository_syncs::Column::IsSyncEnabled,
+            sea_orm::sea_query::Expr::value(false),
+        )
+        .col_expr(
+            github_repository_syncs::Column::LastSyncError,
+            sea_orm::sea_query::Expr::value(DISCONNECT_ERROR),
+        )
+        .filter(github_repository_syncs::Column::WorkspaceIntegrationId.eq(wi.id))
+        .filter(github_repository_syncs::Column::DeletedAt.is_null())
+        .exec(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     // The PAT accounts of this integration (`github.py:522-527`): their
     // bindings go off first, then the accounts are revoked.
-    disconnect_pat_accounts(ex, workspace_id, &wi.id).await
+    disconnect_pat_accounts(db, workspace_id, &wi.id).await
 }
 
 /// Flip the PAT bindings + accounts off. The account ids feed the binding
 /// update (`provider_account__in=pat_accounts`, `github.py:528-531`)
 /// before the accounts themselves are revoked (`:532-536`).
 async fn disconnect_pat_accounts(
-    ex: &mut sqlx::PgConnection,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     wi_id: &uuid::Uuid,
 ) -> Result<(), Denial> {
-    let ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-        r#"SELECT id FROM git_provider_accounts
-           WHERE workspace_id = $1 AND provider = 'github' AND auth_type = 'pat'
-           AND workspace_integration_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(wi_id)
-    .fetch_all(&mut *ex)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if !ids.is_empty() {
-        // Default-manager update: soft-deleted bindings stay untouched.
-        sqlx::query(
-            r#"UPDATE git_repository_bindings
-               SET is_sync_enabled = false, last_sync_error = $1
-               WHERE provider_account_id = ANY($2) AND deleted_at IS NULL"#,
-        )
-        .bind(DISCONNECT_ERROR)
-        .bind(&ids)
-        .execute(&mut *ex)
+    use pidash_db::entity::{git_provider_accounts, git_repository_bindings};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let ids: Vec<uuid::Uuid> = git_provider_accounts::Entity::find()
+        .select_only()
+        .column(git_provider_accounts::Column::Id)
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(*workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::AuthType.eq("pat"))
+        .filter(git_provider_accounts::Column::WorkspaceIntegrationId.eq(*wi_id))
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .into_tuple()
+        .all(db)
         .await
         .map_err(|_| Denial::ServerError)?;
+    if !ids.is_empty() {
+        // Default-manager update: soft-deleted bindings stay untouched.
+        git_repository_bindings::Entity::update_many()
+            .col_expr(
+                git_repository_bindings::Column::IsSyncEnabled,
+                sea_orm::sea_query::Expr::value(false),
+            )
+            .col_expr(
+                git_repository_bindings::Column::LastSyncError,
+                sea_orm::sea_query::Expr::value(DISCONNECT_ERROR),
+            )
+            .filter(git_repository_bindings::Column::ProviderAccountId.is_in(ids.iter().copied()))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .exec(db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
     }
     let emptied = serde_json::json!({
         "auth_type": "pat",
         "host_url": "https://github.com",
         "token": "",
     });
-    sqlx::query(
-        r#"UPDATE git_provider_accounts
-           SET status = 'revoked', last_check_error = $1, credential_config = $2
-           WHERE workspace_id = $3 AND provider = 'github' AND auth_type = 'pat'
-           AND workspace_integration_id = $4 AND deleted_at IS NULL"#,
-    )
-    .bind(DISCONNECT_ERROR)
-    .bind(&emptied)
-    .bind(workspace_id)
-    .bind(wi_id)
-    .execute(&mut *ex)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    git_provider_accounts::Entity::update_many()
+        .col_expr(
+            git_provider_accounts::Column::Status,
+            sea_orm::sea_query::Expr::value("revoked"),
+        )
+        .col_expr(
+            git_provider_accounts::Column::LastCheckError,
+            sea_orm::sea_query::Expr::value(DISCONNECT_ERROR),
+        )
+        .col_expr(
+            git_provider_accounts::Column::CredentialConfig,
+            sea_orm::sea_query::Expr::value(emptied),
+        )
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(*workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::AuthType.eq("pat"))
+        .filter(git_provider_accounts::Column::WorkspaceIntegrationId.eq(*wi_id))
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .exec(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1135,46 +1166,50 @@ async fn ensure_github_integration(
     pool: &sqlx::PgPool,
     actor_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM integrations
-           WHERE provider = 'github' AND deleted_at IS NULL
-           ORDER BY id ASC LIMIT 1"#,
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let Some((id,)) = existing {
+    use pidash_db::entity::integrations;
+    use sea_orm::{ActiveModelTrait, Set};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let existing =
+        pidash_db::app_integrations::queries_github::fetch_integration_id_by_provider(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    if let Some(id) = existing {
         return Ok(id);
     }
     let now = chrono::Utc::now();
     let id = uuid::Uuid::new_v4();
     let description = serde_json::json!({"summary": "Mirror GitHub issues into Pi Dash projects."});
-    let created: Result<_, sqlx::Error> = sqlx::query(
-        r#"INSERT INTO integrations
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            title, provider, network, description, author,
-            webhook_url, webhook_secret, redirect_url, metadata, verified, avatar_url)
-           VALUES ($1,$2,$2,$4,NULL,NULL,'GitHub','github',1,$3,'','','','','{}',true,NULL)"#,
-    )
-    .bind(id)
-    .bind(now)
-    .bind(&description)
-    .bind(actor_id)
-    .execute(pool)
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    let created = integrations::ActiveModel {
+        id: Set(id),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(Some(*actor_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        title: Set("GitHub".to_owned()),
+        provider: Set("github".to_owned()),
+        network: Set(1_i32),
+        description: Set(description),
+        author: Set(String::new()),
+        webhook_url: Set(String::new()),
+        webhook_secret: Set(String::new()),
+        redirect_url: Set(String::new()),
+        metadata: Set(serde_json::json!({})),
+        verified: Set(true),
+        avatar_url: Set(None),
+    }
+    .insert(&db)
     .await;
     match created {
         Ok(_) => Ok(id),
         Err(_) => {
             // Concurrent first-connect: re-read the winner.
-            let winner: Option<(uuid::Uuid,)> = sqlx::query_as(
-                r#"SELECT id FROM integrations
-                   WHERE provider = 'github' AND deleted_at IS NULL
-                   ORDER BY id ASC LIMIT 1"#,
-            )
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            winner.map(|row| row.0).ok_or(Denial::ServerError)
+            let winner =
+                pidash_db::app_integrations::queries_github::fetch_integration_id_by_provider(&db)
+                    .await
+                    .map_err(|_| Denial::ServerError)?;
+            winner.ok_or(Denial::ServerError)
         }
     }
 }
@@ -1196,9 +1231,15 @@ async fn connect_write(
     user_info: &Value,
 ) -> Result<uuid::Uuid, Denial> {
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    let wi = ensure_workspace_integration(&mut tx, workspace_id, actor_id, integration_id).await?;
-    save_wi_config(&mut tx, &wi, config).await?;
-    upsert_pat_account(&mut tx, workspace_id, &wi, actor_id, config, user_info).await?;
+    let wi = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        ensure_workspace_integration(&conn, workspace_id, actor_id, integration_id).await?
+    };
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        save_wi_config(&conn, &wi, config).await?;
+        upsert_pat_account(&conn, workspace_id, &wi, actor_id, config, user_info).await?;
+    }
     tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(wi)
 }
@@ -1208,22 +1249,27 @@ async fn connect_write(
 /// never for auth — see the review of #65 quoted at `:456-460`) and the
 /// row itself with an empty `config`.
 async fn ensure_workspace_integration(
-    ex: &mut sqlx::PgConnection,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     actor_id: &uuid::Uuid,
     integration_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM workspace_integrations
-           WHERE workspace_id = $1 AND integration_id = $2 AND deleted_at IS NULL
-           ORDER BY id ASC LIMIT 1"#,
-    )
-    .bind(workspace_id)
-    .bind(integration_id)
-    .fetch_optional(&mut *ex)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    if let Some((id,)) = existing {
+    use pidash_db::entity::workspace_integrations;
+    use sea_orm::{
+        ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    };
+    let existing: Option<uuid::Uuid> = workspace_integrations::Entity::find()
+        .select_only()
+        .column(workspace_integrations::Column::Id)
+        .filter(workspace_integrations::Column::WorkspaceId.eq(*workspace_id))
+        .filter(workspace_integrations::Column::IntegrationId.eq(*integration_id))
+        .filter(workspace_integrations::Column::DeletedAt.is_null())
+        .order_by_asc(workspace_integrations::Column::Id)
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    if let Some(id) = existing {
         return Ok(id);
     }
     let now = chrono::Utc::now();
@@ -1231,7 +1277,7 @@ async fn ensure_workspace_integration(
     let api_token = format!("pi_dash_api_{}", uuid::Uuid::new_v4().simple());
     let label = format!("github-integration-{workspace_id}");
     pidash_services::domain::tokens::insert_github_shim_token(
-        &mut *ex,
+        db,
         &pidash_services::domain::tokens::NewGithubShimToken {
             id: token_id,
             label,
@@ -1244,19 +1290,22 @@ async fn ensure_workspace_integration(
     .await
     .map_err(|_| Denial::ServerError)?;
     let wi_id = uuid::Uuid::new_v4();
-    sqlx::query(
-        r#"INSERT INTO workspace_integrations
-           (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, actor_id, integration_id, api_token_id, metadata, config)
-           VALUES ($1,$2,$2,$3,NULL,NULL,$4,$3,$5,$6,'{}','{}')"#,
-    )
-    .bind(wi_id)
-    .bind(now)
-    .bind(actor_id)
-    .bind(workspace_id)
-    .bind(integration_id)
-    .bind(token_id)
-    .execute(&mut *ex)
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    workspace_integrations::ActiveModel {
+        id: Set(wi_id),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(Some(*actor_id)),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(*workspace_id),
+        actor_id: Set(*actor_id),
+        integration_id: Set(*integration_id),
+        api_token_id: Set(token_id),
+        metadata: Set(serde_json::json!({})),
+        config: Set(serde_json::json!({})),
+    }
+    .insert(db)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(wi_id)
@@ -1264,14 +1313,19 @@ async fn ensure_workspace_integration(
 
 /// `wi.save(update_fields=["config"])` (`github.py:480-481`).
 async fn save_wi_config(
-    ex: &mut sqlx::PgConnection,
+    db: &impl sea_orm::ConnectionTrait,
     wi_id: &uuid::Uuid,
     config: &Value,
 ) -> Result<(), Denial> {
-    sqlx::query(r#"UPDATE workspace_integrations SET config = $1 WHERE id = $2"#)
-        .bind(config)
-        .bind(wi_id)
-        .execute(&mut *ex)
+    use pidash_db::entity::workspace_integrations;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    workspace_integrations::Entity::update_many()
+        .col_expr(
+            workspace_integrations::Column::Config,
+            sea_orm::sea_query::Expr::value(config.clone()),
+        )
+        .filter(workspace_integrations::Column::Id.eq(*wi_id))
+        .exec(db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
@@ -1284,7 +1338,7 @@ async fn save_wi_config(
 /// prefer it over the live `user_info` (`:294-295`); `verified_at` is now
 /// (`:308`).
 async fn upsert_pat_account(
-    ex: &mut sqlx::PgConnection,
+    db: &impl sea_orm::ConnectionTrait,
     workspace_id: &uuid::Uuid,
     wi_id: &uuid::Uuid,
     actor_id: &uuid::Uuid,
@@ -1322,65 +1376,94 @@ async fn upsert_pat_account(
     });
     let metadata = serde_json::json!({"identity": user_info});
     let now = chrono::Utc::now();
-    let existing: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT id FROM git_provider_accounts
-           WHERE workspace_id = $1 AND provider = 'github' AND host_url = 'https://github.com'
-           AND auth_type = 'pat' AND external_account_id = $2 AND deleted_at IS NULL"#,
-    )
-    .bind(workspace_id)
-    .bind(&external_id)
-    .fetch_optional(&mut *ex)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::git_provider_accounts;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+    let existing: Option<uuid::Uuid> = git_provider_accounts::Entity::find()
+        .select_only()
+        .column(git_provider_accounts::Column::Id)
+        .filter(git_provider_accounts::Column::WorkspaceId.eq(*workspace_id))
+        .filter(git_provider_accounts::Column::Provider.eq("github"))
+        .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+        .filter(git_provider_accounts::Column::AuthType.eq("pat"))
+        .filter(git_provider_accounts::Column::ExternalAccountId.eq(external_id.clone()))
+        .filter(git_provider_accounts::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
     match existing {
-        Some((id,)) => {
-            sqlx::query(
-                r#"UPDATE git_provider_accounts
-                   SET external_account_login = $1, display_name = $2,
-                       capabilities = $3, credential_config = $4,
-                       workspace_integration_id = $5, status = 'connected',
-                       verified_at = $6, metadata = $7,
-                       updated_at = $6, updated_by_id = $8
-                   WHERE id = $9"#,
-            )
-            .bind(login)
-            .bind(&display)
-            .bind(&capabilities)
-            .bind(&credential_config)
-            .bind(wi_id)
-            .bind(now)
-            .bind(&metadata)
-            .bind(actor_id)
-            .bind(id)
-            .execute(&mut *ex)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        Some(id) => {
+            git_provider_accounts::Entity::update_many()
+                .col_expr(
+                    git_provider_accounts::Column::ExternalAccountLogin,
+                    sea_orm::sea_query::Expr::value(login.to_owned()),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::DisplayName,
+                    sea_orm::sea_query::Expr::value(display),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::Capabilities,
+                    sea_orm::sea_query::Expr::value(capabilities),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::CredentialConfig,
+                    sea_orm::sea_query::Expr::value(credential_config),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::WorkspaceIntegrationId,
+                    sea_orm::sea_query::Expr::value(*wi_id),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::Status,
+                    sea_orm::sea_query::Expr::value("connected"),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::VerifiedAt,
+                    sea_orm::sea_query::Expr::value(stamped),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::Metadata,
+                    sea_orm::sea_query::Expr::value(metadata),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(stamped),
+                )
+                .col_expr(
+                    git_provider_accounts::Column::UpdatedById,
+                    sea_orm::sea_query::Expr::value(*actor_id),
+                )
+                .filter(git_provider_accounts::Column::Id.eq(id))
+                .exec(db)
+                .await
+                .map_err(|_| Denial::ServerError)?;
         }
         None => {
-            sqlx::query(
-                r#"INSERT INTO git_provider_accounts
-                   (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-                    workspace_id, provider, host_url, auth_type, external_account_id,
-                    external_account_login, display_name, capabilities, credential_config,
-                    workspace_integration_id, status, verified_at, last_check_error, metadata)
-                   VALUES ($1,$2,$2,$3,NULL,NULL,
-                    $4,'github','https://github.com','pat',$5,
-                    $6,$7,$8,$9,
-                    $10,'connected',$11,'',$12)"#,
-            )
-            .bind(uuid::Uuid::new_v4())
-            .bind(now)
-            .bind(actor_id)
-            .bind(workspace_id)
-            .bind(&external_id)
-            .bind(login)
-            .bind(&display)
-            .bind(&capabilities)
-            .bind(&credential_config)
-            .bind(wi_id)
-            .bind(now)
-            .bind(&metadata)
-            .execute(&mut *ex)
+            git_provider_accounts::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                created_at: Set(stamped),
+                updated_at: Set(stamped),
+                created_by_id: Set(Some(*actor_id)),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+                workspace_id: Set(*workspace_id),
+                provider: Set("github".to_owned()),
+                host_url: Set("https://github.com".to_owned()),
+                auth_type: Set("pat".to_owned()),
+                external_account_id: Set(external_id.clone()),
+                external_account_login: Set(login.to_owned()),
+                display_name: Set(display),
+                capabilities: Set(capabilities),
+                credential_config: Set(credential_config),
+                workspace_integration_id: Set(Some(*wi_id)),
+                status: Set("connected".to_owned()),
+                verified_at: Set(Some(stamped)),
+                last_check_error: Set(String::new()),
+                metadata: Set(metadata),
+            }
+            .insert(db)
             .await
             .map_err(|_| Denial::ServerError)?;
         }

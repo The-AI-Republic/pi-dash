@@ -8,6 +8,10 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/components/runners/this-computer", () => ({
+  useThisComputer: () => ({ localEngineRunnerIds: new Set<string>() }),
+}));
+
 const { apiBaseUrl, listPods, listProjects, setToast, listDevMachines } = vi.hoisted(() => ({
   apiBaseUrl: { value: "http://localhost:8000" },
   listPods: vi.fn(),

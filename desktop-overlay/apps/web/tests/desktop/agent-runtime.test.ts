@@ -4,93 +4,74 @@
  * See the LICENSE file for details.
  */
 
+/**
+ * The desktop agent runtime as a client of this computer's daemon (design
+ * §4.1, §4.6, §5): no private daemon, no enrolment on project open, the engine
+ * turned on for a project when it is used, and an app sign-out that signs out
+ * only the app.
+ */
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENT_RUNTIME_REASON_MESSAGES } from "@/pi-dash-web/components/desktop/agent-runtime-edition";
 
 vi.mock("@pi-dash/constants", () => ({ API_BASE_URL: "http://localhost:18002" }));
-// Exercise the public service export and the SPA's real axios setup without replacing their modules.
-// Session-refresh behaviour depends on the edition's interceptor and is tested by the edition.
 
 const calls: { path: string; method: string; body: Record<string, unknown> }[] = [];
-const invoke = vi.fn(async (command: string) =>
-  command === "managed_doctor" ? { runner_present: true, engine_present: true, host_label: "desktop-test" } : {}
-);
-let available = true;
-let issueExecutor: string | null = "managed_runner";
-let projectExecutor = "managed_runner";
-let accessExpired = false;
-let refreshFailure: number | "network" | undefined;
-let deleteFailure: number | "network" | undefined;
-type ListedProject = { identifier: string; created_at: string; is_default?: boolean; archived_at?: string | null };
-// The workspace project list, in the order the server happens to return it.
-let projectList: ListedProject[] = [];
-const ALPHA = { identifier: "ALPHA", created_at: "2026-01-01T00:00:00Z" };
-const BETA = { identifier: "BETA", created_at: "2026-02-01T00:00:00Z" };
-const GAMMA = { identifier: "GAMMA", created_at: "2026-03-01T00:00:00Z" };
-const TEST = { identifier: "TEST", created_at: "2026-01-01T00:00:00Z" };
-const enrolledProjects = () =>
-  (invoke.mock.calls as unknown as [string, { project?: string }][])
-    .filter(([command]) => command === "managed_enroll")
-    .map(([, args]) => args.project);
-let topUpUrl: string | undefined;
+let discovery: Record<string, unknown>;
+let localRunners: Record<string, unknown>[];
+let issueExecutor: string | null;
+let projectExecutor: string;
+const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+  if (command === "daemon_discover") return discovery;
+  if (command === "daemon_runners") return localRunners;
+  if (command === "daemon_engine_runner_add")
+    return { runner: "builtin-host-acme-test", runner_id: "r-1", workspace: args?.workspace, project: args?.project };
+  return undefined;
+});
+
+const LEGACY_COMMANDS = new Set([
+  "managed_bootstrap",
+  "managed_enroll",
+  "managed_start_daemon",
+  "managed_stop_daemon",
+  "managed_write_engine_config",
+  "managed_write_model_token",
+  "managed_sign_out",
+  "managed_doctor",
+]);
+
+function hello(signInState = "active") {
+  return {
+    daemon_version: "0.2.0",
+    ipc_version: 6,
+    cloud_url: "http://localhost:18002",
+    account: { user_id: "user-a", cloud_url: "http://localhost:18002" },
+    workspaces: [{ slug: "workspace-a", signed_in: true, runners: 0 }],
+    machine_id: "machine-1",
+    engine: "available",
+    engine_detail: { state: "available", sign_in_state: signInState },
+  };
+}
 
 beforeEach(async () => {
   vi.resetModules();
   calls.length = 0;
   invoke.mockClear();
-  available = true;
+  discovery = { kind: "compatible", hello: hello() };
+  localRunners = [];
   issueExecutor = "managed_runner";
   projectExecutor = "managed_runner";
-  accessExpired = false;
-  refreshFailure = undefined;
-  deleteFailure = undefined;
-  projectList = [TEST];
-  topUpUrl = undefined;
   sessionStorage.clear();
   Object.assign(window, { __TAURI__: { core: { invoke } } });
-  const { default: axios, AxiosError } = await import("axios");
+  const { default: axios } = await import("axios");
   axios.defaults.adapter = async (config) => {
     const path = new URL(config.url!, config.baseURL ?? "http://localhost:18002").pathname;
     const method = (config.method ?? "get").toUpperCase();
-    calls.push({
-      path,
-      method,
-      body: JSON.parse(String(config.data ?? "{}")),
-    });
-    const fail = (status: number | "network") => {
-      if (status === "network") throw new AxiosError("Network error", "ERR_NETWORK", config);
-      throw new AxiosError("Request failed", "ERR_BAD_REQUEST", config, undefined, {
-        status,
-        statusText: "error",
-        config,
-        headers: {},
-        data: { error: "desktop_session_required" },
-      });
-    };
+    calls.push({ path, method, body: JSON.parse(String(config.data ?? "{}")) });
     let data: unknown = {};
-    if (path.endsWith("/auth/refresh/")) {
-      if (refreshFailure) fail(refreshFailure);
-      accessExpired = false;
-    } else if (accessExpired) fail(401);
-    if (method === "DELETE" && deleteFailure) fail(deleteFailure);
     if (path.endsWith("get-csrf-token/")) data = { csrf_token: "csrf-test" };
-    else if (path.endsWith("agent-profile/"))
-      data = {
-        available,
-        model: "test-model",
-        base_url: "https://gateway.test/v1",
-        reason_code: "byok_not_supported_on_desktop",
-        top_up_url: topUpUrl,
-      };
-    else if (path.endsWith("agent-token/"))
-      data = {
-        token: "short-lived-test-token",
-        expires_at: new Date(Date.now() + 600_000).toISOString(),
-      };
-    else if (path.endsWith("desktop-enroll/"))
-      data = { machine_token: "machine-test-token", dev_machine_id: "server-machine-id" };
-    else if (/workspaces\/[^/]+\/projects\/$/.test(path)) data = projectList;
-    else if (/projects\/project-\d\/$/.test(path))
+    else if (path.endsWith("agent-profile/")) data = { top_up_url: "https://wallet.test/top-up" };
+    else if (path.endsWith("device/start/")) data = { device_code: "dc-1", user_code: "UC-1" };
+    else if (path.endsWith("projects/project-1/"))
       data = {
         identifier: "TEST",
         default_agent_executor: projectExecutor,
@@ -101,393 +82,158 @@ beforeEach(async () => {
   };
 });
 
-describe("desktop agent lifecycle", () => {
-  it("reuses enrollment across page reloads instead of revoking the running daemon token", async () => {
-    const first = await import("../../core/services/agent-runtime");
-    first.resumeAgentRuntime("user-a");
-    await first.connectAgentProject("workspace-a", "project-1");
-    vi.resetModules();
-    const reloaded = await import("../../core/services/agent-runtime");
-    reloaded.resumeAgentRuntime("user-a");
-    await reloaded.connectAgentProject("workspace-a", "project-1");
-    expect(calls.filter((call) => call.path.endsWith("desktop-enroll/") && call.method === "POST")).toHaveLength(1);
-    await reloaded.disposeAgentRuntime();
-    expect(sessionStorage.length).toBe(0);
-  });
+const commands = () => invoke.mock.calls.map(([command]) => command);
+const target = { workspaceSlug: "workspace-a", projectId: "project-1", issueId: "issue-1" };
 
-  it("does not reuse a different users enrollment", async () => {
-    const first = await import("../../core/services/agent-runtime");
-    first.resumeAgentRuntime("user-a");
-    await first.connectAgentProject("workspace-a", "project-1");
-    vi.resetModules();
-    const reloaded = await import("../../core/services/agent-runtime");
-    reloaded.resumeAgentRuntime("user-b");
-    await reloaded.connectAgentProject("workspace-a", "project-1");
-    expect(calls.filter((call) => call.path.endsWith("desktop-enroll/") && call.method === "POST")).toHaveLength(2);
-  });
-
-  it("enrolls once and preserves the selected executor without patching the issue", async () => {
+describe("desktop agent runtime", () => {
+  it("never runs a private daemon, writes engine files, or enrols a machine", async () => {
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
-    await Promise.all([
-      runtime.connectAgentProject("workspace-a", "project-1"),
-      runtime.prepareAgentRun({
-        workspaceSlug: "workspace-a",
-        projectId: "project-1",
-        issueId: "issue-1",
-      }),
-    ]);
-    expect(calls.filter((call) => call.path.endsWith("desktop-enroll/") && call.method === "POST")).toHaveLength(1);
-    expect(invoke).toHaveBeenCalledWith(
-      "managed_bootstrap",
-      expect.objectContaining({ workspace: "workspace-a", devMachineId: "server-machine-id" })
-    );
-    expect(invoke).toHaveBeenCalledWith("managed_enroll", {
-      account: "user-a",
+    await runtime.refreshAgentRuntime();
+    await runtime.ensureChatRuntime("workspace-a");
+    await runtime.prepareAgentRun(target);
+    expect(commands().filter((c) => LEGACY_COMMANDS.has(c))).toEqual([]);
+    expect(calls.some((c) => c.path.includes("desktop-enroll") || c.path.includes("agent-token"))).toBe(false);
+  });
+
+  it("turns the engine on for the project at the first Run on this computer, and only once", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    runtime.resumeAgentRuntime("user-a");
+    await runtime.prepareAgentRun(target);
+    expect(invoke).toHaveBeenCalledWith("daemon_engine_runner_add", {
       workspace: "workspace-a",
       project: "TEST",
-      hostLabel: "desktop-test",
+      workingDir: null,
     });
-    expect(calls.filter((call) => call.method === "PATCH")).toEqual([]);
-    expect(calls.filter((call) => call.path.endsWith("agent-token/"))).toHaveLength(1);
-  });
-
-  it("bootstraps separate workspaces and clears them on sign-out", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    await runtime.connectAgentProject("workspace-b", "project-2");
-    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { account: "user-a", workspace: "workspace-a" });
-    expect(invoke).toHaveBeenCalledWith("managed_start_daemon", { account: "user-a", workspace: "workspace-b" });
-    await runtime.disposeAgentRuntime();
-    expect(calls.some((call) => call.method === "DELETE" && call.body.host_label === "desktop-test")).toBe(true);
-    const starts = invoke.mock.calls.filter(([command]) => command === "managed_start_daemon").length;
-    await runtime.refreshAgentRuntime();
-    expect(invoke.mock.calls.filter(([command]) => command === "managed_start_daemon")).toHaveLength(starts);
-    await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
-  });
-
-  it("replaces a model credential the gateway refused, though it has not expired", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    const minted = () => calls.filter((call) => call.path.endsWith("agent-token/")).length;
-    const written = () => invoke.mock.calls.filter(([command]) => command === "managed_write_model_token").length;
-    expect([minted(), written()]).toEqual([1, 1]);
-    // The ordinary refresh keeps a credential that still has time on it.
-    await runtime.refreshAgentRuntime();
-    expect(minted()).toBe(1);
-    await runtime.refreshModelCredential();
-    expect([minted(), written()]).toEqual([2, 2]);
-
-    accessExpired = true;
-    refreshFailure = 401;
-    await expect(runtime.refreshModelCredential()).rejects.toThrow();
-  });
-  it("remembers where the server says model credit is added", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    expect(runtime.getModelTopUpUrl()).toBe("");
-    topUpUrl = "https://hub.test/account/credits";
-    await runtime.refreshAgentRuntime();
-    expect(runtime.getModelTopUpUrl()).toBe("https://hub.test/account/credits");
-  });
-  it("points every engine command at the signed-in account's own engine home", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    runtime.resumeAgentRuntime("user-b");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    for (const command of ["managed_write_engine_config", "managed_enroll", "managed_start_daemon"]) {
-      const accounts = (invoke.mock.calls as unknown as [string, { account?: string }][])
-        .filter(([name]) => name === command)
-        .map(([, args]) => args.account);
-      expect(accounts, command).toEqual(["user-a", "user-b"]);
-    }
-  });
-
-  it("refuses to run the engine with no account to scope it to", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
-    expect(invoke.mock.calls.some(([command]) => command === "managed_enroll")).toBe(false);
-  });
-
-  it("deletes chat history on sign-out only when the user asked for it", async () => {
-    const signOuts = () =>
-      (invoke.mock.calls as unknown as [string, unknown][])
-        .filter(([command]) => command === "managed_sign_out")
-        .map(([, args]) => args);
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-
-    await runtime.disposeAgentRuntime({ deleteChatHistory: true });
-    // Once, for the account that is signing out; the cleanup pass that follows
-    // only destroys credentials again.
-    expect(signOuts()).toEqual([{ clearChatHistory: { account: "user-a" } }, undefined]);
-
+    localRunners = [
+      { name: "builtin", runner_id: "r-1", workspace_slug: "workspace-a", project_slug: "TEST", agent: "engine" },
+    ];
     invoke.mockClear();
-    await runtime.disposeAgentRuntime({ deleteChatHistory: false });
-    await runtime.disposeAgentRuntime();
-    expect(signOuts()).toEqual([undefined, undefined, undefined, undefined]);
+    await runtime.prepareAgentRun(target);
+    expect(commands()).not.toContain("daemon_engine_runner_add");
+    // A Run never changes the issue's executor.
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
   });
 
-  it("never deletes chat history when an expired session tears the runtime down", async () => {
+  it.each(["local_runner", "cloud_agent"])("leaves a %s issue alone", async (executor) => {
+    issueExecutor = executor;
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    accessExpired = true;
-    // An edition whose interceptor refreshes on a 401 only tears down once the refresh is refused.
-    refreshFailure = 401;
-    await expect(runtime.connectAgentProject("workspace-a", "project-2")).rejects.toThrow();
-    const signOuts = (invoke.mock.calls as unknown as [string, unknown][]).filter(
-      ([command]) => command === "managed_sign_out"
-    );
-    expect(signOuts.length).toBeGreaterThan(0);
-    for (const [, args] of signOuts) expect(args).toBeUndefined();
+    await runtime.prepareAgentRun(target);
+    expect(commands()).not.toContain("daemon_engine_runner_add");
   });
 
-  it("asks through the mounted dialog, and keeps history when there is none to ask through", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: false });
-    runtime.registerSignOutPrompt((resolve) => resolve(null));
-    await expect(runtime.confirmSignOut()).resolves.toBeNull();
-    runtime.registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true }));
-    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: true });
-  });
-
-  it("explains BYOK without enrolling or pinning the issue", async () => {
-    available = false;
-    const runtime = await import("../../core/services/agent-runtime");
-    await expect(
-      runtime.prepareAgentRun({
-        workspaceSlug: "workspace-a",
-        projectId: "project-1",
-        issueId: "issue-1",
-      })
-    ).rejects.toThrow(AGENT_RUNTIME_REASON_MESSAGES.byok_not_supported_on_desktop);
-    expect(calls.some((call) => call.method === "PATCH" || call.path.endsWith("desktop-enroll/"))).toBe(false);
-    expect(invoke).toHaveBeenCalledWith("managed_stop_daemon", { graceSeconds: 5 });
-  });
-
-  it.each([401, 403, 503, "network"])("allows logout when enrollment revocation fails with %s", async (failure) => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    deleteFailure = failure as number | "network";
-    try {
-      await expect(runtime.disposeAgentRuntime()).resolves.toBeUndefined();
-      expect(sessionStorage.length).toBe(0);
-      expect(invoke).toHaveBeenLastCalledWith("managed_sign_out", undefined);
-      await expect(runtime.connectAgentProject("workspace-a", "project-1")).rejects.toThrow("signed out");
-      expect(warning).toHaveBeenCalledOnce();
-    } finally {
-      warning.mockRestore();
-    }
-  });
-
-  it("does not provision a machine from a browser tab", async () => {
+  it("does nothing from a browser tab", async () => {
     Reflect.deleteProperty(window, "__TAURI__");
     const runtime = await import("../../core/services/agent-runtime");
-    await runtime.prepareAgentRun({
-      workspaceSlug: "workspace-a",
-      projectId: "project-1",
-      issueId: "issue-1",
-    });
+    await runtime.prepareAgentRun(target);
+    await runtime.ensureChatRuntime("workspace-a");
     expect(calls).toEqual([]);
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it.each(["local_runner", "cloud_agent"])("respects explicit %s even if desktop is unavailable", async (executor) => {
-    issueExecutor = executor;
-    available = false;
+  it("offers set-up when there is no daemon, and refuses with the reason when declined", async () => {
+    discovery = { kind: "no_daemon", cli: { installed: false, path: null, version: null, updatable: false } };
     const runtime = await import("../../core/services/agent-runtime");
-    await runtime.prepareAgentRun({
-      workspaceSlug: "workspace-a",
-      projectId: "project-1",
-      issueId: "issue-1",
+    const setup = await import("../../core/services/pidash-cli");
+    const asked: string[] = [];
+    setup.registerSetUpPrompt((request, done) => {
+      asked.push(request.reason);
+      done(false);
     });
-    expect(invoke).not.toHaveBeenCalled();
-    expect(calls.every((call) => call.method === "GET")).toBe(true);
+    runtime.resumeAgentRuntime("user-a");
+    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow("not set up");
+    await expect(runtime.prepareAgentRun(target)).rejects.toThrow("not set up");
+    expect(asked).toEqual(["chat", "engine"]);
+    expect(commands()).not.toContain("daemon_engine_runner_add");
   });
 
-  it.each(["local_runner", "cloud_agent", "managed_runner"])("respects inherited %s", async (executor) => {
-    issueExecutor = null;
-    projectExecutor = executor;
+  it("refuses local chat on another account's daemon, without offering a second daemon", async () => {
+    discovery = {
+      kind: "account_mismatch",
+      daemon_account: "b@example.com",
+      daemon_cloud_url: "",
+      hosts_runners: true,
+    };
+    const runtime = await import("../../core/services/agent-runtime");
+    const setup = await import("../../core/services/pidash-cli");
+    const prompt = vi.fn();
+    setup.registerSetUpPrompt(prompt);
+    runtime.resumeAgentRuntime("user-a");
+    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow("signed in as b@example.com");
+    expect(prompt).not.toHaveBeenCalled();
+    await expect(runtime.agentAvailability()).resolves.toEqual({
+      available: false,
+      reason: "Pi Dash on this computer is signed in as b@example.com.",
+    });
+  });
+
+  it("renews an expiring engine silently before a chat, but asks for a signed-out one", async () => {
+    discovery = { kind: "compatible", hello: hello("expiring") };
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
-    await runtime.prepareAgentRun({
-      workspaceSlug: "workspace-a",
-      projectId: "project-1",
-      issueId: "issue-1",
-    });
-    expect(invoke.mock.calls.some(([command]) => command === "managed_start_daemon")).toBe(
-      executor === "managed_runner"
-    );
-    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
-  });
-});
+    await runtime.ensureChatRuntime("workspace-a");
+    expect(commands()).toContain("pidash_cli_engine_login");
 
-describe("local chat enrolment project", () => {
-  it("keeps the project it enrolled when a newer project appears between messages", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    projectList = [BETA, ALPHA];
-    await runtime.ensureChatRuntime("workspace-a");
-    // Someone creates GAMMA; the list now leads with it.
-    projectList = [GAMMA, BETA, ALPHA];
-    await runtime.ensureChatRuntime("workspace-a");
-    await runtime.ensureChatRuntime("workspace-a");
-    expect(new Set(enrolledProjects()).size).toBe(1);
-    expect(calls.filter((call) => call.path.endsWith("workspaces/workspace-a/projects/"))).toHaveLength(1);
-  });
-
-  it("keeps that project across a page reload", async () => {
-    const first = await import("../../core/services/agent-runtime");
-    first.resumeAgentRuntime("user-a");
-    projectList = [BETA, ALPHA];
-    await first.ensureChatRuntime("workspace-a");
     vi.resetModules();
-    const reloaded = await import("../../core/services/agent-runtime");
-    reloaded.resumeAgentRuntime("user-a");
-    projectList = [GAMMA, BETA, ALPHA];
-    await reloaded.ensureChatRuntime("workspace-a");
-    expect(new Set(enrolledProjects()).size).toBe(1);
+    invoke.mockClear();
+    discovery = { kind: "compatible", hello: hello("signed_out") };
+    const again = await import("../../core/services/agent-runtime");
+    again.resumeAgentRuntime("user-a");
+    await expect(again.ensureChatRuntime("workspace-a")).rejects.toThrow("signed out");
+    expect(commands()).not.toContain("pidash_cli_engine_login");
   });
 
-  it.each([
-    ["the oldest project, whatever order the list arrives in", [GAMMA, ALPHA, BETA], "ALPHA"],
-    ["the workspace default project over an older one", [ALPHA, { ...BETA, is_default: true }, GAMMA], "BETA"],
-    [
-      "an active project over an archived one",
-      [{ ...ALPHA, archived_at: "2026-04-01T00:00:00Z" }, GAMMA, BETA],
-      "BETA",
-    ],
-  ] as [string, ListedProject[], string][])("enrols %s", async (_name, listed, expected) => {
+  it("remembers where the server says model credit is added", async () => {
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
-    projectList = listed;
-    await runtime.ensureChatRuntime("workspace-a");
-    expect(enrolledProjects()).toEqual([expected]);
-  });
-
-  it("reuses the project the user already connected instead of enrolling another", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.connectAgentProject("workspace-a", "project-1");
-    projectList = [GAMMA, BETA, ALPHA];
-    await runtime.ensureChatRuntime("workspace-a");
-    expect(new Set(enrolledProjects())).toEqual(new Set(["TEST"]));
-  });
-
-  it("re-resolves the project after sign-out", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    projectList = [ALPHA];
-    await runtime.ensureChatRuntime("workspace-a");
-    await runtime.disposeAgentRuntime();
-    runtime.resumeAgentRuntime("user-a");
-    projectList = [BETA];
-    await runtime.ensureChatRuntime("workspace-a");
-    expect(enrolledProjects()).toEqual(["ALPHA", "BETA"]);
-  });
-
-  it("still asks for a project when the workspace has none", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    projectList = [];
-    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow("Create a project");
-    expect(enrolledProjects()).toEqual([]);
+    await runtime.refreshAgentRuntime();
+    await vi.waitFor(() => expect(runtime.getModelTopUpUrl()).toBe("https://wallet.test/top-up"));
   });
 });
 
-describe("local chat runtime hot path", () => {
-  const cloudCalls = (suffix: string) => calls.filter((call) => call.path.endsWith(suffix));
-  const invoked = (command: string) =>
-    (invoke.mock.calls as unknown as [string, { workspace?: string }][]).filter(([name]) => name === command);
-
-  it("provisions once, then only checks the daemon on later messages", async () => {
+describe("app sign-out", () => {
+  it("signs out only the app by default: the daemon and its runners stay signed in", async () => {
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
-    await runtime.ensureChatRuntime("workspace-a");
-    const provisioning = calls.length;
-    await runtime.ensureChatRuntime("workspace-a");
-    await runtime.ensureChatRuntime("workspace-a");
-    expect(calls.slice(provisioning).map((call) => `${call.method} ${call.path}`)).toEqual([]);
-    expect(cloudCalls("agent-profile/")).toHaveLength(1);
-    expect(cloudCalls("workspaces/workspace-a/projects/")).toHaveLength(1);
-    expect(invoked("managed_enroll")).toHaveLength(1);
-    expect(invoked("managed_write_engine_config")).toHaveLength(1);
-    // The daemon check is the one step kept: it restarts a daemon that died.
-    expect(invoked("managed_start_daemon")).toHaveLength(3);
-    for (const [, args] of invoked("managed_start_daemon")) {
-      expect(args).toEqual({ account: "user-a", workspace: "workspace-a" });
-    }
+    await runtime.disposeAgentRuntime({ deleteChatHistory: false });
+    expect(commands()).not.toContain("pidash_cli_logout");
+    expect(commands()).not.toContain("chat_clear_history");
+    // The account is still known to the session teardown that follows.
+    expect(runtime.getAgentAccount()).toBe("user-a");
   });
 
-  it("coalesces a burst of messages into one provisioning pass", async () => {
+  it("signs out Pi Dash on this computer and deletes history only when ticked", async () => {
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
-    await Promise.all([
-      runtime.ensureChatRuntime("workspace-a"),
-      runtime.ensureChatRuntime("workspace-a"),
-      runtime.ensureChatRuntime("workspace-a"),
-    ]);
-    expect(cloudCalls("agent-profile/")).toHaveLength(1);
-    expect(invoked("managed_enroll")).toHaveLength(1);
+    await runtime.disposeAgentRuntime({ deleteChatHistory: true, signOutComputer: true });
+    expect(invoke).toHaveBeenCalledWith("chat_clear_history", { account: "user-a" });
+    expect(invoke).toHaveBeenCalledWith("pidash_cli_logout", { engine: false });
   });
 
-  it("provisions each workspace separately", async () => {
+  it("asks through the mounted dialog, and signs out only the app when there is none", async () => {
+    const runtime = await import("../../core/services/agent-runtime");
+    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    runtime.registerSignOutPrompt((resolve) => resolve({ deleteChatHistory: true, signOutComputer: true }));
+    await expect(runtime.confirmSignOut()).resolves.toEqual({ deleteChatHistory: true, signOutComputer: true });
+  });
+
+  it("offers to sign out the computer only for a daemon of this account", async () => {
     const runtime = await import("../../core/services/agent-runtime");
     runtime.resumeAgentRuntime("user-a");
-    await runtime.ensureChatRuntime("workspace-a");
-    await runtime.ensureChatRuntime("workspace-b");
-    expect(invoked("managed_enroll").map(([, args]) => args.workspace)).toEqual(["workspace-a", "workspace-b"]);
-  });
+    await runtime.refreshAgentRuntime();
+    expect(runtime.canSignOutComputer()).toBe(true);
 
-  it("renews an expiring model credential without enrolling again", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    try {
-      const runtime = await import("../../core/services/agent-runtime");
-      runtime.resumeAgentRuntime("user-a");
-      await runtime.ensureChatRuntime("workspace-a");
-      // The mocked credential lasts 10 minutes; step to within its renewal window.
-      vi.setSystemTime(Date.now() + 540_000);
-      await runtime.ensureChatRuntime("workspace-a");
-      expect(cloudCalls("agent-token/")).toHaveLength(2);
-      expect(invoked("managed_enroll")).toHaveLength(1);
-      expect(cloudCalls("workspaces/workspace-a/projects/")).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("provisions again after sign-out and a new sign-in", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.ensureChatRuntime("workspace-a");
-    await runtime.disposeAgentRuntime();
-    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow("signed out");
-    runtime.resumeAgentRuntime("user-b");
-    await runtime.ensureChatRuntime("workspace-a");
-    expect(invoked("managed_enroll")).toHaveLength(2);
-    expect(cloudCalls("desktop-enroll/").filter((call) => call.method === "POST")).toHaveLength(2);
-  });
-
-  it("does not restart the daemon for a message once the agent became unavailable", async () => {
-    const runtime = await import("../../core/services/agent-runtime");
-    runtime.resumeAgentRuntime("user-a");
-    await runtime.ensureChatRuntime("workspace-a");
-    available = false;
-    await expect(runtime.refreshAgentRuntime()).rejects.toThrow(
-      AGENT_RUNTIME_REASON_MESSAGES.byok_not_supported_on_desktop
-    );
-    const starts = invoked("managed_start_daemon").length;
-    await expect(runtime.ensureChatRuntime("workspace-a")).rejects.toThrow(
-      AGENT_RUNTIME_REASON_MESSAGES.byok_not_supported_on_desktop
-    );
-    expect(invoked("managed_start_daemon")).toHaveLength(starts);
+    vi.resetModules();
+    discovery = {
+      kind: "account_mismatch",
+      daemon_account: "b@example.com",
+      daemon_cloud_url: "",
+      hosts_runners: false,
+    };
+    const other = await import("../../core/services/agent-runtime");
+    other.resumeAgentRuntime("user-a");
+    await other.refreshAgentRuntime();
+    expect(other.canSignOutComputer()).toBe(false);
   });
 });

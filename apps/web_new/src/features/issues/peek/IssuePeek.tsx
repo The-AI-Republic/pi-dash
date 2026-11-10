@@ -229,7 +229,7 @@ export function IssuePeek({
 
   const issue = detail.data ?? null;
   const menu = useQuickActions(
-    issue === null || issue.is_synced
+    issue === null
       ? null
       : {
           workspaceSlug,
@@ -293,7 +293,7 @@ export function IssuePeek({
   });
   const archived = issue.archived_at !== null;
   const readOnly = !editable || archived || issue.is_synced;
-  const writable = editable && !archived && !issue.is_synced;
+  const writable = editable && !archived;
   const resolved = peekKeyOf(issueKey, project?.identifier, projectIdentifier, issue.sequence_id);
   const linkKey = peekLinkKeyOf(issueKey, project?.identifier, issue.sequence_id);
 
@@ -332,7 +332,7 @@ export function IssuePeek({
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           issueId={issue.id}
-          editable={editable}
+          editable={writable}
         />
       ),
     },
@@ -355,9 +355,9 @@ export function IssuePeek({
                 workspaceSlug={workspaceSlug}
                 issue={issue}
                 project={project}
-                editable={editable}
+                editable={writable}
                 projectIdentifier={resolved.identifier}
-                canWrite={editable}
+                canWrite={writable}
                 onOpen={(row: SubIssueItem, identifier: string) => {
                   openNested({ issueId: row.id, projectId: row.project_id, issueKey: identifier });
                 }}
@@ -393,7 +393,7 @@ export function IssuePeek({
               workspaceSlug={workspaceSlug}
               projectId={projectId}
               issueId={issue.id}
-              editable={editable}
+              editable={writable}
             />
             <CommentThread
               workspaceSlug={workspaceSlug}

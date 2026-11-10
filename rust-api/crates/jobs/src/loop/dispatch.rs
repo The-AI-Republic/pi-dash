@@ -54,6 +54,11 @@
 //! Fixture: FX-LOOP-05 (`fixtures/loop/tasks/`; recorded by PIDASHCONV-151).
 
 use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DbBackend};
+use sea_query::{
+    Alias, Asterisk, Condition, Expr, Func, InsertStatement, LockType, Query, SelectStatement,
+    UpdateStatement,
+};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -62,6 +67,7 @@ use uuid::Uuid;
 use crate::loop_scan::FIRE_LOOP_TARGET_TASK;
 use crate::queue::{enqueue_exec, JobRow, NewJob};
 use crate::Error;
+use pidash_db::orm_tx::into_sqlx;
 #[cfg(test)]
 use pidash_db::r#loop::SkipReason;
 
@@ -151,18 +157,44 @@ pub fn run_turn_message(turn_id: &Uuid) -> crate::task_message::TaskMessage {
 /// target row, so no further join is needed. Only the default manager's
 /// single `deleted_at IS NULL` applies: unlike the fire claim there is no
 /// explicit filter.
-pub fn dispatch_claim_sql() -> &'static str {
-    "SELECT t.id AS id, t.workspace_id AS workspace_id, t.user_id AS user_id, \
-     t.thread_id AS thread_id, j.prompt AS prompt, j.public_name AS public_name \
-     FROM loop_targets AS t \
-     INNER JOIN loop_jobs AS j ON j.id = t.job_id \
-     WHERE t.id = $1 AND t.deleted_at IS NULL \
-     FOR UPDATE OF t"
+pub fn dispatch_claim_select(target_id: Uuid) -> SelectStatement {
+    let t = Alias::new("t");
+    let mut sel = Query::select();
+    sel.expr_as(Expr::col((t.clone(), Alias::new("id"))), Alias::new("id"))
+        .expr_as(
+            Expr::col((t.clone(), Alias::new("workspace_id"))),
+            Alias::new("workspace_id"),
+        )
+        .expr_as(
+            Expr::col((t.clone(), Alias::new("user_id"))),
+            Alias::new("user_id"),
+        )
+        .expr_as(
+            Expr::col((t.clone(), Alias::new("thread_id"))),
+            Alias::new("thread_id"),
+        )
+        .column((Alias::new("j"), Alias::new("prompt")))
+        .column((Alias::new("j"), Alias::new("public_name")))
+        .from_as(Alias::new("loop_targets"), t.clone())
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            Alias::new("loop_jobs"),
+            Alias::new("j"),
+            Expr::col((Alias::new("j"), Alias::new("id")))
+                .equals((t.clone(), Alias::new("job_id"))),
+        )
+        .cond_where(
+            Condition::all()
+                .add(Expr::col((t.clone(), Alias::new("id"))).eq(target_id))
+                .add(Expr::col((t.clone(), Alias::new("deleted_at"))).is_null()),
+        )
+        .lock_with_tables(LockType::Update, [t]);
+    sel
 }
 
 /// One dispatch claim row: the FK values `_ensure_thread` copies onto a
 /// fresh thread plus the job payload the turn message carries.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 pub struct DispatchClaim {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -174,56 +206,133 @@ pub struct DispatchClaim {
 
 /// Thread reuse probe (`dispatch.py:50-53`):
 /// `AssistantThread.objects.filter(pk=thread_id, kind=LOOP).first()`.
-/// Binds `$1 = thread_id`.
-pub fn thread_lookup_sql() -> &'static str {
-    "SELECT id FROM assistant_thread WHERE id = $1 AND kind = 'loop'"
+pub fn thread_lookup_select(thread_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column(Alias::new("id"))
+        .from(Alias::new("assistant_thread"))
+        .cond_where(
+            Condition::all()
+                .add(Expr::col(Alias::new("id")).eq(thread_id))
+                .add(Expr::col(Alias::new("kind")).eq(THREAD_KIND_LOOP)),
+        )
+        .limit(1);
+    sel
 }
 
 /// Rotation count (`dispatch.py:55`):
 /// `AssistantMessage.objects.filter(thread=current).count()`.
-/// Binds `$1 = thread_id`.
-pub fn message_count_sql() -> &'static str {
-    "SELECT COUNT(*) FROM assistant_message WHERE thread_id = $1"
+pub fn message_count_select(thread_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.expr_as(Func::count(Expr::col(Asterisk)), Alias::new("count"))
+        .from(Alias::new("assistant_message"))
+        .cond_where(Expr::col(Alias::new("thread_id")).eq(thread_id));
+    sel
 }
 
 /// Fresh hidden thread (`dispatch.py:60-66`):
 /// `AssistantThread.objects.create(workspace, user, kind=LOOP,
 /// title, is_archived=False)`. `active_turn_id` stays NULL;
 /// `auto_now_add`/`auto_now` ride along explicitly.
-pub fn thread_insert_sql() -> &'static str {
-    "INSERT INTO assistant_thread \
-     (id, workspace_id, user_id, title, kind, is_archived, created_at, updated_at) \
-     VALUES ($1, $2, $3, $4, 'loop', FALSE, $5, $6) \
-     RETURNING id"
+pub fn thread_insert_insert(
+    id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    title: &str,
+    now: DateTime<Utc>,
+) -> InsertStatement {
+    let mut stmt = Query::insert();
+    stmt.into_table(Alias::new("assistant_thread"))
+        .columns([
+            Alias::new("id"),
+            Alias::new("workspace_id"),
+            Alias::new("user_id"),
+            Alias::new("title"),
+            Alias::new("kind"),
+            Alias::new("is_archived"),
+            Alias::new("created_at"),
+            Alias::new("updated_at"),
+        ])
+        .values_panic([
+            Expr::val(id).into(),
+            Expr::val(workspace_id).into(),
+            Expr::val(user_id).into(),
+            Expr::val(title.to_owned()).into(),
+            Expr::val(THREAD_KIND_LOOP.to_owned()).into(),
+            Expr::val(false).into(),
+            Expr::val(now.fixed_offset()).into(),
+            Expr::val(now.fixed_offset()).into(),
+        ]);
+    stmt
 }
 
 /// Archive the rotated-out thread (`dispatch.py:68`).
-pub fn thread_archive_sql() -> &'static str {
-    "UPDATE assistant_thread SET is_archived = TRUE, updated_at = $1 WHERE id = $2"
+pub fn thread_archive_update(now: DateTime<Utc>, old: Uuid) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("assistant_thread"))
+        .values([
+            (Alias::new("is_archived"), Expr::val(true).into()),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(old));
+    stmt
 }
 
 /// Repoint the target at the fresh thread (`dispatch.py:69`).
-pub fn target_repoint_sql() -> &'static str {
-    "UPDATE loop_targets SET thread_id = $1, updated_at = $2 WHERE id = $3"
+pub fn target_repoint_update(fresh: Uuid, now: DateTime<Utc>, target_id: Uuid) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("loop_targets"))
+        .values([
+            (Alias::new("thread_id"), Expr::val(fresh).into()),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(target_id));
+    stmt
 }
 
 /// Re-lock the ensured thread (`dispatch.py:89` via
 /// `events.create_message`'s `select_for_update().get(pk)` at
 /// `assistant/runtime/events.py:106-121`): full row lock, of which the
 /// dispatch reads `active_turn_id`.
-pub fn thread_lock_sql() -> &'static str {
-    "SELECT active_turn_id FROM assistant_thread WHERE id = $1 FOR UPDATE"
+pub fn thread_lock_select(thread_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.column(Alias::new("active_turn_id"))
+        .from(Alias::new("assistant_thread"))
+        .cond_where(Expr::col(Alias::new("id")).eq(thread_id))
+        .lock(LockType::Update);
+    sel
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone)]
 struct LockedThread {
     pub active_turn_id: Option<Uuid>,
 }
 
 /// In-flight skip write (`dispatch.py:95-99`).
-pub fn turn_active_skip_sql() -> &'static str {
-    "UPDATE loop_targets SET last_skipped_at = $1, last_skip_reason = 'turn_active', \
-     updated_at = $2 WHERE id = $3"
+pub fn turn_active_skip_update(now: DateTime<Utc>, target_id: Uuid) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("loop_targets"))
+        .values([
+            (
+                Alias::new("last_skipped_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+            (
+                Alias::new("last_skip_reason"),
+                Expr::val("turn_active".to_owned()).into(),
+            ),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(target_id));
+    stmt
 }
 
 /// Queued turn (`dispatch.py:102`):
@@ -231,45 +340,133 @@ pub fn turn_active_skip_sql() -> &'static str {
 /// The ORM fills `model_used`, `error_code` and `error_detail` from their
 /// model defaults (`""`, `assistant/models.py:89-91`); the columns are
 /// `NOT NULL` with no database default, so the insert carries them.
-pub fn turn_insert_sql() -> &'static str {
-    "INSERT INTO assistant_turn \
-     (id, thread_id, status, model_used, error_code, error_detail, created_at) \
-     VALUES ($1, $2, 'queued', '', '', '', $3) \
-     RETURNING id"
+pub fn turn_insert_insert(turn_id: Uuid, thread_id: Uuid, now: DateTime<Utc>) -> InsertStatement {
+    let mut stmt = Query::insert();
+    stmt.into_table(Alias::new("assistant_turn"))
+        .columns([
+            Alias::new("id"),
+            Alias::new("thread_id"),
+            Alias::new("status"),
+            Alias::new("model_used"),
+            Alias::new("error_code"),
+            Alias::new("error_detail"),
+            Alias::new("created_at"),
+        ])
+        .values_panic([
+            Expr::val(turn_id).into(),
+            Expr::val(thread_id).into(),
+            Expr::val(TURN_STATUS_QUEUED.to_owned()).into(),
+            Expr::val(String::new()).into(),
+            Expr::val(String::new()).into(),
+            Expr::val(String::new()).into(),
+            Expr::val(now.fixed_offset()).into(),
+        ]);
+    stmt
 }
 
 /// Next message sequence (`assistant/runtime/events.py:78-80`):
-/// `MAX("seq") or 0`, then `+ 1` at the insert site. Binds
-/// `$1 = thread_id`.
-pub fn message_seq_sql() -> &'static str {
-    "SELECT COALESCE(MAX(seq), 0) FROM assistant_message WHERE thread_id = $1"
+/// `MAX("seq") or 0`, then `+ 1` at the insert site.
+pub fn message_seq_select(thread_id: Uuid) -> SelectStatement {
+    let mut sel = Query::select();
+    sel.expr_as(
+        Func::coalesce([Expr::col(Alias::new("seq")).max(), Expr::val(0).into()]),
+        Alias::new("max_seq"),
+    )
+    .from(Alias::new("assistant_message"))
+    .cond_where(Expr::col(Alias::new("thread_id")).eq(thread_id));
+    sel
 }
 
 /// Link the message back onto the turn (`dispatch.py:110-111`,
 /// `turn.save(update_fields=["user_message"])`).
-pub fn turn_link_message_sql() -> &'static str {
-    "UPDATE assistant_turn SET user_message_id = $1 WHERE id = $2"
+pub fn turn_link_message_update(message_id: Uuid, turn_id: Uuid) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("assistant_turn"))
+        .values([(Alias::new("user_message_id"), Expr::val(message_id).into())])
+        .and_where(Expr::col(Alias::new("id")).eq(turn_id));
+    stmt
 }
 
 /// Raise the one-active-turn flag (`dispatch.py:112-113`,
 /// `locked.save(update_fields=["active_turn", "updated_at"])`).
-pub fn thread_set_active_sql() -> &'static str {
-    "UPDATE assistant_thread SET active_turn_id = $1, updated_at = $2 WHERE id = $3"
+pub fn thread_set_active_update(
+    turn_id: Uuid,
+    now: DateTime<Utc>,
+    thread_id: Uuid,
+) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("assistant_thread"))
+        .values([
+            (Alias::new("active_turn_id"), Expr::val(turn_id).into()),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(thread_id));
+    stmt
 }
 
 /// Pin the run on the target (`dispatch.py:115-117`): `last_run=turn`,
 /// `last_skip_reason=""` (empty = never skipped), `updated_at` now.
 /// `last_skipped_at` is deliberately untouched.
-pub fn target_pin_run_sql() -> &'static str {
-    "UPDATE loop_targets SET last_run_id = $1, last_skip_reason = '', \
-     updated_at = $2 WHERE id = $3"
+pub fn target_pin_run_update(
+    turn_id: Uuid,
+    now: DateTime<Utc>,
+    target_id: Uuid,
+) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("loop_targets"))
+        .values([
+            (Alias::new("last_run_id"), Expr::val(turn_id).into()),
+            (
+                Alias::new("last_skip_reason"),
+                Expr::val(String::new()).into(),
+            ),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(target_id));
+    stmt
 }
 
 /// Unexpected-error record (`dispatch.py:126-130`): `DISPATCH_ERROR` with
 /// `last_skipped_at` now, no `deleted_at` filter (plain `.filter(pk)`).
-pub fn dispatch_error_sql() -> &'static str {
-    "UPDATE loop_targets SET last_skipped_at = $1, last_skip_reason = 'dispatch_error', \
-     updated_at = $2 WHERE id = $3"
+pub fn dispatch_error_update(now: DateTime<Utc>, target_id: Uuid) -> UpdateStatement {
+    let mut stmt = Query::update();
+    stmt.table(Alias::new("loop_targets"))
+        .values([
+            (
+                Alias::new("last_skipped_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+            (
+                Alias::new("last_skip_reason"),
+                Expr::val("dispatch_error".to_owned()).into(),
+            ),
+            (
+                Alias::new("updated_at"),
+                Expr::val(now.fixed_offset()).into(),
+            ),
+        ])
+        .and_where(Expr::col(Alias::new("id")).eq(target_id));
+    stmt
+}
+
+async fn exec_insert(db: &impl ConnectionTrait, stmt: &InsertStatement) -> Result<(), sqlx::Error> {
+    db.execute(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(into_sqlx)?;
+    Ok(())
+}
+
+async fn exec_update(db: &impl ConnectionTrait, stmt: &UpdateStatement) -> Result<(), sqlx::Error> {
+    db.execute(DbBackend::Postgres.build(stmt))
+        .await
+        .map_err(into_sqlx)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +481,7 @@ pub fn dispatch_error_sql() -> &'static str {
 /// prompts must not depend on memory for correctness, only benefit from
 /// it. Runs inside the caller's dispatch transaction.
 pub async fn ensure_thread(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    db: &impl ConnectionTrait,
     target_id: &Uuid,
     workspace_id: &Uuid,
     user_id: &Uuid,
@@ -292,20 +489,24 @@ pub async fn ensure_thread(
     public_name: &str,
     now: &DateTime<Utc>,
 ) -> Result<Uuid, Error> {
-    let current: Option<(Uuid,)> = match thread_id {
-        Some(id) => {
-            sqlx::query_as(thread_lookup_sql())
-                .bind(id)
-                .fetch_optional(&mut **tx)
-                .await?
-        }
+    let current: Option<Uuid> = match thread_id {
+        Some(id) => db
+            .query_one(DbBackend::Postgres.build(&thread_lookup_select(id)))
+            .await
+            .map_err(into_sqlx)?
+            .map(|row| row.try_get::<Uuid>("", "id").map_err(into_sqlx))
+            .transpose()?,
         None => None,
     };
-    if let Some((id,)) = current {
-        let count: i64 = sqlx::query_scalar(message_count_sql())
-            .bind(id)
-            .fetch_one(&mut **tx)
-            .await?;
+    if let Some(id) = current {
+        let count_row = db
+            .query_one(DbBackend::Postgres.build(&message_count_select(id)))
+            .await
+            .map_err(into_sqlx)?;
+        let count = count_row
+            .map(|row| row.try_get::<i64>("", "count").map_err(into_sqlx))
+            .transpose()?
+            .ok_or(sqlx::Error::RowNotFound)?;
         if count < rotation_threshold() {
             return Ok(id);
         }
@@ -313,28 +514,21 @@ pub async fn ensure_thread(
 
     // Create a fresh thread; archive the old one (kept for admin history).
     let fresh = Uuid::new_v4();
-    sqlx::query(thread_insert_sql())
-        .bind(fresh)
-        .bind(*workspace_id)
-        .bind(*user_id)
-        .bind(truncate_title(public_name))
-        .bind(*now)
-        .bind(*now)
-        .execute(&mut **tx)
-        .await?;
-    if let Some((old,)) = current {
-        sqlx::query(thread_archive_sql())
-            .bind(*now)
-            .bind(old)
-            .execute(&mut **tx)
-            .await?;
+    exec_insert(
+        db,
+        &thread_insert_insert(
+            fresh,
+            *workspace_id,
+            *user_id,
+            &truncate_title(public_name),
+            *now,
+        ),
+    )
+    .await?;
+    if let Some(old) = current {
+        exec_update(db, &thread_archive_update(*now, old)).await?;
     }
-    sqlx::query(target_repoint_sql())
-        .bind(fresh)
-        .bind(*now)
-        .bind(*target_id)
-        .execute(&mut **tx)
-        .await?;
+    exec_update(db, &target_repoint_update(fresh, *now, *target_id)).await?;
     Ok(fresh)
 }
 
@@ -353,102 +547,101 @@ enum Inner {
 /// `DISPATCH_ERROR` — the broad `except Exception` at `:124-131`.
 async fn dispatch_inner(pool: &PgPool, target_id: &Uuid) -> Result<Inner, Error> {
     let mut tx = pool.begin().await?;
-    let claim: Option<DispatchClaim> = sqlx::query_as(dispatch_claim_sql())
-        .bind(*target_id)
-        .fetch_optional(&mut *tx)
+    let (queued_turn, settled) = {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let claim: Option<DispatchClaim> = conn
+            .query_one(DbBackend::Postgres.build(&dispatch_claim_select(*target_id)))
+            .await
+            .map_err(into_sqlx)?
+            .map(|row| {
+                Ok::<_, sqlx::Error>(DispatchClaim {
+                    id: row.try_get("", "id").map_err(into_sqlx)?,
+                    workspace_id: row.try_get("", "workspace_id").map_err(into_sqlx)?,
+                    user_id: row.try_get("", "user_id").map_err(into_sqlx)?,
+                    thread_id: row.try_get("", "thread_id").map_err(into_sqlx)?,
+                    prompt: row.try_get("", "prompt").map_err(into_sqlx)?,
+                    public_name: row.try_get("", "public_name").map_err(into_sqlx)?,
+                })
+            })
+            .transpose()?;
+        let Some(claim) = claim else {
+            return Ok(Inner::Missing);
+        };
+        let now = Utc::now();
+        let thread_id = ensure_thread(
+            &conn,
+            &claim.id,
+            &claim.workspace_id,
+            &claim.user_id,
+            claim.thread_id,
+            &claim.public_name,
+            &now,
+        )
         .await?;
-    let Some(claim) = claim else {
-        return Ok(Inner::Missing);
-    };
-    let now = Utc::now();
-    let thread_id = ensure_thread(
-        &mut tx,
-        &claim.id,
-        &claim.workspace_id,
-        &claim.user_id,
-        claim.thread_id,
-        &claim.public_name,
-        &now,
-    )
-    .await?;
 
-    let locked: LockedThread = sqlx::query_as(thread_lock_sql())
-        .bind(thread_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
-    if locked.active_turn_id.is_some() {
-        // Previous run still in flight — skip, don't queue (same policy
-        // as the scanner). The assistant stale-turn sweep guarantees
-        // active_turn eventually clears even after a worker crash, so a
-        // target can never wedge permanently.
-        sqlx::query(turn_active_skip_sql())
-            .bind(now)
-            .bind(now)
-            .bind(claim.id)
-            .execute(&mut *tx)
+        let locked = conn
+            .query_one(DbBackend::Postgres.build(&thread_lock_select(thread_id)))
+            .await
+            .map_err(into_sqlx)?
+            .map(|row| {
+                Ok::<_, sqlx::Error>(LockedThread {
+                    active_turn_id: row.try_get("", "active_turn_id").map_err(into_sqlx)?,
+                })
+            })
+            .transpose()?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        if locked.active_turn_id.is_some() {
+            // Previous run still in flight — skip, don't queue (same policy
+            // as the scanner). The assistant stale-turn sweep guarantees
+            // active_turn eventually clears even after a worker crash, so a
+            // target can never wedge permanently.
+            exec_update(&conn, &turn_active_skip_update(now, claim.id)).await?;
+            (None, Inner::Settled(false))
+        } else {
+            let turn_id = Uuid::new_v4();
+            exec_insert(&conn, &turn_insert_insert(turn_id, thread_id, now)).await?;
+            let max_seq = conn
+                .query_one(DbBackend::Postgres.build(&message_seq_select(thread_id)))
+                .await
+                .map_err(into_sqlx)?
+                .map(|row| row.try_get::<i64>("", "max_seq").map_err(into_sqlx))
+                .transpose()?
+                .ok_or(sqlx::Error::RowNotFound)?;
+            let message_id = Uuid::new_v4();
+            pidash_services::domain::assistant::create_prompt_message(
+                &conn,
+                message_id,
+                thread_id,
+                turn_id,
+                max_seq + 1,
+                &claim.prompt,
+                now,
+            )
             .await?;
-        tx.commit().await?;
-        return Ok(Inner::Settled(false));
+            exec_update(&conn, &turn_link_message_update(message_id, turn_id)).await?;
+            exec_update(&conn, &thread_set_active_update(turn_id, now, thread_id)).await?;
+            exec_update(&conn, &target_pin_run_update(turn_id, now, claim.id)).await?;
+            (Some(turn_id), Inner::Settled(true))
+        }
+    };
+    if let Some(turn_id) = queued_turn {
+        // `transaction.on_commit(run_assistant_turn.delay(turn_id))`: the job
+        // row commits or rolls back with the turn, so a failed dispatch never
+        // emits a phantom run.
+        enqueue_exec(&mut *tx, &run_turn_job(&turn_id)).await?;
     }
-
-    let turn_id = Uuid::new_v4();
-    sqlx::query(turn_insert_sql())
-        .bind(turn_id)
-        .bind(thread_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-    let max_seq: i64 = sqlx::query_scalar(message_seq_sql())
-        .bind(thread_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    let message_id = Uuid::new_v4();
-    pidash_services::domain::assistant::create_prompt_message(
-        &mut *tx,
-        message_id,
-        thread_id,
-        turn_id,
-        max_seq + 1,
-        &claim.prompt,
-        now,
-    )
-    .await?;
-    sqlx::query(turn_link_message_sql())
-        .bind(message_id)
-        .bind(turn_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(thread_set_active_sql())
-        .bind(turn_id)
-        .bind(now)
-        .bind(thread_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(target_pin_run_sql())
-        .bind(turn_id)
-        .bind(now)
-        .bind(claim.id)
-        .execute(&mut *tx)
-        .await?;
-    // `transaction.on_commit(run_assistant_turn.delay(turn_id))`: the job
-    // row commits or rolls back with the turn, so a failed dispatch never
-    // emits a phantom run.
-    enqueue_exec(&mut *tx, &run_turn_job(&turn_id)).await?;
     tx.commit().await?;
-    tracing::info!(turn = %turn_id, target = %target_id, "loop.dispatch: queued turn");
-    Ok(Inner::Settled(true))
+    if let Some(turn_id) = queued_turn {
+        tracing::info!(turn = %turn_id, target = %target_id, "loop.dispatch: queued turn");
+    }
+    Ok(settled)
 }
 
 /// Record an unexpected dispatch failure (`dispatch.py:126-130`).
 async fn record_dispatch_error(pool: &PgPool, target_id: &Uuid) -> Result<(), Error> {
     let now = Utc::now();
-    sqlx::query(dispatch_error_sql())
-        .bind(now)
-        .bind(now)
-        .bind(*target_id)
-        .execute(pool)
-        .await?;
+    let db = pidash_db::sea_orm_connection(pool);
+    exec_update(&db, &dispatch_error_update(now, *target_id)).await?;
     Ok(())
 }
 
@@ -637,6 +830,26 @@ mod tests {
         );
     }
 
+    fn pinned() -> Uuid {
+        Uuid::from_bytes([7; 16])
+    }
+
+    fn render_stmt(stmt: &SelectStatement) -> String {
+        stmt.to_string(sea_query::PostgresQueryBuilder)
+    }
+
+    fn render_insert(stmt: &InsertStatement) -> String {
+        stmt.to_string(sea_query::PostgresQueryBuilder)
+    }
+
+    fn render_update(stmt: &UpdateStatement) -> String {
+        stmt.to_string(sea_query::PostgresQueryBuilder)
+    }
+
+    fn pinned_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).expect("fits")
+    }
+
     // Dispatch SQL parses and carries every ORM arm: the claim locks only
     // the target row over an inner job join with the manager's single
     // `deleted_at` filter (no explicit one — unlike the fire claim); the
@@ -645,17 +858,17 @@ mod tests {
     // `user`, `completed`); the skip writes pin the exact reason values.
     #[test]
     fn dispatch_sql_carries_every_python_arm() {
-        let claim = dispatch_claim_sql();
-        assert!(matches!(parse(claim), sqlparser::ast::Statement::Query(_)));
-        let mine = norm(claim);
+        let claim = render_stmt(&dispatch_claim_select(pinned()));
+        assert!(matches!(parse(&claim), sqlparser::ast::Statement::Query(_)));
+        let mine = norm(&claim);
         for fragment in [
             "from loop_targets as t",
             "inner join loop_jobs as j on j.id = t.job_id",
-            "t.id = $1",
+            "t.id = '07070707-0707-0707-0707-070707070707'",
             "t.deleted_at is null",
             "for update of t",
-            "j.prompt as prompt",
-            "j.public_name as public_name",
+            "j.prompt",
+            "j.public_name",
         ] {
             assert!(mine.contains(fragment), "missing {fragment} in:\n{claim}");
         }
@@ -663,36 +876,43 @@ mod tests {
         // explicit `deleted_at__isnull` to double it.
         assert_eq!(mine.matches("t.deleted_at is null").count(), 1);
 
-        let probe = thread_lookup_sql();
-        assert!(matches!(parse(probe), sqlparser::ast::Statement::Query(_)));
-        let mine = norm(probe);
-        assert!(mine.contains("from assistant_thread where id = $1"));
+        let probe = render_stmt(&thread_lookup_select(pinned()));
+        assert!(matches!(parse(&probe), sqlparser::ast::Statement::Query(_)));
+        let mine = norm(&probe);
+        assert!(mine.contains("from assistant_thread where id ="));
         assert!(mine.contains("kind = 'loop'"));
 
-        let count = message_count_sql();
-        assert!(matches!(parse(count), sqlparser::ast::Statement::Query(_)));
-        assert!(norm(count).contains("count(*)"));
-        assert!(norm(count).contains("from assistant_message where thread_id = $1"));
+        let count = render_stmt(&message_count_select(pinned()));
+        assert!(matches!(parse(&count), sqlparser::ast::Statement::Query(_)));
+        assert!(norm(&count).contains("count(*)"));
+        assert!(norm(&count).contains("from assistant_message where thread_id ="));
 
-        let seq = message_seq_sql();
-        assert!(matches!(parse(seq), sqlparser::ast::Statement::Query(_)));
-        let mine = norm(seq);
+        let seq = render_stmt(&message_seq_select(pinned()));
+        assert!(matches!(parse(&seq), sqlparser::ast::Statement::Query(_)));
+        let mine = norm(&seq);
         // `MAX(seq) or 0` — the transcript-ordering source, not a count.
         assert!(mine.contains("coalesce(max(seq), 0)"));
-        assert!(mine.contains("from assistant_message where thread_id = $1"));
+        assert!(mine.contains("from assistant_message where thread_id ="));
 
         // Re-lock (`dispatch.py:89`): a SELECT … FOR UPDATE read of the
         // one-active-turn flag — a lock, not a write.
-        let lock = thread_lock_sql();
-        assert!(matches!(parse(lock), sqlparser::ast::Statement::Query(_)));
-        let mine = norm(lock);
+        let lock = render_stmt(&thread_lock_select(pinned()));
+        assert!(matches!(parse(&lock), sqlparser::ast::Statement::Query(_)));
+        let mine = norm(&lock);
         assert!(mine.contains("select active_turn_id"));
-        assert!(mine.contains("from assistant_thread where id = $1"));
+        assert!(mine.contains("from assistant_thread where id ="));
         assert!(mine.contains("for update"));
 
+        let now = pinned_now();
         for (sql, fragments) in [
             (
-                thread_insert_sql(),
+                render_insert(&thread_insert_insert(
+                    pinned(),
+                    pinned(),
+                    pinned(),
+                    "Pub name",
+                    now,
+                )),
                 vec![
                     "insert into assistant_thread",
                     "workspace_id",
@@ -702,19 +922,18 @@ mod tests {
                     "is_archived",
                     "'loop'",
                     "false",
-                    "returning id",
                 ],
             ),
             (
-                thread_archive_sql(),
+                render_update(&thread_archive_update(now, pinned())),
                 vec!["update assistant_thread", "is_archived = true"],
             ),
             (
-                target_repoint_sql(),
-                vec!["update loop_targets", "thread_id = $1"],
+                render_update(&target_repoint_update(pinned(), now, pinned())),
+                vec!["update loop_targets", "thread_id ="],
             ),
             (
-                turn_insert_sql(),
+                render_insert(&turn_insert_insert(pinned(), pinned(), now)),
                 vec![
                     "insert into assistant_turn",
                     "thread_id",
@@ -722,43 +941,42 @@ mod tests {
                     "model_used",
                     "error_code",
                     "error_detail",
-                    "returning id",
                 ],
             ),
             (
-                turn_link_message_sql(),
-                vec!["update assistant_turn", "user_message_id = $1"],
+                render_update(&turn_link_message_update(pinned(), pinned())),
+                vec!["update assistant_turn", "user_message_id ="],
             ),
             (
-                thread_set_active_sql(),
-                vec!["update assistant_thread", "active_turn_id = $1"],
+                render_update(&thread_set_active_update(pinned(), now, pinned())),
+                vec!["update assistant_thread", "active_turn_id ="],
             ),
             (
-                target_pin_run_sql(),
+                render_update(&target_pin_run_update(pinned(), now, pinned())),
                 vec![
                     "update loop_targets",
-                    "last_run_id = $1",
+                    "last_run_id =",
                     "last_skip_reason = ''",
                 ],
             ),
             (
-                turn_active_skip_sql(),
+                render_update(&turn_active_skip_update(now, pinned())),
                 vec![
                     "update loop_targets",
-                    "last_skipped_at = $1",
+                    "last_skipped_at =",
                     "last_skip_reason = 'turn_active'",
                 ],
             ),
             (
-                dispatch_error_sql(),
+                render_update(&dispatch_error_update(now, pinned())),
                 vec![
                     "update loop_targets",
-                    "last_skipped_at = $1",
+                    "last_skipped_at =",
                     "last_skip_reason = 'dispatch_error'",
                 ],
             ),
         ] {
-            let parsed = parse(sql);
+            let parsed = parse(&sql);
             assert!(
                 matches!(
                     parsed,
@@ -766,7 +984,7 @@ mod tests {
                 ),
                 "not a write:\n{sql}"
             );
-            let mine = norm(sql);
+            let mine = norm(&sql);
             for fragment in fragments {
                 assert!(mine.contains(fragment), "missing {fragment} in:\n{sql}");
             }

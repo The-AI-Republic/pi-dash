@@ -22,7 +22,8 @@ pub struct Model {
     pub default_assignee_id: Option<Uuid>,
     pub project_lead_id: Option<Uuid>,
     pub updated_by_id: Option<Uuid>,
-    #[sea_orm(unique)]
+    // Not `unique`: the generator reads a partial unique index as a
+    // column constraint (see the module doc in `mod.rs`).
     pub workspace_id: Uuid,
     pub emoji: Option<String>,
     pub cycle_view: bool,
@@ -59,6 +60,11 @@ pub struct Model {
     pub agent_review_default_interval_seconds: i32,
     pub default_agent_executor: String,
     pub agent_test_default_interval_seconds: i32,
+    // What happens to a dedicated issue when its runner is revoked or
+    // deleted (PDASHOSS01-297, design §6.6, H-2): `fail_to_backlog`
+    // (default) or `fall_back`. Reads the Django-owned column (db 0173);
+    // Django model order puts it last.
+    pub dedicated_runner_lost_action: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

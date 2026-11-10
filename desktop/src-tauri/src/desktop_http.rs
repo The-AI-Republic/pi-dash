@@ -34,6 +34,14 @@ pub struct DesktopHttp {
     // Abort signals for in-flight requests and streams, keyed by the page's
     // request id, so a canceled request stops instead of completing unseen.
     inflight: std::sync::Mutex<HashMap<String, Arc<Notify>>>,
+    // Cancels that arrived before the request registered. The request and
+    // stream commands are async (spawned, so track runs on a later poll)
+    // while cancel is sync (runs inline), so a fast page-side abort can be
+    // handled first. Each entry holds a pre-notified Notify that track
+    // adopts instead of inserting a fresh one. Stale entries are pruned,
+    // so cancels for ids that never track cannot accumulate.
+    // Lock order: always pre_cancel before inflight.
+    pre_cancel: std::sync::Mutex<HashMap<String, (Arc<Notify>, Instant)>>,
 }
 
 impl DesktopHttp {
@@ -48,15 +56,22 @@ impl DesktopHttp {
                 .build()?,
             generation: Mutex::new(0),
             inflight: Default::default(),
+            pre_cancel: Default::default(),
         })
     }
 
     fn track(&self, id: &str) -> Inflight<'_> {
-        let cancel = Arc::new(Notify::new());
-        self.inflight
-            .lock()
-            .unwrap()
-            .insert(id.to_owned(), cancel.clone());
+        let now = Instant::now();
+        let mut pre = self.pre_cancel.lock().unwrap();
+        pre.retain(|_, (_, at)| now.duration_since(*at) < PRE_CANCEL_TTL);
+        // Adopt a cancel that landed before this request registered; it is
+        // already notified, so the caller's select fires at once.
+        let cancel = pre
+            .remove(id)
+            .map(|(cancel, _)| cancel)
+            .unwrap_or_else(|| Arc::new(Notify::new()));
+        let mut inflight = self.inflight.lock().unwrap();
+        inflight.insert(id.to_owned(), cancel.clone());
         Inflight {
             http: self,
             id: id.to_owned(),
@@ -65,9 +80,33 @@ impl DesktopHttp {
     }
 
     fn cancel(&self, id: &str) {
-        if let Some(cancel) = self.inflight.lock().unwrap().remove(id) {
+        let now = Instant::now();
+        let mut pre = self.pre_cancel.lock().unwrap();
+        pre.retain(|_, (_, at)| now.duration_since(*at) < PRE_CANCEL_TTL);
+        let mut inflight = self.inflight.lock().unwrap();
+        if let Some(cancel) = inflight.remove(id) {
             // notify_one stores a permit, so a cancel that arrives before the
             // request starts waiting is not lost.
+            cancel.notify_one();
+        } else {
+            // No entry yet: the async request task may not have run track yet.
+            // Leave a pre-notified tombstone for track to adopt.
+            let cancel = Arc::new(Notify::new());
+            cancel.notify_one();
+            pre.insert(id.to_owned(), (cancel, now));
+        }
+    }
+
+    /// Abort every in-flight request and stream. The page that asked for
+    /// them is gone (reload, redirect, crash) and can no longer cancel
+    /// them itself: without this, each reload orphans one Rust task per
+    /// open stream until sign-out bumps the session generation.
+    pub(crate) fn cancel_all(&self) {
+        let pending: Vec<Arc<Notify>> = {
+            let mut inflight = self.inflight.lock().unwrap();
+            std::mem::take(&mut *inflight).into_values().collect()
+        };
+        for cancel in pending {
             cancel.notify_one();
         }
     }
@@ -93,6 +132,10 @@ impl Drop for Inflight<'_> {
 
 const CANCELED: &str = "API request canceled";
 const TIMED_OUT: &str = "API request timed out";
+// How long a cancel that landed before its request stays outstanding. The
+// gap between the request and cancel IPCs is milliseconds; this just has to
+// outlive spawn scheduling under load.
+const PRE_CANCEL_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -561,6 +604,67 @@ mod tests {
         assert!(http.inflight.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn cancel_arriving_before_track_still_cancels_the_request() {
+        let http = DesktopHttp::new(api()).unwrap();
+        http.cancel("r1");
+        let inflight = http.track("r1");
+        tokio::time::timeout(Duration::from_secs(1), inflight.cancel.notified())
+            .await
+            .expect("cancel that arrived before track was lost");
+        drop(inflight);
+        assert!(http.inflight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_pre_cancel_does_not_poison_a_later_request() {
+        let http = DesktopHttp::new(api()).unwrap();
+        http.cancel("r1");
+        {
+            let mut pre = http.pre_cancel.lock().unwrap();
+            let (_, at) = pre.get_mut("r1").expect("tombstone missing");
+            *at = Instant::now() - PRE_CANCEL_TTL - Duration::from_secs(1);
+        }
+        let inflight = http.track("r1");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), inflight.cancel.notified())
+                .await
+                .is_err(),
+            "stale tombstone must not cancel a later request"
+        );
+        drop(inflight);
+    }
+
+    // A page reload destroys the JS world without running its cleanup, so
+    // the page never sends desktop_api_cancel. cancel_all is the Rust-side
+    // safety net the page-load hook calls: every tracked entry must be
+    // aborted, while entries tracked afterwards (the new page's requests)
+    // must be untouched.
+    #[tokio::test]
+    async fn cancel_all_aborts_every_inflight_entry_but_not_later_ones() {
+        let http = DesktopHttp::new(api()).unwrap();
+        let first = http.track("r1");
+        let second = http.track("r2");
+        http.cancel_all();
+        tokio::time::timeout(Duration::from_secs(1), first.cancel.notified())
+            .await
+            .expect("cancel_all missed r1");
+        tokio::time::timeout(Duration::from_secs(1), second.cancel.notified())
+            .await
+            .expect("cancel_all missed r2");
+        drop(first);
+        drop(second);
+        assert!(http.inflight.lock().unwrap().is_empty());
+        let later = http.track("r3");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), later.cancel.notified())
+                .await
+                .is_err(),
+            "cancel_all must not poison entries tracked after it"
+        );
+        drop(later);
+    }
+
     #[test]
     fn finished_requests_do_not_leak_or_evict_a_reused_id() {
         let http = DesktopHttp::new(api()).unwrap();
@@ -713,7 +817,10 @@ mod tests {
             bundle_root: Some(crate::bundle_root_for(None)),
             web_base: Url::parse("https://pidash.example.com").unwrap(),
         };
-        let page = Url::parse(crate::BUNDLE_ORIGIN).unwrap().join("/acme/").unwrap();
+        let page = Url::parse(crate::BUNDLE_ORIGIN)
+            .unwrap()
+            .join("/acme/")
+            .unwrap();
         assert!(from_app_ui("main", &page, &config));
         let dev = Url::parse("http://127.0.0.1:1430/").unwrap();
         assert!(!from_app_ui("main", &dev, &config));

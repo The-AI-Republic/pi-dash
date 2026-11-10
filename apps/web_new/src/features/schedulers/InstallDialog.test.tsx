@@ -348,13 +348,30 @@ describe("InstallForm author path", { timeout: 30_000 }, () => {
       slug: "authored",
       description: "",
       prompt: "Audit nightly",
-      color: "#5e6ad2",
+      color: "#3b82f6",
       is_enabled: true,
     });
     expect(refreshDefinitions).toHaveBeenCalled();
     expect(notifySuccess).toHaveBeenCalledWith(
       "Scheduler created and installed",
       "It will fire on the configured schedule."
+    );
+  });
+
+  it("saves a picked preset as the author-path color", async () => {
+    contracts.createScheduler.mockResolvedValue(scheduler({ id: "new", slug: "authored" }));
+    contracts.createSchedulerBinding.mockResolvedValue(binding({ scheduler: "new", scheduler_slug: "authored" }));
+    const { user } = renderForm({ canAuthor: true });
+    await user.click(screen.getByRole("tab", { name: "Create new" }));
+    await user.type(screen.getByLabelText("Name"), "Tinted");
+    await user.type(screen.getByLabelText("Prompt"), "Run");
+    await user.click(screen.getByRole("button", { name: "Scheduler color #ef4444" }));
+    await user.click(screen.getByRole("button", { name: "Create & install" }));
+    await waitFor(() => expect(contracts.createScheduler).toHaveBeenCalled());
+    expect(contracts.createScheduler).toHaveBeenCalledWith(
+      expect.anything(),
+      SLUG,
+      expect.objectContaining({ color: "#ef4444" })
     );
   });
 

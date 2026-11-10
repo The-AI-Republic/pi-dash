@@ -19,7 +19,7 @@
 //! (the `Agent()` default, `runtime/agent.py:26-34`), `retries=2`,
 //! `end_strategy='early'`, no output *toolset*, no deferred / native /
 //! server tools, no model settings, tools cherry-picked per run
-//! (the 17 local tools registered on the shared agent, plus the
+//! (the 18 local tools registered on the shared agent, plus the
 //! per-run MCP toolsets).
 //!
 //! Rules ported here, each with its graph line, in the order one turn
@@ -67,7 +67,7 @@
 //! classification) and the implementor owns "validate then execute one
 //! call", which is exactly the settled PIDASHCONV-1113
 //! `tools_local::ToolFailure` shape. Phase 7 (the live seam) binds the
-//! 17 local executors and the PIDASHCONV-1112 MCP sessions to it; the
+//! 18 local executors and the PIDASHCONV-1112 MCP sessions to it; the
 //! tests below drive the loop with scripted toolsets over the
 //! `fixtures/assistant/turn-runtime/` captures replayed through a stub
 //! provider.

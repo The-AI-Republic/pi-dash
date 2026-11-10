@@ -56,7 +56,15 @@
 //! (FX-WEB-01) and `rust-api/fixtures/tasks_webhooks/fx-web-03-webhook-send-task.json`
 //! (FX-WEB-03).
 
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QuerySelect, RelationTrait, Select, Set,
+};
 use serde_json::{Map, Value};
+
+use pidash_db::entity::{users, webhook_logs, webhooks, workspaces};
+use pidash_db::orm_tx::into_sqlx;
 
 use crate::pyformat::py_repr;
 use crate::task_message::TaskMessage;
@@ -557,8 +565,6 @@ pub fn parse_email_port(port: &str) -> Result<i64, std::num::ParseIntError> {
     port.trim().parse::<i64>()
 }
 
-use sqlx::Row as _;
-
 /// Live `webhook_send_task` + `send_webhook_deactivation_email` execution
 /// (PIDASHCONV-1105). The decision layer above stays the contract; this
 /// section wires it to Postgres, the raw HTTP client, mongo, and SMTP.
@@ -726,29 +732,50 @@ pub struct WebhookRow {
     pub created_by_id: Option<uuid::Uuid>,
 }
 
+/// The `webhooks JOIN workspaces` read decoded by name: every output name
+/// is unique, so the duplicated-name class of bug cannot recur.
+#[derive(Debug, Clone, FromQueryResult)]
+struct WebhookSendRow {
+    id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    url: String,
+    secret_key: Option<String>,
+    created_by_id: Option<uuid::Uuid>,
+}
+
+fn webhook_query(webhook_id: uuid::Uuid, slug: &str) -> Select<webhooks::Entity> {
+    webhooks::Entity::find()
+        .select_only()
+        .columns([
+            webhooks::Column::Id,
+            webhooks::Column::WorkspaceId,
+            webhooks::Column::Url,
+            webhooks::Column::SecretKey,
+            webhooks::Column::CreatedById,
+        ])
+        .join(JoinType::InnerJoin, webhooks::Relation::Workspaces.def())
+        .filter(webhooks::Column::Id.eq(webhook_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(webhooks::Column::DeletedAt.is_null())
+}
+
 async fn fetch_webhook(
     pool: &sqlx::PgPool,
     webhook_id: uuid::Uuid,
     slug: &str,
 ) -> Result<Option<WebhookRow>, sqlx::Error> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT w.id, w.workspace_id, w.url, w.secret_key, w.created_by_id \
-         FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
-         WHERE w.id = $1 AND ws.slug = $2 AND w.deleted_at IS NULL",
-    )
-    .bind(webhook_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<WebhookSendRow> = webhook_query(webhook_id, slug)
+        .into_model::<WebhookSendRow>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
     Ok(row.map(|row| WebhookRow {
-        id: row.get("id"),
-        workspace_id: row.get("workspace_id"),
-        url: row.get("url"),
-        secret_key: row
-            .try_get("secret_key")
-            .unwrap_or(None)
-            .unwrap_or_default(),
-        created_by_id: row.try_get("created_by_id").unwrap_or(None),
+        id: row.id,
+        workspace_id: row.workspace_id,
+        url: row.url,
+        secret_key: row.secret_key.unwrap_or_default(),
+        created_by_id: row.created_by_id,
     }))
 }
 
@@ -783,41 +810,53 @@ async fn save_log_doc(
             .unwrap_or("")
             .to_owned()
     };
-    let retry_count = doc.get("retry_count").and_then(Value::as_u64).unwrap_or(0) as i32;
     // `WebhookLog.objects.create(**log_data)`: the model's own columns.
     // `webhook` is a bare `UUIDField` (0091 altered the FK away; the
     // column renamed with it), `id`/`created_at`/`updated_at` are
     // Python-side (`uuid4`/`auto_now_add`/`auto_now`), and the audit
     // columns stay null (no crum user in a worker).
+    // Unparseable workspace/webhook ids (unreachable: `build_log_doc`
+    // always renders valid UUIDs) mirror the DB not-null error path and
+    // swallow exactly like the failed INSERT did (BUG-5).
+    let Some(workspace_id) = get("workspace_id").parse::<uuid::Uuid>().ok() else {
+        tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: invalid workspace_id");
+        return;
+    };
+    let Some(webhook) = get("webhook").parse::<uuid::Uuid>().ok() else {
+        tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: invalid webhook");
+        return;
+    };
+    let retry_count = doc.get("retry_count").and_then(Value::as_u64).unwrap_or(0);
+    let retry_count = i16::try_from(retry_count).unwrap_or(i16::MAX);
     let id = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
-    let stored = sqlx::query(
-        "INSERT INTO webhook_logs \
-         (id, created_at, updated_at, workspace_id, webhook, event_type, request_method, \
-         request_headers, request_body, response_status, response_headers, response_body, \
-         retry_count) \
-         VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-    )
-    .bind(id)
-    .bind(now)
-    .bind(get("workspace_id").parse::<uuid::Uuid>().ok())
-    .bind(get("webhook").parse::<uuid::Uuid>().ok())
-    .bind(get("event_type"))
-    .bind(get("request_method"))
-    .bind(get("request_headers"))
-    .bind(get("request_body"))
-    .bind(get("response_status"))
-    .bind(get("response_headers"))
-    .bind(get("response_body"))
-    .bind(retry_count)
-    .execute(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let stored = webhook_logs::ActiveModel {
+        id: Set(id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        workspace_id: Set(workspace_id),
+        webhook: Set(webhook),
+        event_type: Set(Some(get("event_type"))),
+        request_method: Set(Some(get("request_method"))),
+        request_headers: Set(Some(get("request_headers"))),
+        request_body: Set(Some(get("request_body"))),
+        response_status: Set(Some(get("response_status"))),
+        response_headers: Set(Some(get("response_headers"))),
+        response_body: Set(Some(get("response_body"))),
+        retry_count: Set(retry_count),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+    }
+    .insert(&db)
     .await;
     match stored {
         Ok(_) => {
             tracing::info!(target: "pi_dash.worker", "Webhook log saved successfully to database")
         }
         Err(error) => {
-            tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: {error}")
+            tracing::error!(target: "pi_dash.exception", "Failed to save webhook log: {}", into_sqlx(error))
         }
     }
 }
@@ -1032,16 +1071,16 @@ pub async fn run_webhook_send(
                     // the manager adds `deleted_at IS NULL` and the
                     // queryset update bypasses `save()`, so `updated_at`
                     // is untouched.
-                    if let Err(error) = sqlx::query(
-                        "UPDATE webhooks SET is_active = false \
-                         WHERE id = $1 AND deleted_at IS NULL",
-                    )
-                    .bind(webhook.id)
-                    .execute(pool)
-                    .await
-                    {
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    let deactivated = webhooks::Entity::update_many()
+                        .col_expr(webhooks::Column::IsActive, Expr::value(false))
+                        .filter(webhooks::Column::Id.eq(webhook.id))
+                        .filter(webhooks::Column::DeletedAt.is_null())
+                        .exec(&db)
+                        .await;
+                    if let Err(error) = deactivated {
                         return SendOutcome::Fail {
-                            error: error.to_string(),
+                            error: into_sqlx(error).to_string(),
                         };
                     }
                     // `if webhook:` (`:361`) is always true (a model
@@ -1102,23 +1141,31 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
         tracing::error!(target: "pi_dash.exception", task = DEACTIVATION_EMAIL_TASK_NAME, "invalid ids");
         return;
     };
-    let receiver: Option<sqlx::postgres::PgRow> =
-        sqlx::query("SELECT email FROM users WHERE id = $1")
-            .bind(receiver_id)
-            .fetch_optional(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let receiver_email: Option<String> = users::Entity::find_by_id(receiver_id)
+        .select_only()
+        .column(users::Column::Email)
+        .into_tuple::<Option<String>>()
+        .one(&db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+    let webhook_row: Option<(uuid::Uuid, String, uuid::Uuid)> =
+        webhooks::Entity::find_by_id(webhook_id)
+            .select_only()
+            .columns([
+                webhooks::Column::Id,
+                webhooks::Column::Url,
+                webhooks::Column::WorkspaceId,
+            ])
+            .filter(webhooks::Column::DeletedAt.is_null())
+            .into_tuple::<(uuid::Uuid, String, uuid::Uuid)>()
+            .one(&db)
             .await
-            .unwrap_or(None);
-    let receiver_email: Option<String> =
-        receiver.and_then(|row| row.try_get("email").unwrap_or(None));
-    let webhook: Option<sqlx::postgres::PgRow> = sqlx::query(
-        "SELECT id, url, workspace_id FROM webhooks \
-             WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(webhook_id)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
-    let (Some(receiver_email), Some(webhook)) = (receiver_email, webhook) else {
+            .ok()
+            .flatten();
+    let (Some(receiver_email), Some((_, url, workspace_id))) = (receiver_email, webhook_row) else {
         tracing::error!(
             target: "pi_dash.exception",
             task = DEACTIVATION_EMAIL_TASK_NAME,
@@ -1126,14 +1173,14 @@ pub async fn run_deactivation_email(pool: &sqlx::PgPool, call: &DeactivationEmai
         );
         return;
     };
-    let url: String = { webhook.get("url") };
-    let workspace_id: uuid::Uuid = { webhook.get("workspace_id") };
-    let slug: Option<String> = sqlx::query("SELECT slug FROM workspaces WHERE id = $1")
-        .bind(workspace_id)
-        .fetch_optional(pool)
+    let slug: Option<String> = workspaces::Entity::find_by_id(workspace_id)
+        .select_only()
+        .column(workspaces::Column::Slug)
+        .into_tuple::<String>()
+        .one(&db)
         .await
-        .unwrap_or(None)
-        .and_then(|row| row.try_get("slug").unwrap_or(None));
+        .ok()
+        .flatten();
     let Some(slug) = slug else {
         tracing::error!(target: "pi_dash.exception", task = DEACTIVATION_EMAIL_TASK_NAME, "workspace missing");
         return;
@@ -1551,6 +1598,19 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("use_tls=(EMAIL_USE_TLS == '1')"));
+    }
+
+    #[test]
+    fn webhook_query_shape_pins_join_and_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let sql = webhook_query(id, "ws-slug")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("\"webhooks\""), "{sql}");
+        assert!(sql.contains("\"workspaces\""), "{sql}");
+        assert!(sql.contains("\"slug\""), "{sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
     }
 
     #[test]

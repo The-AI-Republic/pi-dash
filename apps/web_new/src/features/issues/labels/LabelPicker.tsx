@@ -10,9 +10,10 @@
 
 import type { Label } from "@pidash/api-client";
 import { Button, Input, Popover, cn } from "@pidash/kit";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Tags } from "lucide-react";
 import * as React from "react";
 
+import { PropertyChip } from "../../../shared/pickers/PropertyChip.js";
 import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
 import { isProjectAdmin } from "../../projects/index.js";
@@ -34,6 +35,8 @@ export interface LabelPickerProps {
   disabled?: boolean | undefined;
   /** Trigger text before any label is chosen. */
   emptyText?: string | undefined;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>> | undefined;
   /** Controlled popup state; omit for the picker's own state. */
@@ -64,6 +67,7 @@ export function LabelPicker({
   label = "Labels",
   disabled = false,
   emptyText = "Select labels",
+  chip = false,
   trigger,
   open: controlledOpen,
   onOpenChange,
@@ -150,30 +154,38 @@ export function LabelPicker({
   }
 
   const trimmed = query.trim();
-  return (
-    <Popover
-      trigger={
-        trigger ?? (
-          <button
-            type="button"
-            aria-label={label}
-            disabled={disabled}
-            tabIndex={-1}
-            data-testid="label-picker-trigger"
-            className="text-body inline-flex cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-2) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {value.length === 0 && emptyText === "" ? null : (
-              <span className="min-w-0 flex-1 truncate text-left">
-                {value.length === 0 ? emptyText : `${value.length} selected`}
-              </span>
-            )}
-            <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
-          </button>
-        )
-      }
-      open={open}
-      onOpenChange={handleOpenChange}
+  const filled = value.length > 0;
+  const chipText = filled ? `${value.length} selected` : emptyText;
+  const defaultTrigger = chip ? (
+    <PropertyChip
+      label={filled ? `${label}: ${chipText}` : label}
+      icon={<Tags size={16} strokeWidth={1.5} className="text-(--text-muted)" aria-hidden="true" />}
+      text={chipText}
+      placeholder={!filled}
+      {...(filled ? { title: chipText } : {})}
+      disabled={disabled}
+      tabIndex={-1}
+      data-testid="label-picker-trigger"
+    />
+  ) : (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      tabIndex={-1}
+      data-testid="label-picker-trigger"
+      className="text-body inline-flex cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-2) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:opacity-50"
     >
+      {value.length === 0 && emptyText === "" ? null : (
+        <span className="min-w-0 flex-1 truncate text-left">
+          {value.length === 0 ? emptyText : `${value.length} selected`}
+        </span>
+      )}
+      <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
+    </button>
+  );
+  return (
+    <Popover trigger={trigger ?? defaultTrigger} open={open} onOpenChange={handleOpenChange}>
       <div className="flex flex-col gap-(--space-3)">
         <Input
           label="Search labels"

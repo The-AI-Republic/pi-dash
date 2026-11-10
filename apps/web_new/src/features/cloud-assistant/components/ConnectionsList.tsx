@@ -17,6 +17,7 @@ import {
   DISCONNECT_ACTION,
   MANAGE_USAGE_HREF,
   MANAGE_USAGE_LABEL,
+  NEEDS_CREDIT_NOTICE,
   REMOVE_ACTION,
   REMOVE_CONFIRM_BODY,
   REMOVE_CONFIRM_TITLE,
@@ -26,6 +27,7 @@ import {
   SIGN_IN_BODY,
   STALE_NOTICE,
   TEST_ACTION,
+  TOP_UP_LABEL,
 } from "../lib/copy.js";
 import type { ConnectionRow } from "../lib/rows.js";
 
@@ -38,6 +40,8 @@ export interface ConnectionsListProps {
   signInPending: boolean;
   testing: boolean;
   busyId: string | null;
+  /** Wallet address for the "Needs credit" top-up link; null hides it. */
+  topUpHref: string | null;
   onSelect(row: ConnectionRow): void;
   onCommitModel(row: ConnectionRow, model: string): void;
   onTest(): void;
@@ -139,6 +143,17 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
           <FreeModelField row={row} disabled={busy} onCommit={props.onCommitModel} />
         ) : null}
 
+        {row.modelCredit === "blocked" ? (
+          <p role="status" className="text-body text-(--text-muted)">
+            {NEEDS_CREDIT_NOTICE}{" "}
+            {props.topUpHref !== null ? (
+              <a href={props.topUpHref} target="_blank" rel="noopener noreferrer" className="text-body text-(--accent)">
+                {TOP_UP_LABEL}
+              </a>
+            ) : null}
+          </p>
+        ) : null}
+
         {row.verifiedAt !== null ? (
           <p className="text-caption text-(--text-muted)">
             Verified <time dateTime={row.verifiedAt}>{row.verifiedAt}</time>
@@ -194,8 +209,8 @@ function ModelPicker(props: {
         className="text-body h-(--control-height) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) text-(--text)"
       >
         {row.modelChoices.map((choice) => (
-          <option key={choice.value} value={choice.value}>
-            {choice.label}
+          <option key={choice.value} value={choice.value} disabled={!choice.selectable}>
+            {choice.badge === null ? choice.label : `${choice.label} (${choice.badge})`}
           </option>
         ))}
       </select>

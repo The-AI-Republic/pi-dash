@@ -786,10 +786,14 @@ test(
         });
 
         await test.step("starting one navigates to the provider auth URL", async () => {
-          const navigation = driver.page.waitForRequest(/\/auth\/google\//, { timeout: 30_000 });
+          // Intended on web_new (bug NEWFRONT-821 fixed): the space card
+          // starts the space-scoped flow, not the workspace flow.
+          const providerPattern = driver.target === "web_new" ? /\/auth\/spaces\/google\// : /\/auth\/google\//;
+          const providerPath = driver.target === "web_new" ? "/auth/spaces/google/" : "/auth/google/";
+          const navigation = driver.page.waitForRequest(providerPattern, { timeout: 30_000 });
           await driver.spaceAuthClickProvider("Google");
           const request = await navigation;
-          expect(request.url()).toContain("/auth/google/");
+          expect(request.url()).toContain(providerPath);
         });
 
         await test.step("the password step keeps the buttons compact", async () => {
@@ -801,6 +805,66 @@ test(
     );
 
     await test.step("restoring the flags removes the buttons and the slot", async () => {
+      await expect
+        .poll(async () => (await instanceConfig(undefined, admin)).is_google_enabled, SERVER_POLL)
+        .toBe(false);
+      await expect
+        .poll(async () => {
+          const buttons = await driver.spaceAuthProviderButtons();
+          if (buttons.length !== 0) await driver.spaceAuthOpenLanding();
+          return driver.spaceAuthProviderButtons();
+        }, SERVER_POLL)
+        .toEqual([]);
+      expect(await driver.spaceAuthProvidersDividerVisible()).toBe(false);
+    });
+  }
+);
+
+test(
+  specTitle(["SPC-062"], "bug: NEWFRONT-821 provider sign-in starts the spaces flow and carries the board address"),
+  { tag: specTags(["SPC-062"]) },
+  async ({ driver, seed }) => {
+    await healBaseline(seed.email, seed.password);
+    // A board position the visitor returns to after sign-in. Both cards
+    // forward it: web_new validates the single leading slash and encodes
+    // it, the old card forwards it raw.
+    const boardAddress = "/issues/parity-anchor-1?board=kanban";
+
+    const admin = await withInstanceConfig(seed.email, seed.password, { IS_GOOGLE_ENABLED: "1" }, async (admin) => {
+      await expect.poll(async () => (await instanceConfig(undefined, admin)).is_google_enabled, SERVER_POLL).toBe(true);
+
+      await test.step("the provider start carries the board address to the flow URL", async () => {
+        // Re-navigate until the button converges: a stale config read
+        // can paint the card without the fresh flag.
+        await expect
+          .poll(async () => {
+            const buttons = await driver.spaceAuthProviderButtons();
+            if (JSON.stringify(buttons) !== JSON.stringify(["Google"])) {
+              await driver.spaceAuthOpenLanding({ nextPath: boardAddress });
+            }
+            return driver.spaceAuthProviderButtons();
+          }, SERVER_POLL)
+          .toEqual(["Google"]);
+        // Intended on web_new (bug NEWFRONT-821 fixed): the space card
+        // starts the space-scoped flow, so the callback returns the
+        // visitor to the board position; the old card starts the
+        // workspace flow, which returns to the workspace app.
+        const providerPattern = driver.target === "web_new" ? /\/auth\/spaces\/google\// : /\/auth\/google\//;
+        const navigation = driver.page.waitForRequest(providerPattern, { timeout: 30_000 });
+        await driver.spaceAuthClickProvider("Google");
+        const request = await navigation;
+        const started = request.url();
+        if (driver.target === "web_new") {
+          expect(started).toContain("/auth/spaces/google/");
+        } else {
+          expect(started).toContain("/auth/google/");
+          expect(started).not.toContain("/auth/spaces/");
+        }
+        expect(new URL(started).searchParams.get("next_path")).toBe(boardAddress);
+      });
+    });
+
+    await test.step("restoring the flag removes the button and the slot", async () => {
       await expect
         .poll(async () => (await instanceConfig(undefined, admin)).is_google_enabled, SERVER_POLL)
         .toBe(false);
@@ -830,6 +894,9 @@ test(
       if (code === "5090" || code === "5092") return /code isn't valid/i;
       if (code === "5095" || code === "5097" || code === "5100" || code === "5102") return /code has expired/i;
       if (code === "5060") return /no account uses this address/i;
+      // Fixed on web_new (bug NEWFRONT-822): a throttled call banners
+      // instead of staying silent as the old card does.
+      if (code === "5900") return /too many attempts/i;
       return fallback;
     };
     const cases: {
@@ -848,7 +915,7 @@ test(
       { code: "5102", step: "code", mode: "sign-up", banner: webNewBanner("5102", /expired magic code/i) },
       { code: "5060", step: "email", mode: "sign-up", banner: webNewBanner("5060", /no account found/i) },
       { code: "5030", step: "email", mode: "sign-up", banner: webNewBanner("5030", /already registered/i) },
-      { code: "5900", step: "email", mode: "sign-up", banner: null },
+      { code: "5900", step: "email", mode: "sign-up", banner: webNewBanner("5900", null) },
       { code: "9999", step: "email", mode: "sign-up", banner: null },
     ];
     for (const { code, step, mode, banner } of cases) {

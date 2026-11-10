@@ -69,6 +69,10 @@ export type TBaseIssue = {
   // the project's default pod, resolved server-side. Reassignment is rejected
   // by the backend once the issue has an active run.
   assigned_pod_id?: string | null;
+  // Dedicated runner: when set, only this runner takes the issue's runs.
+  // Null means pod-assigned (any runner in assigned_pod_id). See
+  // .ai_design/dedicated_runner_assignment/design.md §6.1.
+  assigned_runner_id?: string | null;
   // Per-issue execution-target override. Null inherits the project's
   // `default_agent_executor`. "local_runner" routes to `assigned_pod_id`;
   // "cloud_agent" has no pod. Changing it is rejected by the backend once the
@@ -147,12 +151,30 @@ export type TIssueAgentTicker = {
   can_re_tick?: boolean;
 };
 
+/** Waiting state (§14.3): computed for a QUEUED pinned run. */
+export type TIssueDispatchWait = {
+  reason: string;
+  pin_kind: string;
+  runner: string | null;
+  runner_name: string | null;
+  queued_at: string | null;
+  runner_last_seen_at: string | null;
+  runs_ahead: number;
+  pause_reason: string | null;
+  expires_at: string | null;
+  releasable: boolean;
+};
+
 export type TIssueAgentRunSummary = {
   id: string;
   status: TAgentRunStatus;
   executor_kind: TAgentExecutorKind;
   runner: string | null;
   runner_name: string | null;
+  pinned_runner?: string | null;
+  pinned_runner_name?: string | null;
+  pin_kind?: string | null;
+  dispatch_wait?: TIssueDispatchWait | null;
   created_at: string;
   assigned_at: string | null;
   started_at: string | null;
@@ -168,6 +190,20 @@ export type TIssueAgentRunSummary = {
   live_state?: IRunnerLiveState | null;
 };
 
+/** Detail read (§14.1): present on the issue detail serializer. */
+export type TAssignedRunnerDetail = {
+  id: string;
+  name: string;
+  status: string;
+  pod: string | null;
+  owner: string | null;
+  owner_display_name: string | null;
+  host_label: string | null;
+  last_heartbeat_at: string | null;
+  is_busy: boolean;
+  queue_depth: number;
+};
+
 export type TIssueAgentStatus = {
   ticker: TIssueAgentTicker | null;
   active_run: TIssueAgentRunSummary | null;
@@ -178,6 +214,7 @@ export type TIssueAgentStatus = {
 export type TIssue = TBaseIssue & {
   description_html?: string;
   is_subscribed?: boolean;
+  assigned_runner_detail?: TAssignedRunnerDetail | null;
   agent_ticker?: TIssueAgentTicker | null;
   agent_status?: TIssueAgentStatus | null;
   parent?: Partial<TBaseIssue>;

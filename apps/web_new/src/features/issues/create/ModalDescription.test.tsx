@@ -112,6 +112,8 @@ interface StubOptions {
   uploadStatus?: number;
   /** Hold the upload so the panel's busy state is observable. */
   uploadDelayMs?: number;
+  /** The grant's asset URL; defaults to an absolute address. */
+  assetUrl?: string;
   mentions?: Array<{ member__id: string; member__display_name: string; member__avatar_url: string | null }>;
 }
 
@@ -145,7 +147,7 @@ function stubTransport(options: StubOptions = {}) {
       const status = options.uploadStatus ?? 200;
       return json(status, {
         asset_id: "asset-1",
-        asset_url: "https://cdn.test/asset-1.png",
+        asset_url: options.assetUrl ?? "https://cdn.test/asset-1.png",
         upload_data: { url: "https://s3.test/upload", fields: { key: "k" } },
       });
     }
@@ -566,6 +568,17 @@ describe("ModalDescription uploads (ISS-127)", () => {
     await waitFor(() => expect(h.onAssetUploaded).toHaveBeenCalledWith("asset-1"));
     const grant = h.calls.find((entry) => entry.method === "POST" && entry.url.includes("/api/assets/v2/"));
     expect(grant?.body).toMatchObject({ entity_type: "ISSUE_DESCRIPTION", name: "shot.png" });
+  });
+
+  it("paints a rooted grant URL from the API origin, keeping the parked asset", async () => {
+    setup({ assetUrl: `/api/assets/v2/workspaces/${SLUG}/projects/${PROJECT}/asset-1/` });
+    const input = screen.getByLabelText("Attach an image to the description");
+    fireEvent.change(input, { target: { files: [new File(["bytes"], "shot.png", { type: "image/png" })] } });
+    await waitFor(() =>
+      expect(handleCalls).toEqual([
+        { kind: "image", value: `https://api.test/api/assets/v2/workspaces/${SLUG}/projects/${PROJECT}/asset-1/` },
+      ])
+    );
   });
 
   it("toasts when the upload is refused", async () => {

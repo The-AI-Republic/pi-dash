@@ -31,6 +31,34 @@ export const CHAT_TITLE_REQUIRED_MESSAGE = "Give the conversation a name first."
 /** A rename or working-copy request for something this store does not carry. */
 export const CHAT_SESSION_GONE_MESSAGE = "This conversation is no longer on this machine.";
 
+/**
+ * `chat_failed` codes the daemon sets when the model gateway refuses a
+ * request outright (`runner/src/ipc/chat.rs`). It stops the turn on the
+ * first refusal; `detail` is the gateway's own text.
+ */
+export const MODEL_CREDIT_EXHAUSTED = "model_credit_exhausted";
+export const MODEL_AUTH_FAILED = "model_auth_failed";
+
+export const SIGN_IN_AGAIN =
+  "The model gateway did not accept this sign-in. Sign out and sign in again, then resend your message.";
+
+/** What the transcript says when a turn ends because the account has no credit. */
+export function creditNote(detail: string | undefined, topUpUrl: string): string {
+  const text = detail?.trim() || "Your model credit has run out.";
+  return topUpUrl ? `${text}\nAdd credit: ${topUpUrl}` : text;
+}
+
+/** A turn in flight: what was asked, so it can be submitted once more. */
+interface ActiveTurn {
+  /** The daemon message id of the current submission. */
+  messageId: string;
+  content: string;
+  /** Set once the turn has been resubmitted with a renewed sign-in. */
+  authRetried: boolean;
+  /** Set when the user stopped the turn; it is not submitted again. */
+  stopped?: boolean;
+}
+
 /** The store counts unix milliseconds; the contract wants ISO-8601. */
 function isoFromMillis(millis: number): string {
   return new Date(millis).toISOString();
@@ -247,6 +275,13 @@ export interface LocalTransportDeps {
   /** Bring the daemon up before the first turn; idempotent. */
   ensureRuntime: () => Promise<void>;
   /**
+   * Renew the engine sign-in after the gateway refused the credential it
+   * holds. Rejects when the daemon cannot renew without the user.
+   */
+  refreshModelCredential: () => Promise<void>;
+  /** Where the user adds model credit; empty when the server names no place. */
+  topUpUrl: () => string;
+  /**
    * The mode last stored for a runner. Consulted when the page created a
    * conversation before it loaded its own choice, so the thread still
    * warms under what the person picked last time.
@@ -280,10 +315,14 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
   const runnerModes = new Map<string, string>();
   /** Mode per session, for a page that hands it to a specific conversation. */
   const sessionModes = new Map<string, string>();
-  /** Session id to the daemon message id of its in-flight turn. */
-  const activeTurns = new Map<string, string>();
+  /** Session id to its in-flight turn, if any. */
+  const activeTurns = new Map<string, ActiveTurn>();
   const subscribers = new Map<string, (frame: LocalChatFrame) => void>();
   const errorSubscribers = new Map<string, (message: string) => void>();
+  /** Session id to the assistant text streamed for its in-flight turn. */
+  const assistantTextBySession = new Map<string, string>();
+  /** Session id to the in-flight store of its completed reply. */
+  const replyStores = new Map<string, Promise<void>>();
   let listening = false;
 
   const account = (): string => {
@@ -292,14 +331,150 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     return value;
   };
 
+  const deliver = (frame: LocalChatFrame): void => {
+    subscribers.get(frameSession(frame))?.(frame);
+  };
+
+  /**
+   * Put `note` in the transcript, then let the page hear that the turn failed.
+   * In that order because the page refetches history on the failure event, and
+   * history is the only place it reads the reason from.
+   */
+  const failWithNote = async (frame: LocalChatFrame, note: string): Promise<void> => {
+    const sessionId = frameSession(frame);
+    try {
+      await api.appendEvent(account(), sessionId, { role: "system", content: note });
+    } catch {
+      // The transcript is best-effort; the failure frame still reaches the page.
+    }
+    deliver(frame);
+  };
+
+  /**
+   * The gateway refused the engine's credential: renew the engine sign-in and
+   * submit the turn again, once. The user's message is already in history. If
+   * the sign-in cannot be renewed, the turn ends with the reason and a
+   * request to sign in — in the transcript.
+   */
+  const retryWithNewCredential = async (
+    sessionId: string,
+    turn: ActiveTurn,
+    refused: LocalChatFrame
+  ): Promise<void> => {
+    let renewed = false;
+    try {
+      await deps.refreshModelCredential();
+      renewed = true;
+      // Closed, or failed over the transport, while the sign-in was renewed.
+      if (activeTurns.get(sessionId) !== turn) return;
+      if (turn.stopped) {
+        // Stopped while the sign-in was renewed: the daemon had no turn to
+        // cancel, so end it here instead of starting it over.
+        activeTurns.delete(sessionId);
+        deliver(refused);
+        return;
+      }
+      const record = await api.getSession(account(), sessionId);
+      turn.messageId = crypto.randomUUID();
+      await api.send({
+        workspaceSlug: deps.workspaceSlug(),
+        sessionId,
+        messageId: turn.messageId,
+        content: turn.content,
+        cwd: record?.working_dir,
+        mode: await modeFor(sessionId, record?.project, deps.storedMode),
+        localThreadId: record?.engine_thread_id ?? undefined,
+      });
+    } catch (error) {
+      if (activeTurns.get(sessionId) !== turn) return;
+      activeTurns.delete(sessionId);
+      const reason = error instanceof Error ? error.message : "";
+      // Without a renewed sign-in the refused one is all there is, so the
+      // way out is to sign in, whatever kept the renewal from finishing.
+      const note = renewed ? reason || SIGN_IN_AGAIN : [reason, SIGN_IN_AGAIN].filter(Boolean).join("\n");
+      await failWithNote(refused, note);
+    }
+  };
+
+  /**
+   * Route one daemon frame to its session. A refused credential is retried
+   * silently before the page hears anything; a refusal that stands leaves
+   * its reason in the transcript first.
+   */
+  const routeFrame = (frame: LocalChatFrame): void => {
+    const sessionId = frameSession(frame);
+    const refusal = frame.result === "chat_failed" ? frame.data : null;
+    if (refusal?.code === MODEL_AUTH_FAILED) {
+      const turn = activeTurns.get(sessionId);
+      if (turn && !turn.authRetried && !turn.stopped) {
+        // Still the same turn as far as the page is concerned: it stays busy
+        // and hears nothing unless the second attempt fails too.
+        turn.authRetried = true;
+        void retryWithNewCredential(sessionId, turn, frame);
+        return;
+      }
+    }
+    // Release the session before the page hears about the turn's end: it
+    // refetches sessions on that event and must not read a stale turn.
+    if (endsTurn(frame)) activeTurns.delete(sessionId);
+    if (refusal?.code === MODEL_CREDIT_EXHAUSTED) {
+      void failWithNote(frame, creditNote(refusal.detail, deps.topUpUrl()));
+    } else if (refusal?.code === MODEL_AUTH_FAILED) {
+      void failWithNote(frame, SIGN_IN_AGAIN);
+    } else {
+      deliver(frame);
+    }
+  };
+
   /** Start one process-wide listener pair; frames route by session id. */
   const listenOnce = (): void => {
     if (listening) return;
     listening = true;
     api.subscribe({
       onFrame: (frame) => {
-        if (endsTurn(frame)) activeTurns.delete(frameSession(frame));
-        subscribers.get(frameSession(frame))?.(frame);
+        const sessionId = frameSession(frame);
+        if (frame.result === "chat_message_started") {
+          assistantTextBySession.set(sessionId, "");
+        } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
+          assistantTextBySession.set(
+            sessionId,
+            (assistantTextBySession.get(sessionId) ?? "") + deltaText(frame.data.payload)
+          );
+        }
+        if (frame.result === "chat_message_completed") {
+          // The reply is stored here, not in the page's subscription, so a
+          // turn that finishes after the page left still lands in the store.
+          // It is stored before the page re-reads history on the terminal
+          // frame; otherwise the streamed bubble vanishes.
+          const accumulated = assistantTextBySession.get(sessionId) ?? "";
+          const reply = frame.data.assistant_message?.trim() ? frame.data.assistant_message : accumulated;
+          assistantTextBySession.delete(sessionId);
+          let stored: Promise<void>;
+          try {
+            const owner = account();
+            stored =
+              reply.trim() === ""
+                ? Promise.resolve()
+                : api.appendEvent(owner, sessionId, { role: "assistant", content: reply }).then(
+                    () => undefined,
+                    () => undefined
+                  );
+          } catch {
+            stored = Promise.resolve();
+          }
+          replyStores.set(sessionId, stored);
+          void stored.then(() => {
+            if (replyStores.get(sessionId) === stored) replyStores.delete(sessionId);
+          });
+        }
+        if (frame.result === "chat_started" && frame.data.local_thread_id !== "") {
+          try {
+            void api.setThreadId(account(), sessionId, frame.data.local_thread_id).catch(() => undefined);
+          } catch {
+            // Signed out: the frame is still routed to the page.
+          }
+        }
+        routeFrame(frame);
       },
       onError: (event) => {
         activeTurns.delete(event.chat_session_id);
@@ -346,7 +521,7 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
       const rows = await api.listSessions(owner);
       return rows
         .filter((row) => row.workspace === workspaceId && row.project === runnerId)
-        .map((row) => localSessionRow(row, owner, activeTurns.get(row.id) ?? null));
+        .map((row) => localSessionRow(row, owner, activeTurns.get(row.id)?.messageId ?? null));
     },
 
     createChatSession: async (input) => {
@@ -382,9 +557,9 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     sendChatMessage: async (sessionId, content) => {
       const owner = account();
       if (activeTurns.has(sessionId)) throw new Error(TURN_BUSY_MESSAGE);
-      const messageId = crypto.randomUUID();
+      const turn: ActiveTurn = { messageId: crypto.randomUUID(), content, authRetried: false };
       listenOnce();
-      activeTurns.set(sessionId, messageId);
+      activeTurns.set(sessionId, turn);
       try {
         // The user's turn is stored before the engine hears about it, so a
         // refresh during the reply still shows what was asked.
@@ -394,7 +569,7 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
         await api.send({
           workspaceSlug: deps.workspaceSlug(),
           sessionId,
-          messageId,
+          messageId: turn.messageId,
           content,
           cwd: record?.working_dir,
           mode: await modeFor(sessionId, record?.project, deps.storedMode),
@@ -403,12 +578,16 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
         return localMessageRow(stored);
       } catch (error) {
         // Nothing reached the engine, so no terminal frame will release it.
-        if (activeTurns.get(sessionId) === messageId) activeTurns.delete(sessionId);
+        if (activeTurns.get(sessionId) === turn) activeTurns.delete(sessionId);
         throw error;
       }
     },
 
     cancelChat: async (sessionId, reason) => {
+      // Stopping a turn also stops it resubmitting when a credential was
+      // being minted for its refusal.
+      const turn = activeTurns.get(sessionId);
+      if (turn) turn.stopped = true;
       await api.cancel({ workspaceSlug: deps.workspaceSlug(), sessionId, reason });
       return { ok: true };
     },
@@ -447,18 +626,35 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
 
     deleteChatSession: async (sessionId) => {
       const owner = account();
-      await api.deleteSession(owner, sessionId);
-      // The turn, if any, was cut off with the row; no terminal frame will
-      // arrive for a conversation that no longer exists.
+      // Stop any in-flight turn before its row goes: the daemon owns the
+      // turn and only ends it on ChatCancel/ChatClose, so deleting the row
+      // alone leaves it running with no way to stop it. Best-effort — a
+      // dead daemon must not make the conversation undeletable.
+      await api.close({ workspaceSlug: deps.workspaceSlug(), sessionId }).catch(() => undefined);
       activeTurns.delete(sessionId);
+      await api.deleteSession(owner, sessionId);
       subscribers.delete(sessionId);
       errorSubscribers.delete(sessionId);
+      assistantTextBySession.delete(sessionId);
+      replyStores.delete(sessionId);
     },
 
     clearChatHistory: async () => {
-      await api.clearHistory(account());
-      // Every conversation went with the history, so nothing is in flight.
+      const owner = account();
+      // Stop every in-flight turn before the store (and the working copies
+      // it names) goes, for the same reason as deleting one conversation.
+      const inFlight = [...activeTurns.keys()];
+      await Promise.all(
+        inFlight.map((sessionId) =>
+          api.close({ workspaceSlug: deps.workspaceSlug(), sessionId }).catch(() => undefined)
+        )
+      );
+      await api.clearHistory(owner);
       activeTurns.clear();
+      subscribers.clear();
+      errorSubscribers.clear();
+      assistantTextBySession.clear();
+      replyStores.clear();
     },
 
     chatWorkingDir: async (workspaceId, runnerId) => {
@@ -474,32 +670,17 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     subscribeChatEvents: (sessionId, _after, handlers: ChatSubscriptionHandlers) => {
       listenOnce();
       const folder = createFrameFolder(sessionId);
-      let assistantText = "";
       const receive = (frame: LocalChatFrame): void => {
-        if (frame.result === "chat_message_started") {
-          assistantText = "";
-        } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
-          assistantText += deltaText(frame.data.payload);
-        }
         if (frame.result === "chat_message_completed") {
-          // The reply is stored before the page re-reads history on the
-          // terminal frame; otherwise the streamed bubble vanishes.
-          const reply = frame.data.assistant_message?.trim() ? frame.data.assistant_message : assistantText;
+          // The reply and thread id are stored by the process-wide listener;
+          // the page only displays. Delivery waits for that store so the
+          // history re-read sees the reply.
           const completion = folder(frame);
-          const stored =
-            reply.trim() === ""
-              ? Promise.resolve()
-              : api.appendEvent(account(), sessionId, { role: "assistant", content: reply }).then(
-                  () => undefined,
-                  () => undefined
-                );
+          const stored = replyStores.get(sessionId) ?? Promise.resolve();
           void stored.then(() => {
-            if (completion !== null) handlers.onEvent(completion);
+            if (completion !== null && subscribers.get(sessionId) === receive) handlers.onEvent(completion);
           });
           return;
-        }
-        if (frame.result === "chat_started" && frame.data.local_thread_id !== "") {
-          void api.setThreadId(account(), sessionId, frame.data.local_thread_id).catch(() => undefined);
         }
         const event = folder(frame);
         if (event !== null) handlers.onEvent(event);

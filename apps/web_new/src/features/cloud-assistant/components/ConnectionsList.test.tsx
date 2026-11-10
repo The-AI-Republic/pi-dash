@@ -31,17 +31,20 @@ function row(overrides: Partial<ConnectionRow> = {}): ConnectionRow {
     disconnected: false,
     removable: true,
     disconnectable: false,
+    quotaPlan: null,
+    modelCredit: null,
     ...overrides,
   };
 }
 
 function setup(rows: ConnectionRow[], overrides: Partial<React.ComponentProps<typeof ConnectionsList>> = {}) {
-  const props = {
+  const props: React.ComponentProps<typeof ConnectionsList> = {
     rows,
     signInAvailable: true,
     signInPending: false,
     testing: false,
     busyId: null,
+    topUpHref: null,
     onSelect: vi.fn(),
     onCommitModel: vi.fn(),
     onTest: vi.fn(),
@@ -86,8 +89,8 @@ describe("ConnectionsList", () => {
         modelControl: "select",
         modelName: "gpt-5.6-sol",
         modelChoices: [
-          { value: "gpt-5.6-sol", label: "gpt-5.6-sol" },
-          { value: "gpt-5.5", label: "Previous generation" },
+          { value: "gpt-5.6-sol", label: "gpt-5.6-sol", credit: null, badge: null, selectable: true },
+          { value: "gpt-5.5", label: "Previous generation", credit: null, badge: null, selectable: true },
         ],
         markers: [],
       }),
@@ -110,8 +113,8 @@ describe("ConnectionsList", () => {
         modelControl: "select",
         modelName: "gpt-5.6-sol",
         modelChoices: [
-          { value: "gpt-5.6-sol", label: "gpt-5.6-sol" },
-          { value: "gpt-5.5", label: "Previous generation" },
+          { value: "gpt-5.6-sol", label: "gpt-5.6-sol", credit: null, badge: null, selectable: true },
+          { value: "gpt-5.5", label: "Previous generation", credit: null, badge: null, selectable: true },
         ],
       }),
     ]);
@@ -288,5 +291,139 @@ describe("ConnectionsList", () => {
     ]);
     await user.click(screen.getByRole("button", { name: "Continue with ChatGPT" }));
     expect(props.onSignIn).toHaveBeenCalledTimes(1);
+  });
+
+  it("badges free models and disables paid models for a free-plan user", () => {
+    setup(
+      [
+        row({
+          id: "row-openhub",
+          kind: "openhub",
+          title: "OpenHub",
+          removable: false,
+          disconnectable: false,
+          modelControl: "select",
+          modelName: "deepseek/deepseek-v4.1-flash-1017",
+          quotaPlan: "free",
+          modelCredit: "free",
+          modelChoices: [
+            {
+              value: "deepseek/deepseek-v4.1-flash-1017",
+              label: "Lowest cost",
+              credit: "free",
+              badge: "Free",
+              selectable: true,
+            },
+            {
+              value: "moonshotai/kimi-k3",
+              label: "Balanced hosted model",
+              credit: "blocked",
+              badge: "Needs credit",
+              selectable: false,
+            },
+          ],
+          markers: ["Included in your plan", "In use"],
+        }),
+      ],
+      { topUpHref: "https://hub.example.com/account/credits" }
+    );
+    const picker = screen.getByRole("combobox", { name: "Model for OpenHub" });
+    expect(picker).toHaveValue("deepseek/deepseek-v4.1-flash-1017");
+    const freeOption = screen.getByRole("option", { name: "Lowest cost (Free)" });
+    const paidOption = screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" });
+    expect(freeOption).toBeEnabled();
+    expect(paidOption).toBeDisabled();
+    expect(screen.queryByRole("link", { name: "Top up" })).toBeNull();
+  });
+
+  it("warns and links to top up when the stored model needs credit", () => {
+    setup(
+      [
+        row({
+          id: "row-openhub",
+          kind: "openhub",
+          title: "OpenHub",
+          removable: false,
+          disconnectable: false,
+          modelControl: "select",
+          modelName: "moonshotai/kimi-k3",
+          quotaPlan: "free",
+          modelCredit: "blocked",
+          modelChoices: [
+            {
+              value: "moonshotai/kimi-k3",
+              label: "Balanced hosted model",
+              credit: "blocked",
+              badge: "Needs credit",
+              selectable: false,
+            },
+          ],
+          markers: ["Included in your plan", "In use"],
+        }),
+      ],
+      { topUpHref: "https://hub.example.com/account/credits" }
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("This model needs credit on the free plan.");
+    const link = screen.getByRole("link", { name: "Top up" });
+    expect(link).toHaveAttribute("href", "https://hub.example.com/account/credits");
+  });
+
+  it("omits the top-up link without a wallet address", () => {
+    setup(
+      [
+        row({
+          id: "row-openhub",
+          kind: "openhub",
+          title: "OpenHub",
+          removable: false,
+          disconnectable: false,
+          modelControl: "select",
+          modelName: "moonshotai/kimi-k3",
+          quotaPlan: "free",
+          modelCredit: "blocked",
+          modelChoices: [],
+          markers: ["Included in your plan", "In use"],
+        }),
+      ],
+      { topUpHref: null }
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("This model needs credit on the free plan.");
+    expect(screen.queryByRole("link", { name: "Top up" })).toBeNull();
+  });
+
+  it("shows Uses-credit hints without disabling for a paid plan", () => {
+    setup([
+      row({
+        id: "row-openhub",
+        kind: "openhub",
+        title: "OpenHub",
+        removable: false,
+        disconnectable: false,
+        modelControl: "select",
+        modelName: "moonshotai/kimi-k3",
+        quotaPlan: "payg",
+        modelCredit: "uses-credit",
+        modelChoices: [
+          {
+            value: "deepseek/deepseek-v4.1-flash-1017",
+            label: "Lowest cost",
+            credit: "free",
+            badge: "Free",
+            selectable: true,
+          },
+          {
+            value: "moonshotai/kimi-k3",
+            label: "Balanced hosted model",
+            credit: "uses-credit",
+            badge: "Uses credit",
+            selectable: true,
+          },
+        ],
+        markers: ["Included in your plan", "In use"],
+      }),
+    ]);
+    expect(screen.getByRole("option", { name: "Lowest cost (Free)" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "Balanced hosted model (Uses credit)" })).toBeEnabled();
+    expect(screen.queryByRole("status")).toBeNull();
   });
 });

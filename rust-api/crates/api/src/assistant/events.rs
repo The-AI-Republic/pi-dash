@@ -36,7 +36,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use pidash_db::assistant::event_queries::{serialize_event_json, EventParts};
 use uuid::Uuid;
 
@@ -347,35 +347,34 @@ async fn assistant_event_stream(
     // order-preserving and re-rendered spaced (see `py_dumps`).
     // `message` is the event's nullable `message_id` UUIDField
     // (`events.py:44`), not the turn.
-    let rows = sqlx::query_as::<_, (i64, Uuid, Option<Uuid>, i64, String, String, DateTime<Utc>)>(
-        "SELECT \"id\", \"thread_id\", \"message_id\", \"seq\", \"kind\", \
-         \"payload\"::text, \"created_at\" \
-         FROM \"assistant_event\" \
-         WHERE (\"thread_id\" = $1 AND \"seq\" > $2) \
-         ORDER BY \"seq\" ASC LIMIT 1000",
-    )
-    .bind(thread_id)
-    .bind(after)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let mut frames = Vec::with_capacity(rows.len());
-    for (id, row_thread_id, message_id, seq, kind, payload_text, created_at) in &rows {
-        let payload: serde_json::Value =
-            serde_json::from_str(payload_text).unwrap_or(serde_json::Value::Null);
-        let thread_str = row_thread_id.to_string();
-        let message_str = message_id.map(|id| id.to_string());
-        let created = py_iso(created_at);
-        frames.push(sse_frame(&serialize_event_json(&EventParts {
-            id: *id,
-            thread_id: &thread_str,
-            message_id: message_str.as_deref(),
-            seq: *seq,
-            kind,
-            payload_json: &py_dumps(&payload),
-            created_at: &created,
-        })));
-    }
+    let frames = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let rows = pidash_db::entity::assistant_event::Entity::find()
+            .filter(pidash_db::entity::assistant_event::Column::ThreadId.eq(thread_id))
+            .filter(pidash_db::entity::assistant_event::Column::Seq.gt(after))
+            .order_by_asc(pidash_db::entity::assistant_event::Column::Seq)
+            .limit(1000)
+            .all(&db)
+            .await
+            .map_err(|_| server_error())?;
+        let mut frames = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let thread_str = row.thread_id.to_string();
+            let message_str = row.message_id.map(|id| id.to_string());
+            let created = py_iso(&row.created_at.with_timezone(&Utc));
+            frames.push(sse_frame(&serialize_event_json(&EventParts {
+                id: row.id,
+                thread_id: &thread_str,
+                message_id: message_str.as_deref(),
+                seq: row.seq,
+                kind: &row.kind,
+                payload_json: &py_dumps(&row.payload),
+                created_at: &created,
+            })));
+        }
+        frames
+    };
 
     // Live tail (`events.py:77-103`): subscribe to `assistant:thread:<id>`
     // ([`live_tail_channel`]) after the replay prefix, then relay each
