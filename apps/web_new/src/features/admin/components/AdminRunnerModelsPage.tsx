@@ -152,7 +152,7 @@ function ModelDialog({
           Preselect for this agent
         </label>
         {error !== null ? (
-          <p data-testid="runner-models-form-error" role="alert" className="text-body text-(--error)">
+          <p data-testid="runner-models-form-error" role="alert" className="text-body text-(--danger)">
             {error}
           </p>
         ) : null}
