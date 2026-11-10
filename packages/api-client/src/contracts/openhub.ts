@@ -260,7 +260,7 @@ export const FREE_QUOTA_STALE_TIME_MS = 45_000;
 
 /**
  * One free-quota answer, normalized. `freeModels` is the server-declared
- * free catalog (today only `deepseek/deepseek-v4-flash`, on every plan);
+ * free catalog (today only `deepseek/deepseek-v4.1-flash-1017`, on every plan);
  * `plan` is the normalized plan id (`"free"`, `"payg"`, `"member"`).
  * Token counters are `null` when the proxy omits them (the picker only
  * needs `freeModels` + `plan`, but both surfaces share this read).

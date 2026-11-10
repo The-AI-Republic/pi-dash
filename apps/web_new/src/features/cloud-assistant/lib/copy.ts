@@ -91,7 +91,7 @@ export const TURN_FREE_QUOTA_EXHAUSTED_PREFIX = "Daily free limit reached, reset
 export const TURN_FREE_QUOTA_EXHAUSTED_DETAIL = "Daily free limit reached, resets at";
 export const TURN_PAID_MODEL_TITLE = "This model needs credit";
 export const TURN_PAID_MODEL_DETAIL =
-  "This model needs credit. The free model deepseek/deepseek-v4-flash is included on every plan.";
+  "This model needs credit. The free model deepseek/deepseek-v4.1-flash-1017 is included on every plan.";
 export const TURN_PAID_MODEL_SWITCH_ACTION = "Switch to free model";
 export const TURN_PAID_MODEL_TOPUP_ACTION = "Top up wallet";
 export const TURN_WALLET_DETAIL = "Your OpenHub wallet is out of credits. Top up to keep using the assistant.";

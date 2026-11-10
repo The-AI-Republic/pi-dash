@@ -20,7 +20,7 @@ const QUOTA_BODY = {
   llm: {
     freeTokensUsed: 123_456,
     freeTokensLimit: 2_000_000,
-    freeModels: ["deepseek/deepseek-v4-flash"],
+    freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
   },
   apps: { freeCallsUsed: 5, freeCallsLimit: 150 },
   resetsAt: "2026-11-10T00:00:00+00:00",
