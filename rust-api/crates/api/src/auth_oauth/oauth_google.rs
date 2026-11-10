@@ -2131,9 +2131,13 @@ pub async fn authenticate_google(
     let now = chrono::Utc::now();
     let (client_id, client_secret) = google_config(&ctx.pool, secret).await?;
     let callback_uri = redirect_uri(ctx.secure, &ctx.host, PROVIDER);
+    // Token/userinfo client stays unbounded (Django's `requests` has no
+    // timeout there); the avatar S3 client is bounded separately
+    // (PIDASHCONV-1728) so S3 PUT/HEAD/DELETE cannot hang the callback.
     let client = reqwest::Client::builder()
         .build()
         .map_err(|_| CallbackError::Internal)?;
+    let s3_client = super::avatar_s3_client();
     // `request.scheme` for the server-side S3 calls (`S3Storage(request)`,
     // `base.py:198` — `is_server=False` signs the public host).
     let scheme = if ctx.secure { "https" } else { "http" };
@@ -2228,7 +2232,7 @@ pub async fn authenticate_google(
                 // success sets the FK too, failure keeps the provider URL
                 // (`base.py:330-345`). No old avatar exists to delete.
                 if let Some(asset_id) = download_and_upload_avatar(
-                    &client,
+                    &s3_client,
                     &ctx.pool,
                     &ctx.storage,
                     scheme,
@@ -2252,7 +2256,7 @@ pub async fn authenticate_google(
             }
             if !is_signup && google_sync_enabled(&ctx.pool, secret).await? {
                 sync_user_data(
-                    &client,
+                    &s3_client,
                     &ctx.pool,
                     &ctx.storage,
                     scheme,

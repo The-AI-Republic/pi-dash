@@ -1795,7 +1795,10 @@ async fn app_callback(
         // Avatar I/O inputs (`S3Storage(request)`, `base.py:198` —
         // `is_server=False` signs the public host; the cap is
         // `DATA_UPLOAD_MAX_MEMORY_SIZE`, i.e. `FILE_SIZE_LIMIT`).
-        let avatar_http = reqwest::Client::new();
+        // Bounded S3 client (60s/60s, PIDASHCONV-1728): the provider
+        // download inherits a tighter 10s per-request timeout, while S3
+        // PUT/HEAD/DELETE must not hang the callback indefinitely.
+        let avatar_http = super::avatar_s3_client();
         let avatar_scheme = if is_secure_request(&headers, settings) {
             "https"
         } else {

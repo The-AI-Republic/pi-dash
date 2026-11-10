@@ -1887,8 +1887,10 @@ async fn callback_success(
     // B4: `is_signup = bool(user)` — inverted as written.
     let is_signup = found.is_some();
     // Avatar I/O client (`S3Storage(request)` signs the public host,
-    // `base.py:198` — `is_server=False`).
-    let client = reqwest::Client::new();
+    // `base.py:198` — `is_server=False`). Bounded S3 client (60s/60s,
+    // PIDASHCONV-1728): provider download keeps its 10s per-request
+    // timeout while S3 PUT/HEAD/DELETE must not hang the callback.
+    let client = super::avatar_s3_client();
 
     let user_agent = headers
         .get(header::USER_AGENT)
