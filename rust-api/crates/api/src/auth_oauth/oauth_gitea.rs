@@ -1147,7 +1147,8 @@ pub fn s3_authorization(
 
 /// New FileAsset row (`base.py:197-206`): `attributes={name, type, size}`,
 /// `asset` under the avatar `upload_to` (`asset.py:17-20`, workspace-less →
-/// `user-{hex}-{filename}`), `user` + `created_by` set, entity
+/// `user-{hex}-{filename}`), `user` set (both audit columns NULL —
+/// anonymous callback, PIDASHCONV-1730), entity
 /// `USER_AVATAR`, uploaded flag, S3 head metadata (NULL when the HEAD
 /// fails, like boto3's `None`).
 #[allow(clippy::too_many_arguments)]
@@ -1175,7 +1176,10 @@ pub async fn insert_file_asset(
         updated_at: Set(now_tz),
         attributes: Set(attributes),
         asset: Set(stored_key.to_owned()),
-        created_by_id: Set(Some(user_id)),
+        // Django's BaseModel.save overwrites created_by with NULL on the
+        // anonymous OAuth callback (login() runs after sign-up), so both
+        // audit columns are NULL — same as the shared helper in mod.rs.
+        created_by_id: Set(None),
         updated_by_id: Set(None),
         workspace_id: Set(None),
         is_deleted: Set(false),

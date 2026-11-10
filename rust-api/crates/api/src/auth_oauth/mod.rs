@@ -366,7 +366,8 @@ pub(crate) async fn head_storage_metadata(
 
 /// Shared new `FileAsset` row (`base.py:197-206`):
 /// `attributes={name, type, size}` (`{provider}-avatar.{extension}`),
-/// `asset` the bare filename, `user` + `created_by` set, entity
+/// `asset` the bare filename, `user` set (both audit columns NULL —
+/// anonymous callback, PIDASHCONV-1730), entity
 /// `USER_AVATAR`, uploaded flag, S3 head metadata (`None` → NULL when the
 /// HEAD failed, like boto3's `None`). Every other column rides its Django
 /// default (the reviewed column list mirrors the D-17 google port of the
@@ -395,7 +396,10 @@ pub(crate) async fn insert_avatar_file_asset(
         updated_at: Set(now_tz),
         attributes: Set(attributes),
         asset: Set(stored_key.to_owned()),
-        created_by_id: Set(Some(user_id)),
+        // Django's BaseModel.save overwrites created_by with NULL on the
+        // anonymous OAuth callback (login() runs after sign-up), so both
+        // audit columns are NULL — same as soft_delete_avatar_asset.
+        created_by_id: Set(None),
         updated_by_id: Set(None),
         workspace_id: Set(None),
         is_deleted: Set(false),
