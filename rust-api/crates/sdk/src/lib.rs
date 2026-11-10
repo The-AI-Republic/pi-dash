@@ -241,6 +241,9 @@ pub mod read {
     // build_dispatch_wait with the viewer for `releasable`.
     pub use pidash_services::domain::issue_assignment::build_dispatch_wait;
     pub use pidash_services::domain::issue_assignment::dedicated_refusal_body;
+    // PIDASHCONV-1724: by-id sibling so the overlay can build the
+    // refusal body from an issue id without naming an issues::Model.
+    pub use pidash_services::domain::issue_assignment::dedicated_refusal_body_by_id;
     pub use pidash_services::domain::issue_assignment::fetch_active_dispatch_run;
     pub use pidash_services::domain::issue_assignment::RunWaitInputs;
     pub use pidash_services::read::ActorDetailView;
@@ -458,9 +461,16 @@ pub mod hooks {
     pub use pidash_jobs::hooks::TransitionHook;
     pub use pidash_jobs::issue_transition::PodDrain;
     pub use pidash_jobs::issue_transition::PublishEffectsDrain;
+    // PIDASHCONV-1724: transition outcome visibility for pidash_update_issue
+    // (dispatched_run_id / run_refusal). The overlay wraps IssueTransitionHook
+    // in a recording decorator and reads these types after operations::issues::update
+    // fires; FireRequest is the fire input, FireOutcome the fire output, and
+    // TransitionOutcome carries created_run / reason.
     pub use pidash_services::domain::activity::TaskEnqueueHook;
     pub use pidash_services::domain::issues_move::MoveAdmissionCache;
     pub use pidash_services::domain::transition::IssueTransitionHook;
+    pub use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+    pub use pidash_types::orchestration::TransitionOutcome;
 }
 
 /// The serializer step of the v1 write endpoints: validate the payload,
