@@ -4410,8 +4410,11 @@ async fn comment_create(
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
     }
-    // `Project.objects.get` / `Issue.objects.get`: default managers
+    // `Project.objects.get` plus the issue load: default managers
     // (soft-deleted rows 404), unscoped by tenant (the gate scoped).
+    // DIFF-13: the issue load is scoped to the URL's project, so a
+    // work item of another (e.g. private) project answers 404
+    // instead of accepting the write Django took (NEWPIDASH-170).
     let db = orm(&pool);
     let project = match super::access::project_tenant(&db, project_id).await {
         Ok(row) => row,
@@ -4424,6 +4427,7 @@ async fn comment_create(
         .select_only()
         .column(issues::Column::CreatedById)
         .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::ProjectId.eq(project_id))
         .filter(issues::Column::DeletedAt.is_null())
         .into_tuple()
         .one(&db)
@@ -5356,6 +5360,23 @@ async fn comment_reaction_create(
         Some(reaction) => reaction,
         None => return Denial::ServerError.into_response(),
     };
+    // DIFF-13: the comment must belong to the URL's project
+    // (NEWPIDASH-170); Django took the comment id unscoped.
+    let comment: Option<uuid::Uuid> = match issue_comments::Entity::find()
+        .select_only()
+        .column(issue_comments::Column::Id)
+        .filter(issue_comments::Column::Id.eq(comment_id))
+        .filter(issue_comments::Column::ProjectId.eq(project_id))
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if comment.is_none() {
+        return Denial::NotFound.into_response();
+    }
     let workspace_id = match fetch_project_workspace_unguarded(&pool, &project_id).await {
         Ok(id) => id,
         Err(error) => return error.into_response(),
@@ -5686,6 +5707,24 @@ async fn issue_reaction_create(
         Some(reaction) => reaction,
         None => return Denial::ServerError.into_response(),
     };
+    // DIFF-13: the issue must belong to the URL's project
+    // (NEWPIDASH-170); Django never loaded it on this path.
+    let issue: Option<uuid::Uuid> = match issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if issue.is_none() {
+        return Denial::NotFound.into_response();
+    }
     let workspace_id = match fetch_project_workspace_unguarded(&pool, &project_id).await {
         Ok(id) => id,
         Err(error) => return error.into_response(),
@@ -6160,6 +6199,24 @@ async fn subscriber_create(
     let (Some(subscriber_id), Some(deleted_at)) = (subscriber, deleted_at) else {
         return Denial::ServerError.into_response();
     };
+    // DIFF-13: the issue must belong to the URL's project
+    // (NEWPIDASH-170); Django never loaded it on this path.
+    let issue: Option<uuid::Uuid> = match issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if issue.is_none() {
+        return Denial::NotFound.into_response();
+    }
     let workspace_id = match fetch_project_workspace_unguarded(&pool, &project_id).await {
         Ok(id) => id,
         Err(error) => return error.into_response(),
@@ -6299,6 +6356,25 @@ async fn subscribe(
     };
     if let Err(error) = check_lite(&membership) {
         return error.into_response();
+    }
+    // DIFF-13: the issue must belong to the URL's project
+    // (NEWPIDASH-170), before any subscription read or write;
+    // Django never loaded it on this path.
+    let issue: Option<uuid::Uuid> = match issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::ProjectId.eq(project_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(&pool))
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if issue.is_none() {
+        return Denial::NotFound.into_response();
     }
     // The body is never read here; drop `req` without parsing.
     let _ = req;
