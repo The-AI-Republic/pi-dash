@@ -172,6 +172,27 @@ afterEach(() => {
 });
 
 describe("EstimateCreateDialog steps and dismissal", () => {
+  it("hands the open-time focus to the first family choice", async () => {
+    // The kit's deferred pass would otherwise pick the header's Close
+    // button and could land after the reader clicked a control, stealing
+    // their input on a busy host (NEWFRONT-1055, 1058).
+    stubApi();
+    renderDialog();
+    const first = within(dialog()).getByRole("radio", { name: "Points" });
+    await waitFor(() => expect(first).toHaveFocus());
+    expect(within(dialog()).getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps the keyboard choice on the family once the open-time focus has settled", async () => {
+    const user = userEvent.setup();
+    stubApi();
+    renderDialog();
+    const first = within(dialog()).getByRole("radio", { name: "Points" });
+    await waitFor(() => expect(first).toHaveFocus());
+    await user.keyboard("{ArrowDown}");
+    expect(within(dialog()).getByRole("radio", { name: "Categories" })).toBeChecked();
+  });
+
   it("opens on step one with a counter and no back/submit controls", async () => {
     stubApi();
     renderDialog();

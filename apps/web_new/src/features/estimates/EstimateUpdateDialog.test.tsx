@@ -495,6 +495,28 @@ describe("EstimateUpdateDialog value removal", () => {
 });
 
 describe("EstimateUpdateDialog save and dismissal", () => {
+  it("hands the open-time focus to the name field", async () => {
+    // The kit's deferred pass would otherwise pick the header's Close
+    // button and could land after the reader clicked into a field,
+    // stealing their keystrokes on a busy host (NEWFRONT-1055, 1058).
+    stubApi();
+    renderDialog();
+    const name = within(dialog()).getByRole("textbox", { name: UPDATE_DIALOG_NAME_LABEL });
+    await waitFor(() => expect(name).toHaveFocus());
+    expect(within(dialog()).getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps every keystroke once the open-time focus has settled", async () => {
+    const user = userEvent.setup();
+    stubApi();
+    renderDialog();
+    const name = within(dialog()).getByRole("textbox", { name: UPDATE_DIALOG_NAME_LABEL });
+    await waitFor(() => expect(name).toHaveFocus());
+    await user.clear(name);
+    await user.type(name, "Renamed");
+    expect(name).toHaveValue("Renamed");
+  });
+
   it("saves a rename with the full id set and closes", async () => {
     const user = userEvent.setup();
     const { calls } = stubApi();

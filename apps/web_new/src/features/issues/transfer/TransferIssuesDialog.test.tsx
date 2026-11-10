@@ -84,9 +84,31 @@ describe("TransferIssuesDialog", () => {
   it("narrows the list as the reader types", async () => {
     const user = userEvent.setup();
     setup();
-    await user.type(screen.getByPlaceholderText(TRANSFER_SEARCH_PLACEHOLDER), "draft");
+    const field = screen.getByPlaceholderText(TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "draft");
     expect(screen.queryByText("Target cycle")).not.toBeInTheDocument();
     expect(screen.getByText("Draft cycle")).toBeInTheDocument();
+  });
+
+  it("hands the open-time focus to the search field", async () => {
+    setup();
+    const field = screen.getByPlaceholderText(TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps every keystroke once the open-time focus has settled", async () => {
+    // The kit moves focus to the dialog's first control a frame after
+    // mount. When that pass lands after the reader has clicked into the
+    // search box, focus jumps to the Close button and the keystrokes go
+    // nowhere (NEWFRONT-1055). The dialog now points that pass at the box.
+    const user = userEvent.setup();
+    setup();
+    const field = screen.getByPlaceholderText(TRANSFER_SEARCH_PLACEHOLDER);
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "draft");
+    expect(field).toHaveValue("draft");
   });
 
   it("transfers to the picked cycle, toasts and closes", async () => {

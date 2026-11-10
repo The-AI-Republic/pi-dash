@@ -116,9 +116,29 @@ describe("IntakeDuplicateDialog", () => {
     await waitFor(() => expect(screen.getAllByTestId("intake-duplicate-option")).toHaveLength(1));
 
     server.hits = [hit({ name: "Typed match" })];
-    await user.type(screen.getByLabelText("Search work items"), "match");
+    const field = screen.getByLabelText("Search work items");
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "match");
     await waitFor(() => expect(screen.getByText("Typed match")).toBeInTheDocument(), { timeout: 5000 });
     expect(server.urls.at(-1)).toContain("search=match");
+  });
+
+  it("hands the open-time focus to the search field", async () => {
+    const server: SearchServer = { urls: [], status: 200, hits: [hit()] };
+    setup(server);
+    const field = screen.getByLabelText("Search work items");
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps every keystroke once the open-time focus has settled", async () => {
+    const user = userEvent.setup();
+    const server: SearchServer = { urls: [], status: 200, hits: [hit()] };
+    setup(server);
+    const field = screen.getByLabelText("Search work items");
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "match");
+    expect(field).toHaveValue("match");
   });
 
   it("picks a row at once", async () => {

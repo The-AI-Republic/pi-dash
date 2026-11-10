@@ -105,8 +105,31 @@ describe("AddExistingModal", () => {
     mocks.search.mockResolvedValue([]);
     setup();
     expect(await screen.findByText("No work items to add")).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "Search work items" }), "zzz-no-such-issue");
+    const field = screen.getByRole("textbox", { name: "Search work items" });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "zzz-no-such-issue");
     expect(await screen.findByText("No results for this search")).toBeInTheDocument();
+  });
+
+  it("hands the open-time focus to the search field", async () => {
+    mocks.search.mockResolvedValue([]);
+    setup();
+    const field = screen.getByRole("textbox", { name: "Search work items" });
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+  });
+
+  it("keeps every keystroke once the open-time focus has settled", async () => {
+    const user = userEvent.setup();
+    mocks.search.mockResolvedValue([]);
+    setup();
+    const field = screen.getByRole("textbox", { name: "Search work items" });
+    await waitFor(() => expect(field).toHaveFocus());
+    await user.type(field, "auth");
+    expect(field).toHaveValue("auth");
+    await waitFor(() =>
+      expect(mocks.search).toHaveBeenLastCalledWith({ stub: true }, "acme", PROJECT, { search: "auth" })
+    );
   });
 
   it("asks for undated issues and hides ones that start after the day", async () => {
