@@ -1551,6 +1551,53 @@ pub fn refusal_pause_phrase(pause_reason: &str) -> &'static str {
     }
 }
 
+/// The unavailable refusal body for `code` when the issue row is gone.
+///
+/// Pure shape shared by [`dedicated_refusal_body_by_id`] for a vanished
+/// row and by [`dedicated_refusal_body`] when no runner is assigned
+/// (§11.2). `paused_reason`/`runner*`/`pod*` are null; `options`
+/// follow the `assigned_runner_not_owner` vs other split.
+pub(crate) fn unavailable_refusal_body(code: &'static str) -> Value {
+    let options: Vec<&str> = if code == "assigned_runner_not_owner" {
+        vec!["run_on_my_runner", "pod_once"]
+    } else {
+        vec!["pod_once", "change_runner"]
+    };
+    json!({
+        "error": "the dedicated runner is unavailable",
+        "reason": code,
+        "pause_reason": Value::Null,
+        "runner": Value::Null,
+        "runner_name": Value::Null,
+        "runner_last_seen_at": Value::Null,
+        "pod": Value::Null,
+        "pod_name": Value::Null,
+        "options": options,
+    })
+}
+
+/// The full §11.2 refusal body for `code` on `issue`, fetched by id.
+///
+/// By-id sibling of [`dedicated_refusal_body`] for overlay callers that
+/// hold only a `DecodedIssue` / issue id and cannot name an
+/// `issues::Model` (PIDASHCONV-1724). Fetches the row by primary key and
+/// delegates to [`dedicated_refusal_body`]; a vanished row answers
+/// [`unavailable_refusal_body`] with `reason = code` so the caller always
+/// gets the `{error, reason, pause_reason, runner*, pod*, options}` fields.
+///
+/// Shape: `{error, reason, pause_reason, runner, runner_name,
+/// runner_last_seen_at, pod, pod_name, options}`.
+pub async fn dedicated_refusal_body_by_id(
+    db: &impl ConnectionTrait,
+    issue_id: Uuid,
+    code: &'static str,
+) -> Result<Value, sea_orm::DbErr> {
+    let Some(issue) = issues::Entity::find_by_id(issue_id).one(db).await? else {
+        return Ok(unavailable_refusal_body(code));
+    };
+    dedicated_refusal_body(db, &issue, code).await
+}
+
 /// The full §11.2 refusal body for `code` on `issue`.
 ///
 /// Shape: `{error, reason, pause_reason, runner, runner_name,
@@ -3407,5 +3454,32 @@ mod tests {
         assert!(v["dev_machine_detail"]["engine_credential_expires_at"]
             .as_str()
             .is_some());
+    }
+
+    #[test]
+    fn unavailable_refusal_body_shape_for_each_code() {
+        for code in [
+            "assigned_runner_offline",
+            "assigned_runner_paused",
+            "assigned_runner_not_owner",
+        ] {
+            let body = super::unavailable_refusal_body(code);
+            assert_eq!(body["error"], "the dedicated runner is unavailable");
+            assert_eq!(body["reason"], code);
+            assert_eq!(body["pause_reason"], Value::Null);
+            assert_eq!(body["runner"], Value::Null);
+            assert_eq!(body["runner_name"], Value::Null);
+            assert_eq!(body["runner_last_seen_at"], Value::Null);
+            assert_eq!(body["pod"], Value::Null);
+            assert_eq!(body["pod_name"], Value::Null);
+            if code == "assigned_runner_not_owner" {
+                assert_eq!(body["options"], json!(["run_on_my_runner", "pod_once"]));
+            } else {
+                assert_eq!(body["options"], json!(["pod_once", "change_runner"]));
+            }
+        }
+        // The by-id sibling is a thin fetch+delegate over this shape;
+        // its JSON fields are covered by the SDK surface test and the
+        // live DB wrapper exercised by dedicated_refusal_comment_html.
     }
 }

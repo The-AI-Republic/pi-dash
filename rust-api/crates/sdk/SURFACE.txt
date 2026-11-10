@@ -364,6 +364,8 @@ pidash_sdk::domain::update_user_fields
 pidash_sdk::domain::update_user_last_login_time
 pidash_sdk::domain::update_user_relogin
 pidash_sdk::hooks::EnqueueHook
+pidash_sdk::hooks::FireOutcome
+pidash_sdk::hooks::FireRequest
 pidash_sdk::hooks::HookDeps
 pidash_sdk::hooks::IssueTransitionHook
 pidash_sdk::hooks::LiveMoveAdmissionCache
@@ -379,6 +381,7 @@ pidash_sdk::hooks::TaskEnqueueHook
 pidash_sdk::hooks::TaskSink
 pidash_sdk::hooks::TerminalEffectsDrain
 pidash_sdk::hooks::TransitionHook
+pidash_sdk::hooks::TransitionOutcome
 pidash_sdk::jobs::ANALYTIC_EXPORT_TASK
 pidash_sdk::jobs::ARCHIVE_AND_CLOSE_TASK
 pidash_sdk::jobs::AgentExecutorKind
@@ -667,6 +670,7 @@ pidash_sdk::read::comment_is_synced
 pidash_sdk::read::comment_url
 pidash_sdk::read::decode_issue
 pidash_sdk::read::dedicated_refusal_body
+pidash_sdk::read::dedicated_refusal_body_by_id
 pidash_sdk::read::drf_datetime
 pidash_sdk::read::expand_estimate_point
 pidash_sdk::read::expand_parent
