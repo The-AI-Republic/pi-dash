@@ -48,7 +48,7 @@ export const BUILTIN_CODEX_MODEL_DESCRIPTIONS: Readonly<Record<string, string>> 
 export const OPENHUB_MODEL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   "moonshotai/kimi-k3": "Balanced hosted model",
   "deepseek/deepseek-v4-pro": "Deepest reasoning, costs more",
-  "deepseek/deepseek-v4.1-flash-1017": "Lowest cost",
+  openhub_free_llm: "OpenHub free model",
 };
 
 /**

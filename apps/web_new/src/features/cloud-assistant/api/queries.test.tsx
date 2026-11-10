@@ -64,7 +64,7 @@ describe("cloudQuotaQueryOptions", () => {
   it("reads the free quota with a short stale time", async () => {
     const getJson = vi.fn(
       async (_path: string): Promise<unknown> => ({
-        llm: { freeTokensUsed: 1, freeTokensLimit: 10, freeModels: ["deepseek/deepseek-v4.1-flash-1017"] },
+        llm: { freeTokensUsed: 1, freeTokensLimit: 10, freeModels: ["openhub_free_llm"] },
         resetsAt: "2026-11-10T00:00:00Z",
         plan: "free",
       })
@@ -75,7 +75,7 @@ describe("cloudQuotaQueryOptions", () => {
     expect(options.staleTime).toBe(FREE_QUOTA_STALE_TIME_MS);
     const quota = await options.queryFn?.({} as never);
     expect(getJson).toHaveBeenCalledWith(FREE_QUOTA_PATH);
-    expect(quota).toMatchObject({ plan: "free", freeModels: ["deepseek/deepseek-v4.1-flash-1017"] });
+    expect(quota).toMatchObject({ plan: "free", freeModels: ["openhub_free_llm"] });
   });
 
   it("degrades to null when the proxy is missing (never blocks the tab)", async () => {
@@ -113,7 +113,7 @@ describe("useFreeTokenUsage", () => {
           llm: {
             freeTokensUsed: 5,
             freeTokensLimit: 2_000_000,
-            freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+            freeModels: ["openhub_free_llm"],
           },
           resetsAt: "2026-11-10T00:00:00+00:00",
         }),
@@ -125,7 +125,7 @@ describe("useFreeTokenUsage", () => {
     const { result } = renderHook(() => useFreeTokenUsage(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.plan).toBe("free");
-    expect(result.current.data?.llm.freeModels).toEqual(["deepseek/deepseek-v4.1-flash-1017"]);
+    expect(result.current.data?.llm.freeModels).toEqual(["openhub_free_llm"]);
     resetAppClient();
   });
 });

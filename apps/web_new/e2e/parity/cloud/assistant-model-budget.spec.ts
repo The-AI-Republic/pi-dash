@@ -30,7 +30,7 @@ function hostedPayload(base: Record<string, unknown>, over: Record<string, unkno
         kind: "openhub",
         provider_kind: "openhub",
         base_url: "",
-        model_name: "deepseek/deepseek-v4.1-flash-1017",
+        model_name: "openhub_free_llm",
         has_api_key: false,
         is_selected: true,
         last_verified_at: null,
@@ -39,7 +39,7 @@ function hostedPayload(base: Record<string, unknown>, over: Record<string, unkno
         uses_chatgpt_plan: false,
       },
     ],
-    openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+    openhub_model_options: ["openhub_free_llm", "moonshotai/kimi-k3"],
     openhub_available: true,
     openhub_wallet_url: "https://hub.example.com/account/credits",
     ...over,
@@ -57,7 +57,7 @@ async function stubQuota(driver: { page: import("@playwright/test").Page }, plan
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        llm: { freeTokensUsed: 100, freeTokensLimit: 2_000_000, freeModels: ["deepseek/deepseek-v4.1-flash-1017"] },
+        llm: { freeTokensUsed: 100, freeTokensLimit: 2_000_000, freeModels: ["openhub_free_llm"] },
         resetsAt: "2026-11-10T00:00:00Z",
         plan,
       }),
@@ -72,7 +72,7 @@ async function stubConnections(driver: { page: import("@playwright/test").Page }
   // Stateful stub: the hosted row exists only here, so the PATCH the
   // picker's commit issues must land here too. GET refetches after the
   // write see the picked model, which is how the UI observes the switch.
-  let currentModel = "deepseek/deepseek-v4.1-flash-1017";
+  let currentModel = "openhub_free_llm";
   await driver.page.route(CONNECTIONS_PATH, async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
@@ -123,7 +123,7 @@ test(
 
     await expect
       .poll(() => driver.cloudAssistantModelBudget("OpenHub"), { timeout: 60_000 })
-      .toMatchObject({ value: "deepseek/deepseek-v4.1-flash-1017" });
+      .toMatchObject({ value: "openhub_free_llm" });
     // The quota read annotates the picker after first paint; wait for
     // the blocked state rather than reading the pre-quota unbadged list.
     await expect
@@ -137,7 +137,7 @@ test(
       .toBe(true);
     const budget = await driver.cloudAssistantModelBudget("OpenHub");
     expect(budget.options).toHaveLength(2);
-    const freeOption = budget.options.find((option) => option.value === "deepseek/deepseek-v4.1-flash-1017");
+    const freeOption = budget.options.find((option) => option.value === "openhub_free_llm");
     const paidOption = budget.options.find((option) => option.value === "moonshotai/kimi-k3");
     expect(freeOption?.text).toContain("Free");
     expect(freeOption?.disabled).toBe(false);
@@ -163,7 +163,7 @@ test(
 
     await expect
       .poll(() => driver.cloudAssistantModelBudget("OpenHub"), { timeout: 60_000 })
-      .toMatchObject({ value: "deepseek/deepseek-v4.1-flash-1017" });
+      .toMatchObject({ value: "openhub_free_llm" });
     // Wait for the quota annotations (pre-quota the list is unbadged).
     await expect
       .poll(
@@ -175,9 +175,7 @@ test(
       )
       .toContain("Uses credit");
     let budget = await driver.cloudAssistantModelBudget("OpenHub");
-    expect(budget.options.find((option) => option.value === "deepseek/deepseek-v4.1-flash-1017")?.text).toContain(
-      "Free"
-    );
+    expect(budget.options.find((option) => option.value === "openhub_free_llm")?.text).toContain("Free");
     const paidOption = budget.options.find((option) => option.value === "moonshotai/kimi-k3");
     expect(paidOption?.text).toContain("Uses credit");
     expect(paidOption?.disabled).toBe(false);
