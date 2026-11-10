@@ -460,13 +460,13 @@ describe("cloud assistant model budget", () => {
       });
     const select = locator({
       count: async () => 1,
-      inputValue: async () => "deepseek/deepseek-v4-flash",
+      inputValue: async () => "deepseek/deepseek-v4.1-flash-1017",
       locator: () =>
         locator({
           count: async () => 2,
           nth: (index: number) =>
             index === 0
-              ? option("deepseek/deepseek-v4-flash", "Lowest cost (Free)", false)
+              ? option("deepseek/deepseek-v4.1-flash-1017", "Lowest cost (Free)", false)
               : option("moonshotai/kimi-k3", "Balanced hosted model (Needs credit)", true),
         }),
     });
@@ -501,9 +501,9 @@ describe("cloud assistant model budget", () => {
     const driver = new WebNewDriver(page);
     await expect(driver.cloudAssistantModelBudget("OpenHub")).resolves.toEqual({
       title: "OpenHub",
-      value: "deepseek/deepseek-v4-flash",
+      value: "deepseek/deepseek-v4.1-flash-1017",
       options: [
-        { value: "deepseek/deepseek-v4-flash", text: "Lowest cost (Free)", disabled: false },
+        { value: "deepseek/deepseek-v4.1-flash-1017", text: "Lowest cost (Free)", disabled: false },
         { value: "moonshotai/kimi-k3", text: "Balanced hosted model (Needs credit)", disabled: true },
       ],
       notice: "This model needs credit on the free plan. Switch to a free model, or top up to use it. Top up",

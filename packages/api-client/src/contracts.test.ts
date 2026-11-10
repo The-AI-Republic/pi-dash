@@ -6762,7 +6762,7 @@ describe("free-quota contracts", () => {
     const transport = recordingTransport(() =>
       fakeResponse({
         body: JSON.stringify({
-          llm: { freeTokensUsed: 123, freeTokensLimit: 2_000_000, freeModels: ["deepseek/deepseek-v4-flash"] },
+          llm: { freeTokensUsed: 123, freeTokensLimit: 2_000_000, freeModels: ["deepseek/deepseek-v4.1-flash-1017"] },
           resetsAt: "2026-11-10T00:00:00Z",
           plan: "free",
         }),
@@ -6771,7 +6771,7 @@ describe("free-quota contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     const quota = await getFreeQuota(client);
     expect(quota).toEqual({
-      freeModels: ["deepseek/deepseek-v4-flash"],
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
       plan: "free",
       freeTokensUsed: 123,
       freeTokensLimit: 2_000_000,
@@ -6819,11 +6819,11 @@ describe("free-quota contracts", () => {
   });
 
   it("classifies models from the server list, never a hardcoded one", () => {
-    const freeModels = ["deepseek/deepseek-v4-flash"];
-    expect(isFreeModel("deepseek/deepseek-v4-flash", freeModels)).toBe(true);
-    expect(isFreeModel("  deepseek/deepseek-v4-flash  ", freeModels)).toBe(true);
+    const freeModels = ["deepseek/deepseek-v4.1-flash-1017"];
+    expect(isFreeModel("deepseek/deepseek-v4.1-flash-1017", freeModels)).toBe(true);
+    expect(isFreeModel("  deepseek/deepseek-v4.1-flash-1017  ", freeModels)).toBe(true);
     expect(isFreeModel("moonshotai/kimi-k3", freeModels)).toBe(false);
-    expect(isModelSelectableForPlan("free", "deepseek/deepseek-v4-flash", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("free", "deepseek/deepseek-v4.1-flash-1017", freeModels)).toBe(true);
     expect(isModelSelectableForPlan("free", "moonshotai/kimi-k3", freeModels)).toBe(false);
     expect(isModelSelectableForPlan("payg", "moonshotai/kimi-k3", freeModels)).toBe(true);
     expect(isModelSelectableForPlan("member", "moonshotai/kimi-k3", freeModels)).toBe(true);

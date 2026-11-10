@@ -20,7 +20,7 @@ import { edition } from "../../../core/edition/index.js";
 import { isOpenhubFreeQuotaEnabled } from "../../../core/edition/index.js";
 
 const TURN_PAID_MODEL_DETAIL =
-  "This model needs credit. The free model deepseek/deepseek-v4-flash is included on every plan.";
+  "This model needs credit. The free model deepseek/deepseek-v4.1-flash-1017 is included on every plan.";
 const TURN_WALLET_DETAIL = "Your OpenHub wallet is out of credits. Top up to keep using the assistant.";
 const TURN_FREE_LANE_BUSY_DETAIL = "Too many free requests at once. Try again in a moment.";
 const TURN_FREE_QUOTA_UNAVAILABLE_DETAIL = "Free quota is unavailable right now. Try again shortly.";

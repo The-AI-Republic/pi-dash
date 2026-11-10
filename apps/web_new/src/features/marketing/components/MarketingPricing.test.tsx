@@ -87,7 +87,7 @@ describe("MarketingPricing", () => {
     const block = container.querySelector('[data-testid="pricing-free-tokens"]');
     expect(block?.textContent).toContain("2M");
     expect(block?.textContent).toContain("5M");
-    expect(block?.textContent).toContain("deepseek-v4-flash");
+    expect(block?.textContent).toContain("deepseek-v4.1-flash-1017");
     const section = container.querySelector('section[aria-label="Free daily LLM tokens"]');
     expect(section).not.toBeNull();
     expect(section?.querySelector("#pricing-free-tokens-heading")?.textContent).toContain("Free tokens");

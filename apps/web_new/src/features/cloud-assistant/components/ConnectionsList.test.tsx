@@ -303,12 +303,12 @@ describe("ConnectionsList", () => {
           removable: false,
           disconnectable: false,
           modelControl: "select",
-          modelName: "deepseek/deepseek-v4-flash",
+          modelName: "deepseek/deepseek-v4.1-flash-1017",
           quotaPlan: "free",
           modelCredit: "free",
           modelChoices: [
             {
-              value: "deepseek/deepseek-v4-flash",
+              value: "deepseek/deepseek-v4.1-flash-1017",
               label: "Lowest cost",
               credit: "free",
               badge: "Free",
@@ -328,7 +328,7 @@ describe("ConnectionsList", () => {
       { topUpHref: "https://hub.example.com/account/credits" }
     );
     const picker = screen.getByRole("combobox", { name: "Model for OpenHub" });
-    expect(picker).toHaveValue("deepseek/deepseek-v4-flash");
+    expect(picker).toHaveValue("deepseek/deepseek-v4.1-flash-1017");
     const freeOption = screen.getByRole("option", { name: "Lowest cost (Free)" });
     const paidOption = screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" });
     expect(freeOption).toBeEnabled();
@@ -405,7 +405,7 @@ describe("ConnectionsList", () => {
         modelCredit: "uses-credit",
         modelChoices: [
           {
-            value: "deepseek/deepseek-v4-flash",
+            value: "deepseek/deepseek-v4.1-flash-1017",
             label: "Lowest cost",
             credit: "free",
             badge: "Free",

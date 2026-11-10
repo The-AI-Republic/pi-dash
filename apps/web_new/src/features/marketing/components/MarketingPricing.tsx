@@ -105,18 +105,18 @@ function FreeTokensSection(): React.ReactElement {
       <div className="flex flex-col gap-(--space-6)">
         <SectionHeading id="pricing-free-tokens-heading">Free tokens every day</SectionHeading>
         <p className="text-body max-w-2xl text-(--text-muted)">
-          Every plan includes a daily allowance on deepseek-v4-flash so you can try agents without pre-funding.
+          Every plan includes a daily allowance on deepseek-v4.1-flash-1017 so you can try agents without pre-funding.
         </p>
         <div className="grid gap-(--space-6) md:grid-cols-2" data-testid="pricing-free-tokens">
           <article className="flex flex-col gap-(--space-4) rounded-(--radius-card) border border-(--border) p-(--space-8)">
             <p className="text-body font-medium text-(--text)">Free</p>
             <p className="text-h1 font-semibold text-(--text)">2M</p>
-            <p className="text-caption text-(--text-muted)">tokens per day on deepseek-v4-flash</p>
+            <p className="text-caption text-(--text-muted)">tokens per day on deepseek-v4.1-flash-1017</p>
           </article>
           <article className="flex flex-col gap-(--space-4) rounded-(--radius-card) border border-(--border) p-(--space-8)">
             <p className="text-body font-medium text-(--text)">Pay as you go and membership</p>
             <p className="text-h1 font-semibold text-(--text)">5M</p>
-            <p className="text-caption text-(--text-muted)">tokens per day on deepseek-v4-flash</p>
+            <p className="text-caption text-(--text-muted)">tokens per day on deepseek-v4.1-flash-1017</p>
           </article>
         </div>
         <ul className="flex flex-col gap-(--space-2)">

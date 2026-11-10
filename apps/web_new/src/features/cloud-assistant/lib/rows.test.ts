@@ -137,13 +137,13 @@ describe("connection flags", () => {
 
   it("carries the free quota through when the meter has answered", () => {
     const flags = connectionModelFlags(list(), {
-      freeModels: ["deepseek/deepseek-v4-flash"],
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
       plan: "free",
       freeTokensUsed: 10,
       freeTokensLimit: 2_000_000,
       resetsAt: "2026-11-10T00:00:00Z",
     });
-    expect(flags.freeModels).toEqual(["deepseek/deepseek-v4-flash"]);
+    expect(flags.freeModels).toEqual(["deepseek/deepseek-v4.1-flash-1017"]);
     expect(flags.quotaPlan).toBe("free");
   });
 });
@@ -253,11 +253,11 @@ describe("toConnectionRow", () => {
 
   it("badges hosted models for a free-plan user and blocks paid models", () => {
     const answer = list({
-      connections: [row({ kind: "openhub", base_url: "", model_name: "deepseek/deepseek-v4-flash" })],
-      openhub_model_options: ["deepseek/deepseek-v4-flash", "moonshotai/kimi-k3"],
+      connections: [row({ kind: "openhub", base_url: "", model_name: "deepseek/deepseek-v4.1-flash-1017" })],
+      openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
     });
     const flags = connectionModelFlags(answer, {
-      freeModels: ["deepseek/deepseek-v4-flash"],
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
       plan: "free",
       freeTokensUsed: null,
       freeTokensLimit: null,
@@ -267,7 +267,13 @@ describe("toConnectionRow", () => {
     expect(target.quotaPlan).toBe("free");
     expect(target.modelCredit).toBe("free");
     expect(target.modelChoices).toEqual([
-      { value: "deepseek/deepseek-v4-flash", label: "Lowest cost", credit: "free", badge: "Free", selectable: true },
+      {
+        value: "deepseek/deepseek-v4.1-flash-1017",
+        label: "Lowest cost",
+        credit: "free",
+        badge: "Free",
+        selectable: true,
+      },
       {
         value: "moonshotai/kimi-k3",
         label: "Balanced hosted model",
@@ -282,10 +288,10 @@ describe("toConnectionRow", () => {
     for (const plan of ["payg", "member"]) {
       const answer = list({
         connections: [row({ kind: "openhub", base_url: "", model_name: "moonshotai/kimi-k3" })],
-        openhub_model_options: ["deepseek/deepseek-v4-flash", "moonshotai/kimi-k3"],
+        openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
       });
       const flags = connectionModelFlags(answer, {
-        freeModels: ["deepseek/deepseek-v4-flash"],
+        freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
         plan,
         freeTokensUsed: null,
         freeTokensLimit: null,
@@ -307,7 +313,7 @@ describe("toConnectionRow", () => {
       has_codex_credential: true,
     });
     const flags = connectionModelFlags(answer, {
-      freeModels: ["deepseek/deepseek-v4-flash"],
+      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
       plan: "free",
       freeTokensUsed: null,
       freeTokensLimit: null,
@@ -322,7 +328,7 @@ describe("toConnectionRow", () => {
 
 describe("quota annotation", () => {
   const baseFlags = connectionModelFlags(list(), {
-    freeModels: ["deepseek/deepseek-v4-flash"],
+    freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
     plan: "free",
     freeTokensUsed: null,
     freeTokensLimit: null,
@@ -339,13 +345,13 @@ describe("quota annotation", () => {
   it("never hardcodes the free list", () => {
     const otherFree = { ...baseFlags, freeModels: ["other/model" as const], quotaPlan: "free" };
     expect(creditForModel("other/model", otherFree)).toBe("free");
-    expect(creditForModel("deepseek/deepseek-v4-flash", otherFree)).toBe("blocked");
+    expect(creditForModel("deepseek/deepseek-v4.1-flash-1017", otherFree)).toBe("blocked");
   });
 
   it("blocks only paid models on the free plan", () => {
-    expect(isBlockedCommit("deepseek/deepseek-v4-flash", baseFlags)).toBe(false);
+    expect(isBlockedCommit("deepseek/deepseek-v4.1-flash-1017", baseFlags)).toBe(false);
     expect(isBlockedCommit("moonshotai/kimi-k3", baseFlags)).toBe(true);
-    expect(isBlockedCommit("  deepseek/deepseek-v4-flash  ", baseFlags)).toBe(false);
+    expect(isBlockedCommit("  deepseek/deepseek-v4.1-flash-1017  ", baseFlags)).toBe(false);
   });
 
   it("treats unknown plans as paid (never blocks)", () => {
