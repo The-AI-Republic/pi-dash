@@ -305,11 +305,18 @@ fn dumps_number(n: &serde_json::Number) -> String {
     if let Some(u) = n.as_u64() {
         return u.to_string();
     }
+    // Beyond i64/u64. The workspace build unifies
+    // `serde_json/arbitrary_precision` (from pidash-api), so an integer
+    // literal keeps its exact digits here; Python ints are unbounded, so
+    // `json.dumps` echoes them verbatim — never route them through `f64`.
+    // Only float-syntax literals (`.`, `e`, `E`) take the `repr` path.
+    let token = n.to_string();
+    if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        return token;
+    }
     match n.as_f64() {
         Some(f) => dumps_float(f),
-        // Unreachable without `arbitrary_precision`: every Number is
-        // i64, u64 or f64.
-        None => n.to_string(),
+        None => token,
     }
 }
 
@@ -1269,6 +1276,38 @@ mod tests {
                 ("nested", json!({"x": [1.25, "y"]})),
             ])),
             "{\"empty\": \"\", \"nested\": {\"x\": [1.25, \"y\"]}}"
+        );
+    }
+
+    #[test]
+    fn dumps_payload_big_integers() {
+        // Python ints are unbounded: `json.dumps(payload, default=str)`
+        // (`machine_outbox.py:350`) echoes the exact digits past
+        // u64/i64. The workspace build unifies
+        // `serde_json/arbitrary_precision` (from pidash-api), so the
+        // literal survives parsing and must echo verbatim
+        // (PIDASHCONV-1733) — never route it through `f64`.
+        let parse = |text: &str| -> String {
+            let value: Value = serde_json::from_str(text).expect("valid JSON");
+            dumps_payload(value.as_object().expect("payload object"))
+        };
+        assert_eq!(
+            parse(
+                r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#,
+            ),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#
+        );
+        // Float-syntax literals still take the float path (`repr`).
+        assert_eq!(
+            parse(r#"{"e": 1e19, "f": 100.00}"#),
+            r#"{"e": 1e+19, "f": 100.0}"#
+        );
+        // i64/u64 edges still echo exactly.
+        assert_eq!(
+            parse(
+                r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#,
+            ),
+            r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#
         );
     }
 
