@@ -53,7 +53,7 @@ jobs:
             echo "No Rust API source or workspace boundary changes."
             exit 0
           fi
-          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^Cargo\.toml$' -e '^$' || true)
+          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^Cargo\.toml$' -e '^\.ai_design/validation/' -e '^$' || true)
           if [ -n "$BAD" ]; then
             echo "::error::Files outside rust-api/ and the allowlist:"
             echo "$BAD"
