@@ -202,6 +202,16 @@ jobs:
       # database; never a real secret) — the other oracles never touch BYOK.
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # NEWPIDASH-176: the cloud-agent dispatch oracle (NEWPIDASH-54) needs
+      # CLOUD_AGENT_ENABLED=true on the Django leg, mirroring
+      # rust-api-contract-tests-dispatch-rust.yml. Without it
+      # cloud_agent_is_configured() is false and run_cloud_agent fails fast
+      # with cloud_agent_disabled instead of reaching the provider.
+      # Loopback stubs need the SSRF guards off (see dispatch README).
+      ASSISTANT_BLOCK_PRIVATE_URLS: "False"
+      CLOUD_AGENT_ENABLED: "true"
+      CLOUD_AGENT_WRITES_ENABLED: "true"
+      CLOUD_AGENT_BLOCK_PRIVATE_URLS: "False"
       # PIDASHCONV-1248: the sweep honors a non-default hard limit — the
       # oracle pins both sides of the resulting 960s cutoff. Only the
       # assistant tasks read this key, and ancient-seeded turns stay stale
