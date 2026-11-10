@@ -47,12 +47,14 @@ Harness: this module has two layers.
    the OAuth signup callback must complete within a bounded time, the user's
    ``avatar`` must be the provider URL, and no ``USER_AVATAR`` ``FileAsset``
    row may exist. Before the fix the Rust callback hangs (test times out at
-   its bound); after the fix it falls back at ~60s. Django passes before and
-   after (boto3 60s). This test needs the backend under test booted with
-   its S3 endpoint pointed at the BlackHole (``AWS_S3_ENDPOINT_URL`` +
-   ``USE_MINIO=1``, stall job) or booted so the S3 PUT hits the BlackHole
-   via the public host — it skips with a clear reason when no stall is
-   observed, so a non-stall CI leg does not hang.
+   its bound); after the fix it falls back at ~60s on Rust. Django passes
+   before and after (boto3 bounded, ~5x60s retries, observed ~313s — the
+   drive timeout is backend-specific). This test needs the backend booted with
+   ``AWS_S3_ENDPOINT_URL`` pointed at the BlackHole (``USE_MINIO`` unset —
+   in MinIO mode both backends sign the public request host, so the PUT
+   would hit the server itself, not the endpoint) or booted so the S3 PUT
+   hits the BlackHole via the public host — it skips with a clear reason
+   when no stall is observed, so a non-stall CI leg does not hang.
 
 No real provider is contacted: the GitLab token/userinfo stub is loopback
 (the PIDASHCONV-1360 host-override seam); the avatar stub is loopback too,
@@ -281,13 +283,15 @@ def test_avatar_s3_stall_falls_back(client: httpx.Client, ensure_instance):
     """A stalled S3 falls back to the provider URL within a bounded time.
 
     Stall environment: the backend under test boots with its S3 endpoint
-    pointed at the BlackHole (``STALL_S3_PORT``/4599, ``USE_MINIO=1``) so the
-    server-side PUT hits the listener. The callback must complete, the user
-    must carry the provider URL, and no ``USER_AVATAR`` row may exist.
+    pointed at the BlackHole (``STALL_S3_PORT``/4599, ``USE_MINIO`` unset)
+    so the server-side PUT hits the listener. The callback must complete,
+    the user must carry the provider URL, and no ``USER_AVATAR`` row may
+    exist.
 
     Before the fix, Rust hangs (the callback never returns, this test hits
-    its 120s httpx timeout and fails); after the fix it falls back at ~60s
-    on both backends. When the S3 endpoint was never stalled (hits == 0),
+    its httpx timeout and fails); after the fix it falls back at ~60s on
+    Rust and at ~5x60s (boto3 retries, observed ~313s) on Django. When the
+    S3 endpoint was never stalled (hits == 0),
     the test skips with an explicit reason instead of passing vacuously —
     the stall must actually be observed (same skip convention as
     ``test_github_nonjson_provider.py``'s stub-mode gate).
@@ -302,8 +306,15 @@ def test_avatar_s3_stall_falls_back(client: httpx.Client, ensure_instance):
         with _gitlab_world() as world:
             email = world["email"]
             # Time the callback; it must be bounded even on a BlackHole.
+            # Django's boto3 retries a stalled PUT (~5x60s + backoff,
+            # observed ~313s) while the Rust client fails after its single
+            # 60s read timeout (~61s), so the drive timeout must cover the
+            # backend under test (PIDASH_CONTRACT_BACKEND), not just one side.
+            drive_timeout = (
+                600 if os.environ.get("PIDASH_CONTRACT_BACKEND") == "django" else 120
+            )
             started = time.monotonic()
-            resp = _drive_gitlab_callback(client, timeout=120)
+            resp = _drive_gitlab_callback(client, timeout=drive_timeout)
             elapsed = time.monotonic() - started
             # The provider avatar must have been downloaded for the S3
             # attempt to be meaningful.
@@ -316,8 +327,9 @@ def test_avatar_s3_stall_falls_back(client: httpx.Client, ensure_instance):
                 "backend never downloaded the avatar; S3 stall would be vacuous",
                 world["avaters"].requests,
             )
-            # Callback completed within the expected bound (botocore 60s
-            # read + headroom, well under the 120s httpx guard).
+            # Callback completed within the expected bound (Rust: one 60s
+            # read timeout + headroom; Django: 5x60s boto3 retries ~313s,
+            # both well under the backend-specific httpx guard).
             assert resp.status_code == 302, (
                 f"callback: {resp.status_code}: {resp.text[:300]}; "
                 f"elapsed {elapsed:.1f}s"
@@ -327,34 +339,35 @@ def test_avatar_s3_stall_falls_back(client: httpx.Client, ensure_instance):
             assert "error_code" not in query, location
             assert "error_message" not in query, location
 
-    # After the BlackHole closes, S3 no longer stalls — assert the DB fell
-    # back. The listener hits prove the S3 PUT actually dialed the stall.
-    # Outside a stall boot (the normal auth_oauth HTTP matrix leg, which
-    # points S3 at live storage) this leg cannot exercise anything, so it
-    # skips instead of failing — the behavioral assertions below would
-    # otherwise demand stall-only state (no USER_AVATAR row) on a backend
-    # whose S3 answered. Re-run in a stall boot (module docstring).
-    if listener.hits < 1:
-        pytest.skip(
-            "backend never dialed the stall endpoint: it was not booted "
-            f"with its S3 endpoint at http://127.0.0.1:{port} (USE_MINIO=1 "
-            "or AWS_S3_ENDPOINT_URL). Re-run in a stall boot (see module "
-            "docstring)."
-        )
-    user = db.fetchone(
-        database_url,
-        "SELECT id, avatar, avatar_asset_id FROM users WHERE email = %s",
-        (email,),
-    )
-    assert user is not None, "callback created the user despite the S3 stall"
-    assert user["avatar"] == world["avatar_url"], (
-        f"avatar must fall back to the provider URL, got {user['avatar']!r}"
-    )
-    rows = db.fetchall(
-        database_url,
-        "SELECT id FROM file_assets WHERE user_id = %s AND entity_type = 'USER_AVATAR'",
-        (user["id"],),
-    )
-    assert rows == [], (
-        f"no USER_AVATAR FileAsset row may exist after a stalled S3, got {rows}"
-    )
+            # The listener hits prove the S3 PUT actually dialed the stall.
+            # Outside a stall boot (the normal auth_oauth HTTP matrix leg,
+            # which points S3 at live storage) this leg cannot exercise
+            # anything, so it skips instead of failing — the behavioral
+            # assertions below would otherwise demand stall-only state (no
+            # USER_AVATAR row) on a backend whose S3 answered. Re-run in a
+            # stall boot (module docstring). These DB assertions must run
+            # INSIDE the _gitlab_world block: its teardown deletes the user.
+            if listener.hits < 1:
+                pytest.skip(
+                    "backend never dialed the stall endpoint: it was not booted "
+                    f"with its S3 endpoint at http://127.0.0.1:{port} (USE_MINIO "
+                    "unset + AWS_S3_ENDPOINT_URL). Re-run in a stall boot (see "
+                    "module docstring)."
+                )
+            user = db.fetchone(
+                database_url,
+                "SELECT id, avatar, avatar_asset_id FROM users WHERE email = %s",
+                (email,),
+            )
+            assert user is not None, "callback created the user despite the S3 stall"
+            assert user["avatar"] == world["avatar_url"], (
+                f"avatar must fall back to the provider URL, got {user['avatar']!r}"
+            )
+            rows = db.fetchall(
+                database_url,
+                "SELECT id FROM file_assets WHERE user_id = %s AND entity_type = 'USER_AVATAR'",
+                (user["id"],),
+            )
+            assert rows == [], (
+                f"no USER_AVATAR FileAsset row may exist after a stalled S3, got {rows}"
+            )
