@@ -262,12 +262,24 @@ pub fn ensure_claim_index_sql() -> &'static str {
         ON rust_job_queue (queue, status, visible_at, id)"
 }
 
-/// Legacy / queue-agnostic claim index kept for back-compat. New boots
-/// create the queue-leading index above under its new name; the old
-/// `rust_job_queue_claim_idx` is left in place on existing databases.
+/// Legacy queue-agnostic claim index (`status,visible_at,id`). New boots
+/// create the queue-leading index above under its new name; once that
+/// exists the old index is redundant (the new index leads with `queue`
+/// and serves all claim shapes), so `ensure_schema` drops it. Kept here
+/// for the contract-test harness which still creates only the legacy
+/// shape — the harness must be updated to create the queue-leading
+/// index instead (see `contract-tests/_harness/rust_queue.py`).
 pub fn ensure_claim_index_legacy_sql() -> &'static str {
     "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx \
         ON rust_job_queue (status, visible_at, id)"
+}
+
+/// Drop the legacy queue-agnostic index once the queue-leading one exists.
+/// The new `(queue, status, visible_at, id)` index covers every claim
+/// shape, so the legacy index would otherwise be maintained on every
+/// write forever (Finding 7 review).
+pub fn drop_legacy_claim_index_sql() -> &'static str {
+    "DROP INDEX IF EXISTS rust_job_queue_claim_idx"
 }
 
 /// Create both queue tables. Runs at worker boot, never from requests.
@@ -295,11 +307,11 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(ensure_claim_index_sql())
         .execute(&mut *tx)
         .await?;
-    // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
-    // Phase 2 / Finding 4: the queue-leading index uses a new name
-    // (`_queue_idx`) so it is created even where the old `claim_idx`
-    // already exists; the legacy statement keeps old installs harmless.
-    sqlx::query(ensure_claim_index_legacy_sql())
+    // raw-sql: DROP INDEX IF EXISTS is the allowed exception (DDL) — the
+    // legacy queue-agnostic index is redundant once the queue-leading one
+    // exists. Dropping it keeps the table from maintaining two claim
+    // indexes on every write (Finding 7 review).
+    sqlx::query(drop_legacy_claim_index_sql())
         .execute(&mut *tx)
         .await?;
     // raw-sql: Rust-owned DDL passthrough (schedule schema) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.

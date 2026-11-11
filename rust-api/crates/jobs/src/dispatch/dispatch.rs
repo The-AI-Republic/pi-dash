@@ -122,26 +122,18 @@ pub fn run_cloud_agent_message(run_id: &str) -> TaskMessage {
     )
 }
 
-/// Queue label for `cloud_agent.run_agent_run` rows when no explicit
-/// setting is passed: `CLOUD_AGENT_JOB_QUEUE`, default `celery`.
-/// Empty/blank env values collapse to the default so a stale empty
-/// SSM value does not strand jobs on an empty label.
-pub fn cloud_agent_job_queue() -> String {
-    std::env::var("CLOUD_AGENT_JOB_QUEUE")
-        .ok()
-        .map(|raw| raw.trim().to_owned())
-        .filter(|raw| !raw.is_empty())
-        .unwrap_or_else(|| crate::queue::DEFAULT_QUEUE.to_owned())
-}
-
 /// Lift the `.delay(run_id)` message into its queue row: `args=[run_id]` with
 /// empty kwargs, so the forward path rebuilds the identical Celery v2 body.
 /// Retry policy is the [`NewJob::new`] default (`max_retries = 3`, 180s
 /// delay): the row budget governs *delivery* to a worker, while the task's
 /// own `max_retries=0` (`tasks.py:78`) governs the Python body after delivery.
-/// Phase 2 (2.1): the queue is CLOUD_AGENT_JOB_QUEUE, default `celery`.
+/// Phase 2 (2.1): the queue is `CLOUD_AGENT_JOB_QUEUE` via
+/// [`run_cloud_agent_job_with_queue`] and `CloudAgentSettings.job_queue`.
+/// This wrapper is kept for the poll-free single-id path in tests; it pins
+/// the default `celery` so it cannot disagree with resolved settings
+/// (Finding 10 review — the previous env-reading helper could).
 pub fn run_cloud_agent_job(run_id: &str) -> NewJob {
-    run_cloud_agent_job_with_queue(run_id, cloud_agent_job_queue())
+    run_cloud_agent_job_with_queue(run_id, crate::queue::DEFAULT_QUEUE)
 }
 
 /// Queue label validation (Finding 8 review): `CLOUD_AGENT_JOB_QUEUE` is

@@ -558,15 +558,10 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
         let owner = pidash_jobs::worker::default_worker_owner();
         let worker_config = WorkerConfig {
             queue: queue.clone(),
-            owner: owner.clone(),
+            owner,
             concurrency: built.concurrency.max(1) as usize,
             ..Default::default()
         };
-        // Overwrite the default owner that Default::default carried;
-        // the per-process owner must win.
-        let mut worker_config = worker_config;
-        worker_config.owner = owner;
-        worker_config.queue = queue.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         tracing::info!(
             concurrency = built.concurrency,

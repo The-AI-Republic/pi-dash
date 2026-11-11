@@ -55,9 +55,10 @@ QUEUE_TABLE_DDL = (
     "last_error TEXT)"
 )
 QUEUE_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx "
-    "ON rust_job_queue (status, visible_at, id)"
+    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_queue_idx "
+    "ON rust_job_queue (queue, status, visible_at, id)"
 )
+QUEUE_LEGACY_DROP_DDL = "DROP INDEX IF EXISTS rust_job_queue_claim_idx"
 SCHEDULE_TABLE_DDL = (
     "CREATE TABLE IF NOT EXISTS rust_job_schedule ("
     "name TEXT PRIMARY KEY,"
@@ -131,6 +132,7 @@ def ensure_queue_schema(database_url: str) -> None:
     with psycopg.connect(database_url, autocommit=True) as conn, conn.cursor() as cur:
         cur.execute(QUEUE_TABLE_DDL)
         cur.execute(QUEUE_INDEX_DDL)
+        cur.execute(QUEUE_LEGACY_DROP_DDL)
         cur.execute(SCHEDULE_TABLE_DDL)
 
 
