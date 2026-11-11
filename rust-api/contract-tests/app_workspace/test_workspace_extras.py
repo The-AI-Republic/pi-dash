@@ -1111,6 +1111,101 @@ def test_draft_to_issue_with_module_ids(user_api, space, world):
         conn.close()
 
 
+def test_draft_to_issue_body_reports_stored_state(user_api, space, world):
+    """NEWPIDASH-184: draft-to-issue 201 must report the stored state.
+
+    A ticking-state issue with no eligible runner in its pod is bounced
+    back to the project's Backlog state via a post-save DB update.
+    Django renders `serializer.data` after the signal so it reports the
+    bounced (stored) state; the Rust body rendered from the pre-hook
+    row reported the requested Started state while the row was Backlog.
+    The pod is required: without one the orchestration short-circuits
+    (`no-pod-available`) and no bounce happens.
+    """
+    db = world["db"]
+    proj = db.make_project(space["id"], "DST1")
+    # NEWPIDASH-185 (DIFF-14): the Rust handler requires an active
+    # project-membership row for draft create/publish, so the fixture
+    # seeds it (Django ignores it and still 201s).
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at, created_at, updated_at, view_props, default_props, sort_order, preferences) VALUES (%s,%s,%s,%s,20,true,NULL,now(),now(),'{}','{}',65535,'{}')",
+                (str(uuid.uuid4()), space["id"], proj["id"], world["user"]["id"]),
+            )
+        conn.commit()
+    backlog_id = str(uuid.uuid4())
+    started_id = str(uuid.uuid4())
+    pod_id = str(uuid.uuid4())
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO states (id, name, description, color, slug,
+                   project_id, workspace_id, sequence, "group", "default",
+                   is_triage, created_at, updated_at)
+                   VALUES (%s, %s, '', '#808080', %s, %s, %s, %s, %s, %s,
+                   false, now(), now())""",
+                (backlog_id, "Backlog", "backlog", proj["id"], space["id"], 1.0, "backlog", True),
+            )
+            cur.execute(
+                """INSERT INTO states (id, name, description, color, slug,
+                   project_id, workspace_id, sequence, "group", "default",
+                   is_triage, created_at, updated_at)
+                   VALUES (%s, %s, '', '#808080', %s, %s, %s, %s, %s, %s,
+                   false, now(), now())""",
+                (started_id, "In Progress", "in-progress", proj["id"], space["id"], 2.0, "started", False),
+            )
+            cur.execute(
+                "UPDATE projects SET default_state_id=%s WHERE id=%s",
+                (backlog_id, proj["id"]),
+            )
+            cur.execute(
+                """INSERT INTO pod (id, name, description, is_default,
+                   workspace_id, project_id, created_at, updated_at)
+                   VALUES (%s, %s, '', true, %s, %s, now(), now())""",
+                (pod_id, "dst-pod", space["id"], proj["id"]),
+            )
+        conn.commit()
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={"name": "D-state", "project_id": proj["id"]},
+    ).json()["id"]
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-to-issue/{did}/",
+        json={"name": "DI-state", "state_id": started_id},
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert set(body.keys()) == ISSUE_CREATE_KEYS
+    fetched = user_api.get(
+        f"/api/workspaces/{space['slug']}/projects/{proj['id']}/issues/{body['id']}/"
+    )
+    assert fetched.status_code == 200
+    stored = fetched.json()
+    # Body and row agree on the stored (bounced) state, not the requested one.
+    assert body["state_id"] == stored["state_id"]
+    assert body["state"] == body["state_id"]
+    assert stored["state_id"] == backlog_id
+    # Clean up the pod and the ticker this test minted: the domain
+    # `clean_db` fixture sweeps neither, and a leftover pod would block
+    # the next test's `DELETE FROM projects` on its FK while a leftover
+    # ticker would block `DELETE FROM issues` (the bounced issue left an
+    # armed ticker plus the skip comment).
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pod WHERE id=%s", (pod_id,))
+            cur.execute("DELETE FROM issue_agent_ticker WHERE issue_id=%s", (body["id"],))
+            cur.execute("DELETE FROM issue_comments WHERE issue_id=%s", (body["id"],))
+            cur.execute("DELETE FROM issue_sequences WHERE issue_id=%s", (body["id"],))
+            # The skip comment mints a descriptions row keyed by project
+            # (db/models/issue.py): the domain clean_db sweep deletes
+            # projects but not descriptions, so the next test's reset
+            # would hit the FK. Remove it here.
+            cur.execute("DELETE FROM descriptions WHERE project_id=%s", (proj["id"],))
+            cur.execute("DELETE FROM issues WHERE id=%s", (body["id"],))
+        conn.commit()
+
+
 def test_drafts_only_own_visible(user_api, member_api, space):
     member_api.post(f"/api/workspaces/{space['slug']}/draft-issues/", json={"name": "Other"})
     assert user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/").json()["results"] == []

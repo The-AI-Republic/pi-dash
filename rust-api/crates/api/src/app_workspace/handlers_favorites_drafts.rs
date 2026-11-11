@@ -7045,8 +7045,33 @@ async fn fetch_issue_m2m(
     ))
 }
 
+/// Re-read the persisted issue row for the 201 body (NEWPIDASH-184):
+/// the save hooks assign the default state/pods and the post-commit
+/// chain may stamp other columns, so Django's post-save `serializer.data`
+/// reflects the stored row while the in-memory `outcome.issue` does not.
+/// Falls back to the in-memory row when the scoped lookup misses, as the
+/// PUT path does (`fetch_put_issue`).
+async fn fetch_draft_issue_row(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+) -> Result<Option<IssueSaveRow>, Denial> {
+    let db = orm(pool);
+    let row = issues::Entity::find()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(issues::Column::Id.eq(*issue_id))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.as_ref().map(IssueSaveRow::from))
+}
+
 /// Render `serializer.data` after the draft-to-issue save: the 41-key
-/// create representation off the in-memory row (no re-read) plus the
+/// create representation off the stored row (re-read) plus the
 /// fresh m2m members, datetimes in DRF `Z` form in the actor zone,
 /// `assignee_ids`/`label_ids` echoed from the raw input (falsy → `[]`).
 async fn render_draft_to_issue_body(
@@ -7369,8 +7394,9 @@ async fn draft_to_issue(
     // A `None` origin stopped the chain above, so this is `Some` — the
     // `ok_or` is unreachable, kept for the type.
     let origin = origin.ok_or(Denial::ServerError)?;
-    // The 201 body renders off the saved row (hook outputs included),
-    // exactly the in-memory row the direct save used to leave behind.
+    // The 201 body renders off the stored row (re-read after the legs);
+    // this in-memory row drives the cycle/module/asset legs and is the
+    // fallback when the scoped re-read misses.
     let row = IssueSaveRow::from(&outcome.issue);
     let issue_text = row.id.to_string();
     let project_text = draft_project.to_string();
@@ -7559,11 +7585,18 @@ async fn draft_to_issue(
         .map_err(|_| Denial::ServerError)?;
     // The draft delete (`:308`) — after all three publishes.
     soft_delete_draft(&pool, &draft_pk, Some(draft_project), draft_state, &user_id).await?;
+    // NEWPIDASH-184: render from the stored row (hook outputs included),
+    // as Django's post-save `serializer.data` does; the in-memory row
+    // carries the requested state_id.
+    let render_row = match fetch_draft_issue_row(&pool, &slug, &draft_project, &row.id).await? {
+        Some(fresh) => fresh,
+        None => row.clone(),
+    };
     Ok(json_response(
         StatusCode::CREATED,
         render_draft_to_issue_body(
             &pool,
-            &row,
+            &render_row,
             &timezone,
             input.get("assignee_ids"),
             input.get("label_ids"),
