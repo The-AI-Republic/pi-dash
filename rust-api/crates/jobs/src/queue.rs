@@ -126,6 +126,15 @@ impl NewJob {
         }
     }
 
+    /// Route this job to a specific queue label (Phase 2 D3). The worker
+    /// claims only its `--queue` label, so this splits agent runs
+    /// (`cloud_agent`) from every other job (`celery`). Default `celery`
+    /// until both workers run.
+    pub fn with_queue(mut self, queue: impl Into<String>) -> Self {
+        self.queue = queue.into();
+        self
+    }
+
     /// Delay visibility by `delay_secs` from now (the `countdown` path).
     pub fn delayed(mut self, delay_secs: u64, now: DateTime<Utc>) -> Self {
         self.visible_at = Some(now + ChronoDuration::seconds(delay_secs as i64));
@@ -239,8 +248,22 @@ pub fn ensure_schema_sql() -> &'static str {
 /// DDL for the claim index. Separate statement from [`ensure_schema_sql`]:
 /// Postgres rejects multiple commands in one prepared statement, so
 /// [`ensure_schema`] executes each DDL on its own.
+/// Phase 2 (D3, 2.4): the claim filters on `(queue, status, visible_at)`, so
+/// the index leads with `queue` — the worker for `cloud_agent` claims only
+/// that label, and with the old `(status, visible_at, id)` index a
+/// `celery`-saturated table would scan every `celery` row for every
+/// `cloud_agent` claim.
 pub fn ensure_claim_index_sql() -> &'static str {
     "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx \
+        ON rust_job_queue (queue, status, visible_at, id)"
+}
+
+/// Legacy / queue-agnostic claim index kept for back-compat. New boots
+/// create `ensure_claim_index_sql` above; this name survives only so a
+/// `CREATE INDEX IF NOT EXISTS` with the old definition stays a no-op on
+/// existing databases instead of failing on a duplicate definition.
+pub fn ensure_claim_index_legacy_sql() -> &'static str {
+    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx_legacy \
         ON rust_job_queue (status, visible_at, id)"
 }
 
@@ -267,6 +290,16 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(ensure_schema_sql()).execute(&mut *tx).await?;
     // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
     sqlx::query(ensure_claim_index_sql())
+        .execute(&mut *tx)
+        .await?;
+    // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
+    // Phase 2: the queue-leading index is created above; the legacy
+    // queue-agnostic index is left in place for old deployments — the
+    // `IF NOT EXISTS` check is by name, so the new statement above never
+    // fails on an existing `rust_job_queue_claim_idx` but also never
+    // rewrites it. The legacy name below is the old shape for fresh
+    // installs that predate the queue-leading index.
+    sqlx::query(ensure_claim_index_legacy_sql())
         .execute(&mut *tx)
         .await?;
     // raw-sql: Rust-owned DDL passthrough (schedule schema) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
@@ -686,6 +719,27 @@ mod tests {
         assert_eq!(job.queue, "celery");
         assert_eq!(job.max_retries, 3);
         assert!(job.visible_at.is_none());
+    }
+
+    #[test]
+    fn new_job_with_queue_routes_agent_jobs() {
+        let job = NewJob::new("cloud_agent.run_agent_run", json!(["r1"]), json!({}))
+            .with_queue("cloud_agent");
+        assert_eq!(job.queue, "cloud_agent");
+        assert_eq!(job.task, "cloud_agent.run_agent_run");
+    }
+
+    #[test]
+    fn claim_index_leads_with_queue() {
+        // Phase 2 (2.4): the claim filters on queue, so the index leads
+        // with queue — otherwise a cloud_agent worker scans every celery
+        // row for every claim.
+        let sql = ensure_claim_index_sql();
+        assert!(
+            sql.contains("(queue, status, visible_at, id)"),
+            "index must lead with queue: {sql}"
+        );
+        assert!(sql.contains("rust_job_queue_claim_idx"), "{sql}");
     }
 
     #[test]

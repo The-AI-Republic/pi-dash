@@ -842,6 +842,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -1394,6 +1395,7 @@ mod tests {
         let settings = CloudAgentSettings {
             enabled: true,
             disabled_tools: vec!["pidash_search_project_issues".to_string()],
+            job_queue: "celery".to_string(),
             ..django_cloud_settings()
         };
         let direct = build_tool_plan::<fn() -> bool, fn() -> bool>(
@@ -1607,6 +1609,7 @@ mod tests {
         // Disabled tools drop out.
         let settings = CloudAgentSettings {
             disabled_tools: vec!["pidash_search_project_issues".to_string()],
+            job_queue: "celery".to_string(),
             ..django_cloud_settings()
         };
         let names =

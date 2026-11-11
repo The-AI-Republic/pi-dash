@@ -267,6 +267,83 @@ pub fn default_schedule() -> Vec<BeatEntry> {
     beat_schedule()
 }
 
+/// Scheduler allowlist from `PIDASH_BEAT_ONLY` (Phase 2, 2.2).
+/// Unset, empty, or a list that trims to nothing means all entries.
+/// Set to a comma-separated list of exact `BeatEntry::name` values to
+/// fire only those entries while Python beat stays live beside Rust.
+/// The allowlist is consulted by [`WorkerBuilder::with_scheduler`]'s
+/// schedule filtering; queue maintenance (reclaim, purge) always runs
+/// even when the allowlist is empty or the scheduler is off.
+pub fn scheduler_allowlist() -> Option<std::collections::HashSet<String>> {
+    let raw = std::env::var("PIDASH_BEAT_ONLY").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let set: std::collections::HashSet<String> = raw
+        .split(',')
+        .map(|part| part.trim().to_owned())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if set.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
+}
+
+/// Pure allowlist filter for tests and the builder: `None` keeps every
+/// entry; `Some(set)` keeps only entries whose name is in the set, in
+/// `beat_schedule` order (stable for the boot log).
+pub fn filter_schedule_by_allowlist(
+    schedule: Vec<BeatEntry>,
+    allowlist: &Option<std::collections::HashSet<String>>,
+) -> Vec<BeatEntry> {
+    match allowlist {
+        None => schedule,
+        Some(allowed) => schedule
+            .into_iter()
+            .filter(|entry| allowed.contains(entry.name))
+            .collect(),
+    }
+}
+
+/// Maintenance loop for the `--no-scheduler` case (Phase 2, 2.2):
+/// keeps the purge + stale-reclaim cadence alive while firing nothing.
+/// Runs inside [`crate::queue`] cadence (once a minute), logging every
+/// sweep so a misconfigured agent-only worker is visible in logs.
+pub async fn run_maintenance(pool: PgPool, mut shutdown: watch::Receiver<bool>) {
+    let mut last_minute = String::new();
+    tracing::info!("queue maintenance running (--no-scheduler; firing nothing)");
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        let now = Utc::now();
+        let minute = now.format("%Y-%m-%d %H:%M").to_string();
+        if minute != last_minute {
+            if let Err(error) = crate::queue::purge_failed(&pool, FAILED_RETENTION_SECS).await {
+                tracing::warn!(%error, "scheduler purge failed");
+            }
+            match crate::queue::reclaim_stale_running(&pool, crate::queue::STALE_CLAIM_LEASE_SECS)
+                .await
+            {
+                Ok(reclaimed) => {
+                    if reclaimed > 0 {
+                        tracing::info!(reclaimed, "scheduler reclaimed stale running jobs");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "scheduler reclaim failed"),
+            }
+            last_minute = minute;
+        }
+        if tick(&mut shutdown).await {
+            break;
+        }
+    }
+    tracing::info!("maintenance loop stopped");
+}
+
 /// Sleep one tick, or stop early on shutdown. True when stopping.
 async fn tick(shutdown: &mut watch::Receiver<bool>) -> bool {
     tokio::select! {
@@ -278,6 +355,41 @@ async fn tick(shutdown: &mut watch::Receiver<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduler_allowlist_filtering_matches_allowlist_semantics() {
+        // Phase 2 (2.2): None keeps all; Some(set) keeps only named entries
+        // in beat order.
+        let schedule = default_schedule();
+        assert_eq!(schedule.len(), 31);
+        assert_eq!(
+            filter_schedule_by_allowlist(schedule.clone(), &None),
+            schedule
+        );
+        let allowed = Some(
+            [
+                "cloud-agent-scan-queued-runs",
+                "cloud-agent-sweep-stale-runs",
+                "agent-run-reconcile-terminal-effects",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>(),
+        );
+        let filtered = filter_schedule_by_allowlist(schedule, &allowed);
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(
+            filtered.iter().map(|entry| entry.name).collect::<Vec<_>>(),
+            vec![
+                "cloud-agent-scan-queued-runs",
+                "cloud-agent-sweep-stale-runs",
+                "agent-run-reconcile-terminal-effects",
+            ]
+        );
+        // An empty set (no entries) is a valid allowlist that fires nothing.
+        let none_allowed = Some(std::collections::HashSet::new());
+        assert!(filter_schedule_by_allowlist(default_schedule(), &none_allowed).is_empty());
+    }
 
     #[test]
     fn singleton_lock_key_is_fixed() {

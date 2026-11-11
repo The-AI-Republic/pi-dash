@@ -122,18 +122,40 @@ pub fn run_cloud_agent_message(run_id: &str) -> TaskMessage {
     )
 }
 
+/// Queue label for `cloud_agent.run_agent_run` rows when no explicit
+/// setting is passed: `CLOUD_AGENT_JOB_QUEUE`, default `celery`.
+/// Empty/blank env values collapse to the default so a stale empty
+/// SSM value does not strand jobs on an empty label.
+pub fn cloud_agent_job_queue() -> String {
+    std::env::var("CLOUD_AGENT_JOB_QUEUE")
+        .ok()
+        .map(|raw| raw.trim().to_owned())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| crate::queue::DEFAULT_QUEUE.to_owned())
+}
+
 /// Lift the `.delay(run_id)` message into its queue row: `args=[run_id]` with
 /// empty kwargs, so the forward path rebuilds the identical Celery v2 body.
 /// Retry policy is the [`NewJob::new`] default (`max_retries = 3`, 180s
 /// delay): the row budget governs *delivery* to a worker, while the task's
 /// own `max_retries=0` (`tasks.py:78`) governs the Python body after delivery.
+/// Phase 2 (2.1): the queue is CLOUD_AGENT_JOB_QUEUE, default `celery`.
 pub fn run_cloud_agent_job(run_id: &str) -> NewJob {
+    run_cloud_agent_job_with_queue(run_id, cloud_agent_job_queue())
+}
+
+/// Queue at an explicit label (Phase 2 D3). `dispatch_waiting` routes
+/// through `CloudAgentSettings.job_queue` so the label follows the
+/// resolved settings rather than a second env read; this wrapper keeps
+/// the free-function surface identical for the poll-free path.
+pub fn run_cloud_agent_job_with_queue(run_id: &str, queue: impl Into<String>) -> NewJob {
     let message = run_cloud_agent_message(run_id);
     NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
         Value::Object(message.kwargs.clone()),
     )
+    .with_queue(queue)
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +459,11 @@ pub async fn dispatch_waiting(
                 .map_err(into_sqlx)?;
         }
         let id = run_id.to_string();
-        enqueue_exec(&mut **tx.inner(), &run_cloud_agent_job(&id)).await?;
+        enqueue_exec(
+            &mut **tx.inner(),
+            &run_cloud_agent_job_with_queue(&id, cloud.job_queue.clone()),
+        )
+        .await?;
         ids.push(id);
     }
     tx.commit().await?;
@@ -609,6 +635,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -924,6 +951,19 @@ mod tests {
             job.visible_at.is_none(),
             "delayed means immediately visible"
         );
+    }
+
+    #[test]
+    fn job_row_with_queue_routes_agent_queue() {
+        // Phase 2 (2.1): `run_cloud_agent_job_with_queue` puts the job on
+        // the configured label; `dispatch_waiting` routes through
+        // `CloudAgentSettings.job_queue`.
+        let run_id = Uuid::new_v4().to_string();
+        let job = run_cloud_agent_job_with_queue(&run_id, "cloud_agent");
+        assert_eq!(job.queue, "cloud_agent");
+        assert_eq!(job.task, RUN_CLOUD_AGENT_TASK);
+        let celery = run_cloud_agent_job_with_queue(&run_id, crate::queue::DEFAULT_QUEUE);
+        assert_eq!(celery.queue, crate::queue::DEFAULT_QUEUE);
     }
 
     // -- tool-plan snapshot shape ---------------------------------------------

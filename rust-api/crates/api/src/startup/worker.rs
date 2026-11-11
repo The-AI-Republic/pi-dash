@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt as _;
 use pidash_db::config::Settings;
 use pidash_jobs::assistant::{register_turn_handler, TurnSeam};
 use pidash_jobs::{
@@ -115,6 +116,9 @@ pub struct WorkerBuilder<S = LiveTurnSeam> {
     turn_seam_is_default: bool,
     turn_soft_limit: i64,
     concurrency: u32,
+    queue: String,
+    scheduler_enabled: bool,
+    shutdown_grace_secs: u64,
     extras: Vec<ExtraReg>,
     extra_schedule: Vec<BeatEntry>,
     queue_schema_owner: Option<sqlx::PgPool>,
@@ -168,6 +172,27 @@ impl WorkerBuilder<LiveTurnSeam> {
         // The configured soft limit for the turn runner's stream deadline
         // (PIDASHCONV-1458), like Celery's `soft_time_limit`.
         let turn_soft_limit = settings.assistant.turn_soft_limit;
+        let shutdown_grace_secs = std::env::var("PIDASH_WORKER_SHUTDOWN_GRACE_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(30);
+        // Phase 2: WORKER_QUEUE / WORKER_NO_SCHEDULER as a pre-CLI
+        // fallback so the overlay's `--queue`/`--no-scheduler` flags
+        // (set as env before the Phase-2 pin lands) are honoured without
+        // requiring a `with_queue` call on the old SDK.
+        let queue = std::env::var("WORKER_QUEUE")
+            .ok()
+            .map(|raw| raw.trim().to_owned())
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or_else(|| pidash_jobs::queue::DEFAULT_QUEUE.to_owned());
+        let scheduler_enabled = !matches!(
+            std::env::var("WORKER_NO_SCHEDULER")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1") | Some("true")
+        );
         Ok(Self {
             settings,
             pools,
@@ -179,6 +204,9 @@ impl WorkerBuilder<LiveTurnSeam> {
             turn_seam_is_default: true,
             turn_soft_limit,
             concurrency: 4,
+            queue,
+            scheduler_enabled,
+            shutdown_grace_secs,
             extras: Vec::new(),
             extra_schedule: Vec::new(),
             queue_schema_owner: None,
@@ -209,6 +237,9 @@ impl WorkerBuilder<LiveTurnSeam> {
             turn_seam_is_default: true,
             turn_soft_limit,
             concurrency: 4,
+            queue: pidash_jobs::queue::DEFAULT_QUEUE.to_owned(),
+            scheduler_enabled: true,
+            shutdown_grace_secs: 30,
             extras: Vec::new(),
             extra_schedule: Vec::new(),
             queue_schema_owner: None,
@@ -297,6 +328,9 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             turn_seam_is_default: _,
             turn_soft_limit,
             concurrency,
+            queue,
+            scheduler_enabled,
+            shutdown_grace_secs,
             extras,
             extra_schedule,
             queue_schema_owner,
@@ -312,6 +346,9 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             turn_seam_is_default: false,
             turn_soft_limit,
             concurrency,
+            queue,
+            scheduler_enabled,
+            shutdown_grace_secs,
             extras,
             extra_schedule,
             queue_schema_owner,
@@ -322,6 +359,31 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
     /// flag; default 4, clamped to at least 1 like the CLI path).
     pub fn with_concurrency(mut self, concurrency: u32) -> Self {
         self.concurrency = concurrency;
+        self
+    }
+
+    /// Claim only jobs on `queue` (Phase 2, 2.2): `celery` for the
+    /// general worker, `cloud_agent` for the dedicated agent worker.
+    /// Default `celery`.
+    pub fn with_queue(mut self, queue: impl Into<String>) -> Self {
+        self.queue = queue.into();
+        self
+    }
+
+    /// Enable or disable the beat scheduler loop (Phase 2, 2.2).
+    /// `false` (--no-scheduler) runs queue maintenance only in the
+    /// agent worker; `true` fires the allowlisted `PIDASH_BEAT_ONLY`
+    /// subset (or all entries when unset).
+    pub fn with_scheduler(mut self, enabled: bool) -> Self {
+        self.scheduler_enabled = enabled;
+        self
+    }
+
+    /// Shutdown drain grace in seconds (Phase 2, 2.6):
+    /// `PIDASH_WORKER_SHUTDOWN_GRACE_SECS`, default 30; the agent
+    /// worker uses 300 so a 285s run can settle on redeploy.
+    pub fn with_shutdown_grace(mut self, secs: u64) -> Self {
+        self.shutdown_grace_secs = secs.max(1);
         self
     }
 
@@ -370,10 +432,14 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             turn_seam_is_default: _,
             turn_soft_limit,
             concurrency,
+            queue,
+            scheduler_enabled: _,
+            shutdown_grace_secs: _,
             extras,
             extra_schedule,
             queue_schema_owner: _,
         } = self;
+        let _ = queue;
         // Task handlers register through the shared OSS composition
         // (`pidash_jobs::register_oss_handlers`, PIDASHCONV-918).
         let ctx = OssWorkerCtx {
@@ -431,8 +497,15 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
 
     /// Ensure the queue schema, build the registry, and drive the worker
     /// plus scheduler loops until SIGINT/SIGTERM, then drain both loops
-    /// inside the 30s grace period — the `worker` sequence.
+    /// inside the grace period — the `worker` sequence. Phase 2 (2.2,
+    /// 2.6): the queue label (`--queue`), the scheduler allowlist
+    /// (`PIDASH_BEAT_ONLY`) / `--no-scheduler`, and the shutdown grace
+    /// (`PIDASH_WORKER_SHUTDOWN_GRACE_SECS`) are honoured here; queue
+    /// maintenance (reclaim, purge) always runs.
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
+        let queue = self.queue.clone();
+        let scheduler_enabled = self.scheduler_enabled;
+        let shutdown_grace_secs = self.shutdown_grace_secs;
         pidash_jobs::queue::ensure_schema(queue_schema_pool(
             self.queue_schema_owner.as_ref(),
             self.pools.primary(),
@@ -446,13 +519,42 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
         ))
         .await?;
         let built = self.build()?;
+        // Apply the PIDASH_BEAT_ONLY allowlist to the schedule. Unset
+        // means all entries; set to a comma-separated list of exact
+        // schedule entry names. The active list is logged so a
+        // misconfigured coexistence is visible at boot.
+        let allowlist = pidash_jobs::scheduler::scheduler_allowlist();
+        let schedule = pidash_jobs::scheduler::filter_schedule_by_allowlist(
+            built.schedule.clone(),
+            &allowlist,
+        );
+        if scheduler_enabled {
+            let names: Vec<&str> = schedule.iter().map(|entry| entry.name).collect();
+            tracing::info!(
+                entries = ?names,
+                "worker scheduler allowlist active (PIDASH_BEAT_ONLY)"
+            );
+        }
+        let owner = pidash_jobs::worker::default_worker_owner();
         let worker_config = WorkerConfig {
+            queue: queue.clone(),
+            owner: owner.clone(),
             concurrency: built.concurrency.max(1) as usize,
             ..Default::default()
         };
+        // Overwrite the default owner that Default::default carried;
+        // the per-process owner must win.
+        let mut worker_config = worker_config;
+        worker_config.owner = owner;
+        worker_config.queue = queue.clone();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         tracing::info!(
             concurrency = built.concurrency,
+            queue = ?worker_config.queue,
+            owner = ?worker_config.owner,
+            scheduler = scheduler_enabled,
+            shutdown_grace_secs = shutdown_grace_secs,
+            schedule_entries = schedule.len(),
             "worker + scheduler loops started"
         );
         let worker_fut = pidash_jobs::worker::run_worker(
@@ -461,11 +563,28 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             worker_config,
             shutdown_rx.clone(),
         );
-        let scheduler_fut = pidash_jobs::scheduler::run_scheduler(
-            built.ctx.pools.primary().clone(),
-            built.schedule,
-            shutdown_rx,
-        );
+        // Two modes: full scheduler (allowlist-filtered) or maintenance
+        // only (--no-scheduler). Maintenance still purges and reclaims.
+        // Both loops share the shutdown watch.
+        let scheduler_fut = if scheduler_enabled {
+            pidash_jobs::scheduler::run_scheduler(
+                built.ctx.pools.primary().clone(),
+                schedule,
+                shutdown_rx.clone(),
+            )
+            .boxed()
+        } else {
+            // --no-scheduler: run the maintenance tick only. It takes the
+            // same shutdown watch and never fires a scheduled entry.
+            async move {
+                pidash_jobs::scheduler::run_maintenance(
+                    built.ctx.pools.primary().clone(),
+                    shutdown_rx.clone(),
+                )
+                .await;
+            }
+            .boxed()
+        };
         tokio::pin!(worker_fut);
         tokio::pin!(scheduler_fut);
         tokio::select! {
@@ -480,7 +599,7 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
                 // scheduler stops at once) and abort in-flight jobs with the
                 // runtime (PIDASHCONV-1326).
                 let drained = tokio::time::timeout(
-                    Duration::from_secs(30),
+                    Duration::from_secs(shutdown_grace_secs),
                     async {
                         tokio::join!(&mut worker_fut, &mut scheduler_fut);
                     },
