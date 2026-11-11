@@ -233,19 +233,19 @@ pub enum CreationJobsError {
 
 /// Map a SeaORM failure onto the store error, keeping the sqlx text the
 /// old readers produced.
-fn sea_db(error: DbErr) -> CreationError {
+pub(crate) fn sea_db(error: DbErr) -> CreationError {
     CreationError::Db(orm_tx::into_sqlx(error).to_string())
 }
 
 /// The store error for a missed `fetch_one` (the old row readers errored
 /// when the row was absent instead of returning `None`).
-fn row_missing() -> CreationError {
+pub(crate) fn row_missing() -> CreationError {
     CreationError::Db(sqlx::Error::RowNotFound.to_string())
 }
 
 /// The `ISSUE_SELECT_SQL` projection, decoded by name.
 #[derive(Debug, FromQueryResult)]
-struct IssueRow {
+pub(crate) struct IssueRow {
     id: Uuid,
     workspace_id: Uuid,
     project_id: Uuid,
@@ -330,7 +330,7 @@ impl From<ProjectRow> for ProjectView {
 /// The consumed `agent_run` projection (`RUN_VIEW_COLUMNS`), decoded by
 /// name.
 #[derive(Debug, FromQueryResult)]
-struct RunRow {
+pub(crate) struct RunRow {
     id: Uuid,
     workspace_id: Uuid,
     created_by_id: Uuid,
@@ -352,7 +352,7 @@ struct RunRow {
     ended_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
 }
 
-fn issue_columns() -> Vec<issues::Column> {
+pub(crate) fn issue_columns() -> Vec<issues::Column> {
     vec![
         issues::Column::Id,
         issues::Column::WorkspaceId,
@@ -392,7 +392,7 @@ fn project_columns() -> Vec<projects::Column> {
     ]
 }
 
-fn run_columns() -> Vec<agent_run::Column> {
+pub(crate) fn run_columns() -> Vec<agent_run::Column> {
     vec![
         agent_run::Column::Id,
         agent_run::Column::WorkspaceId,
@@ -418,7 +418,7 @@ fn run_columns() -> Vec<agent_run::Column> {
 
 /// Unknown stored statuses/executors are unreachable through the checks
 /// but keep the old strict decode (a decode failure, not a silent map).
-fn map_run_row(row: RunRow) -> Result<RunView, CreationError> {
+pub(crate) fn map_run_row(row: RunRow) -> Result<RunView, CreationError> {
     let status = AgentRunStatus::from_value(&row.status)
         .ok_or_else(|| CreationError::Db(format!("unknown agent_run.status {:?}", row.status)))?;
     let executor_kind = AgentExecutorKind::from_value(&row.executor_kind).ok_or_else(|| {

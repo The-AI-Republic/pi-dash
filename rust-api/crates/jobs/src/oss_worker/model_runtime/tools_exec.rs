@@ -571,195 +571,6 @@ async fn load_scope<C: sea_orm::ConnectionTrait>(
 // Audit (`_audit`, `tools.py:76-157`)
 // ---------------------------------------------------------------------------
 
-/// An opened write audit: the transaction, the scope, and the prepared
-/// ledger row. Borrows the pool through the dispatch's hold on `ctx`;
-/// dropping it without commit rolls back (the op-error path relies on
-/// this, explicitly rolling back first for a clean error).
-pub struct WriteAudit<'a> {
-    /// The audit transaction (scope, admission, ledger, op, marking).
-    pub tx: Transaction<'a>,
-    /// The write-bit scope.
-    pub scope: ToolScope,
-    /// The prepared ledger row id.
-    pub ledger_id: Uuid,
-}
-
-/// `_audit` short-circuit: a replay value returns without running the
-/// op (`tools.py:93-94`).
-pub enum AuditBegin<'a> {
-    /// Run the op under this audit.
-    Proceed(WriteAudit<'a>),
-    /// Return the stored replay value (no ledger write, no event).
-    Replay(Value),
-}
-
-/// Write-path `_audit` through the submit flip (`tools.py:76-129`):
-/// fresh call id, fingerprint, kill-switch guards, replay check, then
-/// the transaction over scope, admission, ledger insert, and submit.
-/// Guard/denial failures leave no row; the caller rolls the
-/// transaction back on op errors (or drops it, which rolls back).
-pub async fn write_begin<'a>(
-    ctx: &'a ToolCtx,
-    run_id: Uuid,
-    tool_name: &'static str,
-    args: &Value,
-    source: &'static str,
-    server_key: &'static str,
-) -> Result<AuditBegin<'a>, ToolExecError> {
-    let call_id = plan::resolve_tool_call_id(None);
-    let fingerprint = plan::fingerprint(args);
-    plan::audit_guards(
-        &ctx.cloud,
-        tool_name,
-        plan::ToolRisk::Write,
-        source,
-        server_key,
-    )?;
-    let existing = find_existing(&ctx.pool, run_id, &call_id).await?;
-    match plan::replay_decision(existing.as_ref(), &fingerprint)? {
-        plan::ReplayDecision::Replay(value) => return Ok(AuditBegin::Replay(value)),
-        plan::ReplayDecision::Proceed => {}
-    }
-    let mut tx = Transaction::begin(&ctx.pool).await?;
-    let scope = match load_scope(&tx_conn(&mut tx), run_id, true).await {
-        Ok(scope) => scope,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            return Err(error);
-        }
-    };
-    use pidash_db::entity::agent_run_tool_call as ledger_entity;
-    let succeeded_writes: u64 = ledger_entity::Entity::find()
-        .filter(ledger_entity::Column::AgentRunId.eq(run_id))
-        .filter(ledger_entity::Column::Risk.eq("write"))
-        .filter(ledger_entity::Column::Status.eq("succeeded"))
-        .count(&tx_conn(&mut tx))
-        .await
-        .map_err(orm_error)?;
-    let succeeded_writes: i64 = succeeded_writes.try_into().unwrap_or(i64::MAX);
-    let tool_used = ledger_entity::Entity::find()
-        .filter(ledger_entity::Column::AgentRunId.eq(run_id))
-        .filter(ledger_entity::Column::ToolName.eq(tool_name))
-        .filter(ledger_entity::Column::Risk.eq("write"))
-        .filter(ledger_entity::Column::Status.eq("succeeded"))
-        .select_only()
-        .column(ledger_entity::Column::Id)
-        .into_tuple::<Uuid>()
-        .one(&tx_conn(&mut tx))
-        .await
-        .map_err(orm_error)?
-        .is_some();
-    if let Err(denied) = plan::write_admission(succeeded_writes, tool_used, tool_name, &ctx.cloud) {
-        let _ = tx.rollback().await;
-        return Err(denied.into());
-    }
-    let ledger_id = Uuid::new_v4();
-    let idempotency_hash =
-        plan::fingerprint(&serde_json::json!({"run": run_id.to_string(), "tool": tool_name}));
-    let now = Utc::now();
-    ledger_entity::ActiveModel {
-        id: sea_orm::Set(ledger_id),
-        agent_run_id: sea_orm::Set(run_id),
-        tool_call_id: sea_orm::Set(call_id.to_owned()),
-        source: sea_orm::Set(source.to_owned()),
-        server_key: sea_orm::Set(server_key.to_owned()),
-        tool_name: sea_orm::Set(tool_name.to_owned()),
-        risk: sea_orm::Set("write".to_owned()),
-        status: sea_orm::Set("prepared".to_owned()),
-        request_fingerprint: sea_orm::Set(fingerprint),
-        result_fingerprint: sea_orm::Set("".to_owned()),
-        idempotency_key_hash: sea_orm::Set(idempotency_hash),
-        external_operation_id: sea_orm::Set("".to_owned()),
-        safe_replay_result: sea_orm::Set(None),
-        error_code: sea_orm::Set("".to_owned()),
-        prepared_at: sea_orm::Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
-        submitted_at: sea_orm::Set(None),
-        completed_at: sea_orm::Set(None),
-    }
-    .insert(&tx_conn(&mut tx))
-    .await
-    .map_err(orm_error)?;
-    ledger_entity::Entity::update_many()
-        .col_expr(ledger_entity::Column::Status, Expr::value("submitted"))
-        .col_expr(
-            ledger_entity::Column::SubmittedAt,
-            Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
-        )
-        .filter(ledger_entity::Column::Id.eq(ledger_id))
-        .exec(&tx_conn(&mut tx))
-        .await
-        .map_err(orm_error)?;
-    Ok(AuditBegin::Proceed(WriteAudit {
-        tx,
-        scope,
-        ledger_id,
-    }))
-}
-
-/// Write-path `_audit` after the op (`tools.py:123-129,156`): bound
-/// the result, collapse the replay past 4 KiB, mark succeeded, commit,
-/// then append `tool_completed` outside the transaction. A commit or
-/// event failure propagates (the committed writes stand, as in
-/// Python); the capped-bool is ignored.
-pub async fn write_commit(
-    ctx: &ToolCtx,
-    audit: WriteAudit<'_>,
-    tool_name: &'static str,
-    result: Value,
-) -> Result<Value, ToolExecError> {
-    let run_id = audit.scope.run_id;
-    let value = write_commit_tx(ctx, audit, result).await?;
-    emit_completed(ctx, run_id, tool_name, plan::ToolRisk::Write).await?;
-    Ok(value)
-}
-
-/// Ledger success-mark plus commit: the write-path
-/// `transaction.atomic()` body (`tools.py:97-129`), without the
-/// `tool_completed` append (`tools.py:156`). The create caller commits
-/// through this so its post-save fire runs on commit-success — Django's
-/// signal fires inside the save, before the append — while the tool
-/// result still covers the append exactly as [`write_commit`] does.
-async fn write_commit_tx(
-    ctx: &ToolCtx,
-    audit: WriteAudit<'_>,
-    result: Value,
-) -> Result<Value, ToolExecError> {
-    let WriteAudit {
-        mut tx,
-        scope: _,
-        ledger_id,
-    } = audit;
-    let bounded = plan::bounded(result.clone(), ctx.cloud.max_tool_result_bytes)?;
-    let replay = if plan::collapse_replay(plan::canonical(&bounded).len()) {
-        plan::collapsed_replay()
-    } else {
-        bounded.clone()
-    };
-    let result_fingerprint = plan::fingerprint(&bounded);
-    use pidash_db::entity::agent_run_tool_call as ledger_entity;
-    let now = Utc::now();
-    {
-        let conn = tx_conn(&mut tx);
-        ledger_entity::Entity::update_many()
-            .col_expr(ledger_entity::Column::Status, Expr::value("succeeded"))
-            .col_expr(ledger_entity::Column::SafeReplayResult, Expr::value(replay))
-            .col_expr(
-                ledger_entity::Column::ResultFingerprint,
-                Expr::value(result_fingerprint),
-            )
-            .col_expr(
-                ledger_entity::Column::CompletedAt,
-                Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
-            )
-            .filter(ledger_entity::Column::Id.eq(ledger_id))
-            .exec(&conn)
-            .await
-            .map_err(orm_error)?;
-    }
-    tx.commit().await?;
-    Ok(result)
-}
-
 /// Read-path `_audit` head (`tools.py:76-95,131-142`): fresh call id,
 /// fingerprint, kill-switch guards, replay check, then scope (before
 /// the insert) and the submitted ledger row. Returns the replay value
@@ -2349,12 +2160,6 @@ impl PreflightSeam for BinPreflight {
 /// post-commit completion comment-back (`github_signals.py:44-75`):
 /// the moved issue, its locked pre-save state (Django's
 /// `capture_prior_state` value), and the new state.
-struct TransitionDispatch {
-    issue_id: Uuid,
-    from_state_id: Option<Uuid>,
-    target_id: Uuid,
-}
-
 /// Post-commit completion comment-back for a state-changing
 /// transition (`github_signals.py:44-75`, via the jobs-layer port;
 /// the `tools_local_store::enqueue_completion_comment` shape from
@@ -2391,50 +2196,36 @@ async fn enqueue_completion_comment(
 /// on same state, save through the model (audit stamps as the
 /// creator), then route through the live
 /// `handle_issue_state_transition` with the run stamped as the mover.
-/// Takes the audit transaction by value (the creation store owns it
-/// while driving) and returns it for commit or rollback, plus — only
-/// when the state changed — the [`TransitionDispatch`] the caller
-/// fires after the commit lands.
-async fn op_transition_current_issue<'a>(
-    ctx: &'a ToolCtx,
-    tx: Transaction<'a>,
+/// Runs on the audit [`WriteTxn`] like the other write tools
+/// (NEWPIDASH-190 Part 1b); on a state change, the comment-back
+/// dispatch is queued with [`WriteTxn::on_commit`] and drains after
+/// the audit commits.
+async fn op_transition_current_issue(
+    ctx: &ToolCtx,
+    txn: &mut WriteTxn,
     scope: &ToolScope,
     state_id: &str,
-) -> (
-    Transaction<'a>,
-    Result<(Value, Option<TransitionDispatch>), ToolExecError>,
-) {
-    let mut tx = tx;
+) -> Result<Value, ToolExecError> {
     // `run.work_item.project_id` evaluates before the `.get()` call,
     // so a run with no bound issue raises before parsing `state_id`.
     if scope.work_item_id.is_none() {
-        return (
-            tx,
-            Err(ToolExecError::AttributeError {
-                attribute: "project_id",
-            }),
-        );
+        return Err(ToolExecError::AttributeError {
+            attribute: "project_id",
+        });
     }
     let Some(target_id) = parse_django_uuid(state_id) else {
-        return (
-            tx,
-            Err(ToolExecError::InvalidUuid {
-                value: state_id.to_owned(),
-            }),
-        );
+        return Err(ToolExecError::InvalidUuid {
+            value: state_id.to_owned(),
+        });
     };
     use pidash_db::entity::issues as issue_entity;
     let target = transition_state_query(target_id, scope.project_id)
         .into_model::<IssueStateView>()
-        .one(&tx_conn(&mut tx))
+        .one(&txn.connection())
         .await
-        .map_err(orm_error);
-    let target = match target {
-        Ok(row) => row,
-        Err(error) => return (tx, Err(error)),
-    };
+        .map_err(orm_error)?;
     let Some(target) = target else {
-        return (tx, Err(ToolExecError::Missing { model: "State" }));
+        return Err(ToolExecError::Missing { model: "State" });
     };
     let target_id = target.id;
     let target_name = target.name;
@@ -2450,120 +2241,498 @@ async fn op_transition_current_issue<'a>(
         .column(issue_entity::Column::Id)
         .column(issue_entity::Column::StateId)
         .into_model::<IssueStateLockRow>()
-        .one(&tx_conn(&mut tx))
+        .one(&txn.connection())
         .await
-        .map_err(orm_error);
-    let locked = match locked {
-        Ok(row) => row,
-        Err(error) => return (tx, Err(error)),
-    };
+        .map_err(orm_error)?;
     let Some(locked) = locked else {
-        return (tx, Err(ToolExecError::Missing { model: "Issue" }));
+        return Err(ToolExecError::Missing { model: "Issue" });
     };
     let issue_id = locked.id;
     let from_state_id = locked.state_id;
     if plan::transition_same_state(from_state_id, target_id) {
         let result = plan::transition_result(false, &target_name, &target_id.to_string());
-        let value = serde_json::to_value(result)
-            .map(|value| (value, None))
-            .map_err(|error| {
-                ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
-            });
-        return (tx, value);
+        let value = serde_json::to_value(result).map_err(|error| {
+            ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
+        })?;
+        return Ok(value);
     }
     let now = Utc::now();
     // The `save(update_fields=["state", "updated_at", "updated_by"])`
     // equivalent: three bare columns, no hook-recompute writes, no chain
     // — completion, fire and the orchestration drive stay driver-side, as
-    // today. Inside the audit transaction, under the row lock above (a
-    // separate domain transaction would deadlock against it).
-    if let Err(error) = domain_issues::update_issue_state(
-        &pidash_db::orm_tx::TxConn::new(tx.inner()),
+    // today. Inside the audit transaction, under the row lock above.
+    domain_issues::update_issue_state(
+        &txn.connection(),
         issue_id,
         target_id,
         now,
         scope.creator_id,
     )
-    .await
-    {
-        return (tx, Err(error.into()));
-    }
+    .await?;
     // The orchestration states: `None` when stateless (or on a dangling
     // from-pointer, the `select_related` miss). The target group comes
     // from a second read — the ported target lookup projects id+name+group
     // (decoding `IssueStateView`), and this re-read supplies the fresh
     // orchestration view plus the TOCTOU existence check below.
     let from_state = match from_state_id {
-        Some(id) => match state_view_tx(&tx_conn(&mut tx), id).await {
-            Ok(view) => view,
-            Err(error) => return (tx, Err(error)),
-        },
+        Some(id) => state_view_tx(&txn.connection(), id).await?,
         None => None,
     };
-    let to_state = match state_view_tx(&tx_conn(&mut tx), target_id).await {
-        Ok(Some(view)) => view,
-        Ok(None) => {
+    let to_state = match state_view_tx(&txn.connection(), target_id).await? {
+        Some(view) => view,
+        None => {
             // TOCTOU: the target vanished between the lookup and the
             // group read (Python holds the object and would proceed).
             // Fail closed; the audit rolls back.
-            return (tx, Err(ToolExecError::Missing { model: "State" }));
+            return Err(ToolExecError::Missing { model: "State" });
         }
-        Err(error) => return (tx, Err(error)),
     };
-    let outcome = drive_transition(ctx, tx, scope, issue_id, from_state, to_state, now).await;
-    let (tx, outcome) = outcome;
-    let value = outcome.map(|()| {
-        let result = plan::transition_result(true, &target_name, &target_id.to_string());
-        let value = serde_json::to_value(result).expect("transition result serializes");
-        let dispatch = TransitionDispatch {
-            issue_id,
-            from_state_id,
-            target_id,
-        };
-        (value, Some(dispatch))
+    drive_transition(ctx, txn, scope, issue_id, from_state, to_state, now).await?;
+    // `github_signals.trigger_completion_comment`
+    // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
+    // into a completed-group state enqueues the provider's
+    // `post_completion_comment`. Django fires this from `Issue.save()`
+    // (`tools.py:335`), so the tool path gets it for free; here it is an
+    // after-commit step on the audit transaction (the unchanged-state
+    // no-op above returns `None`; the helper re-checks the completed
+    // group, the mirror order (git before github) and the
+    // already-commented guard). Best-effort like the relation enqueues:
+    // the edit already committed, so a lookup or queue failure must not
+    // fail the tool.
+    let pool = ctx.pool.clone();
+    txn.on_commit(move || {
+        let p = pool.clone();
+        async move {
+            enqueue_completion_comment(&p, &issue_id, from_state_id.as_ref(), Some(&target_id))
+                .await
+        }
     });
-    (tx, value)
+    let result = plan::transition_result(true, &target_name, &target_id.to_string());
+    let value = serde_json::to_value(result).expect("transition result serializes");
+    Ok(value)
 }
 
-/// Drive `handle_issue_state_transition` over the audit transaction:
-/// build the live store (creator presence prefetched; the actor is
-/// always the run creator on this path, so the fallback chain never
-/// consults), run the driver, recover the transaction plus outboxes,
-/// and drain. No creation is reachable (agent moves never dispatch),
-/// so the outboxes are always empty — the drain loops are the
-/// documented driver shape, kept for exactness.
-async fn drive_transition<'a>(
-    ctx: &'a ToolCtx,
-    tx: Transaction<'a>,
+
+/// The `sea_orm::DbErr` -> `CreationError` map for the audit seam
+/// (mirrors `creation_jobs::sea_db`: via the sqlx error text).
+fn audit_sea_db(error: sea_orm::DbErr) -> CreationError {
+    CreationError::Db(pidash_db::orm_tx::into_sqlx(error).to_string())
+}
+
+/// The `DbErr` -> `CreationError` map for this seam's paths (mirrors
+/// `scheduler_dispatch::db_err`).
+fn audit_db_err(error: sea_orm::DbErr) -> CreationError {
+    CreationError::Db(error.to_string())
+}
+
+fn audit_db(error: sqlx::Error) -> CreationError {
+    CreationError::Db(error.to_string())
+}
+
+
+
+/// The moved_by_run transition seam over the audit [`WriteTxn`]
+/// (NEWPIDASH-190 Part 1b): the agent-move reach of
+/// `handle_issue_state_transition` only (issue reads, clock policy,
+/// ticker lock, active/prior run reads, clock writes — agent moves
+/// never dispatch, so every creation method is unreachable). The
+/// clock methods run on the same `WriteTxn` the op writes, keeping
+/// ticker rows ledger-atomic; the clock reads/writes copy the
+/// `LiveCreationStore` query shapes exactly (same columns, same
+/// selection), so outcomes are identical. The other creation methods
+/// fail closed instead of silently succeeding.
+use crate::orchestration::creation_jobs::{
+    issue_columns, map_run_row, row_missing, run_columns, IssueRow, RunRow,
+};
+use pidash_db::orchestration::runs::ACTIVE_STATUSES;
+use pidash_services::domain::TxnConn;
+
+struct AuditTransitionSeam<'c> {
+    conn: TxnConn<'c>,
+    creator: Uuid,
+    has_key: bool,
+    dispatches: Vec<Uuid>,
+    deferred: Vec<DeferredConsume>,
+    terminal_effects: Vec<Uuid>,
+    rollback: bool,
+}
+
+impl<'c> AuditTransitionSeam<'c> {
+    fn unreachable<T>(&self, method: &'static str) -> Result<T, CreationError> {
+        let _ = method;
+        Err(CreationError::Db(
+            "agent transition seam reached a creation method".to_owned(),
+        ))
+    }
+
+    /// Recover the (always empty) outboxes for the driver's drain
+    /// shape.
+    fn take_outboxes(
+        &mut self,
+    ) -> (Vec<Uuid>, Vec<DeferredConsume>, Vec<Uuid>) {
+        (
+            std::mem::take(&mut self.dispatches),
+            std::mem::take(&mut self.deferred),
+            std::mem::take(&mut self.terminal_effects),
+        )
+    }
+}
+
+impl<'c> CreationSeam for AuditTransitionSeam<'c> {
+    async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
+        use pidash_db::entity::issues;
+        let conn = self.conn;
+        let row = issues::Entity::find()
+            .select_only()
+            .columns(issue_columns())
+            .filter(issues::Column::Id.eq(issue_id))
+            .into_model::<IssueRow>()
+            .one(&conn)
+            .await
+            .map_err(audit_sea_db)?;
+        row.map(IssueView::from).ok_or_else(row_missing)
+    }
+
+    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
+        self.unreachable("project")
+    }
+
+    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
+        let Some(state_id) = state_id else {
+            return Ok(None);
+        };
+        state_view_tx(&self.conn, state_id).await.map_err(|error| match error {
+            ToolExecError::Missing { .. } => CreationError::MissingRow("no state".to_owned()),
+            other => CreationError::Db(other.to_string()),
+        })
+    }
+
+    async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        use pidash_db::entity::agent_run;
+        let conn = self.conn;
+        let row = agent_run::Entity::find()
+            .select_only()
+            .columns(run_columns())
+            .filter(agent_run::Column::WorkItemId.eq(issue_id))
+            .order_by_desc(agent_run::Column::CreatedAt)
+            .limit(1)
+            .into_model::<RunRow>()
+            .one(&conn)
+            .await
+            .map_err(audit_sea_db)?;
+        row.map(map_run_row).transpose()
+    }
+
+    async fn active_run_for(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        use pidash_db::entity::agent_run;
+        let statuses: Vec<&str> = ACTIVE_STATUSES.iter().map(|s| s.value()).collect();
+        let conn = self.conn;
+        let row = agent_run::Entity::find()
+            .select_only()
+            .columns(run_columns())
+            .filter(agent_run::Column::WorkItemId.eq(issue_id))
+            .filter(agent_run::Column::Status.is_in(statuses))
+            .order_by_desc(agent_run::Column::CreatedAt)
+            .limit(1)
+            .into_model::<RunRow>()
+            .one(&conn)
+            .await
+            .map_err(audit_sea_db)?;
+        row.map(map_run_row).transpose()
+    }
+
+    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.unreachable("run")
+    }
+
+    async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
+        self.unreachable("runner")
+    }
+
+    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
+        self.unreachable("assigned_pod")
+    }
+
+    async fn default_pod_for_project(
+        &mut self,
+        _project_id: Uuid,
+    ) -> Result<Option<PodView>, CreationError> {
+        self.unreachable("default_pod_for_project")
+    }
+
+    async fn resume_parent_run_id(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<Uuid>, CreationError> {
+        self.unreachable("resume_parent_run_id")
+    }
+
+    async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        self.unreachable("work_item_id_for_run")
+    }
+
+    async fn lock_issue_for_handoff(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<LockedIssue>, CreationError> {
+        self.unreachable("lock_issue_for_handoff")
+    }
+
+    async fn lock_run_for_handoff(
+        &mut self,
+        _run_id: Uuid,
+    ) -> Result<Option<RunView>, CreationError> {
+        self.unreachable("lock_run_for_handoff")
+    }
+
+    async fn user_flags(&mut self, _user_id: Uuid) -> Result<UserFlags, CreationError> {
+        self.unreachable("user_flags")
+    }
+
+    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
+        self.unreachable("insert_run")
+    }
+
+    async fn save_prompt(&mut self, _: Uuid, _: &str, _: &Value) -> Result<(), CreationError> {
+        self.unreachable("save_prompt")
+    }
+
+    async fn save_run_config(&mut self, _: Uuid, _: &Value) -> Result<(), CreationError> {
+        self.unreachable("save_run_config")
+    }
+
+    async fn execution_fields(
+        &mut self,
+        _request: &ExecutionRequest,
+    ) -> Result<ExecutionFields, ExecutionError> {
+        match self.unreachable::<()>("execution_fields").unwrap_err() {
+            CreationError::Db(message) => Err(ExecutionError::Store(CreationError::Db(message))),
+            other => Err(ExecutionError::Store(other)),
+        }
+    }
+
+    async fn lock_cloud_creation_capacity(
+        &mut self,
+        _workspace_id: Uuid,
+        _executor_kind: AgentExecutorKind,
+        _automatic: bool,
+    ) -> Result<Option<AdmissionError>, CreationError> {
+        self.unreachable("lock_cloud_creation_capacity")
+    }
+
+    fn dispatch_after_commit(&mut self, _run_id: Uuid) {}
+
+    async fn render_bundle(
+        &mut self,
+        _issue_id: Uuid,
+        _run_id: Uuid,
+        _parent_run_id: Option<Uuid>,
+        _trigger: &str,
+        _created_by_id: Uuid,
+    ) -> Result<RenderBundle, CreationError> {
+        self.unreachable("render_bundle")
+    }
+
+    fn extra_toolsets_schema_tool(&self) -> String {
+        String::new()
+    }
+
+    async fn dedicated_pin(
+        &mut self,
+        _: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError> {
+        self.unreachable("dedicated_pin")
+    }
+
+    async fn insert_system_comment(
+        &mut self,
+        _comment: &NewSystemComment,
+    ) -> Result<(), CreationError> {
+        self.unreachable("insert_system_comment")
+    }
+
+    async fn clear_parent_thread(
+        &mut self,
+        _run_id: Uuid,
+    ) -> Result<(), CreationError> {
+        self.unreachable("clear_parent_thread")
+    }
+
+    async fn pod_once_started_comment(
+        &mut self,
+        _: Uuid,
+        _: Uuid,
+        _: Uuid,
+        _: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError> {
+        self.unreachable("pod_once_started_comment")
+    }
+}
+
+
+
+impl<'c> FinalizeAgentRunSeam for AuditTransitionSeam<'c> {
+    async fn finalize_failed_run(
+        &mut self,
+        _run_id: Uuid,
+        _error_code: &str,
+        _error: &str,
+        _now: DateTime<Utc>,
+    ) -> Result<RunView, CreationError> {
+        self.unreachable("finalize_failed_run")
+    }
+}
+
+impl<'c> EntriesSeam for AuditTransitionSeam<'c> {
+    async fn prior_state_id(&mut self, _issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
+        self.unreachable("prior_state_id")
+    }
+
+    async fn queued_follow_up(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+        self.unreachable("queued_follow_up")
+    }
+
+    async fn lock_ticker(
+        &mut self,
+        issue_id: Uuid,
+    ) -> Result<Option<IssueAgentTicker>, CreationError> {
+        use pidash_db::entity::issue_agent_ticker;
+        let conn = self.conn;
+        let model = issue_agent_ticker::Entity::find()
+            .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+            .filter(issue_agent_ticker::Column::DeletedAt.is_null())
+            .order_by_asc(issue_agent_ticker::Column::Id)
+            .lock_exclusive()
+            .one(&conn)
+            .await
+            .map_err(audit_db_err)?;
+        Ok(model.map(IssueAgentTicker::from))
+    }
+
+    async fn save_ticker(
+        &mut self,
+        row: &IssueAgentTicker,
+        write: ClockWrite,
+    ) -> Result<(), CreationError> {
+        apply_clock_write(&self.conn, &write, row, Utc::now())
+            .await
+            .map_err(audit_db)
+    }
+
+    fn set_rollback(&mut self) {
+        self.rollback = true;
+    }
+
+    async fn clock_policy(&mut self, project_id: Uuid) -> Result<ProjectClockPolicy, CreationError> {
+        let row = pidash_services::orchestration::entries::clock_policy(&self.conn, project_id)
+            .await
+            .map_err(audit_db_err)?;
+        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
+        else {
+            return Err(CreationError::MissingRow(format!("no clock policy {project_id}")));
+        };
+        Ok(ProjectClockPolicy {
+            agent_ticking_enabled: Some(ticking_enabled),
+            agent_default_max_ticks: Some(max_ticks),
+            agent_default_interval_seconds: Some(i64::from(interval)),
+            agent_review_default_interval_seconds: Some(i64::from(interval_review)),
+            agent_test_default_interval_seconds: Some(i64::from(interval_test)),
+        })
+    }
+
+    async fn binding(&mut self, _binding_id: Uuid) -> Result<BindingView, CreationError> {
+        self.unreachable("binding")
+    }
+
+    async fn scheduler_override_pod(
+        &mut self,
+        _pod_id: Uuid,
+        _project_id: Option<Uuid>,
+    ) -> Result<Option<PodView>, CreationError> {
+        self.unreachable("scheduler_override_pod")
+    }
+
+    async fn workspace(&mut self, _workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
+        self.unreachable("workspace")
+    }
+
+    async fn scheduler_row(
+        &mut self,
+        _scheduler_id: Uuid,
+    ) -> Result<SchedulerView, CreationError> {
+        self.unreachable("scheduler_row")
+    }
+
+    async fn scheduler_override_rows(
+        &mut self,
+        _workspace_id: Uuid,
+    ) -> Result<Vec<OverrideRow>, CreationError> {
+        self.unreachable("scheduler_override_rows")
+    }
+
+    async fn project_role_facts(
+        &mut self,
+        _user_id: Uuid,
+        _workspace_slug: &str,
+        _project_id: Uuid,
+    ) -> Result<ProjectRoleFacts, CreationError> {
+        self.unreachable("project_role_facts")
+    }
+
+    async fn has_usable_llm_config(&mut self, user_id: Uuid) -> Result<bool, CreationError> {
+        Ok(user_id == self.creator && self.has_key)
+    }
+
+    async fn agent_system_user(
+        &mut self,
+    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
+        self.unreachable("agent_system_user")
+    }
+
+    async fn insert_scheduler_run(
+        &mut self,
+        _run: &NewSchedulerRun,
+    ) -> Result<RunView, CreationError> {
+        self.unreachable("insert_scheduler_run")
+    }
+
+    fn compose_scheduler_turn(
+        &mut self,
+        _ctx: &Value,
+        _index: &OverrideIndex,
+        _workspace_id: Option<&str>,
+        _executor_kind: Option<&str>,
+        _tool_catalog_version: i64,
+    ) -> Result<RenderedTurn, String> {
+        Err("unreachable on agent transition seam".to_owned())
+    }
+
+}
+
+
+/// Drive `handle_issue_state_transition` over the audit [`WriteTxn`]:
+/// build the live store over it (creator presence prefetched; the
+/// actor is always the run creator on this path, so the fallback chain
+/// never consults), run the driver, and drain the outboxes. No
+/// creation is reachable (agent moves never dispatch), so the outboxes
+/// are always empty — the drain loops are the documented driver
+/// shape, kept for exactness.
+async fn drive_transition(
+    ctx: &ToolCtx,
+    txn: &WriteTxn,
     scope: &ToolScope,
     issue_id: Uuid,
     from_state: Option<pidash_services::orchestration::creation::StateView>,
     to_state: pidash_services::orchestration::creation::StateView,
     now: DateTime<Utc>,
-) -> (Transaction<'a>, Result<(), ToolExecError>) {
+) -> Result<(), ToolExecError> {
     let creator = scope.creator_id;
     let has_key =
         match crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(&ctx.pool, creator).await
         {
             Ok(row) => row.as_ref().is_some_and(|row| row.has_api_key()),
-            Err(error) => return (tx, Err(ToolExecError::Db(error))),
+            Err(error) => return Err(ToolExecError::Db(error)),
         };
-    let deps = StoreDeps {
-        cloud: ctx.cloud.clone(),
-        managed: ctx.managed.clone(),
-        cache: RedisAdmissionCache::from_env(),
-        has_usable_llm_config: move |user: Uuid| user == creator && has_key,
-        toolsets: ctx.toolsets.clone(),
-        llm_profile: move |user: Option<Uuid>| {
-            let key = user == Some(creator) && has_key;
-            let profile = agent_model_profile_for_user(key);
-            LlmProfile {
-                available: profile.available,
-                reason_code: profile.reason_code,
-            }
-        },
-        now_unix_secs: now.timestamp(),
-    };
     // `jitter_secs: 0.0` is exact: Python draws jitter only inside the
     // retime paths (`scheduling.py:222,813`), which agent moves never
     // reach. `created_by: None`: `impersonate` wraps the save only —
@@ -2580,10 +2749,20 @@ async fn drive_transition<'a>(
         created_by: None,
         pod_once: false,
     };
-    let mut store = LiveCreationStore::new(tx, &ctx.pool, deps);
+    let cache = RedisAdmissionCache::from_env();
+    let mut seam = AuditTransitionSeam {
+        conn: txn.connection(),
+        creator,
+        has_key,
+        dispatches: Vec::new(),
+        deferred: Vec::new(),
+        terminal_effects: Vec::new(),
+        rollback: false,
+    };
     let mut preflight = BinPreflight;
-    let outcome = handle_issue_state_transition(&mut store, &mut preflight, &request).await;
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let outcome = handle_issue_state_transition(&mut seam, &mut preflight, &request).await;
+    let pool = &ctx.pool;
+    let (dispatches, deferred, terminal_effects) = seam.take_outboxes();
     match outcome {
         Err(error) => {
             let creation = match error {
@@ -2592,29 +2771,26 @@ async fn drive_transition<'a>(
                     pidash_services::orchestration::creation::CreationError::Db(other.to_string())
                 }
             };
-            (tx, Err(ToolExecError::Creation(creation)))
+            Err(ToolExecError::Creation(creation))
         }
         Ok(_) => {
             for run_id in dispatches {
                 if let Err(error) = dispatch_agent_run(pool, &ctx.cloud, run_id, now).await {
-                    return (tx, Err(ToolExecError::Db(error)));
+                    return Err(ToolExecError::Db(error));
                 }
             }
             for consume in &deferred {
                 consume_admission_token(&cache, consume);
             }
             if !terminal_effects.is_empty() {
-                return (
-                    tx,
-                    Err(ToolExecError::Creation(
-                        pidash_services::orchestration::creation::CreationError::Db(
-                            "tool transition finalized a run: unreachable, no creation on this path"
-                                .to_owned(),
-                        ),
-                    )),
-                );
+                return Err(ToolExecError::Creation(
+                    pidash_services::orchestration::creation::CreationError::Db(
+                        "tool transition finalized a run: unreachable, no creation on this path"
+                            .to_owned(),
+                    ),
+                ));
             }
-            (tx, Ok(()))
+            Ok(())
         }
     }
 }
@@ -3588,13 +3764,13 @@ fn tool_domain_error(error: domain::DomainError) -> ToolExecError {
 
 /// Run one write tool under its audit on a domain [`WriteTxn`]
 /// (NEWPIDASH-190 design §4.4, phase 1): kill switches and the replay
-/// check stay pre-transaction (as in [`write_begin`]); scope,
-/// admission, the ledger and `op` share the one `WriteTxn`, so a
-/// write and its `agent_run_tool_call` row land or roll back together.
-/// After the commit (whose after-commit queue drained the op's own
-/// post-commit steps, e.g. the create fire), `tool_completed` is
-/// appended — as [`write_commit`] appends it today — and an emit
-/// failure still fails the tool after the commit.
+/// check stay pre-transaction; scope, admission, the ledger and `op`
+/// share the one `WriteTxn`, so a write and its
+/// `agent_run_tool_call` row land or roll back together. After the
+/// commit (whose after-commit queue drained the op's own post-commit
+/// steps, e.g. the create fire and the transition comment-back),
+/// `tool_completed` is appended — as the tool contract requires — and
+/// an emit failure still fails the tool after the commit.
 ///
 /// The driver is manual `WriteTxn` (the primitive `domain::run` itself
 /// uses) rather than `domain::run`: the op's `ToolExecError` variants
@@ -3603,12 +3779,8 @@ fn tool_domain_error(error: domain::DomainError) -> ToolExecError {
 /// carry them losslessly (a synthetic `Work` error would stringify
 /// the variant away and change the failure mode `Str(exc)` reports).
 ///
-/// Conversion order (achieved): workpad, comment, relate, unrelate,
-/// create. The transition arm stays on [`write_begin`] until
-/// `LiveCreationStore` wraps a `WriteTxn` (Part 1b): its orchestration
-/// drive's store holds a `pidash_db::tx::Transaction`, and
-/// genericising it touches the fire drivers and the dispatch-suite
-/// contract, so it lands separately.
+/// All six write arms (workpad, comment, relate, unrelate, create,
+/// transition) run on this wrapper.
 async fn run_write(
     ctx: &ToolCtx,
     run_id: Uuid,
@@ -3720,9 +3892,9 @@ async fn run_write(
     .await;
     match work {
         Ok(value) => {
-            // The op's after-commit steps (create fire) drained inside
-            // `commit`; `tool_completed` appends after the commit, as
-            // [`write_commit`] appends it today.
+            // The op's after-commit steps (create fire, transition
+            // comment-back) drained inside `commit`; `tool_completed`
+            // appends after the commit.
             txn.commit().await.map_err(tool_domain_error)?;
             emit_completed(ctx, run_id, tool, plan::ToolRisk::Write).await?;
             Ok(value)
@@ -3868,81 +4040,18 @@ async fn dispatch_fn(
             .await
         }
         TOOL_TRANSITION_CURRENT_ISSUE => {
-            // Part 1b: this arm stays on `write_begin` (its orchestration
-            // drive's `LiveCreationStore` holds a `Transaction`) until the
-            // store wraps a `WriteTxn`; the other five write arms run on
-            // `run_write`. The arm therefore still opens a
-            // `Transaction` — deleted once 1b lands.
             let state_id = args.get_str("state_id").expect("loop validated state_id");
             let audit_args = serde_json::json!({"state_id": state_id});
-            match write_begin(
+            run_write(
                 ctx,
                 run_id,
                 TOOL_TRANSITION_CURRENT_ISSUE,
                 &audit_args,
-                plan::SOURCE_INTERNAL,
-                "",
+                async move |txn, scope| {
+                    op_transition_current_issue(ctx, txn, scope, state_id).await
+                },
             )
-            .await?
-            {
-                AuditBegin::Replay(value) => Ok(value),
-                AuditBegin::Proceed(audit) => {
-                    let WriteAudit {
-                        tx,
-                        scope,
-                        ledger_id,
-                    } = audit;
-                    let (tx, outcome) =
-                        op_transition_current_issue(ctx, tx, &scope, state_id).await;
-                    match outcome {
-                        Ok((result, dispatch)) => {
-                            let committed = write_commit(
-                                ctx,
-                                WriteAudit {
-                                    tx,
-                                    scope,
-                                    ledger_id,
-                                },
-                                TOOL_TRANSITION_CURRENT_ISSUE,
-                                result,
-                            )
-                            .await;
-                            // `github_signals.trigger_completion_comment`
-                            // (`bgtasks/github_signals.py:44-75`): a save
-                            // moving a mirrored issue into a
-                            // completed-group state enqueues the
-                            // provider's `post_completion_comment`.
-                            // Django fires this from `Issue.save()`
-                            // (`tools.py:335`), so the tool path gets it
-                            // for free; here signals are explicit calls
-                            // after commit. `None` is the unchanged-state
-                            // no-op (`updated: false`); the dispatch
-                            // helper re-checks the completed group, the
-                            // mirror order (git before github) and the
-                            // already-commented guard. Best-effort like
-                            // the relation enqueues: the edit already
-                            // committed, so a lookup or queue failure
-                            // must not fail the tool.
-                            if committed.is_ok() {
-                                if let Some(dispatch) = dispatch {
-                                    enqueue_completion_comment(
-                                        &ctx.pool,
-                                        &dispatch.issue_id,
-                                        dispatch.from_state_id.as_ref(),
-                                        Some(&dispatch.target_id),
-                                    )
-                                    .await;
-                                }
-                            }
-                            committed
-                        }
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            Err(error)
-                        }
-                    }
-                }
-            }
+            .await
         }
         TOOL_CREATE_PROJECT_ISSUE => {
             let title = args.get_str("title").expect("loop validated title");

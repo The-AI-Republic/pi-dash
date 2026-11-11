@@ -251,9 +251,11 @@ pub const EVENTS_TRUNCATED_KIND: &str = "events_truncated";
 /// (domain move path) can call it; this re-export keeps every
 /// `pidash_jobs::dispatch::…` path stable.
 pub use pidash_services::dispatch::execution::{
-    defer_admission_error, execution_fields, lock_cloud_creation_capacity, lock_workspace,
-    quota_verdict, ActorScope, DeferredAdmissionError, ExecutionFields, ExecutionFieldsError,
-    ExecutionInputs, ExecutionSeams, ProjectScope, QUEUED_CLOUD_COUNT_SQL, WORKSPACE_LOCK_SQL,
+    count_queued_cloud_on_conn, defer_admission_error, execution_fields,
+    lock_cloud_creation_capacity, lock_cloud_creation_capacity_on_conn, lock_workspace,
+    lock_workspace_on_conn, quota_verdict, ActorScope, DeferredAdmissionError, ExecutionFields,
+    ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope, QUEUED_CLOUD_COUNT_SQL,
+    WORKSPACE_LOCK_SQL,
 };
 
 // ---------------------------------------------------------------------------
