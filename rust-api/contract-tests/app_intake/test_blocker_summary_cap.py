@@ -107,3 +107,59 @@ def test_blocking_cap_keeps_open_first(make_tenant):
     project_ident = tenant["project"]["identifier"]
     assert blocking[0]["identifier"] == f"{project_ident}-{OPEN_SEQ}"
     assert blocking[0]["state_group"] == "started"
+
+
+def test_has_open_blockers_forward_only(make_tenant):
+    """Single open blocker via forward ``blocked_by`` only."""
+    tenant = make_tenant()
+    urls = intake_urls(tenant)
+    created = create_intake_issue(
+        tenant["client"], urls["intake_issues"], name="NEWPIDASH-186 fwd"
+    )
+    main_issue_id = created["issue"]["id"]
+    seeder = tenant["seeder"]
+    workspace_id = tenant["workspace"]["id"]
+    project_id = tenant["project"]["id"]
+    open_state = seeder.create_state(
+        workspace_id, project_id, name="Open", group="started"
+    )
+    blocker = seeder.create_issue(
+        workspace_id, project_id, open_state["id"],
+        name="fwd-blocker", sequence_id=9001,
+    )
+    seeder.create_issue_relation(
+        workspace_id, project_id, main_issue_id, blocker["id"],
+        relation_type="blocked_by",
+    )
+
+    r = tenant["client"].get(f"{urls['intake_issues']}{main_issue_id}/")
+    assert r.status_code == 200, r.text[:500]
+    assert r.json()["issue"]["has_open_blockers"] is True
+
+
+def test_has_open_blockers_stored_reversed_only(make_tenant):
+    """Single open blocker via stored-reversed ``blocking`` only."""
+    tenant = make_tenant()
+    urls = intake_urls(tenant)
+    created = create_intake_issue(
+        tenant["client"], urls["intake_issues"], name="NEWPIDASH-186 rev"
+    )
+    main_issue_id = created["issue"]["id"]
+    seeder = tenant["seeder"]
+    workspace_id = tenant["workspace"]["id"]
+    project_id = tenant["project"]["id"]
+    open_state = seeder.create_state(
+        workspace_id, project_id, name="Open", group="started"
+    )
+    blocker = seeder.create_issue(
+        workspace_id, project_id, open_state["id"],
+        name="rev-blocker", sequence_id=9002,
+    )
+    seeder.create_issue_relation(
+        workspace_id, project_id, blocker["id"], main_issue_id,
+        relation_type="blocking",
+    )
+
+    r = tenant["client"].get(f"{urls['intake_issues']}{main_issue_id}/")
+    assert r.status_code == 200, r.text[:500]
+    assert r.json()["issue"]["has_open_blockers"] is True

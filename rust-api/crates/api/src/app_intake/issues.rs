@@ -2881,33 +2881,43 @@ pub async fn blocker_summary(
                     )
                     .add(rel_entity::Column::WorkspaceId.eq(*workspace_id))
                     .add(
-                        Condition::any().add(
-                            Condition::all()
-                                .add(
-                                    Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
+                        Condition::any()
+                            .add(
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
                                         .eq(*issue_id),
-                                )
-                                .add(
-                                    Expr::col((
-                                        rel_entity::Entity,
-                                        rel_entity::Column::RelatedIssueId,
-                                    ))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                                )
-                                .add(rel_entity::Column::RelationType.eq("blocked_by")),
-                        ),
-                    )
-                    .add(
-                        Condition::all()
-                            .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::RelatedIssueId))
-                                    .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocked_by")),
                             )
                             .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                            )
-                            .add(rel_entity::Column::RelationType.eq("blocking")),
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocking")),
+                            ),
                     ),
             )
             .to_owned(),
