@@ -883,9 +883,12 @@ const LIST_PATH: &str = "/api/v1/workspaces/acme/projects/ENG/work-items/";
 
 #[tokio::test]
 async fn issue_list_without_filters_sends_no_query() {
+    // No flags now defaults to open groups (PDASHOSS01-352).
     assert_eq!(
         list_paths(list_args("ENG")).await,
-        vec![LIST_PATH.to_string()]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
     );
 }
 
@@ -913,9 +916,12 @@ async fn issue_list_state_group_flag() {
 async fn issue_list_label_flag_maps_to_labels_param() {
     let mut args = list_args("ENG");
     args.label = Some("bug,frontend".into());
+    // Label alone still gets the default open filter.
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?labels=bug%2Cfrontend")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&labels=bug%2Cfrontend"
+        )]
     );
 }
 
@@ -925,7 +931,9 @@ async fn issue_list_priority_flag() {
     args.priority = Some("urgent,high".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?priority=urgent%2Chigh")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&priority=urgent%2Chigh"
+        )]
     );
 }
 
@@ -936,7 +944,7 @@ async fn issue_list_fields_flag() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&fields=id%2Csequence_id%2Cname%2Cstate%2Cparent"
         )]
     );
 }
@@ -947,7 +955,9 @@ async fn issue_list_parent_none_sends_null_without_lookup() {
     args.parent = Some("none".into());
     assert_eq!(
         list_paths(args).await,
-        vec![format!("{LIST_PATH}?parent=null")]
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=null"
+        )]
     );
 }
 
@@ -958,9 +968,86 @@ async fn issue_list_parent_uuid_is_passed_as_is() {
     assert_eq!(
         list_paths(args).await,
         vec![format!(
-            "{LIST_PATH}?parent=00000000-0000-0000-0000-000000000009"
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest&parent=00000000-0000-0000-0000-000000000009"
         )]
     );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_open_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_closed_expands() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("closed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!("{LIST_PATH}?state_group=completed%2Ccancelled")]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_omits_filter() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    assert_eq!(list_paths(args).await, vec![LIST_PATH.to_string()]);
+}
+
+#[tokio::test]
+async fn issue_list_state_group_mixed_alias() {
+    let mut args = list_args("ENG");
+    args.state_group = Some("open,completed".into());
+    assert_eq!(
+        list_paths(args).await,
+        vec![format!(
+            "{LIST_PATH}?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn issue_list_response_carries_visible_state_group() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let resp = pidash::cli::issue::list_issues(&client, &list_args("ENG"))
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "open");
+    assert_eq!(resp["count"], 0);
+}
+
+#[tokio::test]
+async fn issue_list_explicit_state_disables_default_and_omits_state_group_key() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state = Some("Backlog".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    // Explicit --state: no default, and no state_group key (or null).
+    assert!(resp.get("state_group").is_none() || resp["state_group"].is_null());
+}
+
+#[tokio::test]
+async fn issue_list_state_group_all_shows_all_in_output() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(LIST_ENVELOPE))).await;
+    let client = client(&fake);
+    let mut args = list_args("ENG");
+    args.state_group = Some("all".into());
+    let resp = pidash::cli::issue::list_issues(&client, &args)
+        .await
+        .expect("list");
+    assert_eq!(resp["state_group"], "all");
 }
 
 #[tokio::test]
