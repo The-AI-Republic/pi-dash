@@ -2268,6 +2268,7 @@ const SERIALIZER_FIELDS: &[&str] = &[
     "type_id",
     "is_epic",
     "assigned_pod_id",
+    "assigned_runner_id",
     "agent_executor",
     "created_at",
     "updated_at",
