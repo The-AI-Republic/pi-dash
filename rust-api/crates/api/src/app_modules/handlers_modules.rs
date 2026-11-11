@@ -2909,7 +2909,7 @@ pub(crate) async fn fetch_burndown_chart(
             Expr::val(Option::<f64>::None).cast_as(Alias::new("float8")),
             Alias::new("v"),
         )
-        .expr_as(Expr::val(1), Alias::new("n"))
+        .expr_as(Expr::val(1).cast_as(Alias::new("bigint")), Alias::new("n"))
         .and_where(mcol("issues", issues::Column::CompletedAt).is_not_null())
         .order_by(mref("issues", issues::Column::CompletedAt), Order::Asc);
         crate::app_issues::list_engine::query_built::<RawBurndownRow>(&db, &stmt).await?

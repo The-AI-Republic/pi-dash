@@ -150,6 +150,7 @@ ISSUE_CREATE_KEYS = {
     "assignee_ids",
     "assignees",
     "assigned_pod_id",
+    "assigned_runner_id",
     "completed_at",
     "complexity_score",
     "created_at",

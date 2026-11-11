@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from _harness.web import web_delete, web_post
+from _harness.web import web_delete, web_patch, web_post
 
 WEB = "/api/runners"
 
@@ -327,15 +327,15 @@ def test_web_machine_pause_releases_pinned_run(user_client, daemon_world, machin
     pod = daemon_world["pod"]["id"]
     run_id = str(__import__("uuid").uuid4())
     seeder.db.execute(
-        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, pin_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','locality',now())",
+        "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, pod_id, pinned_runner_id, status, prompt, trigger, executor_kind, run_config, required_capabilities, thread_id, agent_metadata, tool_plan, usage, dispatch_attempts, error_details, llm_model, cancel_reason, phase_kind, pin_kind, created_at) VALUES (%s,%s,%s,%s,%s,%s,'queued','','direct','local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','','locality',now())",
         (run_id, ws, owner, owner, pod, runner_id),
     )
-    seeder.track("agent_run", "id", run_id)
+    seeder._put("agent_run", run_id)
     ok = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": True})
     assert ok.status_code == 200, ok.text
     pinned = seeder.db.fetchval("SELECT pinned_runner_id FROM agent_run WHERE id = %s", (run_id,))
     assert pinned is None
-    assert seeder.db.fetchval("SELECT pod_id FROM agent_run WHERE id = %s", (run_id,)) == pod
+    assert str(seeder.db.fetchval("SELECT pod_id FROM agent_run WHERE id = %s", (run_id,))) == pod
     # Resuming lets the engine take work again (200).
     resume = web_patch(user_client, f"{WEB}/dev-machines/{machine_id}/", {"workspace": ws, "engine_paused_by_owner": False})
     assert resume.status_code == 200

@@ -741,7 +741,7 @@ fn targets_list_select(
             Alias::new("run_usage"),
         )
         .expr_as(
-            Expr::col((turn, Alias::new("completed_at"))),
+            Expr::col((turn.clone(), Alias::new("completed_at"))),
             Alias::new("run_completed_at"),
         )
         .from_as(Alias::new("loop_targets"), t.clone())
@@ -762,8 +762,7 @@ fn targets_list_select(
             JoinType::LeftJoin,
             Alias::new(queries::ASSISTANT_TURN_TABLE),
             Alias::new("turn"),
-            Expr::col((t.clone(), Alias::new("last_run_id")))
-                .equals((Alias::new(queries::ASSISTANT_TURN_TABLE), Alias::new("id"))),
+            Expr::col((t.clone(), Alias::new("last_run_id"))).equals((turn, Alias::new("id"))),
         )
         .cond_where(cond)
         .order_by((t, Alias::new("updated_at")), Order::Desc)
@@ -1876,7 +1875,7 @@ mod tests {
         let plain = targets_list_select(job, &queries::TargetsFilter::default(), 1);
         let sql = plain.to_string(sea_query::PostgresQueryBuilder);
         assert!(
-            sql.contains(r#"FROM "loop_targets" AS "t" INNER JOIN "workspaces" AS "w" ON "t"."workspace_id" = "w"."id" INNER JOIN "users" AS "u" ON "t"."user_id" = "u"."id" LEFT JOIN "assistant_turn" AS "turn" ON "t"."last_run_id" = "assistant_turn"."id""#),
+            sql.contains(r#"FROM "loop_targets" AS "t" INNER JOIN "workspaces" AS "w" ON "t"."workspace_id" = "w"."id" INNER JOIN "users" AS "u" ON "t"."user_id" = "u"."id" LEFT JOIN "assistant_turn" AS "turn" ON "t"."last_run_id" = "turn"."id""#),
             "join: {sql}"
         );
         assert!(
