@@ -692,7 +692,10 @@ fn python_str(value: Option<&Value>) -> (String, Value) {
 }
 
 /// `UUIDField.to_python` for FK writes (`django/db/models/fields.py`):
-/// `None`/null stays NULL; strings must parse (else `ValidationError` →
+/// `None`/null stays NULL; `""` also stores NULL
+/// (`ForeignKey.get_db_prep_save`: `value == ""` → `None` for a UUID
+/// target — the comment composer sends `entity_identifier: ""` for a new
+/// comment); other strings must parse (else `ValidationError` →
 /// the 400 envelope); ints/bools coerce via `uuid.UUID(int=...)`
 /// (negative or over-wide values reject); every other JSON shape rejects.
 // `Response` is axum's handle type, so boxing it buys no runtime win;
@@ -701,6 +704,7 @@ fn python_str(value: Option<&Value>) -> (String, Value) {
 fn coerce_uuid_or_400(value: Option<&Value>) -> Result<Option<Uuid>, Response> {
     match value {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.is_empty() => Ok(None),
         Some(Value::String(s)) => s.parse::<Uuid>().map(Some).map_err(|_| valid_detail()),
         Some(Value::Number(n)) => {
             let int = n
@@ -1136,6 +1140,9 @@ async fn post_project_asset(
     }
     let issue_display: Option<String> = match data.get("entity_identifier") {
         None | Some(Value::Null) => None,
+        // `""` stores NULL, so `asset_url` renders `None` (the model
+        // property interpolates the stored FK, not the raw input).
+        Some(Value::String(s)) if s.is_empty() => None,
         Some(v) => Some(python_str(Some(v)).0),
     };
     let asset_url = asset_url_for(
@@ -3160,8 +3167,16 @@ mod tests {
             coerce_uuid_or_400(Some(&Value::from(id.to_string()))).expect("str"),
             Some(id)
         );
+        // Empty string stores NULL (Django ForeignKey.get_db_prep_save:
+        // `""` → None for a UUID target) — the comment composer's
+        // new-comment grant sends "".
+        assert!(coerce_uuid_or_400(Some(&Value::from("")))
+            .expect("empty")
+            .is_none());
         // Garbage strings reject (Django `ValidationError` → 400).
         assert!(coerce_uuid_or_400(Some(&Value::from("nope"))).is_err());
+        // Whitespace is not empty: it still rejects.
+        assert!(coerce_uuid_or_400(Some(&Value::from(" "))).is_err());
         // Small ints coerce via `uuid.UUID(int=...)`.
         assert_eq!(
             coerce_uuid_or_400(Some(&Value::from(5))).expect("int"),
