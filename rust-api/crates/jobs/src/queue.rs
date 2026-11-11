@@ -307,10 +307,7 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(ensure_claim_index_sql())
         .execute(&mut *tx)
         .await?;
-    // raw-sql: DROP INDEX IF EXISTS is the allowed exception (DDL) — the
-    // legacy queue-agnostic index is redundant once the queue-leading one
-    // exists. Dropping it keeps the table from maintaining two claim
-    // indexes on every write (Finding 7 review).
+    // raw-sql: DROP INDEX has no SeaORM builder (orm-migration.md §6); legacy index is redundant once queue-leading index exists.
     sqlx::query(drop_legacy_claim_index_sql())
         .execute(&mut *tx)
         .await?;
