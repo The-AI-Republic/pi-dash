@@ -1187,6 +1187,11 @@ def test_draft_to_issue_body_reports_stored_state(user_api, space, world):
             cur.execute("DELETE FROM issue_agent_ticker WHERE issue_id=%s", (body["id"],))
             cur.execute("DELETE FROM issue_comments WHERE issue_id=%s", (body["id"],))
             cur.execute("DELETE FROM issue_sequences WHERE issue_id=%s", (body["id"],))
+            # The skip comment mints a descriptions row keyed by project
+            # (db/models/issue.py): the domain clean_db sweep deletes
+            # projects but not descriptions, so the next test's reset
+            # would hit the FK. Remove it here.
+            cur.execute("DELETE FROM descriptions WHERE project_id=%s", (proj["id"],))
             cur.execute("DELETE FROM issues WHERE id=%s", (body["id"],))
         conn.commit()
 
