@@ -113,6 +113,11 @@ pub struct EngineProfile {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
+    /// Pi-Dash-hosted Codex model catalog; Codex fetches the curated list
+    /// from here instead of the gateway's OpenAI-shaped ``/v1/models``,
+    /// while inference requests go to ``base_url`` directly.
+    #[serde(default)]
+    pub model_catalog_url: String,
     #[serde(default)]
     pub reason_code: String,
     #[serde(default, deserialize_with = "lenient_sign_in_state")]

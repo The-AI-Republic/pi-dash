@@ -132,6 +132,29 @@ def agent_model_credential_for_user(user) -> tuple[str, object]:
     )
 
 
+def agent_model_catalog_for_token(token: str) -> list[dict]:
+    """Return the Codex-shaped model catalog for the bearer ``token``.
+
+    The engine fetches ``GET /api/v1/runner/engine/models/`` at startup and
+    after token refreshes: Codex refreshes its catalog from the provider
+    before it runs anything, and refuses a ``model`` that is not listed.
+    The response is ``{"models": [<ModelInfo>, ...]}`` — the pi-dash cloud
+    serves its own curated list (never the gateway's OpenRouter-like dump),
+    while inference requests go to OpenHub directly.
+
+    CE has no lane, so there is no catalog either — like
+    :func:`agent_model_credential_for_user`, the profile already says so
+    and the desktop never reaches this. The cloud overlay resolves the
+    token to a user and returns that user's allowed models.
+    """
+    from pi_dash.managed_runner.errors import ManagedRunnerReason, ManagedRunnerUnavailable
+
+    raise ManagedRunnerUnavailable(
+        ManagedRunnerReason.BYOK_UNSUPPORTED,
+        "This build has no model lane the desktop agent can use.",
+    )
+
+
 def model_label_for_user(user) -> str:
     """Human-readable label for the model a turn will use (CE: the BYOK one).
 

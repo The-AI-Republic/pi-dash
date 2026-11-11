@@ -312,6 +312,7 @@ impl EngineManager {
                         lane: String::new(),
                         base_url: String::new(),
                         model: String::new(),
+                        model_catalog_url: String::new(),
                         reason_code,
                         engine_sign_in_state: None,
                     };

@@ -6,6 +6,9 @@
 
 - ``GET  /api/v1/runner/engine/profile/`` — daemon credential (``mt_``). The
   model endpoint the engine should call, and whether it may. No secret.
+- ``GET  /api/v1/runner/engine/models/`` — the pi-dash model token. The
+  Codex-shaped allowed-model list the engine refreshes before it runs;
+  inference requests go to the lane's gateway directly.
 - ``POST /api/v1/runner/engine/model-token/`` — engine credential (``ec_``)
   only. A short-lived model token; rate-limited and audited.
 - ``POST /api/v1/runner/engine/credential/revoke/`` — daemon credential.
@@ -100,12 +103,80 @@ class EngineProfileEndpoint(APIView):
                 "lane": profile.lane,
                 "base_url": profile.base_url,
                 "model": profile.model,
+                # Codex's models refresh reads its catalog from here, not
+                # from the gateway's OpenAI-shaped ``/v1/models``. Only
+                # advertised while the engine may run; the daemon writes
+                # it into the engine config as ``model_catalog_url``.
+                "model_catalog_url": (request.build_absolute_uri("/api/v1/runner/engine/models/") if available else ""),
                 "reason_code": reason_code,
                 "pause_reason": pause_reason,
                 "top_up_url": getattr(profile, "top_up_url", ""),
                 **engine_credential_payload(machine),
             }
         )
+
+
+class EngineModelsEndpoint(APIView):
+    """``GET /api/v1/runner/engine/models/`` — the allowed-model list.
+
+    The engine's caller is Codex with the pi-dash model token (the gateway
+    credential); the answer is the Codex-shaped ``{"models": [<ModelInfo>,
+    ...]}`` curated catalog for that token's user — never the gateway's
+    OpenAI-shaped ``/v1/models`` dump, which Codex cannot decode. Inference
+    requests still go to the lane's gateway directly; this endpoint only
+    says which slugs the engine may name.
+
+    Answers ``{"models": [...]}`` on success. An unavailable lane answers
+    ``{reason_code, detail}`` with the :data:`_STATUS_FOR_REASON` mapping
+    (``profile_unavailable``/``engine_disabled`` 409, sign-in 401,
+    gateway-concurrency wallet 402), and a transient gateway failure 503 —
+    exactly the model-token endpoint's contract, keyed on the same pause
+    reasons, so the daemon sees one vocabulary from both reads.
+    """
+
+    authentication_classes: list = []
+    permission_classes: list = []
+    throttle_classes: list = []
+
+    def get(self, request):
+        from pi_dash.ee.assistant.model_provider import agent_model_catalog_for_token
+        from pi_dash.managed_runner.errors import ManagedRunnerUnavailable
+
+        request_id = _request_id(request)
+        try:
+            models = agent_model_catalog_for_token(_bearer(request))
+        except ManagedRunnerUnavailable as exc:
+            logger.info(
+                "engine.models_refused request_id=%s reason=%s",
+                request_id,
+                exc.code,
+            )
+            return Response(
+                {"reason_code": exc.code, "detail": str(exc)},
+                status=_STATUS_FOR_REASON.get(exc.code, status.HTTP_409_CONFLICT),
+            )
+        except Exception as exc:  # noqa: BLE001 — classified, never echoed raw
+            reason = _classify_gateway_error(exc)
+            if not reason:
+                logger.warning(
+                    "engine.models_transient request_id=%s error=%s",
+                    request_id,
+                    type(exc).__name__,
+                )
+                return Response(
+                    {"error": "gateway_unavailable", "detail": "Try again shortly."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            logger.info(
+                "engine.models_refused request_id=%s reason=%s",
+                request_id,
+                reason,
+            )
+            return Response(
+                {"reason_code": reason, "detail": type(exc).__name__},
+                status=_STATUS_FOR_REASON.get(reason, status.HTTP_409_CONFLICT),
+            )
+        return Response({"models": models})
 
 
 class EngineModelTokenThrottle(SimpleRateThrottle):

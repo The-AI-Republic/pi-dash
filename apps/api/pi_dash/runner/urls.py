@@ -25,6 +25,7 @@ from pi_dash.runner.views import (
     DevMachineReplaceCandidatesEndpoint,
     EngineCredentialRevokeEndpoint,
     EngineModelTokenEndpoint,
+    EngineModelsEndpoint,
     EngineProfileEndpoint,
     HealthEndpoint,
     MachineCommandResultEndpoint,
@@ -123,6 +124,7 @@ urlpatterns = [
     # Built-in engine (built_engine_as_runner §4.3): profile and sign-out
     # with the machine token; model tokens with the engine credential only.
     path("engine/profile/", EngineProfileEndpoint.as_view(), name="engine-profile"),
+    path("engine/models/", EngineModelsEndpoint.as_view(), name="engine-models"),
     path("engine/model-token/", EngineModelTokenEndpoint.as_view(), name="engine-model-token"),
     path(
         "engine/credential/revoke/",

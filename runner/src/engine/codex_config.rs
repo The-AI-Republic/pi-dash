@@ -89,6 +89,19 @@ pub fn render_engine_config(profile: &EngineProfile, helper: &AuthHelper) -> Str
     let command =
         serde_json::to_string(&helper.program.to_string_lossy()).expect("serialize helper path");
     let args = serde_json::to_string(&helper.args).expect("serialize helper args");
+    // Codex refreshes its model list from `model_catalog_url` when set, or
+    // from the gateway's `/v1/models` otherwise — gateways serve the
+    // OpenAI list shape Codex cannot decode, so the pi-dash catalog is
+    // what makes a custom provider usable at all. Absent on old profiles:
+    // render without it rather than emitting an empty override.
+    let catalog = if profile.model_catalog_url.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "model_catalog_url = \"{}\"\n",
+            toml_value(&profile.model_catalog_url)
+        )
+    };
     format!(
         r#"# Managed by Pi Dash. Edits are overwritten on launch.
 model_provider = "pidash"
@@ -103,7 +116,7 @@ web_search = "disabled"
 name = "Pi Dash"
 base_url = "{base_url}"
 wire_api = "responses"
-[model_providers.pidash.auth]
+{catalog}[model_providers.pidash.auth]
 command = {command}
 args = {args}
 timeout_ms = 5000
@@ -180,6 +193,7 @@ mod tests {
             lane: "openhub".into(),
             base_url: "https://gateway.example/v1".into(),
             model: "gpt-5.5".into(),
+            model_catalog_url: String::new(),
             reason_code: String::new(),
             engine_sign_in_state: None,
         }
@@ -225,6 +239,27 @@ mod tests {
         assert!(!text.contains("--file"), "no token file any more: {text}");
         assert_eq!(auth["timeout_ms"].as_integer(), Some(5000));
         assert_eq!(auth["refresh_interval_ms"].as_integer(), Some(30000));
+    }
+
+    #[test]
+    fn renders_model_catalog_url_only_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths(tmp.path());
+        let helper = AuthHelper::for_paths(PathBuf::from("/opt/pidash/bin/pidash"), &paths);
+
+        // Absent on old profiles: no override emitted rather than an
+        // empty string Codex would faithfully look up.
+        let text = render_engine_config(&profile(), &helper);
+        assert!(!text.contains("model_catalog_url"), "{text}");
+
+        let mut p = profile();
+        p.model_catalog_url = "https://cloud.example/api/v1/runner/engine/models/".into();
+        let text = render_engine_config(&p, &helper);
+        let parsed: toml::Value = toml::from_str(&text).expect("valid TOML");
+        assert_eq!(
+            parsed["model_providers"]["pidash"]["model_catalog_url"].as_str(),
+            Some("https://cloud.example/api/v1/runner/engine/models/")
+        );
     }
 
     #[test]

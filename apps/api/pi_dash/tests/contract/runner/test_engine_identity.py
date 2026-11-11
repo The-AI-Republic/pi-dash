@@ -378,12 +378,93 @@ def test_profile_endpoint(db, create_user, machine, mt, lane):
     _sign_in(create_user, machine)
     resp = _client(bearer=mt).get("/api/v1/runner/engine/profile/")
     assert resp.status_code == 200, resp.data
-    for key in ("available", "lane", "base_url", "model", "reason_code", "engine_sign_in_state"):
+    for key in (
+        "available",
+        "lane",
+        "base_url",
+        "model",
+        "model_catalog_url",
+        "reason_code",
+        "engine_sign_in_state",
+    ):
         assert key in resp.data
     assert resp.data["available"] is True
     assert resp.data["base_url"] == "https://gw.example.com/v1"
     assert resp.data["engine_sign_in_state"] == EngineSignInState.ACTIVE
     assert _client().get("/api/v1/runner/engine/profile/").status_code in (401, 403)
+
+
+@override_settings(**ENABLED)
+def test_profile_endpoint_advertises_model_catalog_url(db, create_user, machine, mt, lane):
+    _sign_in(create_user, machine)
+    resp = _client(bearer=mt).get("/api/v1/runner/engine/profile/")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["model_catalog_url"] == "http://testserver/api/v1/runner/engine/models/"
+
+
+def test_profile_endpoint_kill_switch_hides_model_catalog_url(db, machine, mt, lane):
+    with override_settings(MANAGED_RUNNER_ENABLED=False):
+        resp = _client(bearer=mt).get("/api/v1/runner/engine/profile/")
+    assert resp.data["model_catalog_url"] == ""
+
+
+def test_engine_models_endpoint_serves_seam_catalog(db, monkeypatch, lane):
+    from pi_dash.ee.assistant import model_provider
+
+    catalog = [{"slug": "m-1", "display_name": "M One"}]
+    seen = []
+    monkeypatch.setattr(
+        model_provider,
+        "agent_model_catalog_for_token",
+        lambda token: seen.append(token) or catalog,
+    )
+    resp = _client(bearer="model-token-1").get("/api/v1/runner/engine/models/")
+    assert resp.status_code == 200, resp.data
+    assert resp.data == {"models": catalog}
+    assert seen == ["model-token-1"]
+
+
+def test_engine_models_endpoint_ce_unavailable_is_409(db):
+    # CE denies identically to the model-token stub — no lane, no catalog.
+    resp = _client(bearer="anything").get("/api/v1/runner/engine/models/")
+    assert resp.status_code == 409, resp.data
+    assert resp.data["reason_code"] == "byok_not_supported_on_desktop"
+
+
+@pytest.mark.parametrize(
+    ("code", "http"),
+    [
+        ("engine_sign_in_required", 401),
+        ("gateway_session_revoked", 409),
+        ("wallet_empty", 402),
+        ("profile_unavailable", 409),
+        ("engine_disabled", 409),
+        ("something_new", 409),
+    ],
+)
+def test_engine_models_endpoint_reason_mapping(db, monkeypatch, lane, code, http):
+    from pi_dash.ee.assistant import model_provider
+    from pi_dash.managed_runner.errors import ManagedRunnerUnavailable
+
+    def refuse(_token):
+        raise ManagedRunnerUnavailable(code, "nope")
+
+    monkeypatch.setattr(model_provider, "agent_model_catalog_for_token", refuse)
+    resp = _client(bearer="x").get("/api/v1/runner/engine/models/")
+    assert resp.status_code == http, resp.data
+    assert resp.data["reason_code"] == code
+
+
+def test_engine_models_endpoint_transient_gateway_error_is_503(db, monkeypatch, lane):
+    from pi_dash.ee.assistant import model_provider
+
+    def fail(_token):
+        raise GatewayDown()
+
+    monkeypatch.setattr(model_provider, "agent_model_catalog_for_token", fail)
+    resp = _client(bearer="x").get("/api/v1/runner/engine/models/")
+    assert resp.status_code == 503
+    assert resp.data["error"] == "gateway_unavailable"
 
 
 def test_profile_endpoint_kill_switch_pauses_and_recovers(db, machine, mt, lane):

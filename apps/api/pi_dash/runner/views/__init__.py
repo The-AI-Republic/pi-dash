@@ -25,6 +25,7 @@ from .desktop import DesktopEnrollEndpoint
 from .engine import (
     EngineCredentialRevokeEndpoint,
     EngineModelTokenEndpoint,
+    EngineModelsEndpoint,
     EngineProfileEndpoint,
 )
 from .machines import (
@@ -102,6 +103,7 @@ __all__ = [
     "DevMachineReplaceCandidatesEndpoint",
     "EngineCredentialRevokeEndpoint",
     "EngineModelTokenEndpoint",
+    "EngineModelsEndpoint",
     "EngineProfileEndpoint",
     "ApprovalDecideEndpoint",
     "ApprovalListEndpoint",
