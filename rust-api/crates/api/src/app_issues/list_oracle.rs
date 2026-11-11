@@ -729,6 +729,7 @@ pub(crate) fn serializer_sql(filtered: &FilteredSet) -> String {
         issue.completed_at, issue.estimate_point_id AS estimate_point, issue.priority,
         issue.complexity_score, issue.start_date, issue.target_date, issue.sequence_id,
         issue.project_id, issue.parent_id, issue.type_id, issue.assigned_pod_id,
+        issue.assigned_runner_id,
         issue.agent_executor, issue.created_at, issue.updated_at,
         issue.created_by_id AS created_by, issue.updated_by_id AS updated_by,
         issue.is_draft, issue.archived_at,

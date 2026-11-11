@@ -1058,6 +1058,7 @@ pub fn serializer_columns(stmt: &mut SelectStatement) {
         .column((a("issue"), issues::Column::ParentId))
         .column((a("issue"), issues::Column::TypeId))
         .column((a("issue"), issues::Column::AssignedPodId))
+        .column((a("issue"), issues::Column::AssignedRunnerId))
         .column((a("issue"), issues::Column::AgentExecutor))
         .column((a("issue"), issues::Column::CreatedAt))
         .column((a("issue"), issues::Column::UpdatedAt))
