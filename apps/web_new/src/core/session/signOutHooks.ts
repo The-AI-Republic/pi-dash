@@ -15,6 +15,17 @@ export interface RuntimeSignOutChoice {
   signOutComputer: boolean;
 }
 
+/** What the runtime disposal left behind for the sign-out sequence. */
+export interface RuntimeSignOutResult {
+  /**
+   * The confirmed chat-history deletion finished, or deletion was never
+   * requested. False means the user asked for deletion and the native side
+   * failed both passes: sign-out still completes, but the caller tells the
+   * user that local chat history remains on this computer.
+   */
+  chatHistoryDeleted: boolean;
+}
+
 /** Desktop runtime steps the sign-out sequence runs when registered. */
 export interface RuntimeSignOutHooks {
   /**
@@ -27,7 +38,7 @@ export interface RuntimeSignOutHooks {
    * revocation needs a live session). Best-effort: never rejects, so the
    * user is never trapped.
    */
-  disposeRuntimeForSignOut(choice: RuntimeSignOutChoice): Promise<void>;
+  disposeRuntimeForSignOut(choice: RuntimeSignOutChoice): Promise<RuntimeSignOutResult>;
 }
 
 let hooks: RuntimeSignOutHooks | null = null;

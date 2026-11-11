@@ -19,6 +19,9 @@ import { safeNextPath } from "../../core/session/guards.js";
 /** Tab-scoped marker: this tab signed out explicitly (shared with CLOUD-016). */
 export const EXPLICIT_LOGOUT_KEY = "pidash:explicitly-logged-out";
 
+/** Tab-scoped one-shot marker: the sign-out could not delete chat history. */
+export const CHAT_HISTORY_DELETE_FAILED_KEY = "pidash:chat-history-delete-failed";
+
 /** The provider handoff path, also the card's static (unenhanced) target. */
 export const CLOUD_SIGN_IN_HREF = "/api/auth/sign-in/";
 
@@ -146,6 +149,36 @@ export function clearExplicitLogout(storage: Pick<Storage, "removeItem"> | null)
   if (storage === null) return;
   try {
     storage.removeItem(EXPLICIT_LOGOUT_KEY);
+  } catch {
+    // Privacy-restricted contexts have no usable storage; the marker is a convenience.
+  }
+}
+
+/** Whether the tab carries the chat-history-delete-failed marker. */
+export function readChatHistoryDeleteFailed(storage: Pick<Storage, "getItem"> | null): boolean {
+  if (storage === null) return false;
+  try {
+    return storage.getItem(CHAT_HISTORY_DELETE_FAILED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Record the marker for this tab; storage failures are swallowed. */
+export function markChatHistoryDeleteFailed(storage: Pick<Storage, "setItem"> | null): void {
+  if (storage === null) return;
+  try {
+    storage.setItem(CHAT_HISTORY_DELETE_FAILED_KEY, "1");
+  } catch {
+    // Privacy-restricted contexts have no usable storage; the marker is a convenience.
+  }
+}
+
+/** Clear the marker after showing it once on /login; storage failures are swallowed. */
+export function clearChatHistoryDeleteFailed(storage: Pick<Storage, "removeItem"> | null): void {
+  if (storage === null) return;
+  try {
+    storage.removeItem(CHAT_HISTORY_DELETE_FAILED_KEY);
   } catch {
     // Privacy-restricted contexts have no usable storage; the marker is a convenience.
   }

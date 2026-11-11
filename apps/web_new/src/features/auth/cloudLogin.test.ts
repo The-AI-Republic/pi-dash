@@ -4,6 +4,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  CHAT_HISTORY_DELETE_FAILED_KEY,
+  clearChatHistoryDeleteFailed,
   clearExplicitLogout,
   cloudHandoffTarget,
   cloudSignInUrl,
@@ -13,8 +15,10 @@ import {
   DESKTOP_ORIGIN_MISSING,
   DESKTOP_ORIGIN_UNUSABLE,
   EXPLICIT_LOGOUT_KEY,
+  markChatHistoryDeleteFailed,
   markExplicitLogout,
   parseCloudLoginSearch,
+  readChatHistoryDeleteFailed,
   readExplicitLogout,
   resolveCloudReturnTarget,
   shouldAttemptSilentSignIn,
@@ -238,6 +242,42 @@ describe("explicit-logout marker", () => {
     expect(readExplicitLogout(null)).toBe(false);
     expect(() => markExplicitLogout(null)).not.toThrow();
     expect(() => clearExplicitLogout(null)).not.toThrow();
+  });
+});
+
+describe("chat-history-delete-failed marker", () => {
+  it("reads the recorded marker", () => {
+    expect(readChatHistoryDeleteFailed(memoryStorage({ [CHAT_HISTORY_DELETE_FAILED_KEY]: "1" }))).toBe(true);
+    expect(readChatHistoryDeleteFailed(memoryStorage())).toBe(false);
+    expect(readChatHistoryDeleteFailed(memoryStorage({ [CHAT_HISTORY_DELETE_FAILED_KEY]: "0" }))).toBe(false);
+  });
+
+  it("marks and clears the tab marker", () => {
+    const storage = memoryStorage();
+    markChatHistoryDeleteFailed(storage);
+    expect(storage.entries.get(CHAT_HISTORY_DELETE_FAILED_KEY)).toBe("1");
+    clearChatHistoryDeleteFailed(storage);
+    expect(storage.entries.has(CHAT_HISTORY_DELETE_FAILED_KEY)).toBe(false);
+  });
+
+  it("swallows storage failures and treats missing storage as no marker", () => {
+    const broken = {
+      getItem: () => {
+        throw new Error("denied");
+      },
+      setItem: () => {
+        throw new Error("denied");
+      },
+      removeItem: () => {
+        throw new Error("denied");
+      },
+    };
+    expect(readChatHistoryDeleteFailed(broken)).toBe(false);
+    expect(() => markChatHistoryDeleteFailed(broken)).not.toThrow();
+    expect(() => clearChatHistoryDeleteFailed(broken)).not.toThrow();
+    expect(readChatHistoryDeleteFailed(null)).toBe(false);
+    expect(() => markChatHistoryDeleteFailed(null)).not.toThrow();
+    expect(() => clearChatHistoryDeleteFailed(null)).not.toThrow();
   });
 });
 

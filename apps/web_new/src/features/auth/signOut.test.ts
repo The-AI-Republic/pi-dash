@@ -17,8 +17,10 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { notifyError } from "../../shared/shell/index.js";
-import { EXPLICIT_LOGOUT_KEY } from "./cloudLogin.js";
+import { CHAT_HISTORY_DELETE_FAILED_KEY, EXPLICIT_LOGOUT_KEY } from "./cloudLogin.js";
 import {
+  CHAT_HISTORY_DELETE_FAILED_MESSAGE,
+  CHAT_HISTORY_DELETE_FAILED_TITLE,
   performSignOut,
   SIGN_OUT_FAILED_MESSAGE,
   SIGN_OUT_FAILED_TITLE,
@@ -185,7 +187,7 @@ describe("performSignOut", () => {
     const queryClient = new QueryClient();
     const choice = { deleteChatHistory: true, signOutComputer: false };
     const confirmRuntimeSignOut = vi.fn(async () => choice);
-    const disposeRuntimeForSignOut = vi.fn(async () => undefined);
+    const disposeRuntimeForSignOut = vi.fn(async () => ({ chatHistoryDeleted: true }));
     const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
 
     try {
@@ -210,7 +212,7 @@ describe("performSignOut", () => {
     queryClient.setQueryData(["session", "me"], { id: "user-1" });
     const choice = { deleteChatHistory: true, signOutComputer: true };
     const confirmRuntimeSignOut = vi.fn(async () => choice);
-    const disposeRuntimeForSignOut = vi.fn(async () => undefined);
+    const disposeRuntimeForSignOut = vi.fn(async () => ({ chatHistoryDeleted: true }));
     const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
 
     try {
@@ -226,12 +228,29 @@ describe("performSignOut", () => {
     expect(useSessionStore.getState().status).toBe("authenticated");
   });
 
+  it("warns when the runtime could not delete chat history but still signs out", async () => {
+    const client = stubClient(async () => ({ url: "https://app.test/" }));
+    const queryClient = new QueryClient();
+    const confirmRuntimeSignOut = vi.fn(async () => ({ deleteChatHistory: true, signOutComputer: false }));
+    const disposeRuntimeForSignOut = vi.fn(async () => ({ chatHistoryDeleted: false }));
+    const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
+
+    try {
+      await expect(performSignOut({ client: client as never, queryClient })).resolves.toBe("/");
+    } finally {
+      unregister();
+    }
+
+    expect(notifyError).toHaveBeenCalledWith(CHAT_HISTORY_DELETE_FAILED_TITLE, CHAT_HISTORY_DELETE_FAILED_MESSAGE);
+    expect(useSessionStore.getState().status).toBe("signed-out");
+  });
+
   it("signs nothing out when the runtime confirmation is cancelled", async () => {
     const client = stubClient(async () => ({ url: "https://app.test/" }));
     const queryClient = new QueryClient();
     queryClient.setQueryData(["session", "me"], { id: "user-1" });
     const confirmRuntimeSignOut = vi.fn(async () => null);
-    const disposeRuntimeForSignOut = vi.fn(async () => undefined);
+    const disposeRuntimeForSignOut = vi.fn(async () => ({ chatHistoryDeleted: true }));
     const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
 
     try {
@@ -251,7 +270,7 @@ describe("performSignOut", () => {
     const client = stubClient(async () => ({ url: "https://app.test/" }));
     const queryClient = new QueryClient();
     const confirmRuntimeSignOut = vi.fn(async () => ({ deleteChatHistory: true, signOutComputer: false }));
-    const disposeRuntimeForSignOut = vi.fn(async () => undefined);
+    const disposeRuntimeForSignOut = vi.fn(async () => ({ chatHistoryDeleted: true }));
     const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
 
     try {
@@ -351,6 +370,67 @@ describe("performSignOut on the hosted backend", () => {
     expect(entries.get(EXPLICIT_LOGOUT_KEY)).toBe("1");
     expect(replace).toHaveBeenCalledWith("/login");
     expect(replace).toHaveBeenCalledTimes(1);
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("carries a chat-history delete failure across the reload in a one-shot flag", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const { replace } = stubLocation();
+    const client = cloudClient();
+    const queryClient = hostedQueryClient();
+    const confirmRuntimeSignOut = vi.fn(async () => ({ deleteChatHistory: true, signOutComputer: false }));
+    const disposeRuntimeForSignOut = vi.fn(async () => ({ chatHistoryDeleted: false }));
+    const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
+    const clearLocalSession = vi.fn(async () => {
+      entries.clear();
+    });
+
+    try {
+      await expect(
+        performSignOut({ client: client as never, queryClient, teardown: { clearLocalSession } })
+      ).resolves.toBe("/login");
+    } finally {
+      unregister();
+    }
+
+    expect(disposeRuntimeForSignOut).toHaveBeenCalledWith({ deleteChatHistory: true, signOutComputer: false });
+    expect(clearLocalSession).toHaveBeenCalledTimes(1);
+    expect(entries.get(EXPLICIT_LOGOUT_KEY)).toBe("1");
+    expect(entries.get(CHAT_HISTORY_DELETE_FAILED_KEY)).toBe("1");
+    expect(replace).toHaveBeenCalledWith("/login");
+    // The direct toast would not survive the replacing navigation, so the
+    // hosted path defers it to /login instead of toasting here.
+    expect(notifyError).not.toHaveBeenCalled();
+    expect(useSessionStore.getState().status).toBe("signed-out");
+  });
+
+  it("leaves no chat-history flag when the hosted delete succeeded", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const { replace } = stubLocation();
+    const client = cloudClient();
+    const queryClient = hostedQueryClient();
+    const confirmRuntimeSignOut = vi.fn(async () => ({ deleteChatHistory: true, signOutComputer: false }));
+    const disposeRuntimeForSignOut = vi.fn(async () => ({ chatHistoryDeleted: true }));
+    const unregister = registerRuntimeSignOutHooks({ confirmRuntimeSignOut, disposeRuntimeForSignOut });
+
+    try {
+      await expect(performSignOut({ client: client as never, queryClient })).resolves.toBe("/login");
+    } finally {
+      unregister();
+    }
+
+    expect(entries.has(CHAT_HISTORY_DELETE_FAILED_KEY)).toBe(false);
+    expect(replace).toHaveBeenCalledWith("/login");
     expect(notifyError).not.toHaveBeenCalled();
   });
 

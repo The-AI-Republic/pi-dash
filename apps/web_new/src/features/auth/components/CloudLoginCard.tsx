@@ -18,17 +18,21 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
+import { notifyError } from "../../../shared/shell/index.js";
 import {
+  clearChatHistoryDeleteFailed,
   clearExplicitLogout,
   cloudHandoffTarget,
   cloudSignInUrl,
   CLOUD_SIGN_IN_HREF,
   parseCloudLoginSearch,
+  readChatHistoryDeleteFailed,
   readExplicitLogout,
   resolveCloudReturnTarget,
   shouldAttemptSilentSignIn,
   startCloudHandoff,
 } from "../cloudLogin.js";
+import { CHAT_HISTORY_DELETE_FAILED_MESSAGE, CHAT_HISTORY_DELETE_FAILED_TITLE } from "../signOut.js";
 
 const TERMS_HREF = "https://airepublic.com/terms";
 const PRIVACY_HREF = "https://airepublic.com/privacy";
@@ -84,6 +88,12 @@ export interface CloudLoginCardProps {
 export function CloudLoginCard({ apiBase }: CloudLoginCardProps = {}): React.ReactElement {
   const [visit] = React.useState<Visit>(readVisit);
   const [browserOpenFailed, setBrowserOpenFailed] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!readChatHistoryDeleteFailed(tabStorage())) return;
+    notifyError(CHAT_HISTORY_DELETE_FAILED_TITLE, CHAT_HISTORY_DELETE_FAILED_MESSAGE);
+    clearChatHistoryDeleteFailed(tabStorage());
+  }, []);
 
   React.useEffect(() => {
     if (!visit.resuming || visit.pendingTarget === null) return;
