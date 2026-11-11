@@ -1395,9 +1395,10 @@ async fn workspace_id_for(
 
 /// The `**get_entity_id_field(...)` spread value (`v2.py:362`): the raw
 /// identifier text (Postgres casts valid UUID strings; anything else
-/// raises → 500, same as Django), `None` for an explicit null, and the
-/// `MissingBecomesFalse` bug for an absent key (boolean into a uuid
-/// column → 500, `v2.py:319` ported as-is).
+/// raises → 500, same as Django), `None` for an explicit null or `""`
+/// (`ForeignKey.get_db_prep_save`: `""` → `None` for a UUID target),
+/// and the `MissingBecomesFalse` bug for an absent key (boolean into a
+/// uuid column → 500, `v2.py:319` ported as-is).
 enum EntityIdValue {
     Text(String),
     Null,
@@ -1408,6 +1409,7 @@ fn entity_id_value(data: &Map<String, Value>) -> EntityIdValue {
     match data.get("entity_identifier") {
         None => EntityIdValue::Missing,
         Some(Value::Null) => EntityIdValue::Null,
+        Some(Value::String(s)) if s.is_empty() => EntityIdValue::Null,
         Some(Value::String(s)) => EntityIdValue::Text(s.clone()),
         Some(_) => EntityIdValue::Missing,
     }
@@ -2620,6 +2622,10 @@ mod tests {
         let mut data = Map::new();
         assert!(matches!(entity_id_value(&data), EntityIdValue::Missing));
         data.insert("entity_identifier".to_owned(), Value::Null);
+        assert!(matches!(entity_id_value(&data), EntityIdValue::Null));
+        // `""` stores NULL (ForeignKey.get_db_prep_save) — the comment
+        // composer's new-comment grant sends "".
+        data.insert("entity_identifier".to_owned(), Value::from(""));
         assert!(matches!(entity_id_value(&data), EntityIdValue::Null));
         data.insert(
             "entity_identifier".to_owned(),
