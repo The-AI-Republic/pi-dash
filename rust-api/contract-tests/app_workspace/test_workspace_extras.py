@@ -977,6 +977,63 @@ def test_drafts_anon(anon_api, space):
     assert res.status_code == 401
 
 
+def test_draft_create_with_null_dates(user_api, space):
+    # NEWPIDASH-183: both date keys present with a null accepts (Django
+    # draft.py:71-77 compares only when both values are non-null).
+    base = f"/api/workspaces/{space['slug']}/draft-issues/"
+    # Both null on create.
+    res = user_api.post(
+        base, json={"name": "N1", "start_date": None, "target_date": None}
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert set(body.keys()) == DRAFT_KEYS
+    assert body["start_date"] is None
+    assert body["target_date"] is None
+    did = body["id"]
+    # Start set, target null on PATCH (the web_new date-pick shape).
+    res = user_api.patch(
+        f"{base}{did}/", json={"start_date": "2026-11-10", "target_date": None}
+    )
+    assert res.status_code == 204
+    body = user_api.get(f"{base}{did}/").json()
+    assert body["start_date"] == "2026-11-10"
+    assert body["target_date"] is None
+    # Both null on PATCH clears the dates.
+    res = user_api.patch(
+        f"{base}{did}/", json={"start_date": None, "target_date": None}
+    )
+    assert res.status_code == 204
+    body = user_api.get(f"{base}{did}/").json()
+    assert body["start_date"] is None
+    assert body["target_date"] is None
+    # Null start with target set.
+    res = user_api.patch(
+        f"{base}{did}/", json={"start_date": None, "target_date": "2026-11-20"}
+    )
+    assert res.status_code == 204
+    body = user_api.get(f"{base}{did}/").json()
+    assert body["start_date"] is None
+    assert body["target_date"] == "2026-11-20"
+
+
+def test_draft_date_order_still_rejected(user_api, space):
+    # NEWPIDASH-183 regression pin: (Some, Some) with start > target
+    # still 400s (draft.py:71-77) — the fix only lets nulls through.
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={
+            "name": "INV",
+            "start_date": "2026-11-20",
+            "target_date": "2026-11-10",
+        },
+    )
+    assert res.status_code == 400
+    assert res.json() == {
+        "non_field_errors": ["Start date cannot exceed target date"]
+    }
+
+
 # --- draft date filters follow the actor timezone (PIDASHCONV-1373) ---
 
 # 2026-01-01T20:00:00Z is 2026-01-02 05:00 in Asia/Tokyo: Django's
