@@ -37,6 +37,7 @@ use crate::dispatch_execute::{
     InvokeError, ModelFailure, ModelInvocation, RawUsage, CODE_LLM_CONFIG_MISSING,
 };
 use pidash_services::assistant::llm::MSG_NO_PROVIDER;
+use pidash_services::extensions::RunModelKey;
 use pidash_types::dispatch::CloudAgentOutput;
 
 use super::agent::{run_loop, LoopConfig, LoopError};
@@ -87,22 +88,33 @@ pub async fn invoke(
         invocation.extra_toolsets.is_empty(),
         "CE resolves no extra toolsets"
     );
-    let creator = creator_of(&ctx.tools.pool, invocation.run_id).await?;
-    let row = crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(&ctx.tools.pool, creator)
-        .await
-        .map_err(|error| {
-            InvokeError::Failed(ModelFailure {
-                code: None,
-                message: error.to_string(),
-            })
-        })?;
-    let ciphertext = gate_row(row.as_ref()).map_err(InvokeError::Failed)?;
-    let api_key = ctx.keys.decrypted_key(ciphertext).map_err(|failure| {
-        InvokeError::Failed(ModelFailure {
-            code: failure.code,
-            message: failure.message,
-        })
-    })?;
+    // The lane credential: the BYOK ciphertext (the CE path — re-read
+    // and decrypted below, verbatim) or the seam-minted credential for
+    // overlay lanes (PIDASHCONV-1725), used as-is.
+    let api_key = match &invocation.key {
+        RunModelKey::ByokEncrypted(_) => {
+            let creator = creator_of(&ctx.tools.pool, invocation.run_id).await?;
+            let row = crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(
+                &ctx.tools.pool,
+                creator,
+            )
+            .await
+            .map_err(|error| {
+                InvokeError::Failed(ModelFailure {
+                    code: None,
+                    message: error.to_string(),
+                })
+            })?;
+            let ciphertext = gate_row(row.as_ref()).map_err(InvokeError::Failed)?;
+            ctx.keys.decrypted_key(ciphertext).map_err(|failure| {
+                InvokeError::Failed(ModelFailure {
+                    code: failure.code,
+                    message: failure.message,
+                })
+            })?
+        }
+        RunModelKey::Direct(key) => key.clone(),
+    };
     let lane = lane_for(&invocation.model, &api_key);
     let golden = golden();
     let mut wire_tools = Vec::new();

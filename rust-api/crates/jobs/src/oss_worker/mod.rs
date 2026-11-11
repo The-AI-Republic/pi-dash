@@ -462,6 +462,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.pools.primary().clone(),
             ctx.settings.cloud_agent.block_private_urls,
             invoke,
+            ctx.assistant_seam.clone(),
         )),
         std::sync::Arc::new(NoExtraToolsets),
     );

@@ -2024,6 +2024,9 @@ mod tests {
                 pool.clone(),
                 execute_settings.cloud_agent.block_private_urls,
                 invoke,
+                std::sync::Arc::new(pidash_api::assistant::model_seam::CeAssistantSeam::new(
+                    std::sync::Arc::new(execute_settings.clone()),
+                )),
             )),
             std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
         );
