@@ -21,6 +21,7 @@
 
 pub mod comments;
 mod common;
+pub mod core;
 pub mod deps;
 pub mod error;
 pub mod issues;

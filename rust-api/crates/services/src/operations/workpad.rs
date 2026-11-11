@@ -16,7 +16,7 @@ use crate::domain::transition::IssueTransitionHook;
 use crate::domain::{self, WriteCtx};
 use crate::v1_work_items::shape_labels::{validate_workpad_write, WorkpadWriteInput};
 
-use super::common::{activate_timezone, db_error, now_utc};
+use super::common::{activate_timezone, db_error};
 use super::deps::Deps;
 use super::error::{Error, Outcome};
 
@@ -83,9 +83,9 @@ pub async fn update(
         return Err(Error::ServerError);
     };
     // The locked read + sparse `save()` (workpad, audit, hook recomputes)
-    // run in the domain write; the completion pair when the state moved.
-    // No orchestration fire — the port has none.
-    let updated_at = now_utc();
+    // run in the domain write, through the typed core
+    // (`core::workpad::set`, Sparse mode); the completion pair when the
+    // state moved. No orchestration fire — the port has none.
     let transition: Arc<dyn IssueTransitionHook> = deps.transition.clone();
     let enqueue: Arc<dyn TaskEnqueueHook> = deps.enqueue.clone();
     let outcome = domain::run(ctx, &deps.orm, |txn| {
@@ -94,22 +94,24 @@ pub async fn update(
         let pool = deps.pool.clone();
         let ctx = ctx.clone();
         let slug = slug.to_owned();
+        let workpad = workpad.to_owned();
         Box::pin(async move {
             txn.hooks_mut().register(transition);
             txn.hooks_mut().register(enqueue);
-            domain_issues::set_workpad(
-                &ctx,
+            super::core::workpad::set(
                 txn,
+                &ctx,
                 &pool,
-                domain_issues::SetWorkpad {
+                super::core::workpad::WorkpadSet {
                     issue_id,
                     project_id,
                     slug,
-                    workpad,
-                    updated_at,
+                    body: workpad,
+                    mode: super::core::workpad::WorkpadMode::Sparse,
                 },
             )
             .await
+            .map_err(super::core::workpad::core_to_domain_error)
         })
     })
     .await
@@ -120,7 +122,7 @@ pub async fn update(
             Error::ServerError
         }
     })?;
-    if outcome.stopped().is_some() {
+    if outcome.stopped {
         return Err(Error::ServerError);
     }
     // The timestamp only — the body just came from the caller (`:3315-3320`).
@@ -128,7 +130,7 @@ pub async fn update(
     out.insert(
         "updated_at".to_owned(),
         Value::String(pidash_compat::datetime::render_datetime_in(
-            &updated_at,
+            &outcome.updated_at,
             &tz,
         )),
     );

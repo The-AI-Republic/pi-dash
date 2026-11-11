@@ -1130,6 +1130,7 @@ fn write_ctx(scope: &ToolScope, project_id: Uuid) -> WriteCtx {
 /// equivalent, bare columns with no save signals — inside the audit
 /// transaction, exactly where the inline `UPDATE` ran.
 async fn op_update_current_issue_workpad(
+    ctx: &ToolCtx,
     txn: &mut WriteTxn,
     scope: &ToolScope,
     body: &str,
@@ -1142,14 +1143,30 @@ async fn op_update_current_issue_workpad(
                 attribute: "project_id",
             });
         };
-        let _ = domain_issues::update_workpad(
-            &txn.connection(),
-            work_item_id,
-            issue.project_id,
-            body,
-            Utc::now(),
+        // The shared core (NEWPIDASH-190 §4.3): the bare two-column
+        // write, through `core::workpad::set` (Bare mode).
+        let write_ctx = write_ctx(scope, issue.project_id);
+        let _saved = pidash_services::operations::core::workpad::set(
+            txn,
+            &write_ctx,
+            &ctx.pool,
+            pidash_services::operations::core::workpad::WorkpadSet {
+                issue_id: work_item_id,
+                project_id: issue.project_id,
+                slug: String::new(),
+                body: body.to_owned(),
+                mode: pidash_services::operations::core::workpad::WorkpadMode::Bare,
+            },
         )
-        .await?;
+        .await
+        .map_err(|error| match error {
+            pidash_services::operations::core::CoreError::Db(domain_error) => {
+                ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
+            }
+            pidash_services::operations::core::CoreError::Sqlx(sqlx_error) => {
+                ToolExecError::Db(sqlx_error)
+            }
+        })?;
         let updated = plan::workpad_updated(&work_item_id.to_string());
         serde_json::to_value(updated).map_err(|error| {
             ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
@@ -2312,7 +2329,6 @@ async fn op_transition_current_issue(
     Ok(value)
 }
 
-
 /// The `sea_orm::DbErr` -> `CreationError` map for the audit seam
 /// (mirrors `creation_jobs::sea_db`: via the sqlx error text).
 fn audit_sea_db(error: sea_orm::DbErr) -> CreationError {
@@ -2328,8 +2344,6 @@ fn audit_db_err(error: sea_orm::DbErr) -> CreationError {
 fn audit_db(error: sqlx::Error) -> CreationError {
     CreationError::Db(error.to_string())
 }
-
-
 
 /// The moved_by_run transition seam over the audit [`WriteTxn`]
 /// (NEWPIDASH-190 Part 1b): the agent-move reach of
@@ -2367,9 +2381,7 @@ impl<'c> AuditTransitionSeam<'c> {
 
     /// Recover the (always empty) outboxes for the driver's drain
     /// shape.
-    fn take_outboxes(
-        &mut self,
-    ) -> (Vec<Uuid>, Vec<DeferredConsume>, Vec<Uuid>) {
+    fn take_outboxes(&mut self) -> (Vec<Uuid>, Vec<DeferredConsume>, Vec<Uuid>) {
         (
             std::mem::take(&mut self.dispatches),
             std::mem::take(&mut self.deferred),
@@ -2401,10 +2413,12 @@ impl<'c> CreationSeam for AuditTransitionSeam<'c> {
         let Some(state_id) = state_id else {
             return Ok(None);
         };
-        state_view_tx(&self.conn, state_id).await.map_err(|error| match error {
-            ToolExecError::Missing { .. } => CreationError::MissingRow("no state".to_owned()),
-            other => CreationError::Db(other.to_string()),
-        })
+        state_view_tx(&self.conn, state_id)
+            .await
+            .map_err(|error| match error {
+                ToolExecError::Missing { .. } => CreationError::MissingRow("no state".to_owned()),
+                other => CreationError::Db(other.to_string()),
+            })
     }
 
     async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
@@ -2551,10 +2565,7 @@ impl<'c> CreationSeam for AuditTransitionSeam<'c> {
         self.unreachable("insert_system_comment")
     }
 
-    async fn clear_parent_thread(
-        &mut self,
-        _run_id: Uuid,
-    ) -> Result<(), CreationError> {
+    async fn clear_parent_thread(&mut self, _run_id: Uuid) -> Result<(), CreationError> {
         self.unreachable("clear_parent_thread")
     }
 
@@ -2568,8 +2579,6 @@ impl<'c> CreationSeam for AuditTransitionSeam<'c> {
         self.unreachable("pod_once_started_comment")
     }
 }
-
-
 
 impl<'c> FinalizeAgentRunSeam for AuditTransitionSeam<'c> {
     async fn finalize_failed_run(
@@ -2588,7 +2597,10 @@ impl<'c> EntriesSeam for AuditTransitionSeam<'c> {
         self.unreachable("prior_state_id")
     }
 
-    async fn queued_follow_up(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
+    async fn queued_follow_up(
+        &mut self,
+        _issue_id: Uuid,
+    ) -> Result<Option<RunView>, CreationError> {
         self.unreachable("queued_follow_up")
     }
 
@@ -2623,13 +2635,18 @@ impl<'c> EntriesSeam for AuditTransitionSeam<'c> {
         self.rollback = true;
     }
 
-    async fn clock_policy(&mut self, project_id: Uuid) -> Result<ProjectClockPolicy, CreationError> {
+    async fn clock_policy(
+        &mut self,
+        project_id: Uuid,
+    ) -> Result<ProjectClockPolicy, CreationError> {
         let row = pidash_services::orchestration::entries::clock_policy(&self.conn, project_id)
             .await
             .map_err(audit_db_err)?;
         let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
         else {
-            return Err(CreationError::MissingRow(format!("no clock policy {project_id}")));
+            return Err(CreationError::MissingRow(format!(
+                "no clock policy {project_id}"
+            )));
         };
         Ok(ProjectClockPolicy {
             agent_ticking_enabled: Some(ticking_enabled),
@@ -2656,10 +2673,7 @@ impl<'c> EntriesSeam for AuditTransitionSeam<'c> {
         self.unreachable("workspace")
     }
 
-    async fn scheduler_row(
-        &mut self,
-        _scheduler_id: Uuid,
-    ) -> Result<SchedulerView, CreationError> {
+    async fn scheduler_row(&mut self, _scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
         self.unreachable("scheduler_row")
     }
 
@@ -2706,9 +2720,7 @@ impl<'c> EntriesSeam for AuditTransitionSeam<'c> {
     ) -> Result<RenderedTurn, String> {
         Err("unreachable on agent transition seam".to_owned())
     }
-
 }
-
 
 /// Drive `handle_issue_state_transition` over the audit [`WriteTxn`]:
 /// build the live store over it (creator presence prefetched; the
@@ -4035,7 +4047,9 @@ async fn dispatch_fn(
                 run_id,
                 TOOL_UPDATE_CURRENT_ISSUE_WORKPAD,
                 &audit_args,
-                async move |txn, scope| op_update_current_issue_workpad(txn, scope, body).await,
+                async move |txn, scope| {
+                    op_update_current_issue_workpad(ctx, txn, scope, body).await
+                },
             )
             .await
         }
