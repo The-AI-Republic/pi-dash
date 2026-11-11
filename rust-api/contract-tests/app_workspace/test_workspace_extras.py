@@ -961,6 +961,156 @@ def test_draft_to_issue_converts_with_project(user_api, space, world):
     assert res.json() == {"error": "The required object does not exist."}
 
 
+def test_draft_create_with_module_ids(user_api, space, world):
+    # NEWPIDASH-182: every draft write carrying module_ids 500'd on Rust
+    # (deleted_at bound as uuid NULL on draft_issue_modules and
+    # module_issues) while Django 201/204/201s and writes the rows.
+    # The draft_issue_modules INSERT must bind deleted_at as timestamptz NULL.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
+        module_id = seed.module(space["id"], project_id, name="NE182 mod")
+    finally:
+        conn.close()
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={
+            "name": "NE182 create",
+            "project_id": project_id,
+            "module_ids": [module_id],
+        },
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert set(body.keys()) == DRAFT_KEYS
+    assert body["name"] == "NE182 create"
+    assert body["module_ids"] == [module_id], body
+    did = body["id"]
+    # Re-read shows the link.
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/")
+    assert res.status_code == 200, res.text
+    assert res.json()["module_ids"] == [module_id], res.json()
+    # The DB row exists (alive).
+    conn = env.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT module_id FROM draft_issue_modules"
+                " WHERE draft_issue_id = %s AND deleted_at IS NULL",
+                [did],
+            )
+            rows = [str(r[0]) for r in cur.fetchall()]
+            assert rows == [module_id], rows
+    finally:
+        conn.close()
+
+
+def test_draft_patch_module_ids(user_api, space, world):
+    # NEWPIDASH-182: PATCH replacing module_ids 500'd on Rust before the fix
+    # (same deleted_at uuid bind) after soft-deleting the old links.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
+        module_a = seed.module(space["id"], project_id, name="NE182 A")
+        module_b = seed.module(space["id"], project_id, name="NE182 B")
+    finally:
+        conn.close()
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={"name": "NE182 patch", "project_id": project_id},
+    ).json()["id"]
+    assert (
+        user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/").json()[
+            "module_ids"
+        ]
+        == []
+    )
+    res = user_api.patch(
+        f"/api/workspaces/{space['slug']}/draft-issues/{did}/",
+        json={"module_ids": [module_a]},
+    )
+    assert res.status_code == 204, res.text
+    assert (
+        user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/").json()[
+            "module_ids"
+        ]
+        == [module_a]
+    )
+    # Replace with a different module.
+    res = user_api.patch(
+        f"/api/workspaces/{space['slug']}/draft-issues/{did}/",
+        json={"module_ids": [module_b]},
+    )
+    assert res.status_code == 204, res.text
+    assert (
+        user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/").json()[
+            "module_ids"
+        ]
+        == [module_b]
+    )
+    # The DB row for the current module exists alive; the old one is soft-deleted.
+    conn = env.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT module_id FROM draft_issue_modules"
+                " WHERE draft_issue_id = %s AND deleted_at IS NULL",
+                [did],
+            )
+            rows = [str(r[0]) for r in cur.fetchall()]
+            assert rows == [module_b], rows
+    finally:
+        conn.close()
+
+
+def test_draft_to_issue_with_module_ids(user_api, space, world):
+    # NEWPIDASH-182: draft-to-issue with module_ids 500'd on Rust before the fix
+    # (deleted_at uuid bind on module_issues), leaving the work item created,
+    # the modules unwritten and the draft live. Django 201s, writes
+    # module_issues and deletes the draft.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
+        module_id = seed.module(space["id"], project_id, name="NE182 conv mod")
+    finally:
+        conn.close()
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/",
+        json={"name": "NE182 convert", "project_id": project_id},
+    ).json()["id"]
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-to-issue/{did}/",
+        json={"name": "NE182 issue", "module_ids": [module_id]},
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert set(body.keys()) == ISSUE_CREATE_KEYS
+    assert body["name"] == "NE182 issue"
+    issue_id = body["id"]
+    # The convert deletes the draft.
+    res = user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/{did}/")
+    assert res.status_code == 404
+    assert res.json() == {"error": "The required object does not exist."}
+    # The module_issues row exists alive.
+    conn = env.connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT module_id FROM module_issues"
+                " WHERE issue_id = %s AND module_id = %s AND deleted_at IS NULL",
+                [issue_id, module_id],
+            )
+            assert cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
 def test_drafts_only_own_visible(user_api, member_api, space):
     member_api.post(f"/api/workspaces/{space['slug']}/draft-issues/", json={"name": "Other"})
     assert user_api.get(f"/api/workspaces/{space['slug']}/draft-issues/").json()["results"] == []
