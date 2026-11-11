@@ -25,10 +25,30 @@ Project-less drafts and same-project members are unchanged.
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from _harness.diffs import expect, is_rust
 
 FORBIDDEN = {"error": "You don't have the required permissions."}
 NOT_FOUND = {"error": "The required object does not exist."}
+
+
+@pytest.fixture
+def space(world):
+    db = world["db"]
+    ws = db.make_workspace("Acme", "acme", world["user"]["id"])
+    db.make_workspace_member(ws["id"], world["user"]["id"], role=20)
+    return ws
+
+
+@pytest.fixture
+def member_api(world, space):
+    """other@example.com as a role-15 member of the space workspace."""
+    from _harness import user_client
+
+    world["db"].make_workspace_member(space["id"], world["other"]["id"], role=15)
+    with user_client(world["other_key"]) as client:
+        yield client
 
 
 def _count_issue_for_project(db, project_id, created_by_id):
@@ -41,12 +61,18 @@ def _count_issue_for_project(db, project_id, created_by_id):
             return cur.fetchone()[0]
 
 
-def _count_subscriber_for_issue(db, issue_id, subscriber_id):
+def _count_subscribers_in_project(db, project_id, subscriber_id):
+    """issue_subscribers rows for `subscriber_id` on issues in `project_id`.
+
+    Used as a before/after pair: a refused publish on Rust must not add
+    a subscriber row for the caller even though no issue id exists yet.
+    """
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM issue_subscribers WHERE issue_id = %s AND subscriber_id = %s AND deleted_at IS NULL",
-                (issue_id, subscriber_id),
+                "SELECT count(*) FROM issue_subscribers s JOIN issues i ON i.id = s.issue_id "
+                "WHERE i.project_id = %s AND s.subscriber_id = %s AND s.deleted_at IS NULL",
+                (project_id, subscriber_id),
             )
             return cur.fetchone()[0]
 
@@ -127,12 +153,14 @@ def test_draft_nonmember_create_and_publish(space, user_api, member_api, world):
     # We seed a fresh draft owned by `other` in P2 and publish it as `other`.
     draft_for_intruder = _seed_draft(world, ws_id, proj_id, other_id, "intruder seed")
     before_issue_count = _count_issue_for_project(db, proj_id, other_id)
+    before_sub_count = _count_subscribers_in_project(db, proj_id, other_id)
     res = member_api.post(f"/api/workspaces/{ws_slug}/draft-to-issue/{draft_for_intruder}/", json={"name": "nonmember conv"})
     assert res.status_code == expect("DIFF-14", django=201, rust=403)
     if is_rust():
         assert res.json() == FORBIDDEN
         # No issue and no subscriber row for the caller on Rust
         assert _count_issue_for_project(db, proj_id, other_id) == before_issue_count
+        assert _count_subscribers_in_project(db, proj_id, other_id) == before_sub_count
         # Draft still exists (refused publish must not delete it)
         with db.connect() as conn:
             with conn.cursor() as cur:
@@ -152,8 +180,10 @@ def test_draft_nonmember_create_and_publish(space, user_api, member_api, world):
         # Django created an issue + subscriber; verify and clean the subscriber leak check
         # The issue row persists after test (conftest will wipe before next test)
         assert _count_issue_for_project(db, proj_id, other_id) == before_issue_count + 1
-        # Subscriber row exists on Django (the leak); we assert the count then leave cleanup to conftest
-        assert _count_subscriber_for_issue(db, issue_id, other_id) >= 0  # not asserted strictly — worker may be eager or lazy
+        # Django subscribes the creator via a worker task (not inline), so
+        # the subscriber row is not asserted here; the debugger probe with
+        # a live worker saw it. The strict no-subscriber check is the Rust
+        # before/after count above.
 
 
 def test_draft_other_user_publish_is_creator_scoped(space, user_api, member_api, world):
@@ -188,11 +218,13 @@ def test_draft_other_user_publish_is_creator_scoped(space, user_api, member_api,
 
     with user_client(world["bot_key"]) as bot_api:
         before_issue_count = _count_issue_for_project(db, proj_id, bot_id)
+        before_sub_count = _count_subscribers_in_project(db, proj_id, bot_id)
         res = bot_api.post(f"/api/workspaces/{ws_slug}/draft-to-issue/{admin_draft_id}/", json={"name": "stolen"})
         assert res.status_code == expect("DIFF-14", django=201, rust=404)
         if is_rust():
             assert res.json() == NOT_FOUND
             assert _count_issue_for_project(db, proj_id, bot_id) == before_issue_count
+            assert _count_subscribers_in_project(db, proj_id, bot_id) == before_sub_count
             # Draft must not be deleted on refusal
             r = user_api.get(f"/api/workspaces/{ws_slug}/draft-issues/{admin_draft_id}/")
             assert r.status_code == 200
