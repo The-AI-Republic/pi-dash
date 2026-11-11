@@ -1719,13 +1719,65 @@ pub async fn dev_machine_patch(
 }
 
 // ---------------------------------------------------------------------------
-// Runner list (`runners.py:289-333`)
+// Runner list (`runners.py:340-413`)
 // ---------------------------------------------------------------------------
 
-/// `GET /api/runners/` (`runners.py:289-333`): workspace gate, the
-/// owner+private visibility predicate, `?pod=`/`?project=` narrowing,
-/// desktop-bundled exclusion unless `?include_bundled=` is exactly
-/// `1`/`true`/`yes`, `-updated_at` order.
+/// `RunnerListEndpoint.get` scope resolution: `?project=` wins over
+/// `?workspace=` ([`pods_list`]); project mode 404s an unknown project
+/// and 403s non-members of the project's workspace, and the returned
+/// workspace is the project's, so a mismatched `workspace` param cannot
+/// widen the list; workspace mode 400s when neither filter is present.
+/// Returns `(workspace_id, project_id)`.
+async fn runner_list_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    params: &crate::license::QueryMap,
+) -> Result<(Uuid, Option<Uuid>), Response> {
+    if let Some(raw) = query_param(params, "project") {
+        let project_id = match parse_uuid(&raw) {
+            Ok(project_id) => project_id,
+            Err(response) => return Err(response),
+        };
+        let facts = match fetch_project_facts(pool, project_id).await {
+            Ok(facts) => facts,
+            Err(response) => return Err(response),
+        };
+        let Some(facts) = facts else {
+            return Err(json_response(
+                StatusCode::NOT_FOUND,
+                PROJECT_NOT_FOUND_BODY.to_owned(),
+            ));
+        };
+        let role = match workspace_role(pool, facts.workspace_id, user_id).await {
+            Ok(role) => role,
+            Err(response) => return Err(response),
+        };
+        if !membership::is_workspace_member(role) {
+            return Err(forbidden());
+        }
+        Ok((facts.workspace_id, Some(project_id)))
+    } else {
+        let Some(raw) = query_param(params, "workspace") else {
+            return Err(bad_request(PROJECT_OR_WORKSPACE_REQUIRED_BODY));
+        };
+        let workspace_id = match parse_uuid(&raw) {
+            Ok(workspace_id) => workspace_id,
+            Err(response) => return Err(response),
+        };
+        let role = match workspace_role(pool, workspace_id, user_id).await {
+            Ok(role) => role,
+            Err(response) => return Err(response),
+        };
+        if !membership::is_workspace_member(role) {
+            return Err(forbidden());
+        }
+        Ok((workspace_id, None))
+    }
+}
+
+/// `GET /api/runners/` (`runners.py:340-413`): the [`runner_list_scope`]
+/// gate, the owner+private visibility predicate, `?pod=` narrowing,
+/// `-updated_at` order.
 pub async fn runners_list(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1735,33 +1787,16 @@ pub async fn runners_list(
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
-    let Some(raw) = query_param(&params, "workspace") else {
-        return bad_request(WORKSPACE_REQUIRED_BODY);
-    };
-    let workspace_id = match parse_uuid(&raw) {
-        Ok(workspace_id) => workspace_id,
+    let (workspace_id, project_id) = match runner_list_scope(&pool, user_id, &params).await {
+        Ok(scope) => scope,
         Err(response) => return response,
     };
-    let role = match workspace_role(&pool, workspace_id, user_id).await {
-        Ok(role) => role,
-        Err(response) => return response,
-    };
-    if !membership::is_workspace_member(role) {
-        return forbidden();
-    }
     // Filter UUIDs parse at queryset evaluation — after the member
     // gate, so a non-member with a garbage filter still answers 403.
     let mut pod_id = None;
     if let Some(raw) = query_param(&params, "pod") {
         match parse_uuid(&raw) {
             Ok(id) => pod_id = Some(id),
-            Err(response) => return response,
-        }
-    }
-    let mut project_id = None;
-    if let Some(raw) = query_param(&params, "project") {
-        match parse_uuid(&raw) {
-            Ok(id) => project_id = Some(id),
             Err(response) => return response,
         }
     }
@@ -2878,7 +2913,14 @@ mod tests {
 
     #[test]
     fn f7_runner_list_bodies() {
-        assert_errors_match("GET_runners", &[WORKSPACE_REQUIRED_BODY, FORBIDDEN_BODY]);
+        assert_errors_match(
+            "GET_runners",
+            &[
+                PROJECT_NOT_FOUND_BODY,
+                FORBIDDEN_BODY,
+                PROJECT_OR_WORKSPACE_REQUIRED_BODY,
+            ],
+        );
     }
 
     #[test]
@@ -3234,6 +3276,202 @@ mod tests {
             render_machine(&machine).unwrap(),
             r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"provisioning":"manual","runner_count":1,"online_runner_count":0,"control_online":false,"engine_paused_by_owner":false,"engine_auto_pause_reason":"","engine_paused":false,"engine_team_runs":false,"engine_sign_in_state":"never","engine_credential_expires_at":null,"engine_state":{},"engine_state_reported_at":null,"merged_into":null,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
+    }
+
+    fn scope_params(pairs: &[(&str, &str)]) -> crate::license::QueryMap {
+        pairs
+            .iter()
+            .map(|(key, value)| {
+                (
+                    (*key).to_owned(),
+                    pidash_compat::http::OneOrMany::One((*value).to_owned()),
+                )
+            })
+            .collect()
+    }
+
+    async fn scope_body(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        (status, String::from_utf8(body.to_vec()).expect("utf8"))
+    }
+
+    // -- Runner list scope (`GET /api/runners/` `?project=` wins) --
+    //
+    // Live-db: [`runner_list_scope`] against session-local TEMP tables
+    // (only the columns the two reads select), on a one-connection pool
+    // so the SeaORM reads see the temp tables. Owner-only listing and
+    // the `assignable_for` eligibility render are untouched by this
+    // branch; they stay pinned by the Django suite and the byte-exact
+    // render test above.
+    #[tokio::test]
+    async fn live_runner_list_scope() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.projects')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return;
+        }
+        sqlx::query(
+            "CREATE TEMP TABLE projects (id uuid PRIMARY KEY, workspace_id uuid NOT NULL, \
+             identifier varchar(12) NOT NULL, deleted_at timestamptz, \
+             created_at timestamptz NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temp projects");
+        sqlx::query(
+            "CREATE TEMP TABLE workspace_members (workspace_id uuid NOT NULL, \
+             member_id uuid NOT NULL, role smallint NOT NULL, is_active boolean NOT NULL, \
+             deleted_at timestamptz, created_at timestamptz NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("temp members");
+        let (owner, outsider, ws1, ws2, project1, project2, deleted_project) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for sql in [
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, created_at) VALUES \
+                 ('{project1}', '{ws1}', 'DEF', now()), ('{project2}', '{ws2}', 'OTHER', now())"
+            ),
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, deleted_at, created_at) VALUES \
+                 ('{deleted_project}', '{ws1}', 'GONE', now(), now())"
+            ),
+            format!(
+                "INSERT INTO workspace_members (workspace_id, member_id, role, is_active, created_at) VALUES \
+                 ('{ws1}', '{owner}', 20, true, now()), ('{ws2}', '{owner}', 20, true, now())"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+
+        // `?project=` alone: the project's workspace, filtered by project.
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", &project1.to_string())]),
+        )
+        .await
+        .expect("project alone");
+        assert_eq!(scope, (ws1, Some(project1)));
+
+        // Both params: project wins — a mismatched `workspace` cannot
+        // widen the scope.
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[
+                ("project", &project1.to_string()),
+                ("workspace", &ws2.to_string()),
+            ]),
+        )
+        .await
+        .expect("project wins");
+        assert_eq!(scope, (ws1, Some(project1)));
+
+        // `?workspace=` alone is unchanged.
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("workspace", &ws1.to_string())]),
+        )
+        .await
+        .expect("workspace alone");
+        assert_eq!(scope, (ws1, None));
+
+        // An empty `?project=` disables the filter (Django truthiness).
+        let scope = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", ""), ("workspace", &ws1.to_string())]),
+        )
+        .await
+        .expect("empty project falls through");
+        assert_eq!(scope, (ws1, None));
+
+        // Neither param: 400 `project or workspace is required`.
+        let err = runner_list_scope(&pool, owner, &scope_params(&[]))
+            .await
+            .expect_err("neither 400s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, PROJECT_OR_WORKSPACE_REQUIRED_BODY);
+
+        // Unknown project: 404 `project not found`.
+        let err = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", &Uuid::new_v4().to_string())]),
+        )
+        .await
+        .expect_err("unknown project 404s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PROJECT_NOT_FOUND_BODY);
+
+        // A tombstoned project reads as unknown (scoped read).
+        let err = runner_list_scope(
+            &pool,
+            owner,
+            &scope_params(&[("project", &deleted_project.to_string())]),
+        )
+        .await
+        .expect_err("tombstoned project 404s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, PROJECT_NOT_FOUND_BODY);
+
+        // Non-member: 403 in both modes.
+        let err = runner_list_scope(
+            &pool,
+            outsider,
+            &scope_params(&[("project", &project1.to_string())]),
+        )
+        .await
+        .expect_err("non-member project 403s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, FORBIDDEN_BODY);
+        let err = runner_list_scope(
+            &pool,
+            outsider,
+            &scope_params(&[("workspace", &ws1.to_string())]),
+        )
+        .await
+        .expect_err("non-member workspace 403s");
+        let (status, body) = scope_body(err).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, FORBIDDEN_BODY);
+
+        // A garbage project is a 500 (Django's `ValidationError`), not a
+        // 404 — the `parse_uuid` arm, same as [`pods_list`].
+        let err = runner_list_scope(&pool, owner, &scope_params(&[("project", "nope")]))
+            .await
+            .expect_err("garbage project 500s");
+        assert_eq!(err.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

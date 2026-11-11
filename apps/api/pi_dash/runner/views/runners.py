@@ -346,6 +346,11 @@ class RunnerListEndpoint(APIView):
     (a project may own several pods), which is how the project-scoped AI
     Workers panel filters this list.
 
+    ``?project=<uuid>`` alone is enough — like the pod list endpoint, the
+    project wins and its workspace is used, so the old web's Runs-on picker
+    works without a ``workspace`` param. ``?workspace=`` alone still scopes
+    to the whole workspace; neither is 400.
+
     Optional ``?assignable_for=<issue-id | "new">`` (design §7.4) adds the
     per-row eligibility read: ``assignable``, ``not_assignable_code``,
     ``is_busy`` and ``queue_depth``.
@@ -355,10 +360,24 @@ class RunnerListEndpoint(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        project_id = request.query_params.get("project")
         workspace_id = request.query_params.get("workspace")
-        if not workspace_id:
+        if project_id:
+            from pi_dash.db.models.project import Project
+
+            project = Project.objects.filter(pk=project_id).first()
+            if project is None:
+                return Response(
+                    {"error": "project not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            # ``project`` wins: the workspace used is the project's
+            # workspace, so a mismatched ``workspace`` param cannot widen
+            # what is visible.
+            workspace_id = project.workspace_id
+        elif not workspace_id:
             return Response(
-                {"error": "workspace is required"},
+                {"error": "project or workspace is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not is_workspace_member(request.user, workspace_id):
@@ -376,7 +395,6 @@ class RunnerListEndpoint(APIView):
             qs = qs.filter(pod_id=pod_id)
         # Built-in engine runners are listed like any other runner, labelled
         # by machine (built_engine_as_runner §11); lists stay owner-only.
-        project_id = request.query_params.get("project")
         if project_id:
             qs = qs.filter(pod__project_id=project_id)
         context = {"request": request}
