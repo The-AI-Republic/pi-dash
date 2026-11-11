@@ -481,7 +481,7 @@ impl LiveS3ObjectStore {
 /// `exponential`/`rand`/`growth_factor 2`). Measured against boto3
 /// 1.34.96 / botocore 1.34.162; the stub contract suite
 /// (`tasks_cleanup/test_s3_retry.py`) pins the attempt counts.
-const S3_MAX_ATTEMPTS: u32 = 5;
+pub(crate) const S3_MAX_ATTEMPTS: u32 = 5;
 
 /// One HEAD attempt's outcome. `Refused` is the swallowed `ClientError`
 /// (stored as NULL); `Transport` escapes to the task's broad `except`
@@ -530,7 +530,7 @@ fn s3_retryable_code(code: &str) -> bool {
 }
 
 /// The legacy retry decision for one service answer.
-fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
+pub(crate) fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
     if s3_retryable_status(status) {
         return true;
     }
@@ -538,7 +538,7 @@ fn s3_retryable_answer(status: u16, code: Option<&str>) -> bool {
 }
 
 /// Extract the `<Code>` from an S3 error body, if any.
-fn s3_error_code(body: &str) -> Option<&str> {
+pub(crate) fn s3_error_code(body: &str) -> Option<&str> {
     let (_, after) = body.split_once("<Code>")?;
     let (code, _) = after.split_once("</Code>")?;
     let code = code.trim();
@@ -578,7 +578,7 @@ fn retry_backoff(failed_attempt: u32, rand01: f64) -> std::time::Duration {
 }
 
 /// Sleep the legacy backoff after failed attempt `n` (1-based).
-async fn sleep_backoff(failed_attempt: u32) {
+pub(crate) async fn sleep_backoff(failed_attempt: u32) {
     let rand01 = rand::random_range(0.0..1.0);
     tokio::time::sleep(retry_backoff(failed_attempt, rand01)).await;
 }
