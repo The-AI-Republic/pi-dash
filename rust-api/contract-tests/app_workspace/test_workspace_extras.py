@@ -970,6 +970,7 @@ def test_draft_create_with_module_ids(user_api, space, world):
     try:
         seed = Seed(conn)
         project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
         module_id = seed.module(space["id"], project_id, name="NE182 mod")
     finally:
         conn.close()
@@ -1013,6 +1014,7 @@ def test_draft_patch_module_ids(user_api, space, world):
     try:
         seed = Seed(conn)
         project_id = seed.project(space["id"])
+        seed.project_member(project_id, space["id"], world["user"]["id"], role=20)
         module_a = seed.module(space["id"], project_id, name="NE182 A")
         module_b = seed.module(space["id"], project_id, name="NE182 B")
     finally:
