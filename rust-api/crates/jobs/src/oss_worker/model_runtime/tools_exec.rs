@@ -1400,6 +1400,27 @@ fn project_lock_query(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::pr
         .lock_exclusive()
 }
 
+/// The transition target lookup (`State.objects.get(pk=..., project_id=...)`
+/// in `tools.py:320-345`): the live, non-triage state row in the run's
+/// project, projecting every `IssueStateView` field (`id`, `name`,
+/// `group`) so the `FromQueryResult` decode succeeds. Extracted so a
+/// unit test can pin the projection.
+fn transition_state_query(
+    target_id: Uuid,
+    project_id: Uuid,
+) -> sea_orm::Select<pidash_db::entity::states::Entity> {
+    use pidash_db::entity::states as st_entity;
+    st_entity::Entity::find()
+        .filter(st_entity::Column::Id.eq(target_id))
+        .filter(st_entity::Column::ProjectId.eq(project_id))
+        .filter(st_entity::Column::DeletedAt.is_null())
+        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
+        .select_only()
+        .column(st_entity::Column::Id)
+        .column(st_entity::Column::Name)
+        .column(st_entity::Column::Group)
+}
+
 /// `pidash_create_project_issue` (`tools.py:345-371`) through
 /// `Issue.save` (`db/models/issue.py:267-341`): lock the scheduler
 /// project, resolve the default/backlog state (plus the save-time
@@ -2414,15 +2435,8 @@ async fn op_transition_current_issue<'a>(
             }),
         );
     };
-    use pidash_db::entity::{issues as issue_entity, states as st_entity};
-    let target = st_entity::Entity::find()
-        .filter(st_entity::Column::Id.eq(target_id))
-        .filter(st_entity::Column::ProjectId.eq(scope.project_id))
-        .filter(st_entity::Column::DeletedAt.is_null())
-        .filter(Expr::col(st_entity::Column::Group).ne("triage"))
-        .select_only()
-        .column(st_entity::Column::Id)
-        .column(st_entity::Column::Name)
+    use pidash_db::entity::issues as issue_entity;
+    let target = transition_state_query(target_id, scope.project_id)
         .into_model::<IssueStateView>()
         .one(&tx_conn(&mut tx))
         .await
@@ -2488,8 +2502,9 @@ async fn op_transition_current_issue<'a>(
     }
     // The orchestration states: `None` when stateless (or on a dangling
     // from-pointer, the `select_related` miss). The target group comes
-    // from a second read — the ported target lookup projects id+name
-    // only.
+    // from a second read — the ported target lookup projects id+name+group
+    // (decoding `IssueStateView`), and this re-read supplies the fresh
+    // orchestration view plus the TOCTOU existence check below.
     let from_state = match from_state_id {
         Some(id) => match state_view_tx(&mut tx, id).await {
             Ok(view) => view,
@@ -2762,6 +2777,12 @@ async fn resolve_tx<C: sea_orm::ConnectionTrait>(
             .filter(i_entity::Column::SequenceId.eq(sequence));
     }
     let row = query
+        .select_only()
+        .column(i_entity::Column::Id)
+        .column(i_entity::Column::WorkspaceId)
+        .column(i_entity::Column::ProjectId)
+        .column(i_entity::Column::SequenceId)
+        .column_as(proj_entity::Column::Identifier, "identifier")
         .limit(1)
         .into_model::<ResolvedIssueRow>()
         .one(conn)
@@ -3093,7 +3114,10 @@ async fn grouped_tx(
     scope: &ToolScope,
     source: &rel::ResolvedIssue,
 ) -> Result<Value, ToolExecError> {
-    use pidash_db::entity::{issue_relations as rel_entity, issues as i_entity};
+    use pidash_db::entity::{
+        issue_relations as rel_entity, issues as i_entity, projects as proj_entity,
+        states as st_entity,
+    };
     let rows = rel_entity::Entity::find()
         .filter(
             sea_orm::sea_query::Condition::any()
@@ -3145,6 +3169,13 @@ async fn grouped_tx(
                     .into(),
             )
             .join(JoinType::InnerJoin, i_entity::Relation::Projects.def())
+            .select_only()
+            .column(i_entity::Column::Id)
+            .column(i_entity::Column::SequenceId)
+            .column(i_entity::Column::Name)
+            .column_as(proj_entity::Column::Identifier, "project_identifier")
+            .column_as(st_entity::Column::Name, "state_name")
+            .column_as(st_entity::Column::Group, "state_group")
             .into_model::<GroupedIssueRow>()
             .all(&tx_conn(&mut *tx))
             .await
@@ -4115,6 +4146,27 @@ mod tests {
             "lock must exclude soft-deleted projects: {sql}"
         );
         assert!(sql.contains("FOR UPDATE"), "lock takes the row lock: {sql}");
+    }
+
+    /// The transition target lookup projects every `IssueStateView`
+    /// field (`id`, `name`, `group`) in the run's project, excluding
+    /// soft-deleted and triage states — otherwise SeaORM's
+    /// `FromQueryResult` fails the decode and every transition call
+    /// ends the run `provider_error` (NEWPIDASH-173).
+    #[test]
+    fn transition_state_query_projects_issue_state_view() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let sql = transition_state_query(Uuid::nil(), Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(r#""states"."id", "states"."name", "states"."group""#),
+            "transition lookup must select id, name and group: {sql}"
+        );
+        assert!(
+            sql.contains(r#""deleted_at" IS NULL"#),
+            "lookup must exclude soft-deleted states: {sql}"
+        );
     }
 
     /// The CPython `uuid.UUID(hex=...)` acceptance battery (probed on
