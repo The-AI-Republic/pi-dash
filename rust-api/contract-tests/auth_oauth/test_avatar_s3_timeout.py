@@ -142,10 +142,15 @@ def test_avatar_s3_clients_have_bounded_timeouts():
     assert "s3_client" in gitea, "gitea must pass s3_client to avatar helpers"
     # The three avatar helpers must take &s3_client, not the token &client.
     assert "&s3_client," in gitea, "gitea avatar calls must use &s3_client"
-    # Gitea's avatar copies (:1283 PUT, :1310 HEAD, :1442 DELETE) are executed
-    # with that bounded client — the download keeps its 10s request timeout.
-    assert "Duration::from_secs(10)" in gitea, (
-        "gitea provider download must keep its 10s per-request timeout"
+    # Gitea delegates to the shared helpers (PIDASHCONV-1729): the 10s
+    # provider-download timeout now lives in mod.rs (asserted below), not
+    # in a private gitea copy — the shared PUT/HEAD/DELETE inherit the
+    # bounded &s3_client.
+    assert "super::download_and_upload_avatar(" in gitea, (
+        "gitea must delegate to the shared download helper"
+    )
+    assert "super::delete_old_avatar(" in gitea, (
+        "gitea must delegate to the shared delete helper"
     )
 
     google = GOOGLE_RS.read_text()

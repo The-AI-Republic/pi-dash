@@ -158,8 +158,8 @@ pub(crate) async fn soft_delete_avatar_asset(
 /// `settings.DATA_UPLOAD_MAX_MEMORY_SIZE` (`FILE_SIZE_LIMIT`, default
 /// `5242880`). `storage` / `scheme` / `host` mirror the
 /// `S3Storage(request)` server-side call the avatar flow makes
-/// (`base.py:198`, `is_server=False`). The google and gitea callbacks keep
-/// their own older copies; github and gitlab share this one.
+/// (`base.py:198`, `is_server=False`). The google callback keeps its own
+/// older copy; gitea, github and gitlab share this one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn download_and_upload_avatar(
     client: &reqwest::Client,

@@ -67,8 +67,8 @@ use axum::Extension;
 use axum::Router;
 
 use pidash_db::entity::{
-    accounts, file_assets, instance_configurations, project_member_invites, users,
-    workspace_member_invites, workspace_members, workspaces,
+    accounts, instance_configurations, project_member_invites, users, workspace_member_invites,
+    workspace_members, workspaces,
 };
 
 use crate::auth_session::render::disallowed_redirect;
@@ -982,487 +982,15 @@ pub async fn sync_user_data(
 }
 
 // ---------------------------------------------------------------------------
-// §7 Avatar download + S3 upload (`base.py:139-218`)
+// §7 Avatar download + S3 upload (`base.py:139-254`) — shared helpers
 // ---------------------------------------------------------------------------
 
-/// `get_avatar_download_headers` (`base.py:122-123`): empty for the base
-/// adapter (no provider overrides it for gitea).
-pub fn avatar_download_headers() -> Vec<(String, String)> {
-    Vec::new()
-}
-
-/// Content-Type → file extension (`base.py:166-174`). Anything else ends
-/// the attempt (`None`), exactly like the Python early return.
-pub fn avatar_extension(content_type: &str) -> Option<&'static str> {
-    match content_type {
-        "image/jpeg" | "image/jpg" => Some("jpg"),
-        "image/png" => Some("png"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        _ => None,
-    }
-}
-
-/// SigV4 endpoint split, mirroring `S3Storage.__init__` with a request
-/// (`is_server=False`) exactly like the D-32 asset presigning does
-/// (`space/assets.rs::endpoint_parts`, same settings source): MinIO mode
-/// signs `{scheme}://{host}` path-style; an explicit endpoint URL signs
-/// path-style against it; otherwise the virtual-hosted AWS default.
-/// Returns `(endpoint, signed_host, key_prefix)` where `key_prefix` is
-/// `"/{bucket}"` for path-style and `""` for virtual-hosted. `None`
-/// when the region cannot be signed — invalid host label, or empty
-/// with no endpoint URL to derive from (`ValueError` /
-/// `InvalidRegionError` from the constructor); the avatar callers fold
-/// it into the provider-URL fallback. Avatar signing is header auth,
-/// so regional clients keep the regional host (no presign rewrite).
-pub fn s3_target(
-    storage: &pidash_db::config::StorageSettings,
-    scheme: &str,
-    host: &str,
-) -> Option<(String, String, String)> {
-    if !pidash_db::config::is_valid_region_name(&storage.region) {
-        return None;
-    }
-    // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
-    let scheme = storage.endpoint_protocol(scheme);
-    if storage.use_minio {
-        Some((
-            format!("{scheme}://{host}"),
-            host.to_owned(),
-            format!("/{}", storage.bucket_name),
-        ))
-    } else if let Some(endpoint) = storage.endpoint_url.as_deref().filter(|e| !e.is_empty()) {
-        let endpoint = endpoint.trim_end_matches('/').to_owned();
-        let signed_host = endpoint
-            .rsplit("://")
-            .next()
-            .unwrap_or(endpoint.as_str())
-            .split('/')
-            .next()
-            .unwrap_or(endpoint.as_str())
-            .to_owned();
-        Some((endpoint, signed_host, format!("/{}", storage.bucket_name)))
-    } else {
-        let region = storage.region.as_str();
-        if region.is_empty() {
-            // botocore derives `https://s3..amazonaws.com` and rejects
-            // it (`ValueError: Invalid endpoint`).
-            return None;
-        }
-        // botocore's s3 endpoint table serves us-east-1 from the global
-        // endpoint (`s3.amazonaws.com`, no region infix); every other
-        // region is virtual-hosted regional.
-        let base = if region == "us-east-1" {
-            "s3.amazonaws.com".to_owned()
-        } else {
-            format!("s3.{region}.amazonaws.com")
-        };
-        Some((
-            format!("https://{}.{base}", storage.bucket_name),
-            format!("{}.{base}", storage.bucket_name),
-            String::new(),
-        ))
-    }
-}
-
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for b in Sha256::digest(data) {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-/// SigV4 `Authorization`-header signer for one S3 request (PUT/HEAD/DELETE
-/// object), mirroring what boto3 signs for `upload_fileobj`, `head_object`,
-/// and `delete_objects`. Any storage misconfiguration (empty keys/bucket)
-/// degrades to `None` — boto3 raises there, and every caller here folds
-/// that into the avatar-URL fallback, same observable outcome.
-pub fn s3_authorization(
-    storage: &pidash_db::config::StorageSettings,
-    signed_host: &str,
-    method: &str,
-    canonical_uri: &str,
-    payload_hash: &str,
-    content_type: Option<&str>,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> Option<(String, String)> {
-    if storage.access_key_id.is_empty()
-        || storage.secret_access_key.is_empty()
-        || storage.bucket_name.is_empty()
-    {
-        return None;
-    }
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let date = now.format("%Y%m%d").to_string();
-    let scope = format!("{date}/{}/s3/aws4_request", storage.region);
-    let mut signed: Vec<(&str, String)> = vec![
-        ("host", signed_host.to_owned()),
-        ("x-amz-content-sha256", payload_hash.to_owned()),
-        ("x-amz-date", amz_date.clone()),
-    ];
-    if let Some(ct) = content_type {
-        signed.push(("content-type", ct.to_owned()));
-    }
-    signed.sort_by(|a, b| a.0.cmp(b.0));
-    let canonical_headers = signed
-        .iter()
-        .map(|(k, v)| format!("{k}:{v}\n"))
-        .collect::<String>();
-    let signed_headers = signed.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(";");
-    let canonical = format!(
-        "{method}\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    );
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
-        sha256_hex(canonical.as_bytes())
-    );
-    let signing_key = {
-        let k_date = hmac_sha256(
-            format!("AWS4{}", storage.secret_access_key).as_bytes(),
-            date.as_bytes(),
-        );
-        let k_region = hmac_sha256(&k_date, storage.region.as_bytes());
-        let k_service = hmac_sha256(&k_region, b"s3");
-        hmac_sha256(&k_service, b"aws4_request")
-    };
-    let signature = sha256_hex(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
-        storage.access_key_id
-    );
-    Some((amz_date, authorization))
-}
-
-/// New FileAsset row (`base.py:197-206`): `attributes={name, type, size}`,
-/// `asset` under the avatar `upload_to` (`asset.py:17-20`, workspace-less →
-/// `user-{hex}-{filename}`), `user` set (both audit columns NULL —
-/// anonymous callback, PIDASHCONV-1730), entity
-/// `USER_AVATAR`, uploaded flag, S3 head metadata (NULL when the HEAD
-/// fails, like boto3's `None`).
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_file_asset(
-    pool: &sqlx::PgPool,
-    id: uuid::Uuid,
-    stored_key: &str,
-    content_type: &str,
-    file_size: i64,
-    user_id: uuid::Uuid,
-    storage_metadata: Option<serde_json::Value>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), sqlx::Error> {
-    use sea_orm::{ActiveModelTrait, Set};
-    let attributes = serde_json::json!({
-        "name": format!("gitea-avatar.{}", avatar_extension(content_type).unwrap_or("jpg")),
-        "type": content_type,
-        "size": file_size,
-    });
-    let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    file_assets::ActiveModel {
-        id: Set(id),
-        created_at: Set(now_tz),
-        updated_at: Set(now_tz),
-        attributes: Set(attributes),
-        asset: Set(stored_key.to_owned()),
-        // Django's BaseModel.save overwrites created_by with NULL on the
-        // anonymous OAuth callback (login() runs after sign-up), so both
-        // audit columns are NULL — same as the shared helper in mod.rs.
-        created_by_id: Set(None),
-        updated_by_id: Set(None),
-        workspace_id: Set(None),
-        is_deleted: Set(false),
-        deleted_at: Set(None),
-        is_archived: Set(false),
-        comment_id: Set(None),
-        entity_type: Set(Some("USER_AVATAR".to_owned())),
-        external_id: Set(None),
-        external_source: Set(None),
-        is_uploaded: Set(true),
-        issue_id: Set(None),
-        page_id: Set(None),
-        project_id: Set(None),
-        size: Set(file_size as f64),
-        storage_metadata: Set(storage_metadata),
-        user_id: Set(Some(user_id)),
-        draft_issue_id: Set(None),
-        entity_identifier: Set(None),
-    }
-    .insert(&db)
-    .await
-    .map_err(pidash_db::orm_tx::into_sqlx)?;
-    Ok(())
-}
-
-/// `download_and_upload_avatar` (`base.py:139-205`): download (10s
-/// timeout), size + content-type guards, S3 PUT, HEAD metadata, FileAsset
-/// row. ANY failure returns `Ok(None)` so the caller falls back to the
-/// provider URL (`except Exception: log_exception; return None`).
-/// `max_bytes` is `settings.DATA_UPLOAD_MAX_MEMORY_SIZE`.
-#[allow(clippy::too_many_arguments)]
-pub async fn download_and_upload_avatar(
-    client: &reqwest::Client,
-    pool: &sqlx::PgPool,
-    storage: &pidash_db::config::StorageSettings,
-    scheme: &str,
-    host: &str,
-    avatar_url: &str,
-    user_id: uuid::Uuid,
-    max_bytes: u64,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<uuid::Uuid> {
-    if avatar_url.is_empty() {
-        return None;
-    }
-    let outcome: Result<Option<uuid::Uuid>, ()> = async {
-        let mut response = client
-            .get(avatar_url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|_| ())?
-            .error_for_status()
-            .map_err(|_| ())?;
-        let headers = response.headers().clone();
-        if let Some(length) = headers
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-        {
-            if length > max_bytes {
-                return Err(());
-            }
-        }
-        let content_type = headers
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("image/jpeg")
-            .split(';')
-            .next()
-            .unwrap_or("image/jpeg")
-            .trim()
-            .to_owned();
-        let extension = avatar_extension(&content_type).ok_or(())?;
-        let mut content = Vec::new();
-        loop {
-            let chunk = response.chunk().await.map_err(|_| ())?;
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if content.len() as u64 + chunk.len() as u64 > max_bytes {
-                return Err(());
-            }
-            content.extend_from_slice(&chunk);
-        }
-        let file_size = content.len() as i64;
-        let filename = format!("{}-user-avatar.{extension}", uuid::Uuid::new_v4().simple());
-        // `upload_to` with no workspace (`asset.py:17-20`).
-        let stored_key = format!("user-{}-{filename}", uuid::Uuid::new_v4().simple());
-        let (endpoint, signed_host, prefix) = s3_target(storage, scheme, host).ok_or(())?;
-        let payload_hash = sha256_hex(&content);
-        let canonical_uri = format!("{prefix}/{stored_key}");
-        let (amz_date, authorization) = s3_authorization(
-            storage,
-            &signed_host,
-            "PUT",
-            &canonical_uri,
-            &payload_hash,
-            Some(&content_type),
-            &now,
-        )
-        .ok_or(())?;
-        let url = format!("{endpoint}{canonical_uri}");
-        let put = client
-            .put(url)
-            .header("Host", signed_host.clone())
-            .header("x-amz-date", amz_date.clone())
-            .header("x-amz-content-sha256", payload_hash.clone())
-            .header(reqwest::header::CONTENT_TYPE, content_type.clone())
-            .header("Authorization", authorization.clone())
-            .body(content)
-            .send()
-            .await
-            .map_err(|_| ())?;
-        if !put.status().is_success() {
-            return Err(());
-        }
-        // `get_object_metadata`: HEAD, same signing, no content type.
-        let head_hash = sha256_hex(&[]);
-        let (head_date, head_auth) = s3_authorization(
-            storage,
-            &signed_host,
-            "HEAD",
-            &canonical_uri,
-            &head_hash,
-            None,
-            &now,
-        )
-        .ok_or(())?;
-        let head_url = format!("{endpoint}{canonical_uri}");
-        let metadata = client
-            .head(head_url)
-            .header("Host", signed_host)
-            .header("x-amz-date", head_date)
-            .header("x-amz-content-sha256", head_hash)
-            .header("Authorization", head_auth)
-            .send()
-            .await
-            .ok()
-            .filter(|r| r.status().is_success())
-            .map(|r| head_metadata_json(r.headers()));
-        let asset_id = uuid::Uuid::new_v4();
-        insert_file_asset(
-            pool,
-            asset_id,
-            &stored_key,
-            &content_type,
-            file_size,
-            user_id,
-            metadata,
-            now,
-        )
-        .await
-        .map_err(|_| ())?;
-        Ok(Some(asset_id))
-    }
-    .await;
-    match outcome {
-        Ok(found) => found,
-        Err(()) => {
-            tracing::warn!("download_and_upload_avatar failed; falling back to provider URL");
-            None
-        }
-    }
-}
-
-/// `S3Storage.get_object_metadata` (`storage.py:156-170`): the HEAD
-/// response projected to `{ContentType, ContentLength, LastModified
-/// (ISO-8601), ETag, Metadata (x-amz-meta-* map)}`.
-pub fn head_metadata_json(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
-    let str_header = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-    };
-    let content_length = headers
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<i64>().ok());
-    let last_modified = str_header("last-modified")
-        .and_then(|v| chrono::DateTime::parse_from_rfc2822(&v).ok())
-        .map(|dt| dt.to_rfc3339());
-    let mut meta = serde_json::Map::new();
-    for (name, value) in headers {
-        let name = name.as_str();
-        if let Some(suffix) = name.strip_prefix("x-amz-meta-") {
-            if let Ok(value) = value.to_str() {
-                meta.insert(
-                    suffix.to_owned(),
-                    serde_json::Value::String(value.to_owned()),
-                );
-            }
-        }
-    }
-    serde_json::json!({
-        "ContentType": str_header("content-type"),
-        "ContentLength": content_length,
-        "LastModified": last_modified,
-        "ETag": str_header("etag"),
-        "Metadata": meta,
-    })
-}
-
-/// `delete_old_avatar` (`base.py:236-254`): when the user carries a
-/// live avatar asset, delete the S3 object, soft-delete the row and clear
-/// both columns. `FileAsset.DoesNotExist` (no row, or a soft-deleted one —
-/// the manager filters `deleted_at IS NULL`) passes silently; any other
-/// failure is logged and the flow continues with the old avatar intact
-/// (`except Exception: log_exception; return`). The row write is a soft
-/// delete, never a hard `DELETE`: the user's FK still points at the row,
-/// so a hard delete would die on the deferred FK in autocommit
-/// (PIDASHCONV-1321).
-#[allow(clippy::too_many_arguments)]
-pub async fn delete_old_avatar(
-    client: &reqwest::Client,
-    pool: &sqlx::PgPool,
-    storage: &pidash_db::config::StorageSettings,
-    scheme: &str,
-    host: &str,
-    user_id: uuid::Uuid,
-    avatar_asset_id: Option<uuid::Uuid>,
-    now: chrono::DateTime<chrono::Utc>,
-) {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
-    let Some(asset_id) = avatar_asset_id else {
-        return;
-    };
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let row: Option<String> = match file_assets::Entity::find_by_id(asset_id)
-        .filter(file_assets::Column::DeletedAt.is_null())
-        .select_only()
-        .column(file_assets::Column::Asset)
-        .into_tuple()
-        .one(&db)
-        .await
-        .map_err(pidash_db::orm_tx::into_sqlx)
-    {
-        Ok(row) => row,
-        Err(error) => {
-            tracing::warn!(%error, "delete_old_avatar lookup failed");
-            return;
-        }
-    };
-    let Some(key) = row else {
-        return;
-    };
-    let Some((endpoint, signed_host, prefix)) = s3_target(storage, scheme, host) else {
-        return;
-    };
-    let payload_hash = sha256_hex(&[]);
-    let canonical_uri = format!("{prefix}/{key}");
-    if let Some((amz_date, authorization)) = s3_authorization(
-        storage,
-        &signed_host,
-        "DELETE",
-        &canonical_uri,
-        &payload_hash,
-        None,
-        &now,
-    ) {
-        let url = format!("{endpoint}{canonical_uri}");
-        match client
-            .delete(url)
-            .header("Host", signed_host)
-            .header("x-amz-date", amz_date)
-            .header("x-amz-content-sha256", payload_hash)
-            .header("Authorization", authorization)
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() || response.status() == 404 => {
-                crate::auth_oauth::soft_delete_avatar_asset(pool, user_id, asset_id, now).await;
-            }
-            other => {
-                tracing::warn!(
-                    "delete_old_avatar S3 delete failed: {:?}",
-                    other.map(|r| r.status())
-                );
-            }
-        }
-    }
-}
+// Avatar work delegates to the shared `super::` helpers (`mod.rs`),
+// exactly like the github/gitlab twins: bare `{uuid4hex}-user-avatar.{ext}`
+// S3 key (`pidash_storage::avatar_object_key`), exact-match Content-Type
+// allowlist, and soft-delete on any answered S3 response. Gitea previously
+// kept private copies that diverged (prefixed `user-{uuid}-` key, `;`-split
+// Content-Type, 2xx/404 delete gate); those copies are gone (PIDASHCONV-1729).
 
 // ---------------------------------------------------------------------------
 // §8 Invitation workflow (post_user_auth_workflow →
@@ -2174,12 +1702,13 @@ pub async fn authenticate_user(
         let (mut avatar, mut asset) = if avatar_url.is_empty() {
             (String::new(), None)
         } else {
-            match download_and_upload_avatar(
+            match super::download_and_upload_avatar(
                 &s3_client,
                 pool,
                 storage,
                 if inputs.is_secure { "https" } else { "http" },
                 &inputs.host,
+                "gitea",
                 avatar_url,
                 user_id,
                 file_size_max,
@@ -2205,7 +1734,7 @@ pub async fn authenticate_user(
         .map(|v| v.as_deref() == Some("1"))
         .unwrap_or(false);
         if sync_enabled && !is_signup {
-            delete_old_avatar(
+            super::delete_old_avatar(
                 &s3_client,
                 pool,
                 storage,
@@ -2216,12 +1745,13 @@ pub async fn authenticate_user(
                 now,
             )
             .await;
-            (avatar, asset) = match download_and_upload_avatar(
+            (avatar, asset) = match super::download_and_upload_avatar(
                 &s3_client,
                 pool,
                 storage,
                 if inputs.is_secure { "https" } else { "http" },
                 &inputs.host,
+                "gitea",
                 avatar_url,
                 user_id,
                 file_size_max,
@@ -3086,17 +2616,6 @@ mod tests {
     }
 
     #[test]
-    fn avatar_extension_map_matches_python() {
-        assert_eq!(avatar_extension("image/jpeg"), Some("jpg"));
-        assert_eq!(avatar_extension("image/jpg"), Some("jpg"));
-        assert_eq!(avatar_extension("image/png"), Some("png"));
-        assert_eq!(avatar_extension("image/gif"), Some("gif"));
-        assert_eq!(avatar_extension("image/webp"), Some("webp"));
-        assert_eq!(avatar_extension("image/svg+xml"), None);
-        assert_eq!(avatar_extension(""), None);
-    }
-
-    #[test]
     fn sanitize_email_branches() {
         assert_eq!(
             sanitize_email(Some(&serde_json::json!("U@Example.COM"))).expect("valid"),
@@ -3177,77 +2696,6 @@ mod tests {
             default_issue_props_json(),
             serde_json::json!({"subscribed": true, "assigned": true, "created": true, "all_issues": true})
         );
-    }
-
-    #[test]
-    fn s3_target_minio_ssl_and_global_east() {
-        use pidash_db::config::StorageSettings;
-        let base = StorageSettings {
-            use_minio: true,
-            minio_endpoint_ssl: false,
-            access_key_id: "access-key".to_owned(),
-            secret_access_key: "secret-key".to_owned(),
-            bucket_name: "uploads".to_owned(),
-            region: "us-east-1".to_owned(),
-            endpoint_url: None,
-            signed_url_expiration_secs: 3600,
-        };
-        // `MINIO_ENDPOINT_SSL=1` signs https in MinIO mode (`storage.py:46-51`).
-        let ssl = StorageSettings {
-            minio_endpoint_ssl: true,
-            ..base.clone()
-        };
-        assert_eq!(
-            s3_target(&ssl, "http", "h:9").expect("minio"),
-            (
-                "https://h:9".to_owned(),
-                "h:9".to_owned(),
-                "/uploads".to_owned()
-            )
-        );
-        // us-east-1 resolves to the global endpoint (botocore probe A/L).
-        let aws = StorageSettings {
-            use_minio: false,
-            ..base.clone()
-        };
-        assert_eq!(
-            s3_target(&aws, "http", "h:9").expect("aws"),
-            (
-                "https://uploads.s3.amazonaws.com".to_owned(),
-                "uploads.s3.amazonaws.com".to_owned(),
-                String::new()
-            )
-        );
-        // Header auth keeps the regional host for regional clients
-        // (botocore probe J HEAD — no presign rewrite).
-        let regional = StorageSettings {
-            use_minio: false,
-            region: "eu-west-1".to_owned(),
-            ..base.clone()
-        };
-        assert_eq!(
-            s3_target(&regional, "http", "h:9").expect("regional"),
-            (
-                "https://uploads.s3.eu-west-1.amazonaws.com".to_owned(),
-                "uploads.s3.eu-west-1.amazonaws.com".to_owned(),
-                String::new()
-            )
-        );
-        // Empty region with a derived endpoint is `None` (`ValueError`,
-        // probe D); garbage regions are `None` everywhere
-        // (`InvalidRegionError`). Both fold into the provider-URL
-        // fallback, never a 500.
-        let empty = StorageSettings {
-            use_minio: false,
-            region: String::new(),
-            ..base.clone()
-        };
-        assert_eq!(s3_target(&empty, "http", "h:9"), None);
-        let garbage = StorageSettings {
-            region: "!!".to_owned(),
-            ..base
-        };
-        assert_eq!(s3_target(&garbage, "http", "h:9"), None);
     }
 
     // -- live kernel tests (env-gated, PIDASHCONV-1089) ------------------
@@ -3714,11 +3162,22 @@ mod tests {
     /// Loopback S3 stub: answers `200` with an empty body to every
     /// request. Returns the base URL plus a hit counter.
     fn s3_stub_200() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        s3_stub_status(200, "OK")
+    }
+
+    /// Loopback S3 stub answering the given status to every request
+    /// (PIDASHCONV-1729: 403 proves Django still soft-deletes).
+    fn s3_stub_status(
+        status: u16,
+        reason: &str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::io::{Read, Write};
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind s3 stub");
         let port = listener.local_addr().expect("stub addr").port();
         let counted = std::sync::Arc::clone(&hits);
+        let response =
+            format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         std::thread::spawn(move || {
             for stream in listener.incoming().take(8) {
                 let Ok(mut socket) = stream else {
@@ -3728,18 +3187,17 @@ mod tests {
                 let _ = socket.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                 let mut buf = [0u8; 4096];
                 let _ = socket.read(&mut buf);
-                let _ = socket.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                );
+                let _ = socket.write_all(response.as_bytes());
             }
         });
         (format!("http://127.0.0.1:{port}"), hits)
     }
 
     /// Seed a user carrying a live `USER_AVATAR` asset (column lists mirror
-    /// `insert_file_asset` and `_harness.db.Database.make_user`), with the
-    /// user's FK + avatar string pointed at it. `created_by` is seeded set
-    /// (like `insert_file_asset`) so the test pins Django's anonymous-save
+    /// `insert_avatar_file_asset` and `_harness.db.Database.make_user`),
+    /// with the user's FK + avatar string pointed at it. `created_by` is
+    /// seeded set (like `insert_avatar_file_asset`) so the test pins
+    /// Django's anonymous-save
     /// NULLing (`BaseModel.save`, `db/models/base.py:31-33`).
     async fn seed_avatar_user(
         pool: &sqlx::PgPool,
@@ -3846,7 +3304,7 @@ mod tests {
             seed_avatar_user(&pool, &email, &format!("kernel-{tag}-user-avatar.png")).await;
         let client = reqwest::Client::new();
 
-        delete_old_avatar(
+        crate::auth_oauth::delete_old_avatar(
             &client,
             &pool,
             &storage,
@@ -3908,6 +3366,67 @@ mod tests {
         assert_eq!(jobs[0].2, serde_json::json!({"using": null}));
     }
 
+    /// A 403 S3 DELETE still soft-deletes (Django `delete_files` catches
+    /// `ClientError` and `asset.delete()` runs anyway; shared helper
+    /// soft-deletes on any answered response — PIDASHCONV-1729).
+    #[tokio::test]
+    async fn gitea_kernel_delete_old_avatar_on_403_soft_deletes() {
+        let Some(pool) = kernel_pool().await else {
+            return;
+        };
+        let (s3_base, hits) = s3_stub_status(403, "Forbidden");
+        let storage = pidash_db::config::StorageSettings {
+            use_minio: false,
+            minio_endpoint_ssl: false,
+            access_key_id: "kernel-access".to_owned(),
+            secret_access_key: "kernel-secret".to_owned(),
+            bucket_name: "uploads".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some(s3_base),
+            signed_url_expiration_secs: 3600,
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let email = format!("ge1729-{tag}@example.test");
+        let (user_id, asset_id) =
+            seed_avatar_user(&pool, &email, &format!("kernel-{tag}-user-avatar.png")).await;
+        let client = reqwest::Client::new();
+
+        crate::auth_oauth::delete_old_avatar(
+            &client,
+            &pool,
+            &storage,
+            "http",
+            "127.0.0.1",
+            user_id,
+            Some(asset_id),
+            chrono::Utc::now(),
+        )
+        .await;
+
+        let row: (Option<chrono::DateTime<chrono::Utc>>,) =
+            sqlx::query_as(r#"SELECT "deleted_at" FROM "file_assets" WHERE "id" = $1"#)
+                .bind(asset_id)
+                .fetch_one(&pool)
+                .await
+                .expect("old asset row read");
+        let user: (Option<uuid::Uuid>, String) =
+            sqlx::query_as(r#"SELECT "avatar_asset_id", "avatar" FROM "users" WHERE "id" = $1"#)
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read user");
+        cleanup_avatar_world(&pool, user_id).await;
+
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the S3 DELETE was attempted once"
+        );
+        assert!(row.0.is_some(), "403 DELETE still soft-deletes");
+        assert_eq!(user.0, None, "user FK cleared on 403");
+        assert_eq!(user.1, "", "user avatar string cleared on 403");
+    }
+
     /// A soft-deleted asset reads as missing (Django's `objects.get`
     /// `deleted_at IS NULL` manager raises `DoesNotExist`): no S3 I/O, no
     /// user write, no enqueue.
@@ -3939,7 +3458,7 @@ mod tests {
             .expect("pre-soft-delete the asset");
         let client = reqwest::Client::new();
 
-        delete_old_avatar(
+        crate::auth_oauth::delete_old_avatar(
             &client,
             &pool,
             &storage,
