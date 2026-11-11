@@ -45,7 +45,7 @@ def test_web_runner_list_shape(user_client, daemon_world, machine_flow):
 def test_web_runner_list_requires_workspace(user_client):
     response = user_client.get(WEB + "/")
     assert response.status_code == 400
-    assert response.json() == {"error": "workspace is required"}
+    assert response.json() == {"error": "project or workspace is required"}
 
 
 def test_web_runner_list_denies_anonymous(anon_client, daemon_world):
