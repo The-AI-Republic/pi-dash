@@ -3194,9 +3194,10 @@ mod tests {
     }
 
     /// Seed a user carrying a live `USER_AVATAR` asset (column lists mirror
-    /// `insert_file_asset` and `_harness.db.Database.make_user`), with the
-    /// user's FK + avatar string pointed at it. `created_by` is seeded set
-    /// (like `insert_file_asset`) so the test pins Django's anonymous-save
+    /// `insert_avatar_file_asset` and `_harness.db.Database.make_user`),
+    /// with the user's FK + avatar string pointed at it. `created_by` is
+    /// seeded set (like `insert_avatar_file_asset`) so the test pins
+    /// Django's anonymous-save
     /// NULLing (`BaseModel.save`, `db/models/base.py:31-33`).
     async fn seed_avatar_user(
         pool: &sqlx::PgPool,
