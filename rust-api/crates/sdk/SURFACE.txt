@@ -763,8 +763,11 @@ pidash_sdk::state::CredentialError
 pidash_sdk::state::CredentialUnavailable
 pidash_sdk::state::DesktopCredential
 pidash_sdk::state::DesktopRequestGate
+pidash_sdk::state::ExecuteModelInputs
 pidash_sdk::state::ExtraToolset
 pidash_sdk::state::NoExtraToolsets
+pidash_sdk::state::ResolvedRunModel
+pidash_sdk::state::RunModelKey
 pidash_sdk::state::SeamFuture
 pidash_sdk::state::TitleError
 pidash_sdk::state::TitleRequest

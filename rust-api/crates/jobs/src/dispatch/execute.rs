@@ -99,12 +99,13 @@ use pidash_db::tx::Transaction;
 use pidash_services::assistant::llm::ModelRef;
 use pidash_services::dispatch::{
     build_tools, cloud_agent_is_configured, github_available_for_project, github_mcp_spec,
-    github_toolset_spec, resolve_current_tool_names, resolve_model_for_run, resolve_run_project,
-    truncate_chars, user_has_llm_config, GithubMcpSpec, GithubToolsetSpec, LinkedPrCtx, ProjectRef,
+    github_toolset_spec, resolve_current_tool_names, resolve_run_project, truncate_chars,
+    user_has_llm_config, GithubMcpSpec, GithubToolsetSpec, LinkedPrCtx, ProjectRef,
     RequiredToolUnavailable, UserFlags, GITHUB_TOOL_NAMES,
 };
 use pidash_services::extensions::{
-    CloudAgentToolsetsSeam, ToolsetsResolution, ToolsetsRun, ToolsetsUnavailable,
+    CloudAgentToolsetsSeam, ResolvedRunModel, RunModelKey, ToolsetsResolution, ToolsetsRun,
+    ToolsetsUnavailable,
 };
 use pidash_types::assistant::errors::AssistantError;
 use pidash_types::dispatch::{
@@ -683,20 +684,7 @@ pub struct ModelSettings {
     pub timeout_secs: i64,
 }
 
-/// The creator LLM facts the model seam reads (`resolve_model_for_run`
-/// inputs): has-key bit, configured name, provider kind, base URL, and
-/// the caller-computed SSRF verdict (the `llm.rs` precedent — presence
-/// bits in, no DB handle here).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreatorLlmFacts {
-    pub has_api_key: bool,
-    pub model_name: String,
-    pub provider_kind: String,
-    pub base_url: String,
-    pub base_url_blocked: bool,
-}
-
-/// The resolved model name (`runtime.py:51`): the BYOK descriptor's
+/// The resolved model name (`runtime.py:51`): the descriptor's
 /// configured name on either branch, truncated to 128 chars.
 pub fn model_name_for(model: &ModelRef) -> String {
     let name = match model {
@@ -726,8 +714,13 @@ pub struct ModelInvocation {
     pub retries: u32,
     /// `CLOUD_AGENT_TOOL_TIMEOUT_SECONDS` (`runtime.py:49`).
     pub tool_timeout_secs: i64,
-    /// [`ModelRef`] from [`resolve_model_for_run`][pidash_services::dispatch::resolve_model_for_run].
+    /// [`ModelRef`] from the resolved run model (the assistant seam's
+    /// `resolve_model_for_user` answer).
     pub model: ModelRef,
+    /// The lane credential the invocation executes with: the creator's
+    /// BYOK ciphertext (decrypted inside the model runtime) or the
+    /// seam-minted credential for overlay lanes.
+    pub key: RunModelKey,
     /// Plan-or-settings limits (`runtime.py:57-63`).
     pub usage_limits: UsageLimits,
     /// Per-request settings (`runtime.py:68-71`).
@@ -1287,6 +1280,42 @@ impl std::fmt::Display for SeamError {
 
 impl std::error::Error for SeamError {}
 
+/// A model-resolution failure at the execute seam: a seam/DB failure,
+/// or the assistant's own resolution error. The drive maps the first
+/// through the generic seam arm and the second through the
+/// `AssistantError` arm (with `LlmConfigMissing` short-circuiting to
+/// `llm_config_missing`, the `except LLMConfigMissing` arm).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// `(seam)` — the facts read failed.
+    Seam(SeamError),
+    /// `(model)` — the assistant seam's own resolution error.
+    Model(AssistantError),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::Seam(error) => write!(f, "{error}"),
+            ResolveError::Model(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+impl From<SeamError> for ResolveError {
+    fn from(error: SeamError) -> Self {
+        ResolveError::Seam(error)
+    }
+}
+
+impl From<AssistantError> for ResolveError {
+    fn from(error: AssistantError) -> Self {
+        ResolveError::Model(error)
+    }
+}
+
 /// One `finalize_agent_run` call
 /// (`runner/services/agent_run_finalization.py:48-86`): the terminal
 /// status, the updates dict, and the optional expected-status guard.
@@ -1362,12 +1391,13 @@ pub trait ExecuteSeams: Send + Sync {
         &self,
         creator_id: Uuid,
     ) -> impl std::future::Future<Output = Result<bool, SeamError>> + Send;
-    /// The creator's provider row as presence bits (assistant-owned
-    /// tables): [`resolve_model_for_run`] inputs.
-    fn creator_llm_facts(
+    /// `resolve_model_for_run` (the assistant-owned EE seam chain,
+    /// `ee/cloud_agent/model_provider.py` → `resolve_model_for_user`):
+    /// the resolved model plus the creator's lane credential.
+    fn resolve_model_for_run(
         &self,
         creator_id: Uuid,
-    ) -> impl std::future::Future<Output = Result<CreatorLlmFacts, SeamError>> + Send;
+    ) -> impl std::future::Future<Output = Result<ResolvedRunModel, ResolveError>> + Send;
     /// `agent.run(prompt, usage_limits, model_settings)`
     /// (`runtime.py:64-72`): the structured output plus the raw usage
     /// object. The drive wraps this call — and only this call — in the
@@ -2128,6 +2158,7 @@ async fn apply_try_done<S: ExecuteSeams>(
 pub fn build_invocation(
     ctx: &RunContext,
     model: ModelRef,
+    key: RunModelKey,
     current_tools: Vec<String>,
     cloud: &CloudAgentSettings,
     usage_limits: UsageLimits,
@@ -2151,6 +2182,7 @@ pub fn build_invocation(
         retries: AGENT_RETRIES,
         tool_timeout_secs: cloud.tool_timeout_secs,
         model,
+        key,
         usage_limits,
         model_settings: ModelSettings {
             max_tokens: cloud.max_output_tokens_per_request,
@@ -2205,23 +2237,15 @@ pub async fn drive_execute<S: ExecuteSeams>(
     current_tools: Vec<String>,
     toolsets: &dyn CloudAgentToolsetsSeam,
 ) -> Result<(CloudAgentOutput, String, Value), TryError> {
-    let facts = seams
-        .creator_llm_facts(ctx.created_by_id)
-        .await
-        .map_err(TryError::Seam)?;
-    let model = match resolve_model_for_run(
-        facts.has_api_key,
-        &facts.model_name,
-        &facts.provider_kind,
-        &facts.base_url,
-        facts.base_url_blocked,
-    ) {
-        Ok(model) => model,
-        Err(AssistantError::LlmConfigMissing(message)) => {
+    let resolved = match seams.resolve_model_for_run(ctx.created_by_id).await {
+        Ok(resolved) => resolved,
+        Err(ResolveError::Seam(error)) => return Err(TryError::Seam(error)),
+        Err(ResolveError::Model(AssistantError::LlmConfigMissing(message))) => {
             return Err(TryError::LlmConfigMissing(message));
         }
-        Err(error) => return Err(TryError::Resolve(error)),
+        Err(ResolveError::Model(error)) => return Err(TryError::Resolve(error)),
     };
+    let model = resolved.model;
     let model_name = model_name_for(&model);
     // Deployment-provided toolsets (`runtime.py:29-37`): the run's own
     // snapshot gates the seam — never consulted when the flag is off —
@@ -2256,6 +2280,7 @@ pub async fn drive_execute<S: ExecuteSeams>(
     let invocation = build_invocation(
         ctx,
         model,
+        resolved.key,
         current_tools,
         cloud,
         usage_limits,
@@ -2897,7 +2922,8 @@ mod tests {
         finalize_fail_times: Mutex<usize>,
         normalized: Mutex<Vec<Map<String, Value>>>,
         llm_ok: bool,
-        facts: CreatorLlmFacts,
+        resolved: ResolvedRunModel,
+        resolve_err: Mutex<Option<ResolveError>>,
         invoke: Mutex<Option<Result<(CloudAgentOutput, RawUsage), InvokeError>>>,
         invocations: Mutex<Vec<ModelInvocation>>,
     }
@@ -2910,13 +2936,13 @@ mod tests {
                 finalize_fail_times: Mutex::new(0),
                 normalized: Mutex::new(Vec::new()),
                 llm_ok: true,
-                facts: CreatorLlmFacts {
-                    has_api_key: true,
-                    model_name: "fake-model".to_owned(),
-                    provider_kind: "anthropic".to_owned(),
-                    base_url: String::new(),
-                    base_url_blocked: false,
+                resolved: ResolvedRunModel {
+                    model: ModelRef::Anthropic {
+                        model: "fake-model".to_owned(),
+                    },
+                    key: RunModelKey::ByokEncrypted(b"fake-key".to_vec()),
                 },
+                resolve_err: Mutex::new(None),
                 invoke: Mutex::new(None),
                 invocations: Mutex::new(Vec::new()),
             }
@@ -2947,8 +2973,14 @@ mod tests {
             Ok(self.llm_ok)
         }
 
-        async fn creator_llm_facts(&self, _creator_id: Uuid) -> Result<CreatorLlmFacts, SeamError> {
-            Ok(self.facts.clone())
+        async fn resolve_model_for_run(
+            &self,
+            _creator_id: Uuid,
+        ) -> Result<ResolvedRunModel, ResolveError> {
+            match self.resolve_err.lock().unwrap().take() {
+                Some(error) => Err(error),
+                None => Ok(self.resolved.clone()),
+            }
         }
 
         async fn invoke_model(
@@ -3423,9 +3455,11 @@ mod tests {
             model: "claude-x".to_owned(),
         };
         let limits = usage_limits_for(&ctx.tool_plan, &cloud).unwrap();
+        let key = RunModelKey::ByokEncrypted(b"fake-key".to_vec());
         let invocation = build_invocation(
             &ctx,
             model.clone(),
+            key.clone(),
             vec![
                 "pidash_search_project_issues".to_owned(),
                 "github_get_file".to_owned(),
@@ -3452,6 +3486,7 @@ mod tests {
         assert_eq!(invocation.retries, 2);
         assert_eq!(invocation.tool_timeout_secs, 20);
         assert_eq!(invocation.model, model);
+        assert_eq!(invocation.key, key);
         assert_eq!(invocation.usage_limits, limits);
         assert_eq!(
             invocation.model_settings,
@@ -3465,6 +3500,7 @@ mod tests {
         let invocation = build_invocation(
             &ctx,
             model,
+            key,
             vec!["pidash_search_project_issues".to_owned()],
             &cloud,
             limits,
@@ -3484,6 +3520,7 @@ mod tests {
         let invocation = build_invocation(
             &ctx,
             model,
+            RunModelKey::Direct("test".to_owned()),
             Vec::new(),
             &cloud,
             limits,
@@ -3607,6 +3644,89 @@ mod tests {
             json!("provider_auth_failed")
         );
         assert_eq!(calls[0].updates["error"], json!("bad key"));
+    }
+
+    /// The resolve-error mapping through the drive (`resolve_model_for_run`
+    /// — PIDASHCONV-1725): a `LlmConfigMissing` from the assistant seam
+    /// short-circuits to `llm_config_missing` before any DB write, a
+    /// seam failure classifies generic, and any other assistant error
+    /// carries its own code. None of the three touches the pool (the
+    /// resolution runs first, exactly like `runtime.py`).
+    #[tokio::test]
+    async fn resolve_errors_map_through_the_drive() {
+        let cloud = django_cloud_settings();
+        let ctx = run_ctx();
+        // LlmConfigMissing: the `except LLMConfigMissing` arm.
+        let seams = FakeSeams {
+            resolve_err: Mutex::new(Some(ResolveError::Model(AssistantError::LlmConfigMissing(
+                "gone".to_owned(),
+            )))),
+            ..FakeSeams::new()
+        };
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("missing config");
+        assert!(matches!(error, TryError::LlmConfigMissing(ref message) if message == "gone"));
+        // Any other assistant error: the exception's own `.code`.
+        let seams = FakeSeams {
+            resolve_err: Mutex::new(Some(ResolveError::Model(
+                AssistantError::AssistantNotConfigured("crypto missing".to_owned()),
+            ))),
+            ..FakeSeams::new()
+        };
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("crypto missing");
+        assert!(matches!(
+            error,
+            TryError::Resolve(AssistantError::AssistantNotConfigured(_))
+        ));
+        // A seam failure classifies generic (`provider_error` downstream).
+        let seams = FakeSeams {
+            resolve_err: Mutex::new(Some(ResolveError::Seam(SeamError("boom".to_owned())))),
+            ..FakeSeams::new()
+        };
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("seam failure");
+        assert!(matches!(error, TryError::Seam(_)));
+        // A resolved model that then hits the lazy pool classifies as a
+        // DB error (the `model_started` write), proving resolution
+        // itself succeeded and reached the event write.
+        let seams = FakeSeams::new();
+        let error = drive_execute(
+            &seams,
+            &lazy_pool(),
+            &cloud,
+            &ctx,
+            Vec::new(),
+            &NoExtraToolsets,
+        )
+        .await
+        .expect_err("lazy pool fails at the event write");
+        assert!(matches!(error, TryError::Db(_)));
+        assert!(seams.invocations.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4201,7 +4321,7 @@ mod tests {
             finalize: Mutex<Vec<FinalizeCall>>,
             force_lose: bool,
             llm_ok: bool,
-            facts: CreatorLlmFacts,
+            resolved: ResolvedRunModel,
             invoke: Mutex<Option<Result<(CloudAgentOutput, RawUsage), InvokeError>>>,
             invocations: Mutex<Vec<ModelInvocation>>,
             pool: PgPool,
@@ -4213,12 +4333,11 @@ mod tests {
                     finalize: Mutex::new(Vec::new()),
                     force_lose: false,
                     llm_ok: true,
-                    facts: CreatorLlmFacts {
-                        has_api_key: true,
-                        model_name: "fake-model".to_owned(),
-                        provider_kind: "anthropic".to_owned(),
-                        base_url: String::new(),
-                        base_url_blocked: false,
+                    resolved: ResolvedRunModel {
+                        model: ModelRef::Anthropic {
+                            model: "fake-model".to_owned(),
+                        },
+                        key: RunModelKey::ByokEncrypted(b"fake-key".to_vec()),
                     },
                     invoke: Mutex::new(None),
                     invocations: Mutex::new(Vec::new()),
@@ -4329,11 +4448,11 @@ mod tests {
                 Ok(self.llm_ok)
             }
 
-            async fn creator_llm_facts(
+            async fn resolve_model_for_run(
                 &self,
                 _creator_id: Uuid,
-            ) -> Result<CreatorLlmFacts, SeamError> {
-                Ok(self.facts.clone())
+            ) -> Result<ResolvedRunModel, ResolveError> {
+                Ok(self.resolved.clone())
             }
 
             async fn invoke_model(
@@ -4789,6 +4908,147 @@ mod tests {
                     .await
                     .expect("events");
             assert_eq!(kinds, vec!["model_started".to_owned()]);
+            teardown(&pool, &graph).await;
+        }
+
+        /// The execute gate and model resolution consult the INSTALLED
+        /// assistant seam (PIDASHCONV-1725): a creator with no BYOK row
+        /// is admitted when the seam says so, and the resolved model +
+        /// credential are the seam's answer — never the (absent) row's.
+        #[derive(Debug)]
+        struct OpenHubSeam;
+
+        impl pidash_services::extensions::AssistantModelSeam for OpenHubSeam {
+            fn has_usable_llm_config(
+                &self,
+                _user_id: Uuid,
+                _has_api_key: bool,
+            ) -> pidash_services::extensions::SeamFuture<'_, bool> {
+                Box::pin(async move { true })
+            }
+
+            fn resolve_model_for_user(
+                &self,
+                _user_id: Uuid,
+                _inputs: pidash_services::extensions::ExecuteModelInputs,
+            ) -> pidash_services::extensions::SeamFuture<'_, Result<ResolvedRunModel, AssistantError>>
+            {
+                Box::pin(async move {
+                    Ok(ResolvedRunModel {
+                        model: ModelRef::OpenAICompatible {
+                            // A stub answer: the plumbing (whatever the
+                            // seam returns flows through), not a model
+                            // choice — hosted answers take their model
+                            // from the cloud seam's openhub_model_for.
+                            model: "stub-model".to_owned(),
+                            base_url: "https://gateway.example.invalid/v1".to_owned(),
+                        },
+                        key: RunModelKey::Direct("stub-key".to_owned()),
+                    })
+                })
+            }
+
+            fn generate_title(
+                &self,
+                _request: pidash_services::extensions::TitleRequest,
+            ) -> pidash_services::extensions::SeamFuture<
+                '_,
+                Result<String, pidash_services::extensions::TitleError>,
+            > {
+                Box::pin(async move { Ok(String::new()) })
+            }
+        }
+
+        /// The mirror's `ToolCtx` needs a transition hook; this
+        /// test never invokes, so it is never called.
+        #[derive(Debug)]
+        struct NoopTransitionHook;
+
+        impl pidash_services::domain::transition::IssueTransitionHook for NoopTransitionHook {
+            fn enqueue_completion_comment(
+                &self,
+                _issue_id: Uuid,
+                _prev_state_id: Option<Uuid>,
+                _current_state_id: Option<Uuid>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {})
+            }
+
+            fn fire(
+                &self,
+                _actor_id: Uuid,
+                _request: pidash_services::orchestration::entries::FireRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                pidash_services::orchestration::entries::FireOutcome,
+                                (),
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    Ok(pidash_services::orchestration::entries::FireOutcome::NoTransition)
+                })
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "needs migrated scratch DB via DATABASE_URL (`manage.py migrate` first)"]
+        async fn live_execute_consults_the_installed_assistant_seam() {
+            use pidash_db::config::Settings;
+
+            let pool = pool().await;
+            // The seeded creator holds no `assistant_user_llm_config`
+            // row (seed_graph inserts none) — the OpenHub-only shape.
+            let graph = seed_graph(&pool, "seam").await;
+            let settings = Settings::test_defaults();
+            let cloud = cloud_on();
+            let invoke = crate::oss_worker::model_runtime::invoke::InvokeCtx {
+                tools: crate::oss_worker::model_runtime::tools_exec::ToolCtx {
+                    toolsets: std::sync::Arc::new(NoExtraToolsets),
+                    pool: pool.clone(),
+                    orm: pidash_db::pool::sea_orm_connection(&pool),
+                    cloud: cloud.clone(),
+                    managed: django_managed_settings(),
+                    http: reqwest::Client::new(),
+                    github: crate::oss_worker::model_runtime::github::GithubAppContext::new(
+                        pool.clone(),
+                        pidash_db::redis::RedisHandle::from_settings(&settings),
+                        settings.secret_key.clone(),
+                    ),
+                    redis: None,
+                    runner: settings.runner.clone(),
+                    transition_hook: std::sync::Arc::new(NoopTransitionHook),
+                },
+                keys: crate::oss_worker::model_runtime::keys::KeyResolver::from_env(
+                    settings.assistant.key_cache_ttl_secs,
+                    settings.assistant.key_cache_maxsize,
+                ),
+            };
+            let seams = crate::oss_worker::execute_seams::LiveExecuteSeams::new(
+                pool.clone(),
+                cloud.block_private_urls,
+                invoke,
+                std::sync::Arc::new(OpenHubSeam),
+            );
+            // No BYOK row, yet the gate passes (the seam admits the
+            // lane) and the resolve answers the seam's model + key.
+            assert!(seams.has_usable_llm_config(graph.user).await.expect("gate"));
+            let resolved = seams
+                .resolve_model_for_run(graph.user)
+                .await
+                .expect("resolve");
+            assert_eq!(
+                resolved.model,
+                ModelRef::OpenAICompatible {
+                    model: "stub-model".to_owned(),
+                    base_url: "https://gateway.example.invalid/v1".to_owned(),
+                }
+            );
+            assert_eq!(resolved.key, RunModelKey::Direct("stub-key".to_owned()));
             teardown(&pool, &graph).await;
         }
 
