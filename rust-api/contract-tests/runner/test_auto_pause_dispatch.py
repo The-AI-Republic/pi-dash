@@ -220,12 +220,14 @@ def test_auto_resume_drains_to_engine_via_heartbeat(
         (pod["id"], engine_runner),
     )
     # Runner session for drain delivery (engine needs live session)
+    drain_session_id = str(uuid.uuid4())
     seeder.db.execute(
         "INSERT INTO runner_session (id, runner_id, protocol_version,"
         " created_at, last_seen_at, revoked_at, revoked_reason)"
         " VALUES (%s,%s,4,now(),now(),NULL,'')",
-        (str(uuid.uuid4()), engine_runner),
+        (drain_session_id, engine_runner),
     )
+    seeder._put("runner_session", drain_session_id)
 
     with bearer_client(settings.base_url, machine_flow["machine_token"]) as client:
         session_id = _open_machine_session(client, machine_id)
