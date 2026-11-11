@@ -925,7 +925,18 @@ def test_draft_to_issue_converts_with_project(user_api, space, world):
     # PIDASHCONV-904: converting a project-bearing draft 500'd on Rust
     # (the issue_sequences INSERT missed its deleted_at bind) while
     # Django 201s, deletes the draft and enqueues issue_activity.
+    # NEWPIDASH-185 (DIFF-14): the workspace admin is the creator; the
+    # Rust handler now requires an active project-membership row, so the
+    # fixture seeds it (Django ignores it and still 201s).
     proj = world["db"].make_project(space["id"], "RPJ")
+    db = world["db"]
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at, created_at, updated_at, view_props, default_props, sort_order, preferences) VALUES (%s,%s,%s,%s,20,true,NULL,now(),now(),'{}','{}',65535,'{}')",
+                (str(uuid.uuid4()), space["id"], proj["id"], world["user"]["id"]),
+            )
+        conn.commit()
     did = user_api.post(
         f"/api/workspaces/{space['slug']}/draft-issues/",
         json={"name": "D2", "project_id": proj["id"]},
