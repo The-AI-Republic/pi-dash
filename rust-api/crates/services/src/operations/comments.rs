@@ -15,8 +15,7 @@ use uuid::Uuid;
 
 use pidash_db::entity::{issue_comments, projects, workspaces};
 
-use crate::domain::comments as comment_domain;
-use crate::domain::WriteCtx;
+use crate::domain::{WriteCtx, WriteTxn};
 use crate::read::{self, DecodedComment};
 use crate::v1_work_items::python_number_str;
 use crate::v1_work_items::shape_social::{
@@ -328,7 +327,6 @@ pub async fn create(
         return Err(Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
     };
     let comment_id = Uuid::new_v4();
-    let created_at = now_utc();
     let updated_at = now_utc();
     let comment_json = validated
         .comment_json
@@ -338,7 +336,6 @@ pub async fn create(
         .comment_html
         .clone()
         .unwrap_or_else(|| "<p></p>".to_owned());
-    let stripped = strip_comment_html(&comment_html);
     let labels = validated.labels.clone().unwrap_or_default();
     let access = validated
         .access
@@ -355,101 +352,57 @@ pub async fn create(
         .clone()
         .unwrap_or(None)
         .map(|text| text.parse().expect("canonical run uuid"));
-    // `IssueComment.save` runs in one `transaction.atomic()`: the comment
-    // INSERT, the `Description` INSERT, and the `description_id` UPDATE
-    // (domain twins). Four `now()` reads keep their positions (comment
-    // pair, description pair).
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| db_error(error, "comment-post-tx"))?;
-    let empty_list: Vec<String> = Vec::new();
-    let desc_stripped = description_stripped_for_create(&comment_html);
-    let external_id = validated.external_id.clone().unwrap_or(None);
-    let external_source = validated.external_source.clone().unwrap_or(None);
-    let rows = comment_domain::CommentRows {
-        id: comment_id,
-        description_id: Uuid::new_v4(),
-        created_at,
-        updated_at,
-        desc_created_at: now_utc(),
-        desc_updated_at: now_utc(),
-        workspace_id: comment_workspace,
-        project_id,
-        issue_id: *issue_id,
-        actor_id: Some(actor_id),
-        created_by: Some(actor_id),
-        updated_by: None,
-        deleted_at: None,
-        html: &comment_html,
-        json: &comment_json,
-        stripped: &stripped,
-        desc_stripped: desc_stripped.as_deref(),
-        access: &access,
-        speaker_type: &speaker_type,
-        speaker_label: &speaker_label,
-        speaker_agent_run_id: speaker_run_id,
-        external_id: external_id.as_deref(),
-        external_source: external_source.as_deref(),
-        parent_id: None,
-        attachments: &empty_list,
-        labels: &labels,
-        edited_at: None,
-    };
-    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
-        .await
-        .map_err(|error| {
-            // No issue lookup precedes the create: a bogus `issue_id`
-            // violates the FK, and `handle_exception` answers the
-            // `IntegrityError` 400 (`api/views/base.py:142-147`). The
-            // transaction rolls back on drop, like the failed ORM `save()`.
-            if is_fk_violation(&error) {
-                Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-            } else {
-                db_error(error, "comment-post-insert")
-            }
-        })?;
-    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(&mut tx), &rows)
-        .await
-        .map_err(|error| db_error(error, "comment-post-desc"))?;
-    comment_domain::link_comment_description(
-        &pidash_db::orm_tx::TxConn::new(&mut tx),
-        rows.id,
-        rows.description_id,
-    )
-    .await
-    .map_err(|error| db_error(error, "comment-post-desc-link"))?;
-    let description_id = rows.description_id;
-    tx.commit().await.map_err(|error| {
-        // Every FK here is `DEFERRABLE INITIALLY DEFERRED`, so the bogus
-        // `issue_id` violation fires at COMMIT, not at the INSERT — and
-        // `handle_exception` answers the `IntegrityError` 400
-        // (`api/views/base.py:142-147`). Every other FK in this
-        // transaction references a row verified above to exist.
-        if is_fk_violation(&error) {
-            Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-        } else {
-            db_error(error, "comment-post-commit")
-        }
-    })?;
     // The overrides (`:1921-1924`): `created_at` (or `now()`), `created_by`
     // (or the actor), `actor_id` in memory only (BUG-3) — saved with
     // `update_fields=["created_at","created_by"]`.
     let (db_created_at, response_created_at) = resolve_created_at(map.get("created_at"))?;
     let created_by = override_user_id(map.get("created_by"), &actor_id)?;
-    if let Err(error) = comment_domain::restamp_comment_created(
-        &pidash_db::pool::sea_orm_connection(pool),
-        comment_id,
-        db_created_at,
-        created_by,
+    // `IssueComment.save` runs in one `transaction.atomic()`: the comment
+    // INSERT, the `Description` INSERT, and the `description_id` UPDATE
+    // (domain twins), since folded into the typed core
+    // (`core::comments::create`). The override values already carry the
+    // post-override stamping the old restamp UPDATE wrote (`:1921-1924`);
+    // a bogus `issue_id` still violates the deferred FK at COMMIT, and
+    // `handle_exception` answers the `IntegrityError` 400
+    // (`api/views/base.py:142-147`).
+    let description_id = Uuid::new_v4();
+    let mut txn = WriteTxn::begin(&deps.orm)
+        .await
+        .map_err(tool_domain_error)?;
+    let save_result = super::core::comments::create(
+        &mut txn,
+        ctx,
+        super::core::comments::CommentCreate {
+            issue_id: *issue_id,
+            project_id,
+            workspace_id: comment_workspace,
+            html: comment_html.clone(),
+            speaker: super::core::comments::Speaker::User {
+                speaker_type: speaker_type.clone(),
+                label: speaker_label.clone(),
+                run_id: speaker_run_id,
+            },
+            access: Some(access.clone()),
+            external: super::core::comments::CommentExternal {
+                id: validated.external_id.clone().unwrap_or(None),
+                source: validated.external_source.clone().unwrap_or(None),
+            },
+            created_by,
+            created_at: db_created_at,
+            json: Some(comment_json.clone()),
+            labels: Some(labels.clone()),
+        },
+        None,
     )
-    .await
-    {
-        if is_fk_violation(&error) {
-            return Err(Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
+    .await;
+    let _saved = match save_result {
+        Ok(saved) => saved,
+        Err(error) => {
+            let _ = txn.rollback().await;
+            return Err(tool_error(error));
         }
-        return Err(db_error(error, "comment-post-override"));
-    }
+    };
+    txn.commit().await.map_err(tool_domain_error)?;
     // Response `actor` is the in-memory override-or-actor (BUG-3 — always
     // identical to the response `created_by`); the DB row keeps the
     // requester.
@@ -538,11 +491,38 @@ pub async fn create(
 
 /// `strip_tags(self.comment_html) if self.comment_html != "" else ""`
 /// (`db/models/issue.py:606` over `utils/html_processor.py`, MLStripper).
-fn strip_comment_html(html: &str) -> String {
+pub fn strip_comment_html(html: &str) -> String {
     if html.is_empty() {
         String::new()
     } else {
         pidash_db::app_pages::strip::ml_strip_tags(html)
+    }
+}
+
+/// The operations-side error mapping for the comments core paths:
+/// integrity violations answer the payload 400, record misses the 404,
+/// everything else the database 500 — the map both wrappers converged
+/// on pre-core.
+fn tool_error(error: super::core::CoreError) -> Error {
+    let domain = super::core::workpad::core_to_domain_error(error);
+    if domain.is_integrity_violation() {
+        Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+    } else if domain.is_not_found() {
+        Error::NotFound
+    } else {
+        db_error(domain.to_string(), "comment-post")
+    }
+}
+
+/// Map a domain write error onto the operation error (the commit or open
+/// failure arm; mirrors the transaction arms this code used to run).
+fn tool_domain_error(error: crate::domain::DomainError) -> Error {
+    if error.is_integrity_violation() {
+        Error::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
+    } else if error.is_not_found() {
+        Error::NotFound
+    } else {
+        db_error(error.to_string(), "comment-post-commit")
     }
 }
 
@@ -553,7 +533,7 @@ fn strip_comment_html(html: &str) -> String {
 /// stores NULL. (PATCH syncs the decoded form via queryset `update()`,
 /// which runs no `save()` — that path is untouched. The PATCH update-mint
 /// reuses this helper: `Description.objects.create` runs the same `save()`.)
-fn description_stripped_for_create(comment_html: &str) -> Option<String> {
+pub fn description_stripped_for_create(comment_html: &str) -> Option<String> {
     if comment_html.is_empty() {
         None
     } else {
@@ -675,42 +655,17 @@ pub async fn update(
         .speaker_agent_run_id
         .clone()
         .unwrap_or_else(|| before_decoded.speaker_agent_run_id.clone());
-    let now = now_utc();
     // `IssueComment.save` runs in one `transaction.atomic()`: the comment
     // UPDATE, the `Description` INSERT-or-sync, and the `description_id`
-    // link write commit or roll back together.
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| db_error(error, "comment-patch-tx"))?;
-    comment_domain::save_v1_comment_update(
-        &pidash_db::orm_tx::TxConn::new(&mut tx),
-        &comment_domain::V1CommentUpdate {
-            id: *pk,
-            json: &new_json,
-            html: &new_html,
-            stripped: &new_stripped,
-            access: &new_access,
-            external_source: new_source.as_deref(),
-            external_id: new_external_id.as_deref(),
-            labels: &new_labels,
-            speaker_type: &new_speaker_type,
-            speaker_label: &new_speaker_label,
-            speaker_agent_run_id: new_run_id
-                .as_deref()
-                .and_then(|text| text.parse::<Uuid>().ok()),
-            updated_at: now,
-            updated_by: actor_id,
-        },
-    )
-    .await
-    .map_err(|error| db_error(error, "comment-patch-update"))?;
-    // The `Description` side of `IssueComment.save` (`db/models/issue.py:623-647`):
-    // a NULL `description_id` (pre-0109 legacy rows) mints a fresh
-    // `Description` over the saved triple; otherwise only changed tracked
-    // fields sync, plus `updated_by`/`updated_at` — via queryset `update()`,
-    // so no `save()` override re-strips. `_changes_on_save` compares
-    // VALUES: a present-but-identical key syncs nothing.
+    // link write commit or roll back together. The `Description` side
+    // (`db/models/issue.py:623-647`): a NULL `description_id` (pre-0109
+    // legacy rows) mints a fresh `Description` over
+    // `description_defaults` (`:607-627`) runs `BaseModel.save`'s
+    // creating arm (`db/models/base.py:36-39`), which overwrites the
+    // passed defaults from crum — the acting user is `created_by`,
+    // `updated_by` is NULL — then the
+    // `update_fields=["description_id"]` link write; otherwise only
+    // changed tracked fields sync, plus `updated_by`/`updated_at`.
     let html_changed = validated
         .comment_html
         .as_ref()
@@ -721,56 +676,47 @@ pub async fn update(
         .is_some_and(|json| *json != before_json);
     let stripped_changed = new_stripped != before_stripped;
     let stored_description_id = before.description_id;
-    if let Some(description_id) = stored_description_id {
-        if html_changed || json_changed || stripped_changed {
-            comment_domain::sync_v1_description_subset(
-                &pidash_db::orm_tx::TxConn::new(&mut tx),
-                &comment_domain::V1DescriptionSync {
-                    id: description_id,
-                    html: html_changed.then_some(new_html.as_str()),
-                    stripped: stripped_changed.then_some(new_stripped.as_str()),
-                    json: json_changed.then_some(&new_json),
-                    updated_by: actor_id,
-                    updated_at: now,
-                },
-            )
-            .await
-            .map_err(|error| db_error(error, "comment-patch-desc"))?;
-        }
-    } else {
-        // Unlinked legacy row: `Description.objects.create` over
-        // `description_defaults` (`:607-627`) runs `BaseModel.save`'s
-        // creating arm (`db/models/base.py:36-39`), which overwrites the
-        // passed defaults from crum — the acting user is `created_by`,
-        // `updated_by` is NULL — then the
-        // `update_fields=["description_id"]` link write.
-        let desc_stripped = description_stripped_for_create(&new_html);
-        let desc = comment_domain::DescriptionValues {
-            id: Uuid::new_v4(),
-            created_at: now_utc(),
-            updated_at: now_utc(),
-            created_by: Some(actor_id),
-            updated_by: None,
+    let mut txn = WriteTxn::begin(&deps.orm)
+        .await
+        .map_err(|error| db_error(error, "comment-patch-tx"))?;
+    let update_result = super::core::comments::update(
+        &mut txn,
+        ctx,
+        super::core::comments::CommentUpdate {
+            id: *pk,
+            html: new_html.clone(),
+            stripped: new_stripped.clone(),
+            json: Some(new_json.clone()),
+            speaker: super::core::comments::Speaker::User {
+                speaker_type: new_speaker_type.clone(),
+                label: new_speaker_label.clone(),
+                run_id: new_run_id
+                    .as_deref()
+                    .and_then(|text| text.parse::<Uuid>().ok()),
+            },
+            access: Some(new_access.clone()),
+            labels: Some(new_labels.clone()),
+            external: super::core::comments::CommentExternal {
+                id: new_external_id.clone(),
+                source: new_source.clone(),
+            },
+            description_id: stored_description_id,
             workspace_id,
             project_id,
-            json: &new_json,
-            html: &new_html,
-            stripped: desc_stripped.as_deref(),
-        };
-        comment_domain::insert_description_values(&pidash_db::orm_tx::TxConn::new(&mut tx), &desc)
-            .await
-            .map_err(|error| db_error(error, "comment-patch-desc-mint"))?;
-        comment_domain::link_comment_description(
-            &pidash_db::orm_tx::TxConn::new(&mut tx),
-            *pk,
-            desc.id,
-        )
-        .await
-        .map_err(|error| db_error(error, "comment-patch-desc-link"))?;
-    }
-    tx.commit()
-        .await
-        .map_err(|error| db_error(error, "comment-patch-commit"))?;
+            is_stripped_changed: stripped_changed,
+            are_html_json_changed: html_changed || json_changed,
+        },
+        None,
+    )
+    .await;
+    let _saved_update = match update_result {
+        Ok(saved) => saved,
+        Err(error) => {
+            let _ = txn.rollback().await;
+            return Err(tool_error(error));
+        }
+    };
+    txn.commit().await.map_err(tool_domain_error)?;
     let kwargs = work_tasks::issue_activity_kwargs(
         work_tasks::ACTIVITY_COMMENT_UPDATED,
         Some(&requested),
@@ -876,7 +822,10 @@ fn override_user_id(raw: Option<&Value>, actor: &Uuid) -> Result<Option<Uuid>, E
 }
 
 /// Whether a sqlx failure is a foreign-key violation (`IntegrityError` →
-/// `{"error": "The payload is not valid"}`).
+/// `{"error": "The payload is not valid"}`). Only the malformed-shape
+/// unit tests exercise the sqlx arm now (production errors arrive as
+/// the domain error type and are checked through it).
+#[cfg(test)]
 fn is_fk_violation(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::Database(db) => db.code().as_deref() == Some("23503"),
