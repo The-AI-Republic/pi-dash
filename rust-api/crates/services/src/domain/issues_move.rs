@@ -1609,6 +1609,7 @@ mod tests {
                 writes_enabled: false,
                 github_tools_enabled: false,
                 disabled_tools: Vec::new(),
+                job_queue: "celery".to_string(),
                 reconcile_interval_secs: 0,
                 model_request_timeout_secs: 0,
                 execution_timeout_secs: 0,

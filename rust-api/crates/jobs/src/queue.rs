@@ -126,6 +126,15 @@ impl NewJob {
         }
     }
 
+    /// Route this job to a specific queue label (Phase 2 D3). The worker
+    /// claims only its `--queue` label, so this splits agent runs
+    /// (`cloud_agent`) from every other job (`celery`). Default `celery`
+    /// until both workers run.
+    pub fn with_queue(mut self, queue: impl Into<String>) -> Self {
+        self.queue = queue.into();
+        self
+    }
+
     /// Delay visibility by `delay_secs` from now (the `countdown` path).
     pub fn delayed(mut self, delay_secs: u64, now: DateTime<Utc>) -> Self {
         self.visible_at = Some(now + ChronoDuration::seconds(delay_secs as i64));
@@ -239,9 +248,38 @@ pub fn ensure_schema_sql() -> &'static str {
 /// DDL for the claim index. Separate statement from [`ensure_schema_sql`]:
 /// Postgres rejects multiple commands in one prepared statement, so
 /// [`ensure_schema`] executes each DDL on its own.
+/// Phase 2 (D3, 2.4): the claim filters on `(queue, status, visible_at)`, so
+/// the index leads with `queue` — the worker for `cloud_agent` claims only
+/// that label, and with the old `(status, visible_at, id)` index a
+/// `celery`-saturated table would scan every `celery` row for every
+/// `cloud_agent` claim.
+/// The name is `_queue_idx` so `CREATE INDEX IF NOT EXISTS` actually
+/// creates it on databases where the old `rust_job_queue_claim_idx`
+/// (`status,visible_at,id`) already exists — reusing the old name would
+/// be a no-op there (Finding 4 review).
 pub fn ensure_claim_index_sql() -> &'static str {
+    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_queue_idx \
+        ON rust_job_queue (queue, status, visible_at, id)"
+}
+
+/// Legacy queue-agnostic claim index (`status,visible_at,id`). New boots
+/// create the queue-leading index above under its new name; once that
+/// exists the old index is redundant (the new index leads with `queue`
+/// and serves all claim shapes), so `ensure_schema` drops it. Kept here
+/// for the contract-test harness which still creates only the legacy
+/// shape — the harness must be updated to create the queue-leading
+/// index instead (see `contract-tests/_harness/rust_queue.py`).
+pub fn ensure_claim_index_legacy_sql() -> &'static str {
     "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx \
         ON rust_job_queue (status, visible_at, id)"
+}
+
+/// Drop the legacy queue-agnostic index once the queue-leading one exists.
+/// The new `(queue, status, visible_at, id)` index covers every claim
+/// shape, so the legacy index would otherwise be maintained on every
+/// write forever (Finding 7 review).
+pub fn drop_legacy_claim_index_sql() -> &'static str {
+    "DROP INDEX IF EXISTS rust_job_queue_claim_idx"
 }
 
 /// Create both queue tables. Runs at worker boot, never from requests.
@@ -267,6 +305,10 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(ensure_schema_sql()).execute(&mut *tx).await?;
     // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
     sqlx::query(ensure_claim_index_sql())
+        .execute(&mut *tx)
+        .await?;
+    // raw-sql: DROP INDEX has no SeaORM builder (orm-migration.md §6); legacy index is redundant once queue-leading index exists.
+    sqlx::query(drop_legacy_claim_index_sql())
         .execute(&mut *tx)
         .await?;
     // raw-sql: Rust-owned DDL passthrough (schedule schema) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
@@ -686,6 +728,32 @@ mod tests {
         assert_eq!(job.queue, "celery");
         assert_eq!(job.max_retries, 3);
         assert!(job.visible_at.is_none());
+    }
+
+    #[test]
+    fn new_job_with_queue_routes_agent_jobs() {
+        let job = NewJob::new("cloud_agent.run_agent_run", json!(["r1"]), json!({}))
+            .with_queue("cloud_agent");
+        assert_eq!(job.queue, "cloud_agent");
+        assert_eq!(job.task, "cloud_agent.run_agent_run");
+    }
+
+    #[test]
+    fn claim_index_leads_with_queue() {
+        // Phase 2 (2.4): the claim filters on queue, so the index leads
+        // with queue — otherwise a cloud_agent worker scans every celery
+        // row for every claim. The name is new so IF NOT EXISTS creates
+        // it on existing databases where the old index already exists.
+        let sql = ensure_claim_index_sql();
+        assert!(
+            sql.contains("(queue, status, visible_at, id)"),
+            "index must lead with queue: {sql}"
+        );
+        assert!(sql.contains("rust_job_queue_claim_queue_idx"), "{sql}");
+        // The legacy index stays on the old shape for existing hosts.
+        let legacy = ensure_claim_index_legacy_sql();
+        assert!(legacy.contains("rust_job_queue_claim_idx"), "{legacy}");
+        assert!(legacy.contains("(status, visible_at, id)"), "{legacy}");
     }
 
     #[test]

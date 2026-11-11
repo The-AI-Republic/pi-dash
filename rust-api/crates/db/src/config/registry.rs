@@ -366,6 +366,11 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("CLOUD_AGENT_MAX_FINAL_RESULT_BYTES", V::from(65536)),
         ("CLOUD_AGENT_MAX_EVENTS", V::from(500)),
         ("CLOUD_AGENT_BLOCK_PRIVATE_URLS", V::from("true")),
+        ("CLOUD_AGENT_JOB_QUEUE", V::from("celery")),
+        // Infra tunables read at boot (DbConfig, scheduler, worker).
+        ("DATABASE_MAX_CONNECTIONS", V::from(10)),
+        ("PIDASH_BEAT_ONLY", V::Null),
+        ("PIDASH_WORKER_SHUTDOWN_GRACE_SECS", V::from(30)),
         // Sessions / cookies.
         ("SESSION_COOKIE_AGE", V::from(604800)),
         ("SESSION_COOKIE_NAME", V::from("session-id")),

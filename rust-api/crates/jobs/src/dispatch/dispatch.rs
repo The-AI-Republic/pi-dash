@@ -127,13 +127,41 @@ pub fn run_cloud_agent_message(run_id: &str) -> TaskMessage {
 /// Retry policy is the [`NewJob::new`] default (`max_retries = 3`, 180s
 /// delay): the row budget governs *delivery* to a worker, while the task's
 /// own `max_retries=0` (`tasks.py:78`) governs the Python body after delivery.
+/// Phase 2 (2.1): the queue is `CLOUD_AGENT_JOB_QUEUE` via
+/// [`run_cloud_agent_job_with_queue`] and `CloudAgentSettings.job_queue`.
+/// This wrapper is kept for the poll-free single-id path in tests; it pins
+/// the default `celery` so it cannot disagree with resolved settings
+/// (Finding 10 review — the previous env-reading helper could).
 pub fn run_cloud_agent_job(run_id: &str) -> NewJob {
+    run_cloud_agent_job_with_queue(run_id, crate::queue::DEFAULT_QUEUE)
+}
+
+/// Queue label validation (Finding 8 review): `CLOUD_AGENT_JOB_QUEUE` is
+/// read through `Settings` as a plain string, so a blank, space-padded,
+/// or stale SSM value would otherwise enqueue on a label no worker claims
+/// and strand runs `queued` with no error. `dispatch_waiting` and the job
+/// wrapper both collapse blank/whitespace-only to the default.
+fn validated_job_queue(raw: &str) -> String {
+    let trimmed = raw.trim().to_owned();
+    if trimmed.is_empty() {
+        crate::queue::DEFAULT_QUEUE.to_owned()
+    } else {
+        trimmed
+    }
+}
+
+/// Queue at an explicit label (Phase 2 D3). `dispatch_waiting` routes
+/// through `CloudAgentSettings.job_queue` (validated) so the label follows
+/// the resolved settings rather than a second env read; this wrapper keeps
+/// the free-function surface identical for the poll-free path.
+pub fn run_cloud_agent_job_with_queue(run_id: &str, queue: impl Into<String>) -> NewJob {
     let message = run_cloud_agent_message(run_id);
     NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
         Value::Object(message.kwargs.clone()),
     )
+    .with_queue(validated_job_queue(&queue.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +465,11 @@ pub async fn dispatch_waiting(
                 .map_err(into_sqlx)?;
         }
         let id = run_id.to_string();
-        enqueue_exec(&mut **tx.inner(), &run_cloud_agent_job(&id)).await?;
+        enqueue_exec(
+            &mut **tx.inner(),
+            &run_cloud_agent_job_with_queue(&id, cloud.job_queue.clone()),
+        )
+        .await?;
         ids.push(id);
     }
     tx.commit().await?;
@@ -609,6 +641,7 @@ mod tests {
             writes_enabled: false,
             github_tools_enabled: true,
             disabled_tools: Vec::new(),
+            job_queue: "celery".to_string(),
             reconcile_interval_secs: 30,
             model_request_timeout_secs: 60,
             execution_timeout_secs: 285,
@@ -923,6 +956,33 @@ mod tests {
         assert!(
             job.visible_at.is_none(),
             "delayed means immediately visible"
+        );
+    }
+
+    #[test]
+    fn job_row_with_queue_routes_agent_queue() {
+        // Phase 2 (2.1): `run_cloud_agent_job_with_queue` puts the job on
+        // the configured label; `dispatch_waiting` routes through
+        // `CloudAgentSettings.job_queue`.
+        let run_id = Uuid::new_v4().to_string();
+        let job = run_cloud_agent_job_with_queue(&run_id, "cloud_agent");
+        assert_eq!(job.queue, "cloud_agent");
+        assert_eq!(job.task, RUN_CLOUD_AGENT_TASK);
+        let celery = run_cloud_agent_job_with_queue(&run_id, crate::queue::DEFAULT_QUEUE);
+        assert_eq!(celery.queue, crate::queue::DEFAULT_QUEUE);
+        // Finding 8: blank/space-padded values collapse to the default
+        // instead of stranding runs on a phantom label.
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, "").queue,
+            crate::queue::DEFAULT_QUEUE
+        );
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, "  ").queue,
+            crate::queue::DEFAULT_QUEUE
+        );
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, " cloud_agent ").queue,
+            "cloud_agent"
         );
     }
 

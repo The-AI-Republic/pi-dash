@@ -229,6 +229,11 @@ pub struct CloudAgentSettings {
     pub writes_enabled: bool,
     pub github_tools_enabled: bool,
     pub disabled_tools: Vec<String>,
+    /// Queue every `cloud_agent.run_agent_run` job is enqueued on.
+    /// Default `celery`; set to `cloud_agent` after the dedicated
+    /// agent-worker pool is running (Phase 2 rollout). Kept as the
+    /// string queue label `NewJob` carries / workers claim on.
+    pub job_queue: String,
     pub reconcile_interval_secs: i64,
     pub model_request_timeout_secs: i64,
     pub execution_timeout_secs: i64,
@@ -1137,6 +1142,7 @@ impl Settings {
                 writes_enabled: ctx.flag_tri("CLOUD_AGENT_WRITES_ENABLED", "false")?,
                 github_tools_enabled: ctx.flag_tri("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", "true")?,
                 disabled_tools: ctx.csv_stripped("CLOUD_AGENT_DISABLED_TOOLS", "")?,
+                job_queue: ctx.req_string("CLOUD_AGENT_JOB_QUEUE", "celery")?,
                 reconcile_interval_secs: ctx.req_int(
                     "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
                     ConfigValue::from(30),
@@ -1437,6 +1443,9 @@ mod tests {
         assert_eq!(s.loop_tuning.max_writes, 10);
         assert_eq!(s.file_size_limit, 5242880);
         assert_eq!(s.email_backend, SMTP_BACKEND);
+        // Phase 2 (2.1): the agent job queue defaults to `celery` until
+        // both workers are running.
+        assert_eq!(s.cloud_agent.job_queue, "celery");
         // Non-Local profiles ignore an EMAIL_BACKEND env override, exactly
         // like common.py's hardcoded assignment.
         let s2 = Settings::from_map_with(
@@ -1497,6 +1506,17 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
+    }
+
+    #[test]
+    fn cloud_agent_job_queue_overrides_from_env() {
+        let s = Settings::from_map_with(
+            &vars(&[("CLOUD_AGENT_JOB_QUEUE", "cloud_agent")]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert_eq!(s.cloud_agent.job_queue, "cloud_agent");
     }
 
     #[test]
