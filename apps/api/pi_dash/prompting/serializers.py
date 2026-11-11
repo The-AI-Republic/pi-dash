@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from pi_dash.prompting.models import PromptSectionOverride
+from pi_dash.prompting.models import (
+    PromptLabel,
+    PromptLabelAssignment,
+    PromptSectionOverride,
+)
 
 
 class PromptSectionOverrideSerializer(serializers.ModelSerializer):
@@ -52,3 +56,38 @@ class ResolvedSectionSerializer(serializers.Serializer):
     # the caller's role to decide which editors to surface.
     editable_at_workspace = serializers.BooleanField()
     editable_at_personal = serializers.BooleanField()
+
+
+class PromptLabelAssignmentSerializer(serializers.ModelSerializer):
+    """One attachment of a label to a section/receipt target."""
+
+    class Meta:
+        model = PromptLabelAssignment
+        fields = ["id", "target_type", "target_key", "created_at"]
+        read_only_fields = fields
+
+
+class PromptLabelSerializer(serializers.ModelSerializer):
+    """A workspace prompt label plus its section/receipt attachments.
+
+    The nested ``targets`` list lets the client build both the per-target chip
+    map (target -> labels) and the click-to-filter map (label -> targets) from a
+    single list response.
+    """
+
+    targets = PromptLabelAssignmentSerializer(source="assignments", many=True, read_only=True)
+
+    class Meta:
+        model = PromptLabel
+        fields = [
+            "id",
+            "workspace",
+            "name",
+            "color",
+            "targets",
+            "created_by",
+            "updated_by",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "workspace", "targets", "created_by", "updated_by", "created_at", "updated_at"]
