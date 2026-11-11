@@ -33,12 +33,11 @@ the effect is the contract. The negative case proves silence: with
 moves, and the sync metadata is untouched.
 
 Needs a worker on both backends (the run and the comment task both
-execute there). Backend selection follows
-``runner/test_offline_runner_sweeps.py``: ``PIDASH_CONTRACT_BACKEND``
-``=django`` (default) publishes Celery wire v2 to the Redis broker (a
-Django celery worker must be running); ``=rust`` seeds
-``rust_job_queue`` (``pidash-api worker`` must be running against the
-same ``DATABASE_URL``). No HTTP server is needed: the LLM config row is
+execute there). Backend selection is automatic via the dispatch
+conftest ``_live_channel`` (Celery inspect answered -> Celery wire v2
+to the Redis broker, else ``rust_job_queue`` rows), the same channel
+the sibling dispatch suites publish through. Exactly one worker runs
+in any contract run, so exactly one channel delivers. No HTTP server is needed: the LLM config row is
 seeded directly with a Fernet-encrypted key
 (``tasks_assistant/test_rust_replay.py`` pattern), so the workers need
 ``CLOUD_AGENT_ENABLED=true``, ``CLOUD_AGENT_WRITES_ENABLED=true``,
@@ -65,14 +64,13 @@ from integrations import seed as int_seed
 
 from .conftest import (
     COMPLETED,
+    _live_channel,
     create_agent_run,
     wait_for_queue_drain,
     wait_for_run,
 )
 
 pytestmark = pytest.mark.contract
-
-BACKEND = os.environ.get("PIDASH_CONTRACT_BACKEND", "django")
 
 RUN_TASK = "cloud_agent.run_agent_run"
 
@@ -337,7 +335,7 @@ def _seed_sync_world(unique: str, ws_id: str, project_id: str, owner_id: str,
 
 def _publish(broker, run_id: str):
     """Publish one run invocation; returns the queue baseline for drains."""
-    if BACKEND == "rust":
+    if _live_channel() == "rust_queue":
         baseline = rust_queue.queue_depth()
         rust_queue.publish(RUN_TASK, [run_id], {})
         return baseline
@@ -347,7 +345,7 @@ def _publish(broker, run_id: str):
 
 
 def _drain(broker, baseline):
-    if BACKEND == "rust":
+    if _live_channel() == "rust_queue":
         rust_queue.wait_for_queue_drain(baseline=baseline)
     else:
         wait_for_queue_drain(broker, baseline=baseline)
