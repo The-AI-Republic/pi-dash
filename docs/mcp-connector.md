@@ -5,6 +5,19 @@ MCP-capable AI clients (e.g. Claude) as tools. It is a thin wrapper over the sam
 public REST surface (`/api/v1/`) that the `pidash` CLI uses, so tool responses
 mirror the REST serializers documented below.
 
+## Run AI
+
+`pidash_run_ai` starts an agent run immediately on an accessible work item. It
+is the MCP equivalent of clicking **Run AI**: it uses the same prompt, ticker
+re-timing, runner selection and single-active-run guard. Pass `workspace_slug`
+and an `issue_id` (a UUID or identifier such as `PROJ-123`); `project_id` is
+optional.
+
+When a run is created, the tool returns `dispatched: true` with the run ID,
+status and issue identifier. An issue that cannot dispatch returns
+`dispatched: false` with one of these machine-readable reasons as a normal tool
+result: `active_run_exists`, `no_pod` or `no_eligible_runner`.
+
 ## Issue web URL (`url`)
 
 Every issue-returning tool includes an absolute, human-clickable `url` pointing
