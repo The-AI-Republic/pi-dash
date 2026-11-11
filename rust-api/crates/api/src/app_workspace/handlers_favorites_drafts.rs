@@ -2714,6 +2714,30 @@ async fn project_row(pool: &sqlx::PgPool, id: &Uuid) -> Result<Option<ProjectRow
     }))
 }
 
+/// NEWPIDASH-185 (DIFF-14): `draft_create` / `draft_to_issue` refuse a
+/// `project_id` the caller is not an active member of. Django allowed any
+/// workspace member to name any project; the Rust port fixes it so a non-member
+/// cannot write into a private project (or any project they are not in).
+/// Returns `true` when the caller is an active, non-deleted member.
+async fn is_project_member(
+    pool: &sqlx::PgPool,
+    project_id: &Uuid,
+    user_id: &Uuid,
+) -> Result<bool, Denial> {
+    let hit: Option<Uuid> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::ProjectId.eq(*project_id))
+        .filter(project_members::Column::MemberId.eq(*user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
+}
+
 /// A JSON float: CPython `repr` for finite values (`1e+16`, `65535.0`),
 /// `Infinity`/`-Infinity`/`NaN` tokens for the non-finite ones (`json.dumps`
 /// emits the tokens; `serde_json` would mistranslate them to `null` — and its
@@ -5166,6 +5190,8 @@ async fn draft_create(
     // input (`DraftIssue(project=…, project_id=…)` keeps the latter —
     // probed live); `save()` fetches it (miss → 404) and re-points
     // `workspace` at the project's workspace.
+    // NEWPIDASH-185 (DIFF-14): Django allowed any workspace member to name
+    // any project; refuse when the caller is not an active project member.
     let row_project = context_project;
     let row_workspace = match row_project {
         None => workspace_id,
@@ -5176,7 +5202,15 @@ async fn draft_create(
                     OBJECT_NOT_FOUND_BODY.to_owned(),
                 ))
             }
-            Some(row) => row.workspace_id,
+            Some(row) => {
+                if !is_project_member(&pool, &project, &user_id).await? {
+                    return Ok(json_response(
+                        StatusCode::FORBIDDEN,
+                        gates::FORBIDDEN_BODY.to_owned(),
+                    ));
+                }
+                row.workspace_id
+            }
         },
     };
     let now = utc_now_micros();
@@ -7132,6 +7166,8 @@ async fn draft_to_issue(
     // `.filter(pk=draft_id).first()` — NO `created_by` scoping (any
     // member's draft converts); a miss leaves `None`, and
     // `None.project_id` raises `AttributeError` → the generic 500.
+    // NEWPIDASH-185 (DIFF-14): only the creator may publish (`draft_created_by`
+    // check below) and the caller must be an active member of `draft_project`.
     #[derive(Debug, FromQueryResult)]
     struct DraftConvertRow {
         project_id: Option<Uuid>,
@@ -7175,6 +7211,14 @@ async fn draft_to_issue(
     else {
         return Err(Denial::ServerError);
     };
+    // NEWPIDASH-185 (DIFF-14): scope to the caller — another user's draft
+    // 404s (Django would have converted it).
+    if draft_created_by != Some(user_id) {
+        return Ok(json_response(
+            StatusCode::NOT_FOUND,
+            OBJECT_NOT_FOUND_BODY.to_owned(),
+        ));
+    }
     let Some(draft_project) = draft_project_opt else {
         return Ok(json_response(
             StatusCode::BAD_REQUEST,
@@ -7192,6 +7236,14 @@ async fn draft_to_issue(
             ))
         }
     };
+    // NEWPIDASH-185 (DIFF-14): refuse when the caller is not an active
+    // member of the draft's project (403, not 201 as Django does).
+    if !is_project_member(&pool, &draft_project, &user_id).await? {
+        return Ok(json_response(
+            StatusCode::FORBIDDEN,
+            gates::FORBIDDEN_BODY.to_owned(),
+        ));
+    }
     let input = match negotiate_input(&headers, &body) {
         Ok(input) => input,
         Err(response) => return Ok(response),
