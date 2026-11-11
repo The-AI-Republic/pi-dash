@@ -491,6 +491,7 @@ pub mod operations {
     // NEWPIDASH-37: api-backed (the scheduler cores live in `pidash_api`),
     // same contract as the services-backed submodules.
     pub use pidash_api::v1_schedulers::service as schedulers;
+    pub use pidash_services::operations::core;
     pub use pidash_services::operations::workpad;
     pub use pidash_services::operations::Deps;
     pub use pidash_services::operations::Error;

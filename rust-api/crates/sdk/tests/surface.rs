@@ -493,6 +493,8 @@ surface_snapshot! {
     operations::Error,
     operations::Outcome,
     operations::comments,
+    operations::core,
+    operations::core::workpad,
     operations::issues,
     operations::pull_requests,
     operations::relations,

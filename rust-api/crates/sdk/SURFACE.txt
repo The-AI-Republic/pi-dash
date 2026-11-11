@@ -435,6 +435,8 @@ pidash_sdk::operations::Deps
 pidash_sdk::operations::Error
 pidash_sdk::operations::Outcome
 pidash_sdk::operations::comments
+pidash_sdk::operations::core
+pidash_sdk::operations::core::workpad
 pidash_sdk::operations::issues
 pidash_sdk::operations::pull_requests
 pidash_sdk::operations::relations
