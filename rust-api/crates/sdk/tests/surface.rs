@@ -32,6 +32,10 @@ macro_rules! surface_snapshot {
                 .lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                // Three-segment paths are checked by
+                // `surface_matches_snapshot3`; this arm asserts only
+                // the two-segment entries.
+                .filter(|l| l.matches("::").count() == 2)
                 .collect();
             let mut sorted = actual.clone();
             sorted.sort_unstable();
@@ -55,6 +59,33 @@ macro_rules! surface_snapshot {
                     missing,
                     extra,
                 );
+            }
+        }
+    };
+    ($( $module:ident :: $mid:ident :: $name:ident ),* $(,)?) => {
+        const SURFACE3_PATHS: &[&str] = &[
+            $(concat!(
+                "pidash_sdk::",
+                stringify!($module),
+                "::",
+                stringify!($mid),
+                "::",
+                stringify!($name)
+            )),*
+        ];
+
+        #[test]
+        fn surface_matches_snapshot3() {
+            $(
+                { use pidash_sdk::$module::$mid::$name; }
+            )*
+
+            let actual: Vec<&str> = include_str!("../SURFACE.txt")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#')).collect();
+            for path in SURFACE3_PATHS {
+                assert!(actual.contains(path), "SURFACE.txt is missing {path}");
             }
         }
     };
@@ -494,8 +525,6 @@ surface_snapshot! {
     operations::Outcome,
     operations::comments,
     operations::core,
-    operations::core::comments,
-    operations::core::workpad,
     operations::issues,
     operations::pull_requests,
     operations::relations,
@@ -836,4 +865,10 @@ surface_snapshot! {
     state::ToolsetsRun,
     state::ToolsetsUnavailable,
     state::header_value,
+}
+
+surface_snapshot! {
+    operations::core::comments,
+    operations::core::relations,
+    operations::core::workpad,
 }

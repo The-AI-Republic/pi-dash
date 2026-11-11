@@ -119,5 +119,8 @@ pub fn core_to_domain_error(error: super::CoreError) -> crate::domain::DomainErr
         super::CoreError::Sqlx(inner) => crate::domain::DomainError::Db(sea_orm::DbErr::Exec(
             sea_orm::RuntimeErr::SqlxError(inner),
         )),
+        super::CoreError::Request(message) => {
+            crate::domain::DomainError::Work(format!("request refused: {message}"))
+        }
     }
 }

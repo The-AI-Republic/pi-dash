@@ -98,11 +98,11 @@ use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet;
-use pidash_services::domain::relations as relation_domain;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteOptions, WriteScope, WriteTxn};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::operations::core::comments as core_comments;
+use pidash_services::operations::core::relations as core_relations;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
     AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
@@ -1039,6 +1039,9 @@ async fn op_add_current_issue_comment(
     )
     .await
     .map_err(|error| match error {
+        pidash_services::operations::core::CoreError::Request(message) => {
+            ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
+        }
         pidash_services::operations::core::CoreError::Db(domain_error) => {
             ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
         }
@@ -1147,6 +1150,9 @@ async fn op_update_current_issue_workpad(
         )
         .await
         .map_err(|error| match error {
+            pidash_services::operations::core::CoreError::Request(message) => {
+                ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
+            }
             pidash_services::operations::core::CoreError::Db(domain_error) => {
                 ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
             }
@@ -2990,53 +2996,6 @@ async fn resolve_by_identifier_tx<C: sea_orm::ConnectionTrait>(
     .await
 }
 
-/// `_pair_rows` (`relations.py:117-120`) over the audit transaction.
-async fn pair_rows_tx<C: sea_orm::ConnectionTrait>(
-    conn: &C,
-    a_id: Uuid,
-    b_id: Uuid,
-) -> Result<Vec<rel::PairRow>, ToolExecError> {
-    pair_rows(conn, a_id, b_id).await
-}
-
-/// `#pair_rows` on any connection: the live rows between the pair, in
-/// either direction, with no self-pair exclusion.
-async fn pair_rows<C: sea_orm::ConnectionTrait>(
-    conn: &C,
-    a_id: Uuid,
-    b_id: Uuid,
-) -> Result<Vec<rel::PairRow>, ToolExecError> {
-    use pidash_db::entity::issue_relations as rel_entity;
-    let rows = rel_entity::Entity::find()
-        .filter(
-            sea_orm::sea_query::Condition::any()
-                .add(
-                    sea_orm::sea_query::Condition::all()
-                        .add(rel_entity::Column::IssueId.eq(a_id))
-                        .add(rel_entity::Column::RelatedIssueId.eq(b_id)),
-                )
-                .add(
-                    sea_orm::sea_query::Condition::all()
-                        .add(rel_entity::Column::IssueId.eq(b_id))
-                        .add(rel_entity::Column::RelatedIssueId.eq(a_id)),
-                ),
-        )
-        .filter(rel_entity::Column::DeletedAt.is_null())
-        .into_model::<IssuePairRow>()
-        .all(conn)
-        .await
-        .map_err(orm_error)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| rel::PairRow {
-            id: row.id,
-            issue_id: row.issue_id,
-            related_issue_id: row.related_issue_id,
-            relation_type: row.relation_type,
-        })
-        .collect())
-}
-
 /// One pair/grouped row.
 #[derive(Clone, Debug, PartialEq, FromQueryResult)]
 struct IssuePairRow {
@@ -3077,64 +3036,42 @@ async fn op_relate_issues(
         .into_iter()
         .next()
         .expect("one source ref resolves one row");
-    let targets = rel::check_targets(&source, &targets)
-        .map_err(|error| plan::ToolCallFailure::InvalidArg(error.to_string()))?;
-    let mut created: Vec<rel::ResolvedIssue> = Vec::new();
-    let mut unchanged: Vec<String> = Vec::new();
-    let mut conflicts: Vec<rel::RelateConflict> = Vec::new();
-    for target in &targets {
-        loop {
-            let existing = pair_rows_tx(&txn.connection(), source.id, target.id).await?;
-            match rel::relate_verdict(&existing, &source.id, &args.relation_type) {
-                rel::RelateVerdict::Unchanged => {
-                    unchanged.push(target.identifier());
-                    break;
-                }
-                rel::RelateVerdict::Conflict { existing_relation } => {
-                    conflicts.push(rel::RelateConflict {
-                        identifier: target.identifier(),
-                        existing_relation,
-                    });
-                    break;
-                }
-                rel::RelateVerdict::Create => {
-                    let row = rel::relate_insert_row(
-                        Uuid::new_v4(),
-                        &source,
-                        &args.relation_type,
-                        target,
-                        scope.creator_id,
-                    );
-                    let value = relation_domain::RelationRow {
-                        id: row.id,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                        created_by: Some(row.created_by_id),
-                        updated_by: row.updated_by_id,
-                        project_id: row.project_id,
-                        workspace_id: row.workspace_id,
-                        issue_id: row.issue_id,
-                        related_issue_id: row.related_issue_id,
-                        relation_type: row.relation_type.as_str(),
-                    };
-                    // `WriteTxn` forbids savepoints; the conflict arm
-                    // (`ON CONFLICT DO NOTHING` → re-verdict, quirk 5)
-                    // replaces the savepointed insert (`relations.py`
-                    // `bulk_create(ignore_conflicts=True)` verdict loop).
-                    let inserted =
-                        relation_domain::relate_row_or_nothing(&txn.connection(), &value).await?;
-                    if inserted {
-                        created.push(target.clone());
-                        break;
-                    }
-                    // A concurrent writer won the race; re-read and
-                    // re-verdict (quirk 5 loops here when the race
-                    // resolves to nothing).
-                    continue;
-                }
-            }
+    // The shared core (NEWPIDASH-190 §4.3): the check, verdict loop
+    // and guarded inserts on the audit transaction; emissions and
+    // `relations` stay with this wrapper.
+    let core_source = core_relations::CoreSource::from(&source);
+    let core_targets: Vec<core_relations::CoreTarget> = targets
+        .iter()
+        .map(core_relations::CoreTarget::from)
+        .collect();
+    let outcome = core_relations::relate(
+        &txn.connection(),
+        &core_relations::RelationBatch {
+            source: &core_source,
+            targets: &core_targets,
+            relation_type: &args.relation_type,
+            actor_id: scope.creator_id,
+            own_project: true,
+            pair_exact: false,
+            raw_targets: false,
+            newest_only: false,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        pidash_services::operations::core::CoreError::Request(message) => {
+            ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
         }
-    }
+        pidash_services::operations::core::CoreError::Db(domain_error) => {
+            ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
+        }
+        pidash_services::operations::core::CoreError::Sqlx(sqlx_error) => {
+            ToolExecError::Db(sqlx_error)
+        }
+    })?;
+    let created = outcome.created;
+    let unchanged = outcome.unchanged;
+    let conflicts = outcome.conflicts;
     if !created.is_empty() {
         let created_ids: Vec<Uuid> = created.iter().map(|target| target.id).collect();
         let emit = rel::relate_created_emit(
@@ -3191,33 +3128,50 @@ async fn op_unrelate_issues(
         .into_iter()
         .next()
         .expect("one source ref resolves one row");
-    let targets = rel::check_targets(&source, &targets)
-        .map_err(|error| plan::ToolCallFailure::InvalidArg(error.to_string()))?;
-    let mut removed: Vec<String> = Vec::new();
-    let mut not_related: Vec<String> = Vec::new();
-    for target in &targets {
-        let existing = pair_rows_tx(&txn.connection(), source.id, target.id).await?;
-        let matching = rel::unrelate_matches(&existing, &source.id, &args.relation_type);
-        if matching.is_empty() {
-            not_related.push(target.identifier());
-            continue;
+    // The shared core (NEWPIDASH-190 §4.3): the check, pair fetch,
+    // match and soft deletes on the audit transaction; emissions and
+    // `relations` stay with this wrapper.
+    // The shared core (NEWPIDASH-190 §4.3): the check, pair fetch,
+    // match and soft deletes on the audit transaction; emissions and
+    // `relations` stay with this wrapper.
+    let core_source = core_relations::CoreSource::from(&source);
+    let core_targets: Vec<core_relations::CoreTarget> = targets
+        .iter()
+        .map(core_relations::CoreTarget::from)
+        .collect();
+    let outcome = core_relations::unrelate(
+        &txn.connection(),
+        &core_relations::RelationBatch {
+            source: &core_source,
+            targets: &core_targets,
+            relation_type: &args.relation_type,
+            actor_id: scope.creator_id,
+            own_project: true,
+            pair_exact: false,
+            raw_targets: false,
+            newest_only: false,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        pidash_services::operations::core::CoreError::Request(message) => {
+            ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
         }
-        for row in matching {
-            let now = Utc::now();
-            relation_domain::soft_delete_relation_row(
-                &txn.connection(),
-                row.id,
-                scope.creator_id,
-                now,
-                now,
-            )
-            .await?;
-            enqueue_sweep(txn, "issuerelation", &row.id.to_string()).await?;
+        pidash_services::operations::core::CoreError::Db(domain_error) => {
+            ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
         }
-        removed.push(target.identifier());
+        pidash_services::operations::core::CoreError::Sqlx(sqlx_error) => {
+            ToolExecError::Db(sqlx_error)
+        }
+    })?;
+    for row_id in &outcome.rows_affected {
+        enqueue_sweep(txn, "issuerelation", &row_id.to_string()).await?;
+    }
+    // One activity per removed target (inside the loop).
+    for removed_id in &outcome.removed_ids {
         let emit = rel::unrelate_deleted_emit(
             &args.relation_type,
-            &target.id,
+            removed_id,
             &scope.creator_id,
             &source.id,
             &source.project_id,
@@ -3225,6 +3179,8 @@ async fn op_unrelate_issues(
         );
         enqueue_activity(txn, &emit).await?;
     }
+    let removed = outcome.removed;
+    let not_related = outcome.not_related;
     let result = rel::UnrelateResult {
         issue: source.identifier(),
         relation_type: args.relation_type.clone(),

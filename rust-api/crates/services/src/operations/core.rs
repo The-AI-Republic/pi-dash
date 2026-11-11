@@ -7,6 +7,7 @@
 //! structurally unchanged.
 
 pub mod comments;
+pub mod relations;
 pub mod workpad;
 
 use std::fmt;
@@ -21,6 +22,10 @@ pub enum CoreError {
     /// A sqlx failure from the row-level domain writes that return
     /// sqlx-native errors directly.
     Sqlx(sqlx::Error),
+    /// A request refusal: self-relations and cross-workspace targets
+    /// (`check_targets`). Every wrapper maps the contained message to
+    /// its own envelope (operations' 400, the agent's `InvalidArg`).
+    Request(String),
 }
 
 impl fmt::Display for CoreError {
@@ -28,6 +33,7 @@ impl fmt::Display for CoreError {
         match self {
             Self::Db(error) => write!(f, "database error: {error}"),
             Self::Sqlx(error) => write!(f, "database error: {error}"),
+            Self::Request(message) => write!(f, "request refused: {message}"),
         }
     }
 }
@@ -37,6 +43,7 @@ impl std::error::Error for CoreError {
         match self {
             Self::Db(error) => Some(error),
             Self::Sqlx(error) => Some(error),
+            Self::Request(_) => None,
         }
     }
 }
