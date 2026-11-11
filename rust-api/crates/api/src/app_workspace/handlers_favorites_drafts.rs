@@ -4805,23 +4805,16 @@ async fn draft_object_leg(
         );
         bad(errors)
     };
-    // Start/target order (`:72-79`): presence-keyed — explicit nulls on
-    // both sides `TypeError` (`None > None`) → the generic 500.
+    // Start/target order (`:71-77`): compared only when both values are
+    // non-null; a null on either side passes validation and is stored
+    // (an explicit null clears the date on PATCH).
     if has_key(values, "start_date") && has_key(values, "target_date") {
-        match (
+        if let (Some(start), Some(target)) = (
             opt_date(values, "start_date"),
             opt_date(values, "target_date"),
         ) {
-            (Some(start), Some(target)) => {
-                if start > target {
-                    return Err(non_field("Start date cannot exceed target date"));
-                }
-            }
-            _ => {
-                return Err(json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    SERVER_ERROR_BODY.to_owned(),
-                ));
+            if start > target {
+                return Err(non_field("Start date cannot exceed target date"));
             }
         }
     }
