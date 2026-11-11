@@ -10,6 +10,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +20,7 @@ const RETIRED_KB = ["2", "20"].join("");
 const ENV_SWITCH = ["SIZE", "TARGET"].join("_");
 const CHAIN = ["dist/web/assets/index-ENTRY.js", "dist/web/assets/route-FIRST.js"];
 
+const budgetSourcePath = fileURLToPath(new URL("./size-budget.mjs", import.meta.url));
 const configPath = join(dirname(fileURLToPath(import.meta.url)), "..", ".size-limit.mjs");
 
 describe("size budgets", () => {
@@ -60,6 +62,35 @@ describe("sizeLimits", () => {
   it("returns exactly the two entries and nothing switchable", () => {
     assert.equal(entries.length, 2);
     for (const entry of entries) assert.deepEqual(Object.keys(entry).sort(), ["gzip", "limit", "name", "path"]);
+  });
+});
+
+describe("size-budget.mjs", () => {
+  const source = readFileSync(budgetSourcePath, "utf8");
+
+  it("never reads the environment", () => {
+    assert.doesNotMatch(source, /process\.env/);
+  });
+
+  it("does not carry the retired ceiling or its switch, in code or prose", () => {
+    assert.ok(!source.includes(RETIRED_KB), `size-budget.mjs still mentions ${RETIRED_KB}`);
+    assert.ok(!source.includes(ENV_SWITCH), `size-budget.mjs still mentions ${ENV_SWITCH}`);
+  });
+
+  it("keeps the one ceiling even when the retired switch is exported", () => {
+    const appRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const read = () =>
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          'import("./checks/size-budget.mjs").then((m) => console.log(m.INITIAL_JS_CEILING))',
+        ],
+        { cwd: appRoot, encoding: "utf8", env: { ...process.env, [ENV_SWITCH]: "1" } }
+      ).trim();
+    assert.equal(read({ [ENV_SWITCH]: "1" }), "276 KB");
+    assert.equal(read({}), "276 KB");
   });
 });
 
