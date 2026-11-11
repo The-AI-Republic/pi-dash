@@ -39,8 +39,8 @@ pub struct ToolIssueRow {
 
 /// The run's bound issue by id. Like `_bound_issue`, there is no
 /// soft-delete filter: a deleted bound issue still resolves.
-pub async fn bound_issue(
-    db: &DatabaseConnection,
+pub async fn bound_issue<C: sea_orm::ConnectionTrait>(
+    db: &C,
     issue_id: Uuid,
 ) -> Result<Option<ToolIssueRow>, DbErr> {
     issue_query()

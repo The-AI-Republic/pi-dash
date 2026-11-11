@@ -347,6 +347,40 @@ pub async fn enqueue_in(tx: &mut Transaction<'_>, job: &NewJob) -> Result<i64, s
     enqueue_exec(&mut **tx.inner(), job).await
 }
 
+/// Enqueue a job inside a domain `WriteTxn`: the same statement as
+/// [`enqueue_exec`], executed through the SeaORM transaction so the
+/// row commits or rolls back with the caller's domain write (the
+/// cloud-agent writes' audit transaction, NEWPIDASH-190 §4.4). The
+/// `pg_notify` push-wake fires only after the surrounding commit, as
+/// on the sqlx paths (the statement is unchanged).
+pub async fn enqueue_in_write_txn(
+    txn: &pidash_services::domain::WriteTxn,
+    job: &NewJob,
+) -> Result<(), sqlx::Error> {
+    // raw-sql: same CTE-with-side-effect as `enqueue_exec` above (identically marked there).
+    let stmt = sea_orm::Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        enqueue_sql(),
+        [
+            sea_orm::Value::String(Some(Box::new(uuid::Uuid::new_v4().to_string()))),
+            sea_orm::Value::String(Some(Box::new(job.task.clone()))),
+            sea_orm::Value::Json(Some(Box::new(job.args.clone()))),
+            sea_orm::Value::Json(Some(Box::new(job.kwargs.clone()))),
+            sea_orm::Value::String(Some(Box::new(job.queue.clone()))),
+            sea_orm::Value::from(
+                job.visible_at
+                    .map(sea_orm::prelude::DateTimeWithTimeZone::from),
+            ),
+            sea_orm::Value::Int(Some(job.max_retries)),
+        ],
+    );
+    txn.connection()
+        .execute(stmt)
+        .await
+        .map(|_| ())
+        .map_err(into_sqlx)
+}
+
 /// Enqueue a job on any Postgres executor (pool, connection or open
 /// transaction). [`enqueue`] and [`enqueue_in`] both go through here.
 pub async fn enqueue_exec<'e, E>(executor: E, job: &NewJob) -> Result<i64, sqlx::Error>
