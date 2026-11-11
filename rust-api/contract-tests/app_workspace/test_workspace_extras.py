@@ -1124,6 +1124,16 @@ def test_draft_to_issue_body_reports_stored_state(user_api, space, world):
     """
     db = world["db"]
     proj = db.make_project(space["id"], "DST1")
+    # NEWPIDASH-185 (DIFF-14): the Rust handler requires an active
+    # project-membership row for draft create/publish, so the fixture
+    # seeds it (Django ignores it and still 201s).
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at, created_at, updated_at, view_props, default_props, sort_order, preferences) VALUES (%s,%s,%s,%s,20,true,NULL,now(),now(),'{}','{}',65535,'{}')",
+                (str(uuid.uuid4()), space["id"], proj["id"], world["user"]["id"]),
+            )
+        conn.commit()
     backlog_id = str(uuid.uuid4())
     started_id = str(uuid.uuid4())
     pod_id = str(uuid.uuid4())
