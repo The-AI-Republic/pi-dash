@@ -208,12 +208,14 @@ def _engine_world(seeder, daemon_world, *, pod_dispatch="pod_member"):
         dev_machine_id=machine["id"],
     )
     _go_online(seeder, engine_id)
+    session_id = str(uuid.uuid4())
     seeder.db.execute(
         "INSERT INTO runner_session (id, runner_id, protocol_version,"
         " created_at, last_seen_at, revoked_at, revoked_reason)"
         " VALUES (%s,%s,4,now(),now(),NULL,'')",
-        (str(uuid.uuid4()), engine_id),
+        (session_id, engine_id),
     )
+    seeder._put("runner_session", session_id)
     return engine_id, machine["id"]
 
 
