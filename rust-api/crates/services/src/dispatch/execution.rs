@@ -241,9 +241,18 @@ pub async fn lock_workspace(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    use sea_orm::{ConnectionTrait, DbBackend};
-    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
-    let row = tx_conn
+    lock_workspace_on_conn(&pidash_db::orm_tx::TxConn::new(conn), workspace_id).await
+}
+
+/// Connection-form of [`lock_workspace`] over any transaction
+/// connection (NEWPIDASH-190 Part 1b: the `WriteTxn`-backed
+/// creation store takes this instead of the sqlx transaction).
+pub async fn lock_workspace_on_conn<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    workspace_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    use sea_orm::DbBackend;
+    let row = conn
         .query_one(DbBackend::Postgres.build(&workspace_lock_select(workspace_id)))
         .await
         .map_err(pidash_db::orm_tx::into_sqlx)?;
@@ -257,9 +266,17 @@ async fn count_queued_cloud(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    use sea_orm::{ConnectionTrait, DbBackend};
-    let tx_conn = pidash_db::orm_tx::TxConn::new(conn);
-    let row = tx_conn
+    count_queued_cloud_on_conn(&pidash_db::orm_tx::TxConn::new(conn), workspace_id).await
+}
+
+/// Connection-form of [`count_queued_cloud`] over any transaction
+/// connection (NEWPIDASH-190 Part 1b, as above).
+pub async fn count_queued_cloud_on_conn<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    workspace_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    use sea_orm::DbBackend;
+    let row = conn
         .query_one(DbBackend::Postgres.build(&queued_cloud_count_select(workspace_id)))
         .await
         .map_err(pidash_db::orm_tx::into_sqlx)?
@@ -474,11 +491,32 @@ pub async fn lock_cloud_creation_capacity(
     automatic: bool,
     cloud: &CloudAgentSettings,
 ) -> Result<Option<DeferredAdmissionError>, ExecutionFieldsError> {
+    lock_cloud_creation_capacity_on_conn(
+        &pidash_db::orm_tx::TxConn::new(tx.inner()),
+        workspace_id,
+        executor_kind,
+        automatic,
+        cloud,
+    )
+    .await
+}
+
+/// Connection-form of [`lock_cloud_creation_capacity`] over any
+/// transaction connection (NEWPIDASH-190 Part 1b: the creation store
+/// may sit on a `WriteTxn`, which has no sqlx transaction). The
+/// verdict is shared; only the lock and count ride the connection.
+pub async fn lock_cloud_creation_capacity_on_conn<C: sea_orm::ConnectionTrait>(
+    conn: &C,
+    workspace_id: Uuid,
+    executor_kind: &AgentExecutorKind,
+    automatic: bool,
+    cloud: &CloudAgentSettings,
+) -> Result<Option<DeferredAdmissionError>, ExecutionFieldsError> {
     if *executor_kind != AgentExecutorKind::CloudAgent {
         return Ok(None);
     }
-    lock_workspace(tx.inner(), workspace_id).await?;
-    let queued = count_queued_cloud(tx.inner(), workspace_id).await?;
+    lock_workspace_on_conn(conn, workspace_id).await?;
+    let queued = count_queued_cloud_on_conn(conn, workspace_id).await?;
     Ok(quota_verdict(
         queued,
         cloud.max_queued_per_workspace,
