@@ -34,7 +34,7 @@ ISSUE_KEYS = {
     "sequence_id", "sort_order", "completed_at", "archived_at", "is_draft",
     "external_source", "external_id", "git_work_branch", "created_via",
     "agent_executor", "created_by", "updated_by", "project", "workspace",
-    "parent", "estimate_point", "type", "assigned_pod",
+    "parent", "estimate_point", "type", "assigned_pod", "assigned_runner",
 }
 
 LIST_KEYS = {

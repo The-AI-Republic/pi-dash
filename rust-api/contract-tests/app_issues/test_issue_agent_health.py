@@ -67,7 +67,7 @@ def _seed_world(cur, seed):
         " agent_metadata, tool_plan, usage, dispatch_attempts,"
         " error_details, llm_model, cancel_reason, phase_kind, pin_kind, created_at)"
         " VALUES (%s,%s,%s,%s,%s,%s,%s,'running','','direct',"
-        "'local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','locality',"
+        "'local_runner','{}','[]','{}','{}','{}','{}',0,'{}','','','','locality',"
         "%s)",
         (run_id, ws, admin, admin, pod_id, runner_id, issue, NOW),
     )
