@@ -219,26 +219,8 @@ pub async fn run_scheduler(
         // worker that dies while already running leaves rows `running`
         // that `claim` never picks up again.
         let minute = now.format("%Y-%m-%d %H:%M").to_string();
-        if minute != last_purge_minute {
-            match crate::queue::purge_failed(&pool, FAILED_RETENTION_SECS).await {
-                Ok(removed) => {
-                    if removed > 0 {
-                        tracing::info!(removed, "scheduler purged old failures");
-                    }
-                    last_purge_minute = minute;
-                }
-                Err(error) => tracing::warn!(%error, "scheduler purge failed"),
-            }
-            match crate::queue::reclaim_stale_running(&pool, crate::queue::STALE_CLAIM_LEASE_SECS)
-                .await
-            {
-                Ok(reclaimed) => {
-                    if reclaimed > 0 {
-                        tracing::info!(reclaimed, "scheduler reclaimed stale running jobs");
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "scheduler reclaim failed"),
-            }
+        if minute != last_purge_minute && purge_and_reclaim(&pool).await {
+            last_purge_minute = minute;
         }
         if tick(&mut shutdown).await {
             break;
@@ -268,28 +250,28 @@ pub fn default_schedule() -> Vec<BeatEntry> {
 }
 
 /// Scheduler allowlist from `PIDASH_BEAT_ONLY` (Phase 2, 2.2).
-/// Unset, empty, or a list that trims to nothing means all entries.
+/// Unset (var absent) means all entries. Set — even to an empty string —
+/// means an allowlist: an empty/whitespace-only value yields `Some(empty)`
+/// and fires nothing. This fail-closed choice matters during
+/// coexistence: a blank SSM value left from an earlier overlay must not
+/// silently re-enable all 31 entries next to Python beat (Finding 7 review).
 /// Set to a comma-separated list of exact `BeatEntry::name` values to
 /// fire only those entries while Python beat stays live beside Rust.
 /// The allowlist is consulted by [`WorkerBuilder::with_scheduler`]'s
 /// schedule filtering; queue maintenance (reclaim, purge) always runs
 /// even when the allowlist is empty or the scheduler is off.
 pub fn scheduler_allowlist() -> Option<std::collections::HashSet<String>> {
-    let raw = std::env::var("PIDASH_BEAT_ONLY").ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+    let raw = match std::env::var("PIDASH_BEAT_ONLY") {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    // Set (even empty) stays an allowlist: an empty string fires nothing.
     let set: std::collections::HashSet<String> = raw
         .split(',')
         .map(|part| part.trim().to_owned())
         .filter(|part| !part.is_empty())
         .collect();
-    if set.is_empty() {
-        None
-    } else {
-        Some(set)
-    }
+    Some(set)
 }
 
 /// Pure allowlist filter for tests and the builder: `None` keeps every
@@ -308,6 +290,35 @@ pub fn filter_schedule_by_allowlist(
     }
 }
 
+/// One purge + stale-reclaim sweep (Finding 10 review): shared by the
+/// full scheduler and the `--no-scheduler` maintenance loop so the two
+/// cannot drift. Returns `true` when both writes succeeded (so callers
+/// can advance their minute), `false` on any purge failure (reclaim may
+/// still have run — logged separately).
+async fn purge_and_reclaim(pool: &PgPool) -> bool {
+    let purge_ok = match crate::queue::purge_failed(pool, FAILED_RETENTION_SECS).await {
+        Ok(removed) => {
+            if removed > 0 {
+                tracing::info!(removed, "scheduler purged old failures");
+            }
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "scheduler purge failed");
+            false
+        }
+    };
+    match crate::queue::reclaim_stale_running(pool, crate::queue::STALE_CLAIM_LEASE_SECS).await {
+        Ok(reclaimed) => {
+            if reclaimed > 0 {
+                tracing::info!(reclaimed, "scheduler reclaimed stale running jobs");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "scheduler reclaim failed"),
+    }
+    purge_ok
+}
+
 /// Maintenance loop for the `--no-scheduler` case (Phase 2, 2.2):
 /// keeps the purge + stale-reclaim cadence alive while firing nothing.
 /// Runs inside [`crate::queue`] cadence (once a minute), logging every
@@ -321,20 +332,7 @@ pub async fn run_maintenance(pool: PgPool, mut shutdown: watch::Receiver<bool>) 
         }
         let now = Utc::now();
         let minute = now.format("%Y-%m-%d %H:%M").to_string();
-        if minute != last_minute {
-            if let Err(error) = crate::queue::purge_failed(&pool, FAILED_RETENTION_SECS).await {
-                tracing::warn!(%error, "scheduler purge failed");
-            }
-            match crate::queue::reclaim_stale_running(&pool, crate::queue::STALE_CLAIM_LEASE_SECS)
-                .await
-            {
-                Ok(reclaimed) => {
-                    if reclaimed > 0 {
-                        tracing::info!(reclaimed, "scheduler reclaimed stale running jobs");
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "scheduler reclaim failed"),
-            }
+        if minute != last_minute && purge_and_reclaim(&pool).await {
             last_minute = minute;
         }
         if tick(&mut shutdown).await {

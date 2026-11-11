@@ -144,9 +144,23 @@ pub fn run_cloud_agent_job(run_id: &str) -> NewJob {
     run_cloud_agent_job_with_queue(run_id, cloud_agent_job_queue())
 }
 
+/// Queue label validation (Finding 8 review): `CLOUD_AGENT_JOB_QUEUE` is
+/// read through `Settings` as a plain string, so a blank, space-padded,
+/// or stale SSM value would otherwise enqueue on a label no worker claims
+/// and strand runs `queued` with no error. `dispatch_waiting` and the job
+/// wrapper both collapse blank/whitespace-only to the default.
+fn validated_job_queue(raw: &str) -> String {
+    let trimmed = raw.trim().to_owned();
+    if trimmed.is_empty() {
+        crate::queue::DEFAULT_QUEUE.to_owned()
+    } else {
+        trimmed
+    }
+}
+
 /// Queue at an explicit label (Phase 2 D3). `dispatch_waiting` routes
-/// through `CloudAgentSettings.job_queue` so the label follows the
-/// resolved settings rather than a second env read; this wrapper keeps
+/// through `CloudAgentSettings.job_queue` (validated) so the label follows
+/// the resolved settings rather than a second env read; this wrapper keeps
 /// the free-function surface identical for the poll-free path.
 pub fn run_cloud_agent_job_with_queue(run_id: &str, queue: impl Into<String>) -> NewJob {
     let message = run_cloud_agent_message(run_id);
@@ -155,7 +169,7 @@ pub fn run_cloud_agent_job_with_queue(run_id: &str, queue: impl Into<String>) ->
         Value::Array(message.args.clone()),
         Value::Object(message.kwargs.clone()),
     )
-    .with_queue(queue)
+    .with_queue(validated_job_queue(&queue.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +978,20 @@ mod tests {
         assert_eq!(job.task, RUN_CLOUD_AGENT_TASK);
         let celery = run_cloud_agent_job_with_queue(&run_id, crate::queue::DEFAULT_QUEUE);
         assert_eq!(celery.queue, crate::queue::DEFAULT_QUEUE);
+        // Finding 8: blank/space-padded values collapse to the default
+        // instead of stranding runs on a phantom label.
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, "").queue,
+            crate::queue::DEFAULT_QUEUE
+        );
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, "  ").queue,
+            crate::queue::DEFAULT_QUEUE
+        );
+        assert_eq!(
+            run_cloud_agent_job_with_queue(&run_id, " cloud_agent ").queue,
+            "cloud_agent"
+        );
     }
 
     // -- tool-plan snapshot shape ---------------------------------------------

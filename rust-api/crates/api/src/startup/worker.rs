@@ -520,10 +520,30 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
         .await?;
         let built = self.build()?;
         // Apply the PIDASH_BEAT_ONLY allowlist to the schedule. Unset
-        // means all entries; set to a comma-separated list of exact
-        // schedule entry names. The active list is logged so a
-        // misconfigured coexistence is visible at boot.
+        // means all entries; set (even empty) means only the listed
+        // entries. The active list is logged so a misconfigured
+        // coexistence is visible at boot, and unknown names are warned
+        // (Finding 7): a typo'd allowlist that silently drops to a
+        // subset would otherwise hide the error.
         let allowlist = pidash_jobs::scheduler::scheduler_allowlist();
+        if let Some(allowed) = &allowlist {
+            let known: std::collections::HashSet<_> = built
+                .schedule
+                .iter()
+                .map(|entry| entry.name.to_owned())
+                .collect();
+            for name in allowed {
+                if !known.contains(name.as_str()) {
+                    tracing::warn!(
+                        entry = %name,
+                        "PIDASH_BEAT_ONLY contains unknown schedule entry; it will be ignored"
+                    );
+                }
+            }
+            if allowed.is_empty() {
+                tracing::warn!("PIDASH_BEAT_ONLY is set but empty; scheduler will fire no entries (maintenance still runs)");
+            }
+        }
         let schedule = pidash_jobs::scheduler::filter_schedule_by_allowlist(
             built.schedule.clone(),
             &allowlist,
