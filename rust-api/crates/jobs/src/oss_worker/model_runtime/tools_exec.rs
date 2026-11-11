@@ -63,7 +63,7 @@ use crate::orchestration::{
     fire_tick_seam::emit_logs, live_inputs::JobsMatcher, preflight_eligibility_or_bounce,
     LiveCreationStore, StoreDeps,
 };
-use crate::queue::{enqueue, enqueue_in, NewJob};
+use crate::queue::{enqueue, enqueue_in_write_txn, NewJob};
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_db::app_pages::strip::ml_strip_tags;
@@ -103,7 +103,7 @@ use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::relations as relation_domain;
 use pidash_services::domain::transition::IssueTransitionHook;
-use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
+use pidash_services::domain::{self, WriteActor, WriteCtx, WriteOptions, WriteScope, WriteTxn};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
@@ -126,7 +126,6 @@ use super::agent::{ToolExecutor, ToolOutcome};
 use super::github::{GithubAppContext, GithubFailure, GithubRestClient};
 use super::validation::ValidatedArgs;
 use pidash_compat::datetime::render_isoformat;
-use pidash_compat::db::is_unique_violation;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -1191,11 +1190,11 @@ async fn op_list_linked_code_reviews(
 /// row, and the link. `impersonate(run.created_by)` surfaces as the
 /// explicit actor binds.
 async fn op_add_current_issue_comment(
-    tx: &mut Transaction<'_>,
+    txn: &mut WriteTxn,
     scope: &ToolScope,
     body: &str,
 ) -> Result<Value, ToolExecError> {
-    let issue = bound_issue_tx(tx, scope.work_item_id).await?;
+    let issue = bound_issue_wtxn(txn, scope.work_item_id).await?;
     let Some(issue) = issue else {
         return Err(ToolExecError::AttributeError {
             attribute: "project",
@@ -1245,35 +1244,29 @@ async fn op_add_current_issue_comment(
         labels: &empty_list,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &rows).await?;
-    comment_domain::insert_description_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &rows)
+    comment_domain::insert_comment_row(&txn.connection(), &rows).await?;
+    comment_domain::insert_description_row(&txn.connection(), &rows).await?;
+    comment_domain::link_comment_description(&txn.connection(), rows.id, rows.description_id)
         .await?;
-    comment_domain::link_comment_description(
-        &pidash_db::orm_tx::TxConn::new(tx.inner()),
-        rows.id,
-        rows.description_id,
-    )
-    .await?;
     let comment_id = rows.id;
     let created = plan::comment_created(&comment_id.to_string());
     serde_json::to_value(created)
         .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))
 }
 
-/// The bound-issue read over the audit transaction (same shape as
-/// [`bound_issue`]).
-async fn bound_issue_tx(
-    tx: &mut Transaction<'_>,
+/// The bound-issue read over a [`WriteTxn`] (same shape as
+/// [`bound_issue`]): the domain connection joins the SeaORM query
+/// directly, so no sqlx statement is needed.
+async fn bound_issue_wtxn(
+    txn: &WriteTxn,
     work_item_id: Option<Uuid>,
 ) -> Result<Option<BoundIssue>, ToolExecError> {
     let Some(issue_id) = work_item_id else {
         return Ok(None);
     };
-    // raw-sql: runs on the tool's sqlx audit transaction, which a SeaORM call cannot join; SeaORM builds the statement (tool_issues::bound_issue_sql), so its output names are unique.
-    let row: Option<ToolIssueRow> = sqlx::query_as(tool_issues::bound_issue_sql())
-        .bind(issue_id)
-        .fetch_optional(&mut **tx.inner())
-        .await?;
+    let row = tool_issues::bound_issue(&txn.connection(), issue_id)
+        .await
+        .map_err(orm_error)?;
     Ok(row)
 }
 
@@ -1312,6 +1305,11 @@ fn write_ctx(scope: &ToolScope, project_id: Uuid) -> WriteCtx {
         workspace_id: Some(scope.workspace_id),
         project_id: Some(project_id),
     })
+    .with_options(WriteOptions {
+        source: pidash_services::domain::WriteSource::CloudAgent {
+            run_id: scope.run_id,
+        },
+    })
 }
 
 /// `pidash_update_current_issue_workpad` (`tools.py:296-307`). A run
@@ -1321,20 +1319,20 @@ fn write_ctx(scope: &ToolScope, project_id: Uuid) -> WriteCtx {
 /// equivalent, bare columns with no save signals — inside the audit
 /// transaction, exactly where the inline `UPDATE` ran.
 async fn op_update_current_issue_workpad(
-    tx: &mut Transaction<'_>,
+    txn: &mut WriteTxn,
     scope: &ToolScope,
     body: &str,
 ) -> Result<Value, ToolExecError> {
     if let Some(work_item_id) = scope.work_item_id {
         // `run.work_item.project_id` (the raw attname, not the join).
-        let issue = bound_issue_tx(tx, scope.work_item_id).await?;
+        let issue = bound_issue_wtxn(txn, scope.work_item_id).await?;
         let Some(issue) = issue else {
             return Err(ToolExecError::AttributeError {
                 attribute: "project_id",
             });
         };
         let _ = domain_issues::update_workpad(
-            &pidash_db::orm_tx::TxConn::new(tx.inner()),
+            &txn.connection(),
             work_item_id,
             issue.project_id,
             body,
@@ -1354,15 +1352,14 @@ async fn op_update_current_issue_workpad(
 }
 
 /// The orchestration state view (the `STATE_SELECT_SQL` read).
-async fn state_view_tx(
-    tx: &mut Transaction<'_>,
+async fn state_view_tx<C: sea_orm::ConnectionTrait>(
+    conn: &C,
     state_id: Uuid,
 ) -> Result<Option<pidash_services::orchestration::creation::StateView>, ToolExecError> {
     use pidash_db::entity::states as st_entity;
-    let conn = tx_conn(tx);
     let row = st_entity::Entity::find_by_id(state_id)
         .into_model::<IssueStateView>()
-        .one(&conn)
+        .one(conn)
         .await
         .map_err(orm_error)?;
     Ok(
@@ -1430,15 +1427,16 @@ fn transition_state_query(
 /// a tool-supplied completed state, insert the issue plus its
 /// sequence row, and return the brief. The title/description are
 /// pre-validated by the dispatch; `stripped_title` is what stores.
-/// Returns the brief plus the post-commit fire inputs — the caller
-/// drives [`fire_create_transition`] once the audit commits.
+/// The save rides the audit [`WriteTxn`] (NEWPIDASH-190 §4.4 phase
+/// 1.5): the post-commit orchestration fire is queued with
+/// [`WriteTxn::on_commit`] and drains after the audit commits.
 async fn op_create_project_issue(
     ctx: &ToolCtx,
-    tx: &mut Transaction<'_>,
+    txn: &mut WriteTxn,
     scope: &ToolScope,
     description: &str,
     stripped_title: &str,
-) -> Result<(Value, CreateDispatch), ToolExecError> {
+) -> Result<Value, ToolExecError> {
     // `run.scheduler_binding.project_id` (the raw attname): the tool
     // uses the binding's project even when the run also has a bound
     // issue in another project.
@@ -1455,7 +1453,7 @@ async fn op_create_project_issue(
         .select_only()
         .column(sb_entity::Column::ProjectId)
         .into_tuple::<Uuid>()
-        .one(&tx_conn(tx))
+        .one(&txn.connection())
         .await
         .map_err(orm_error)?;
     let Some(project_id) = binding_project_id else {
@@ -1464,19 +1462,17 @@ async fn op_create_project_issue(
         });
     };
     // Existence first, lock later: Django takes `select_for_update`
-    // here (`tools.py:351`) and saves in the same transaction, but the
-    // port commits the save in a separate domain transaction whose
-    // deferred FK checks run at COMMIT — holding this row's FOR UPDATE
-    // across that commit stalls the domain COMMIT on the audit txn (a
-    // one-way lock wait; the 60s idle guard then kills the audit
-    // connection, PIDASHCONV-1596). The lock lands after the domain
-    // commit below, still inside the audit transaction.
+    // here (`tools.py:351`) and saves in the same transaction. The
+    // save now rides the audit `WriteTxn` itself (no second domain
+    // transaction), so a single-transaction `FOR UPDATE` throughout
+    // is holdable; the lock still lands after the save, inside the
+    // audit transaction.
     let exists = proj_entity::Entity::find_by_id(project_id)
         .filter(proj_entity::Column::DeletedAt.is_null())
         .select_only()
         .column(proj_entity::Column::Id)
         .into_tuple::<Uuid>()
-        .one(&tx_conn(tx))
+        .one(&txn.connection())
         .await
         .map_err(orm_error)?;
     if exists.is_none() {
@@ -1492,7 +1488,7 @@ async fn op_create_project_issue(
         .select_only()
         .column(st_entity::Column::Id)
         .into_tuple::<Uuid>()
-        .one(&tx_conn(tx))
+        .one(&txn.connection())
         .await
         .map_err(orm_error)?;
     let tool_state = match tool_state {
@@ -1507,7 +1503,7 @@ async fn op_create_project_issue(
             .select_only()
             .column(st_entity::Column::Id)
             .into_tuple::<Uuid>()
-            .one(&tx_conn(tx))
+            .one(&txn.connection())
             .await
             .map_err(orm_error)?,
     };
@@ -1521,23 +1517,23 @@ async fn op_create_project_issue(
         .order_by_desc(issue_entity::Column::SequenceId)
         .limit(1)
         .into_tuple::<i64>()
-        .one(&tx_conn(tx))
+        .one(&txn.connection())
         .await
         .map_err(orm_error)?;
-    // The save rides `domain::issues::create`: the hooks repair a
-    // missing tool state (same default-then-fallback queries), take the
-    // advisory lock, scan the effective sequence and sort order, resolve
-    // the default pod, stamp `completed_at` for a tool-supplied completed
-    // state only (a repaired state never stamps — the assembled `None`
-    // rides through), and strip the html. The fire and the created
-    // activity are both skipped: the caller drives the bespoke
-    // post-commit fire and Django sends no activity on this path, so the
-    // chain stays empty. Both hooks are still registered: `create`
-    // resolves them eagerly and an unregistered lookup panics the task
-    // (PIDASHCONV-1596). The issue commits in the domain transaction,
-    // ahead of the audit commit below (the old
-    // inline inserts shared the audit transaction — a post-write audit
-    // failure now leaves the issue standing; fault-path only).
+    // The save rides `domain::issues::create` on the audit `WriteTxn`:
+    // the hooks repair a missing tool state (same default-then-fallback
+    // queries), take the advisory lock, scan the effective sequence and
+    // sort order, resolve the default pod, stamp `completed_at` for a
+    // tool-supplied completed state only (a repaired state never stamps
+    // — the assembled `None` rides through), and strip the html. The
+    // fire and the created activity are both skipped: the after-commit
+    // fire step below drives the bespoke fire and Django sends no
+    // activity on this path, so the chain stays empty. Both hooks are
+    // still registered: `create` resolves them eagerly and an
+    // unregistered lookup panics the task (PIDASHCONV-1596). The issue
+    // commits with the audit transaction; the earlier separate domain
+    // transaction (which left the issue standing on a post-write audit
+    // failure) is gone.
     // `to_safe_html` never yields `""` (the `<p></p>` fallback), so the
     // hook's `NULL` arm is defensive, kept for the port's exact shape.
     let html = to_safe_html(Some(description));
@@ -1594,48 +1590,38 @@ async fn op_create_project_issue(
     let domain_ctx = write_ctx(scope, project_id);
     let transition = ctx.transition_hook.clone();
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(WorkerTaskEnqueueHook::new(&ctx.pool));
-    let outcome = domain::run(&domain_ctx, &ctx.orm, |txn| {
-        let domain_ctx = domain_ctx.clone();
-        let pool = ctx.pool.clone();
-        let transition = transition.clone();
-        let enqueue = enqueue.clone();
-        Box::pin(async move {
-            txn.hooks_mut().register(transition);
-            txn.hooks_mut().register(enqueue);
-            domain_issues::create(
-                &domain_ctx,
-                txn,
-                &pool,
-                domain_issues::CreateIssue {
-                    fields,
-                    assignees: Vec::new(),
-                    default_assignee: None,
-                    labels: Vec::new(),
-                    fire,
-                    origin: None,
-                    activity_requested: serde_json::Value::Null,
-                    activity_notification: None,
-                    activity_require_origin: false,
-                    skip_activity: true,
-                    skip_fire: true,
-                    model_activity: None,
-                    created_override: None,
-                },
-            )
-            .await
-        })
-    })
+    let pool = ctx.pool.clone();
+    txn.hooks_mut().register(transition);
+    txn.hooks_mut().register(enqueue);
+    let outcome = domain_issues::create(
+        &domain_ctx,
+        txn,
+        &pool,
+        domain_issues::CreateIssue {
+            fields,
+            assignees: Vec::new(),
+            default_assignee: None,
+            labels: Vec::new(),
+            fire,
+            origin: None,
+            activity_requested: serde_json::Value::Null,
+            activity_notification: None,
+            activity_require_origin: false,
+            skip_activity: true,
+            skip_fire: true,
+            model_activity: None,
+            created_override: None,
+        },
+    )
     .await
     .map_err(domain_error)?;
     // The deferred `select_for_update` (`tools.py:351`; see above):
-    // still held when the audit commits. A project deleted mid-flight
-    // errors here with the issue standing (fault-path only, like the
-    // audit-aftermath note above).
+    // taken on the audit transaction and held until the audit commits.
     let locked = project_lock_query(project_id)
         .select_only()
         .column(proj_entity::Column::Id)
         .into_tuple::<Uuid>()
-        .one(&tx_conn(tx))
+        .one(&txn.connection())
         .await
         .map_err(orm_error)?;
     if locked.is_none() {
@@ -1649,16 +1635,27 @@ async fn op_create_project_issue(
         .select_only()
         .column(proj_entity::Column::Identifier)
         .into_tuple::<String>()
-        .one(&tx_conn(tx))
+        .one(&txn.connection())
         .await
         .map_err(orm_error)?;
     let (state_name, state_group) = match state_id {
-        Some(state) => match state_view_tx(tx, state).await? {
+        Some(state) => match state_view_tx(&txn.connection(), state).await? {
             Some(view) => (Some(view.name), Some(view.group)),
             None => (None, None),
         },
         None => (None, None),
     };
+    // The orchestration post-save fire (`signals.py:74-107`): Django's
+    // `Issue.objects.create` runs it inside the save; here it is an
+    // after-commit step on the audit transaction, drained after the
+    // audit commits (before the `tool_completed` emit, which
+    // `run_write` queues after the op).
+    let ctx_fire = ctx.clone();
+    let creator_id = scope.creator_id;
+    txn.on_commit(move || {
+        let c = ctx_fire.clone();
+        async move { fire_create_transition(&c, creator_id, issue_id, state_id).await }
+    });
     let detail = plan::issue_data(
         &issue_id.to_string(),
         project_identifier.as_deref().unwrap_or(""),
@@ -1673,16 +1670,7 @@ async fn op_create_project_issue(
     let value = serde_json::to_value(created).map_err(|error| {
         ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
     })?;
-    Ok((value, CreateDispatch { issue_id, state_id }))
-}
-
-/// What a create hands its caller for the post-commit orchestration
-/// fire (`signals.py:74-107`): the new issue plus its resolved state.
-/// `state_id` is `None` when the project has no state at all — the
-/// fire's early return (Django's `prev == current` no-op).
-struct CreateDispatch {
-    issue_id: Uuid,
-    state_id: Option<Uuid>,
+    Ok(value)
 }
 
 /// Preflight for the tool's create: the live
@@ -2506,13 +2494,13 @@ async fn op_transition_current_issue<'a>(
     // (decoding `IssueStateView`), and this re-read supplies the fresh
     // orchestration view plus the TOCTOU existence check below.
     let from_state = match from_state_id {
-        Some(id) => match state_view_tx(&mut tx, id).await {
+        Some(id) => match state_view_tx(&tx_conn(&mut tx), id).await {
             Ok(view) => view,
             Err(error) => return (tx, Err(error)),
         },
         None => None,
     };
-    let to_state = match state_view_tx(&mut tx, target_id).await {
+    let to_state = match state_view_tx(&tx_conn(&mut tx), target_id).await {
         Ok(Some(view)) => view,
         Ok(None) => {
             // TOCTOU: the target vanished between the lookup and the
@@ -2705,8 +2693,8 @@ struct ResolvedIssueRow {
 /// collect `ref or str(raw)`. `own_project` narrows to the run's
 /// project ([`plan::OWN_PROJECT_ISSUES_PREDICATE`], `$3`). Returns
 /// `(found, unresolved)` in request order.
-async fn resolve_refs_tx(
-    tx: &mut Transaction<'_>,
+async fn resolve_refs_tx<C: sea_orm::ConnectionTrait>(
+    conn: &C,
     scope: &ToolScope,
     refs: &[String],
     own_project: bool,
@@ -2717,12 +2705,13 @@ async fn resolve_refs_tx(
         let classified = rel::classify_ref(raw);
         let matched = match &classified.kind {
             rel::RefKind::Unresolved => None,
-            rel::RefKind::Id(id) => resolve_by_id_tx(tx, scope, own_project, *id).await?,
+            rel::RefKind::Id(id) => resolve_by_id_tx(conn, scope, own_project, *id).await?,
             rel::RefKind::Identifier {
                 project_code,
                 sequence_id,
             } => {
-                resolve_by_identifier_tx(tx, scope, own_project, project_code, *sequence_id).await?
+                resolve_by_identifier_tx(conn, scope, own_project, project_code, *sequence_id)
+                    .await?
             }
         };
         match matched {
@@ -2797,26 +2786,26 @@ fn workspace_slug_str(scope: &ToolScope) -> &str {
 
 /// The UUID half of `resolve_refs`: pool, `$3` project when narrowed,
 /// then the canonical id.
-async fn resolve_by_id_tx(
-    tx: &mut Transaction<'_>,
+async fn resolve_by_id_tx<C: sea_orm::ConnectionTrait>(
+    conn: &C,
     scope: &ToolScope,
     own_project: bool,
     id: Uuid,
 ) -> Result<Option<rel::ResolvedIssue>, ToolExecError> {
-    resolve_tx(&tx_conn(tx), scope, own_project, Some(id), None, None).await
+    resolve_tx(conn, scope, own_project, Some(id), None, None).await
 }
 
 /// The identifier half of `resolve_refs`: pool, optional narrowing,
 /// then code + sequence.
-async fn resolve_by_identifier_tx(
-    tx: &mut Transaction<'_>,
+async fn resolve_by_identifier_tx<C: sea_orm::ConnectionTrait>(
+    conn: &C,
     scope: &ToolScope,
     own_project: bool,
     project_code: &str,
     sequence_id: i64,
 ) -> Result<Option<rel::ResolvedIssue>, ToolExecError> {
     resolve_tx(
-        &tx_conn(tx),
+        conn,
         scope,
         own_project,
         None,
@@ -2827,12 +2816,12 @@ async fn resolve_by_identifier_tx(
 }
 
 /// `_pair_rows` (`relations.py:117-120`) over the audit transaction.
-async fn pair_rows_tx(
-    tx: &mut Transaction<'_>,
+async fn pair_rows_tx<C: sea_orm::ConnectionTrait>(
+    conn: &C,
     a_id: Uuid,
     b_id: Uuid,
 ) -> Result<Vec<rel::PairRow>, ToolExecError> {
-    pair_rows(&tx_conn(tx), a_id, b_id).await
+    pair_rows(conn, a_id, b_id).await
 }
 
 /// `#pair_rows` on any connection: the live rows between the pair, in
@@ -2888,17 +2877,23 @@ struct IssuePairRow {
 /// looping back to `Create` when the race resolves to nothing), one
 /// `issue_activity` emit for the batch, and the refreshed grouping.
 async fn op_relate_issues(
-    tx: &mut Transaction<'_>,
+    txn: &mut WriteTxn,
     scope: &ToolScope,
     args: &plan::RelationWriteArgs,
 ) -> Result<Value, ToolExecError> {
-    let (sources, unresolved) =
-        resolve_refs_tx(tx, scope, std::slice::from_ref(&args.issue), true).await?;
+    let (sources, unresolved) = resolve_refs_tx(
+        &txn.connection(),
+        scope,
+        std::slice::from_ref(&args.issue),
+        true,
+    )
+    .await?;
     if !unresolved.is_empty() {
         let refs: Vec<&str> = unresolved.iter().map(String::as_str).collect();
         return Err(plan::ToolCallFailure::InvalidArg(plan::unresolved_refs_message(&refs)).into());
     }
-    let (targets, unresolved) = resolve_refs_tx(tx, scope, &args.related_issues, false).await?;
+    let (targets, unresolved) =
+        resolve_refs_tx(&txn.connection(), scope, &args.related_issues, false).await?;
     if !unresolved.is_empty() {
         let refs: Vec<&str> = unresolved.iter().map(String::as_str).collect();
         return Err(plan::ToolCallFailure::InvalidArg(plan::unresolved_refs_message(&refs)).into());
@@ -2914,7 +2909,7 @@ async fn op_relate_issues(
     let mut conflicts: Vec<rel::RelateConflict> = Vec::new();
     for target in &targets {
         loop {
-            let existing = pair_rows_tx(tx, source.id, target.id).await?;
+            let existing = pair_rows_tx(&txn.connection(), source.id, target.id).await?;
             match rel::relate_verdict(&existing, &source.id, &args.relation_type) {
                 rel::RelateVerdict::Unchanged => {
                     unchanged.push(target.identifier());
@@ -2935,24 +2930,32 @@ async fn op_relate_issues(
                         target,
                         scope.creator_id,
                     );
-                    match relate_insert_tx(tx, &row).await {
-                        Ok(()) => {
-                            created.push(target.clone());
-                            break;
-                        }
-                        Err(error) => {
-                            let raced =
-                                matches!(&error, ToolExecError::Db(db) if is_unique_violation(db));
-                            if raced {
-                                // A concurrent writer won the race;
-                                // re-read and re-verdict (quirk 5
-                                // loops here when the race resolves to
-                                // nothing).
-                                continue;
-                            }
-                            return Err(error);
-                        }
+                    let value = relation_domain::RelationRow {
+                        id: row.id,
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        created_by: Some(row.created_by_id),
+                        updated_by: row.updated_by_id,
+                        project_id: row.project_id,
+                        workspace_id: row.workspace_id,
+                        issue_id: row.issue_id,
+                        related_issue_id: row.related_issue_id,
+                        relation_type: row.relation_type.as_str(),
+                    };
+                    // `WriteTxn` forbids savepoints; the conflict arm
+                    // (`ON CONFLICT DO NOTHING` → re-verdict, quirk 5)
+                    // replaces the savepointed insert (`relations.py`
+                    // `bulk_create(ignore_conflicts=True)` verdict loop).
+                    let inserted =
+                        relation_domain::relate_row_or_nothing(&txn.connection(), &value).await?;
+                    if inserted {
+                        created.push(target.clone());
+                        break;
                     }
+                    // A concurrent writer won the race; re-read and
+                    // re-verdict (quirk 5 loops here when the race
+                    // resolves to nothing).
+                    continue;
                 }
             }
         }
@@ -2967,7 +2970,7 @@ async fn op_relate_issues(
             &source.project_id,
             Utc::now().timestamp(),
         );
-        enqueue_activity(tx, &emit).await?;
+        enqueue_activity(txn, &emit).await?;
     }
     let result = rel::RelateResult {
         issue: source.identifier(),
@@ -2978,60 +2981,9 @@ async fn op_relate_issues(
     };
     let mut map = serde_json::to_value(result)
         .map_err(|error| plan::ToolCallFailure::Failed(error.to_string()))?;
-    let grouped = grouped_tx(tx, scope, &source).await?;
+    let grouped = grouped_tx(&txn.connection(), scope, &source).await?;
     map = plan::with_grouped_relations(map.as_object().cloned().unwrap_or_default(), grouped);
     Ok(map)
-}
-
-/// One savepointed relate `INSERT` (`relations.py:198-207`): the
-/// savepoint scopes the 23505 rollback — anything else aborts the
-/// audit transaction, as Python's uncaught raise does.
-async fn relate_insert_tx(
-    tx: &mut Transaction<'_>,
-    row: &rel::RelateInsert,
-) -> Result<(), ToolExecError> {
-    let now = Utc::now();
-    // raw-sql: SAVEPOINT is a transaction command, not a select/insert the ORM can build.
-    sqlx::query("SAVEPOINT relate_target")
-        .execute(&mut **tx.inner())
-        .await?;
-    let value = relation_domain::RelationRow {
-        id: row.id,
-        created_at: now,
-        updated_at: now,
-        created_by: Some(row.created_by_id),
-        updated_by: row.updated_by_id,
-        project_id: row.project_id,
-        workspace_id: row.workspace_id,
-        issue_id: row.issue_id,
-        related_issue_id: row.related_issue_id,
-        relation_type: row.relation_type.as_str(),
-    };
-    let inserted =
-        relation_domain::relate_row(&pidash_db::orm_tx::TxConn::new(tx.inner()), &value).await;
-    match inserted {
-        Ok(_) => {
-            // raw-sql: RELEASE is a transaction command, not a statement the ORM can build.
-            sqlx::query("RELEASE SAVEPOINT relate_target")
-                .execute(&mut **tx.inner())
-                .await?;
-            Ok(())
-        }
-        Err(error) => {
-            // Scope the rollback to the savepoint; cleanup failures
-            // cannot mask the original (Python's atomic exit raises
-            // the `IntegrityError`, not a teardown error).
-            // raw-sql: ROLLBACK TO is a transaction command, not a statement the ORM can build.
-            let _ = sqlx::query("ROLLBACK TO SAVEPOINT relate_target")
-                .execute(&mut **tx.inner())
-                .await;
-            // raw-sql: RELEASE is a transaction command, not a statement the ORM can build.
-            let _ = sqlx::query("RELEASE SAVEPOINT relate_target")
-                .execute(&mut **tx.inner())
-                .await;
-            Err(error.into())
-        }
-    }
 }
 
 /// `pidash_unrelate_issues` (`tools.py:426-431` over
@@ -3039,17 +2991,23 @@ async fn relate_insert_tx(
 /// plus the related-objects sweep per row), one `issue_activity` emit
 /// per removed target, and the refreshed grouping.
 async fn op_unrelate_issues(
-    tx: &mut Transaction<'_>,
+    txn: &mut WriteTxn,
     scope: &ToolScope,
     args: &plan::RelationWriteArgs,
 ) -> Result<Value, ToolExecError> {
-    let (sources, unresolved) =
-        resolve_refs_tx(tx, scope, std::slice::from_ref(&args.issue), true).await?;
+    let (sources, unresolved) = resolve_refs_tx(
+        &txn.connection(),
+        scope,
+        std::slice::from_ref(&args.issue),
+        true,
+    )
+    .await?;
     if !unresolved.is_empty() {
         let refs: Vec<&str> = unresolved.iter().map(String::as_str).collect();
         return Err(plan::ToolCallFailure::InvalidArg(plan::unresolved_refs_message(&refs)).into());
     }
-    let (targets, unresolved) = resolve_refs_tx(tx, scope, &args.related_issues, false).await?;
+    let (targets, unresolved) =
+        resolve_refs_tx(&txn.connection(), scope, &args.related_issues, false).await?;
     if !unresolved.is_empty() {
         let refs: Vec<&str> = unresolved.iter().map(String::as_str).collect();
         return Err(plan::ToolCallFailure::InvalidArg(plan::unresolved_refs_message(&refs)).into());
@@ -3063,7 +3021,7 @@ async fn op_unrelate_issues(
     let mut removed: Vec<String> = Vec::new();
     let mut not_related: Vec<String> = Vec::new();
     for target in &targets {
-        let existing = pair_rows_tx(tx, source.id, target.id).await?;
+        let existing = pair_rows_tx(&txn.connection(), source.id, target.id).await?;
         let matching = rel::unrelate_matches(&existing, &source.id, &args.relation_type);
         if matching.is_empty() {
             not_related.push(target.identifier());
@@ -3072,14 +3030,14 @@ async fn op_unrelate_issues(
         for row in matching {
             let now = Utc::now();
             relation_domain::soft_delete_relation_row(
-                &pidash_db::orm_tx::TxConn::new(tx.inner()),
+                &txn.connection(),
                 row.id,
                 scope.creator_id,
                 now,
                 now,
             )
             .await?;
-            enqueue_sweep(tx, "issuerelation", &row.id.to_string()).await?;
+            enqueue_sweep(txn, "issuerelation", &row.id.to_string()).await?;
         }
         removed.push(target.identifier());
         let emit = rel::unrelate_deleted_emit(
@@ -3090,7 +3048,7 @@ async fn op_unrelate_issues(
             &source.project_id,
             Utc::now().timestamp(),
         );
-        enqueue_activity(tx, &emit).await?;
+        enqueue_activity(txn, &emit).await?;
     }
     let result = rel::UnrelateResult {
         issue: source.identifier(),
@@ -3100,7 +3058,7 @@ async fn op_unrelate_issues(
     };
     let mut map = serde_json::to_value(result)
         .map_err(|error| plan::ToolCallFailure::Failed(error.to_string()))?;
-    let grouped = grouped_tx(tx, scope, &source).await?;
+    let grouped = grouped_tx(&txn.connection(), scope, &source).await?;
     map = plan::with_grouped_relations(map.as_object().cloned().unwrap_or_default(), grouped);
     Ok(map)
 }
@@ -3109,8 +3067,8 @@ async fn op_unrelate_issues(
 /// transaction: the live rows touching the source plus the visible
 /// pool narrowed to the wanted other ends, shaped by the ported
 /// assembler.
-async fn grouped_tx(
-    tx: &mut Transaction<'_>,
+async fn grouped_tx<C: sea_orm::ConnectionTrait>(
+    conn: &C,
     scope: &ToolScope,
     source: &rel::ResolvedIssue,
 ) -> Result<Value, ToolExecError> {
@@ -3131,7 +3089,7 @@ async fn grouped_tx(
         )
         .filter(rel_entity::Column::DeletedAt.is_null())
         .into_model::<IssuePairRow>()
-        .all(&tx_conn(&mut *tx))
+        .all(conn)
         .await
         .map_err(orm_error)?;
     let pair_rows: Vec<rel::PairRow> = rows
@@ -3177,7 +3135,7 @@ async fn grouped_tx(
             .column_as(st_entity::Column::Name, "state_name")
             .column_as(st_entity::Column::Group, "state_group")
             .into_model::<GroupedIssueRow>()
-            .all(&tx_conn(&mut *tx))
+            .all(conn)
             .await
             .map_err(orm_error)?;
         for row in rows {
@@ -3222,8 +3180,13 @@ async fn op_list_issue_relations(
     let mut tx = Transaction::begin(&ctx.pool).await?;
     let source = match plan::relations_source(issue_arg, scope.work_item_id)? {
         plan::RelationsSource::Ref(reference) => {
-            let (found, unresolved) =
-                resolve_refs_tx(&mut tx, scope, std::slice::from_ref(&reference), false).await?;
+            let (found, unresolved) = resolve_refs_tx(
+                &tx_conn(&mut tx),
+                scope,
+                std::slice::from_ref(&reference),
+                false,
+            )
+            .await?;
             if !unresolved.is_empty() {
                 let refs: Vec<&str> = unresolved.iter().map(String::as_str).collect();
                 return Err(
@@ -3250,7 +3213,7 @@ async fn op_list_issue_relations(
             }
         }
     };
-    let grouped = grouped_tx(&mut tx, scope, &source).await;
+    let grouped = grouped_tx(&tx_conn(&mut tx), scope, &source).await;
     let _ = tx.rollback().await;
     Ok(plan::issue_relations_result(&source.identifier(), grouped?))
 }
@@ -3260,7 +3223,7 @@ async fn op_list_issue_relations(
 /// relate/unrelate write; enqueue errors propagate (Python's `.delay`
 /// has no `try`).
 async fn enqueue_activity(
-    tx: &mut Transaction<'_>,
+    txn: &WriteTxn,
     emit: &rel::RelationActivityEmit,
 ) -> Result<(), ToolExecError> {
     let job = NewJob::new(
@@ -3268,7 +3231,7 @@ async fn enqueue_activity(
         Value::Array(emit.args()),
         Value::Object(emit.kwargs()),
     );
-    enqueue_in(tx, &job).await?;
+    enqueue_in_write_txn(txn, &job).await?;
     Ok(())
 }
 
@@ -3290,14 +3253,10 @@ fn soft_delete_sweep(model_name: &str, pk: &str) -> (Vec<Value>, Map<String, Val
 
 /// Enqueue one sweep transactionally (same audit transaction; errors
 /// propagate like the activity emits).
-async fn enqueue_sweep(
-    tx: &mut Transaction<'_>,
-    model_name: &str,
-    pk: &str,
-) -> Result<(), ToolExecError> {
+async fn enqueue_sweep(txn: &WriteTxn, model_name: &str, pk: &str) -> Result<(), ToolExecError> {
     let (args, kwargs) = soft_delete_sweep(model_name, pk);
     let job = NewJob::new(SOFT_DELETE_TASK, Value::Array(args), Value::Object(kwargs));
-    enqueue_in(tx, &job).await?;
+    enqueue_in_write_txn(txn, &job).await?;
     Ok(())
 }
 
@@ -3612,6 +3571,169 @@ async fn run_read(
     }
 }
 
+/// The domain-write error that forces a `domain::run` rollback after
+/// the real [`ToolExecError`] is parked in the violation slot (the
+/// callback must answer `DomainError`; the slot preserves the exact
+/// variant — see [`run_write`]).
+/// Map a domain-transaction failure onto the tool errors: begin and
+/// commit carry no message of their own, so a `Db` error classifies
+/// as `Db` (the wrapped sqlx error when there is one) and a `Work`
+/// carries its message.
+fn tool_domain_error(error: domain::DomainError) -> ToolExecError {
+    match error {
+        domain::DomainError::Db(error) => orm_error(error),
+        domain::DomainError::Work(message) => ToolExecError::Db(sqlx::Error::Protocol(message)),
+    }
+}
+
+/// Run one write tool under its audit on a domain [`WriteTxn`]
+/// (NEWPIDASH-190 design §4.4, phase 1): kill switches and the replay
+/// check stay pre-transaction (as in [`write_begin`]); scope,
+/// admission, the ledger and `op` share the one `WriteTxn`, so a
+/// write and its `agent_run_tool_call` row land or roll back together.
+/// After the commit (whose after-commit queue drained the op's own
+/// post-commit steps, e.g. the create fire), `tool_completed` is
+/// appended — as [`write_commit`] appends it today — and an emit
+/// failure still fails the tool after the commit.
+///
+/// The driver is manual `WriteTxn` (the primitive `domain::run` itself
+/// uses) rather than `domain::run`: the op's `ToolExecError` variants
+/// (`Missing`, `InvalidArg`, `Creation`, ...) must survive into
+/// `dispatch_fn` unchanged, and `domain::run`'s `DomainError` cannot
+/// carry them losslessly (a synthetic `Work` error would stringify
+/// the variant away and change the failure mode `Str(exc)` reports).
+///
+/// Conversion order (achieved): workpad, comment, relate, unrelate,
+/// create. The transition arm stays on [`write_begin`] until
+/// `LiveCreationStore` wraps a `WriteTxn` (Part 1b): its orchestration
+/// drive's store holds a `pidash_db::tx::Transaction`, and
+/// genericising it touches the fire drivers and the dispatch-suite
+/// contract, so it lands separately.
+async fn run_write(
+    ctx: &ToolCtx,
+    run_id: Uuid,
+    tool: &'static str,
+    args: &Value,
+    op: impl AsyncFnOnce(&mut WriteTxn, &ToolScope) -> Result<Value, ToolExecError>,
+) -> Result<Value, ToolExecError> {
+    let call_id = plan::resolve_tool_call_id(None);
+    let fingerprint = plan::fingerprint(args);
+    plan::audit_guards(
+        &ctx.cloud,
+        tool,
+        plan::ToolRisk::Write,
+        plan::SOURCE_INTERNAL,
+        "",
+    )?;
+    let existing = find_existing(&ctx.pool, run_id, &call_id).await?;
+    match plan::replay_decision(existing.as_ref(), &fingerprint)? {
+        plan::ReplayDecision::Replay(value) => return Ok(value),
+        plan::ReplayDecision::Proceed => {}
+    }
+    let mut txn = WriteTxn::begin(&ctx.orm).await.map_err(tool_domain_error)?;
+    let work: Result<Value, ToolExecError> = async {
+        let scope = load_scope(&txn.connection(), run_id, true).await?;
+        use pidash_db::entity::agent_run_tool_call as ledger_entity;
+        let succeeded_writes: u64 = ledger_entity::Entity::find()
+            .filter(ledger_entity::Column::AgentRunId.eq(run_id))
+            .filter(ledger_entity::Column::Risk.eq("write"))
+            .filter(ledger_entity::Column::Status.eq("succeeded"))
+            .count(&txn.connection())
+            .await
+            .map_err(orm_error)?;
+        let succeeded_writes: i64 = succeeded_writes.try_into().unwrap_or(i64::MAX);
+        let tool_used = ledger_entity::Entity::find()
+            .filter(ledger_entity::Column::AgentRunId.eq(run_id))
+            .filter(ledger_entity::Column::ToolName.eq(tool))
+            .filter(ledger_entity::Column::Risk.eq("write"))
+            .filter(ledger_entity::Column::Status.eq("succeeded"))
+            .select_only()
+            .column(ledger_entity::Column::Id)
+            .into_tuple::<Uuid>()
+            .one(&txn.connection())
+            .await
+            .map_err(orm_error)?
+            .is_some();
+        plan::write_admission(succeeded_writes, tool_used, tool, &ctx.cloud)?;
+        let ledger_id = Uuid::new_v4();
+        let idempotency_hash =
+            plan::fingerprint(&serde_json::json!({"run": run_id.to_string(), "tool": tool}));
+        let now = Utc::now();
+        ledger_entity::ActiveModel {
+            id: sea_orm::Set(ledger_id),
+            agent_run_id: sea_orm::Set(run_id),
+            tool_call_id: sea_orm::Set(call_id.to_owned()),
+            source: sea_orm::Set(plan::SOURCE_INTERNAL.to_owned()),
+            server_key: sea_orm::Set("".to_owned()),
+            tool_name: sea_orm::Set(tool.to_owned()),
+            risk: sea_orm::Set("write".to_owned()),
+            status: sea_orm::Set("prepared".to_owned()),
+            request_fingerprint: sea_orm::Set(fingerprint),
+            result_fingerprint: sea_orm::Set("".to_owned()),
+            idempotency_key_hash: sea_orm::Set(idempotency_hash),
+            external_operation_id: sea_orm::Set("".to_owned()),
+            safe_replay_result: sea_orm::Set(None),
+            error_code: sea_orm::Set("".to_owned()),
+            prepared_at: sea_orm::Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+            submitted_at: sea_orm::Set(None),
+            completed_at: sea_orm::Set(None),
+        }
+        .insert(&txn.connection())
+        .await
+        .map_err(orm_error)?;
+        ledger_entity::Entity::update_many()
+            .col_expr(ledger_entity::Column::Status, Expr::value("submitted"))
+            .col_expr(
+                ledger_entity::Column::SubmittedAt,
+                Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
+            )
+            .filter(ledger_entity::Column::Id.eq(ledger_id))
+            .exec(&txn.connection())
+            .await
+            .map_err(orm_error)?;
+        let result = op(&mut txn, &scope).await?;
+        let bounded = plan::bounded(result.clone(), ctx.cloud.max_tool_result_bytes)?;
+        let replay = if plan::collapse_replay(plan::canonical(&bounded).len()) {
+            plan::collapsed_replay()
+        } else {
+            bounded.clone()
+        };
+        let result_fingerprint = plan::fingerprint(&bounded);
+        let marked = Utc::now();
+        ledger_entity::Entity::update_many()
+            .col_expr(ledger_entity::Column::Status, Expr::value("succeeded"))
+            .col_expr(ledger_entity::Column::SafeReplayResult, Expr::value(replay))
+            .col_expr(
+                ledger_entity::Column::ResultFingerprint,
+                Expr::value(result_fingerprint),
+            )
+            .col_expr(
+                ledger_entity::Column::CompletedAt,
+                Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(marked)),
+            )
+            .filter(ledger_entity::Column::Id.eq(ledger_id))
+            .exec(&txn.connection())
+            .await
+            .map_err(orm_error)?;
+        Ok::<_, ToolExecError>(result)
+    }
+    .await;
+    match work {
+        Ok(value) => {
+            // The op's after-commit steps (create fire) drained inside
+            // `commit`; `tool_completed` appends after the commit, as
+            // [`write_commit`] appends it today.
+            txn.commit().await.map_err(tool_domain_error)?;
+            emit_completed(ctx, run_id, tool, plan::ToolRisk::Write).await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = txn.rollback().await;
+            Err(error)
+        }
+    }
+}
+
 /// Dispatch one validated function-tool call: pre-audit validation,
 /// audit args, then the op under its audit. Argument extraction
 /// unwraps loop invariants (the loop validated required params and
@@ -3723,89 +3845,34 @@ async fn dispatch_fn(
             let body = args.get_str("body").expect("loop validated body");
             plan::validate_comment_body(body)?;
             let audit_args = serde_json::json!({"body": body});
-            match write_begin(
+            run_write(
                 ctx,
                 run_id,
                 TOOL_ADD_CURRENT_ISSUE_COMMENT,
                 &audit_args,
-                plan::SOURCE_INTERNAL,
-                "",
+                async move |txn, scope| op_add_current_issue_comment(txn, scope, body).await,
             )
-            .await?
-            {
-                AuditBegin::Replay(value) => Ok(value),
-                AuditBegin::Proceed(audit) => {
-                    let WriteAudit {
-                        mut tx,
-                        scope,
-                        ledger_id,
-                    } = audit;
-                    match op_add_current_issue_comment(&mut tx, &scope, body).await {
-                        Ok(result) => {
-                            write_commit(
-                                ctx,
-                                WriteAudit {
-                                    tx,
-                                    scope,
-                                    ledger_id,
-                                },
-                                TOOL_ADD_CURRENT_ISSUE_COMMENT,
-                                result,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            Err(error)
-                        }
-                    }
-                }
-            }
+            .await
         }
         TOOL_UPDATE_CURRENT_ISSUE_WORKPAD => {
             let body = args.get_str("body").expect("loop validated body");
             plan::validate_workpad_body(body)?;
             let audit_args = serde_json::json!({"body": body});
-            match write_begin(
+            run_write(
                 ctx,
                 run_id,
                 TOOL_UPDATE_CURRENT_ISSUE_WORKPAD,
                 &audit_args,
-                plan::SOURCE_INTERNAL,
-                "",
+                async move |txn, scope| op_update_current_issue_workpad(txn, scope, body).await,
             )
-            .await?
-            {
-                AuditBegin::Replay(value) => Ok(value),
-                AuditBegin::Proceed(audit) => {
-                    let WriteAudit {
-                        mut tx,
-                        scope,
-                        ledger_id,
-                    } = audit;
-                    match op_update_current_issue_workpad(&mut tx, &scope, body).await {
-                        Ok(result) => {
-                            write_commit(
-                                ctx,
-                                WriteAudit {
-                                    tx,
-                                    scope,
-                                    ledger_id,
-                                },
-                                TOOL_UPDATE_CURRENT_ISSUE_WORKPAD,
-                                result,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            Err(error)
-                        }
-                    }
-                }
-            }
+            .await
         }
         TOOL_TRANSITION_CURRENT_ISSUE => {
+            // Part 1b: this arm stays on `write_begin` (its orchestration
+            // drive's `LiveCreationStore` holds a `Transaction`) until the
+            // store wraps a `WriteTxn`; the other five write arms run on
+            // `run_write`. The arm therefore still opens a
+            // `Transaction` — deleted once 1b lands.
             let state_id = args.get_str("state_id").expect("loop validated state_id");
             let audit_args = serde_json::json!({"state_id": state_id});
             match write_begin(
@@ -3884,78 +3951,16 @@ async fn dispatch_fn(
                 .expect("loop applied description");
             let stripped = plan::validate_create_issue(title, description)?;
             let audit_args = serde_json::json!({"title": title, "description": description});
-            match write_begin(
+            run_write(
                 ctx,
                 run_id,
                 TOOL_CREATE_PROJECT_ISSUE,
                 &audit_args,
-                plan::SOURCE_INTERNAL,
-                "",
+                async move |txn, scope| {
+                    op_create_project_issue(ctx, txn, scope, description, &stripped).await
+                },
             )
-            .await?
-            {
-                AuditBegin::Replay(value) => Ok(value),
-                AuditBegin::Proceed(audit) => {
-                    let WriteAudit {
-                        mut tx,
-                        scope,
-                        ledger_id,
-                    } = audit;
-                    match op_create_project_issue(ctx, &mut tx, &scope, description, &stripped)
-                        .await
-                    {
-                        Ok((result, fire)) => {
-                            let creator_id = scope.creator_id;
-                            let run_id = scope.run_id;
-                            // The orchestration post-save fire
-                            // (`signals.py:74-107`): Django's
-                            // `Issue.objects.create` runs it inside the
-                            // save; here signals are explicit calls after
-                            // the commit lands (the v1 create shape,
-                            // PIDASHCONV-1216). The fire runs on
-                            // commit-success even when the
-                            // `tool_completed` append below fails
-                            // (Django appends at `tools.py:156`, after
-                            // the save's signal). Best-effort: the issue
-                            // already committed.
-                            match write_commit_tx(
-                                ctx,
-                                WriteAudit {
-                                    tx,
-                                    scope,
-                                    ledger_id,
-                                },
-                                result,
-                            )
-                            .await
-                            {
-                                Ok(value) => {
-                                    fire_create_transition(
-                                        ctx,
-                                        creator_id,
-                                        fire.issue_id,
-                                        fire.state_id,
-                                    )
-                                    .await;
-                                    emit_completed(
-                                        ctx,
-                                        run_id,
-                                        TOOL_CREATE_PROJECT_ISSUE,
-                                        plan::ToolRisk::Write,
-                                    )
-                                    .await?;
-                                    Ok(value)
-                                }
-                                Err(error) => Err(error),
-                            }
-                        }
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            Err(error)
-                        }
-                    }
-                }
-            }
+            .await
         }
         TOOL_RELATE_ISSUES => {
             let write_args = plan::relation_write_args(
@@ -3972,44 +3977,14 @@ async fn dispatch_fn(
                 "relation_type": write_args.relation_type,
                 "related_issues": write_args.related_issues,
             });
-            match write_begin(
+            run_write(
                 ctx,
                 run_id,
                 TOOL_RELATE_ISSUES,
                 &audit_args,
-                plan::SOURCE_INTERNAL,
-                "",
+                async move |txn, scope| op_relate_issues(txn, scope, &write_args).await,
             )
-            .await?
-            {
-                AuditBegin::Replay(value) => Ok(value),
-                AuditBegin::Proceed(audit) => {
-                    let WriteAudit {
-                        mut tx,
-                        scope,
-                        ledger_id,
-                    } = audit;
-                    match op_relate_issues(&mut tx, &scope, &write_args).await {
-                        Ok(result) => {
-                            write_commit(
-                                ctx,
-                                WriteAudit {
-                                    tx,
-                                    scope,
-                                    ledger_id,
-                                },
-                                TOOL_RELATE_ISSUES,
-                                result,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            Err(error)
-                        }
-                    }
-                }
-            }
+            .await
         }
         TOOL_UNRELATE_ISSUES => {
             let write_args = plan::relation_write_args(
@@ -4026,44 +4001,14 @@ async fn dispatch_fn(
                 "relation_type": write_args.relation_type,
                 "related_issues": write_args.related_issues,
             });
-            match write_begin(
+            run_write(
                 ctx,
                 run_id,
                 TOOL_UNRELATE_ISSUES,
                 &audit_args,
-                plan::SOURCE_INTERNAL,
-                "",
+                async move |txn, scope| op_unrelate_issues(txn, scope, &write_args).await,
             )
-            .await?
-            {
-                AuditBegin::Replay(value) => Ok(value),
-                AuditBegin::Proceed(audit) => {
-                    let WriteAudit {
-                        mut tx,
-                        scope,
-                        ledger_id,
-                    } = audit;
-                    match op_unrelate_issues(&mut tx, &scope, &write_args).await {
-                        Ok(result) => {
-                            write_commit(
-                                ctx,
-                                WriteAudit {
-                                    tx,
-                                    scope,
-                                    ledger_id,
-                                },
-                                TOOL_UNRELATE_ISSUES,
-                                result,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            let _ = tx.rollback().await;
-                            Err(error)
-                        }
-                    }
-                }
-            }
+            .await
         }
         // GitHub twins (`TOOL_GITHUB_*`) grant as MCP tools only
         // (`partition_tools` excludes them from the internal build);
@@ -4638,11 +4583,14 @@ mod live_tests {
             return;
         };
         let seed = seed_world(&pool).await;
-        let mut tx = Transaction::begin(&pool).await.expect("begin");
-        let out = op_add_current_issue_comment(&mut tx, &seed.scope, "a & b")
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let mut txn = pidash_services::domain::WriteTxn::begin(&db)
+            .await
+            .expect("begin");
+        let out = op_add_current_issue_comment(&mut txn, &seed.scope, "a & b")
             .await
             .expect("add comment");
-        tx.commit().await.expect("commit");
+        txn.commit().await.expect("commit");
         let comment_id: Uuid = out["comment_id"]
             .as_str()
             .expect("comment_id renders")
@@ -4650,7 +4598,6 @@ mod live_tests {
             .expect("comment_id parses");
         use pidash_db::entity::{descriptions as d_entity2, issue_comments as ic_entity2};
         use sea_orm::EntityTrait;
-        let db = pidash_db::pool::sea_orm_connection(&pool);
         let comment = ic_entity2::Entity::find_by_id(comment_id)
             .one(&db)
             .await

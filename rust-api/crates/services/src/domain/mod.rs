@@ -71,7 +71,7 @@ pub mod txn;
 pub mod user_saves;
 pub mod workspaces;
 
-pub use ctx::{WriteActor, WriteCtx, WriteOptions, WriteScope};
+pub use ctx::{WriteActor, WriteCtx, WriteOptions, WriteScope, WriteSource};
 pub use error::DomainError;
 pub use txn::{CommitQueue, HookRegistry, TxnConn, WriteTxn};
 

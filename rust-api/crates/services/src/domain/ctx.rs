@@ -23,12 +23,38 @@ pub struct WriteScope {
     pub project_id: Option<Uuid>,
 }
 
+/// Who is acting and on whose behalf, typed rather than read from an
+/// untrusted request body (NEWPIDASH-190 design §4.2): the request
+/// path, an MCP token, a cloud-agent run, or an assistant thread.
+/// Speaker fields and run markers stop travelling through payloads;
+/// every write carries an attributable origin on its `WriteCtx`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum WriteSource {
+    /// The HTTP request path (default).
+    #[default]
+    Api,
+    /// An MCP capability call (overlay token auth).
+    Mcp,
+    /// A cloud-agent run (`agent_run_tool_call` ledger leg).
+    CloudAgent {
+        /// The run that owns the write (speaker run, admission scope).
+        run_id: Uuid,
+    },
+    /// An assistant chat thread.
+    Assistant {
+        /// The thread the write belongs to.
+        thread_id: Uuid,
+    },
+}
+
 /// Per-caller deltas (design D6). Where Django views do different things
 /// for the same write, the difference becomes an explicit option here with
 /// a doc comment citing the Python file:line — never a silent branch.
-/// Empty until ORM-03 finds the first such difference.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct WriteOptions {}
+pub struct WriteOptions {
+    /// Which surface the write came from (NEWPIDASH-190 §4.2).
+    pub source: WriteSource,
+}
 
 /// The context one [`crate::domain::run`] call runs under: actor, request
 /// origin/host, tenant scope, and per-caller options.
@@ -98,5 +124,22 @@ mod tests {
         assert_eq!(ctx.actor.user_id, Uuid::nil());
         assert!(ctx.origin.is_none());
         assert!(ctx.scope.workspace_id.is_none());
+    }
+
+    #[test]
+    fn default_options_carry_api_source() {
+        assert_eq!(WriteOptions::default().source, WriteSource::Api);
+        assert_eq!(WriteSource::default(), WriteSource::Api);
+        let options = WriteOptions {
+            source: WriteSource::CloudAgent {
+                run_id: Uuid::nil(),
+            },
+        };
+        assert_eq!(
+            options.source,
+            WriteSource::CloudAgent {
+                run_id: Uuid::nil()
+            }
+        );
     }
 }
