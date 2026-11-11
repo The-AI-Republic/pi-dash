@@ -17,15 +17,13 @@ use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_compat::db::is_unique_violation;
 use pidash_db::entity::{issue_relations, issues, project_members, projects, states, workspaces};
 
-use crate::domain::relations as relation_domain;
 use crate::domain::WriteCtx;
 use crate::v1_work_items::queries_sub::actual_relation;
 use crate::v1_work_items::tasks as work_tasks;
 
-use super::common::{db_error, now_utc};
+use super::common::db_error;
 use super::deps::Deps;
 use super::error::{Error, Outcome};
 
@@ -140,18 +138,12 @@ fn parse_python_uuid(text: &str) -> Option<Uuid> {
 
 /// One resolved reference: the visible-pool row plus its identifier facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedIssue {
-    id: Uuid,
-    workspace_id: Uuid,
-    project_identifier: String,
-    sequence_id: i32,
-}
-
-impl ResolvedIssue {
-    /// `identifier(issue)` (`relations.py:88-89`).
-    fn identifier(&self) -> String {
-        format!("{}-{}", self.project_identifier, self.sequence_id)
-    }
+pub struct ResolvedIssue {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub project_id: Uuid,
+    pub project_identifier: String,
+    pub sequence_id: i32,
 }
 
 /// `_source`/visible-pool predicates shared by [`visible_pool_query`]
@@ -198,6 +190,7 @@ fn visible_pool_query(slug: &str, user_id: &Uuid) -> Select<issues::Entity> {
 struct ResolvedRow {
     id: Uuid,
     workspace_id: Uuid,
+    project_id: Uuid,
     identifier: String,
     sequence_id: i32,
 }
@@ -445,6 +438,7 @@ async fn resolve_by_id(
         .columns([
             issues::Column::Id,
             issues::Column::WorkspaceId,
+            issues::Column::ProjectId,
             issues::Column::SequenceId,
         ])
         .column_as(projects::Column::Identifier, "identifier")
@@ -457,6 +451,7 @@ async fn resolve_by_id(
     Ok(row.map(|row| ResolvedIssue {
         id: row.id,
         workspace_id: row.workspace_id,
+        project_id: row.project_id,
         project_identifier: row.identifier,
         sequence_id: row.sequence_id,
     }))
@@ -481,6 +476,7 @@ async fn resolve_by_identifier(
         .columns([
             issues::Column::Id,
             issues::Column::WorkspaceId,
+            issues::Column::ProjectId,
             issues::Column::SequenceId,
         ])
         .column_as(projects::Column::Identifier, "identifier")
@@ -500,6 +496,7 @@ async fn resolve_by_identifier(
     Ok(row.map(|row| ResolvedIssue {
         id: row.id,
         workspace_id: row.workspace_id,
+        project_id: row.project_id,
         project_identifier: row.identifier,
         sequence_id: row.sequence_id,
     }))
@@ -570,38 +567,6 @@ pub async fn fetch_source(
     })
 }
 
-/// `_check_targets` (`relations.py:166-177`): self-relation and
-/// cross-workspace refusals, then first-seen dedupe. The refusals fire
-/// before the dedupe check, so a duplicate self-ref still 400s. With
-/// `raw_targets` the self-refusal and the dedupe are skipped (the MCP
-/// per-iteration loop); the cross-workspace refusal still runs.
-fn check_targets(
-    source: &SourceIssue,
-    targets: Vec<ResolvedIssue>,
-    raw_targets: bool,
-) -> Result<Vec<ResolvedIssue>, Error> {
-    let mut unique = Vec::with_capacity(targets.len());
-    let mut seen = std::collections::HashSet::new();
-    for target in targets {
-        if !raw_targets && target.id == source.id {
-            return Err(Error::BadError(format!(
-                "{} cannot be related to itself",
-                source.identifier()
-            )));
-        }
-        if target.workspace_id != source.workspace_id {
-            return Err(Error::BadError(format!(
-                "{} is in a different workspace",
-                target.identifier()
-            )));
-        }
-        if raw_targets || seen.insert(target.id) {
-            unique.push(target);
-        }
-    }
-    Ok(unique)
-}
-
 /// `get_inverse_relation` (`utils/issue_relation_mapper.py:5-16`):
 /// unknown wires fall through unchanged.
 fn inverse_relation(relation_type: &str) -> &str {
@@ -618,20 +583,8 @@ fn inverse_relation(relation_type: &str) -> &str {
     }
 }
 
-/// `_stored_edge` (`relations.py:92-97`): `(issue_id, related_issue_id,
-/// stored_type)` for "source \<type\> target".
-fn stored_edge(source_id: Uuid, relation_type: &str, target_id: Uuid) -> (Uuid, Uuid, String) {
-    let stored = actual_relation(relation_type).to_owned();
-    if AGENT_REVERSE_TYPES.contains(&relation_type) {
-        (target_id, source_id, stored)
-    } else {
-        (source_id, target_id, stored)
-    }
-}
-
 /// One live pair row for viewpoint classification.
 struct PairRow {
-    id: Uuid,
     issue_id: Uuid,
     related_issue_id: Uuid,
     relation_type: String,
@@ -652,56 +605,6 @@ fn type_from(row: &PairRow, viewpoint_id: &Uuid) -> String {
     } else {
         inverse_relation(stored).to_owned()
     }
-}
-
-/// `_pair_rows` (`relations.py:117-120`): live rows between the two ids in
-/// either direction, `Meta.ordering` (`-created_at`).
-#[derive(Debug, Clone, FromQueryResult)]
-struct PairStoredRow {
-    id: Uuid,
-    issue_id: Uuid,
-    related_issue_id: Uuid,
-    relation_type: String,
-}
-
-async fn fetch_pair_rows(pool: &PgPool, a_id: &Uuid, b_id: &Uuid) -> Result<Vec<PairRow>, Error> {
-    let db = pidash_db::pool::sea_orm_connection(pool);
-    let rows = issue_relations::Entity::find()
-        .select_only()
-        .columns([
-            issue_relations::Column::Id,
-            issue_relations::Column::IssueId,
-            issue_relations::Column::RelatedIssueId,
-            issue_relations::Column::RelationType,
-        ])
-        .filter(issue_relations::Column::DeletedAt.is_null())
-        .filter(
-            Condition::any()
-                .add(
-                    Condition::all()
-                        .add(issue_relations::Column::IssueId.eq(*a_id))
-                        .add(issue_relations::Column::RelatedIssueId.eq(*b_id)),
-                )
-                .add(
-                    Condition::all()
-                        .add(issue_relations::Column::IssueId.eq(*b_id))
-                        .add(issue_relations::Column::RelatedIssueId.eq(*a_id)),
-                ),
-        )
-        .order_by_desc(issue_relations::Column::CreatedAt)
-        .into_model::<PairStoredRow>()
-        .all(&db)
-        .await
-        .map_err(|error| db_error(error, "relation-pair-rows"))?;
-    Ok(rows
-        .into_iter()
-        .map(|row| PairRow {
-            id: row.id,
-            issue_id: row.issue_id,
-            related_issue_id: row.related_issue_id,
-            relation_type: row.relation_type,
-        })
-        .collect())
 }
 
 /// The related-objects sweep payload (`SoftDeleteModel.delete()` calls
@@ -809,7 +712,6 @@ pub async fn grouped_relations(
         };
         // The viewpoint probe has no id (unneeded for classification).
         let probe = PairRow {
-            id: Uuid::nil(),
             issue_id,
             related_issue_id: related_id,
             relation_type,
@@ -921,52 +823,12 @@ fn agent_activity_kwargs(
     kwargs
 }
 
-/// One relate `INSERT` attempt (`relations.py:196-207`): `Ok(true)`
-/// when this call created the row, `Ok(false)` when a concurrent
-/// writer holds the pair (Python's `IntegrityError` catch re-reads;
-/// both callers map a lost race the same way they map a lost
-/// `ON CONFLICT` race).
-async fn insert_relation_row(
-    pool: &PgPool,
-    actor_id: &Uuid,
-    source: &SourceIssue,
-    issue_id: Uuid,
-    related_id: Uuid,
-    stored: &str,
-) -> Result<bool, Error> {
-    // `objects.create()` in `transaction.atomic()` (a single
-    // statement is atomic anyway): the explicit
-    // `created_by`/`updated_by` pass through `BaseModel.save`,
-    // whose adding branch keeps `created_by` but NULLS
-    // `updated_by` (REL-5).
-    let row = relation_domain::RelationRow {
-        id: Uuid::new_v4(),
-        created_at: now_utc(),
-        updated_at: now_utc(),
-        created_by: Some(*actor_id),
-        updated_by: None,
-        project_id: source.project_id,
-        workspace_id: source.workspace_id,
-        issue_id,
-        related_issue_id: related_id,
-        relation_type: stored,
-    };
-    match relation_domain::relate_row_or_nothing(&pidash_db::pool::sea_orm_connection(pool), &row)
-        .await
-    {
-        Ok(created) => Ok(created),
-        Err(error) if is_unique_violation(&error) => Ok(false),
-        Err(error) => Err(db_error(error, "relate-insert")),
-    }
-}
-
 /// `relate` (`relations.py:180-232`): record "source \<type\> each
 /// target", idempotent. Returns the response map minus `relations` (the
-/// caller appends the grouped read). With `pair_exact`, creation matches
-/// the exact oriented pair (the MCP `get_or_create`) instead of deduping
-/// across orientations. With `raw_targets`, self ids and duplicate ids
-/// are processed per-iteration instead of refused/deduped (the MCP
-/// loop over the raw `related_issue_ids`).
+/// caller appends the grouped read). The check, verdict loop and
+/// guarded inserts run in the shared core
+/// ([`crate::operations::core::relations::relate`]); this wrapper keeps
+/// the activity emission and the response shape.
 #[allow(clippy::too_many_arguments)]
 async fn relate_op(
     deps: &Deps,
@@ -978,64 +840,48 @@ async fn relate_op(
     pair_exact: bool,
     raw_targets: bool,
 ) -> Result<Map<String, Value>, Error> {
-    let pool = &deps.pool;
-    let targets = check_targets(source, targets, raw_targets)?;
-    let mut created: Vec<&ResolvedIssue> = Vec::new();
-    let mut unchanged: Vec<String> = Vec::new();
-    let mut conflicts: Vec<Value> = Vec::new();
-    for target in &targets {
-        let (issue_id, related_id, stored) = stored_edge(source.id, relation_type, target.id);
-        let existing = fetch_pair_rows(pool, &source.id, &target.id).await?;
-        if pair_exact {
-            // MCP `get_or_create(issue, related_issue)`
-            // (`pi_dash_cloud/mcp/tools.py:664-675`): the lookup names
-            // the exact oriented pair and no type, so a live row on
-            // this orientation — any stored type — means "skipped"
-            // (reported under `unchanged`), and cross-orientation rows
-            // are invisible. The stored edge is the same triple the
-            // default path writes (MCP's swap set and canonical type
-            // match [`stored_edge`).
-            let oriented_live = existing
+    // The shared core (NEWPIDASH-190 §4.3): check/verdict/inserts on
+    // the pool connection; the activity emission and the `relations`
+    // payload stay with this wrapper.
+    let outcome = crate::operations::core::relations::relate(
+        &deps.orm,
+        &crate::operations::core::relations::RelationBatch {
+            source: &crate::operations::core::relations::CoreSource::from(source),
+            targets: &targets
                 .iter()
-                .any(|row| row.issue_id == issue_id && row.related_issue_id == related_id);
-            let created_now = !oriented_live
-                && insert_relation_row(pool, actor_id, source, issue_id, related_id, &stored)
-                    .await?;
-            if created_now {
-                created.push(target);
-            } else {
-                unchanged.push(target.identifier());
-            }
-            continue;
-        }
-        if existing.is_empty() {
-            // A concurrent writer's unique violation re-reads below
-            // (Python's `IntegrityError` catch does the same).
-            if insert_relation_row(pool, actor_id, source, issue_id, related_id, &stored).await? {
-                created.push(target);
-                continue;
-            }
-        }
-        let existing = if existing.is_empty() {
-            fetch_pair_rows(pool, &source.id, &target.id).await?
-        } else {
-            existing
-        };
-        let current: std::collections::BTreeSet<String> = existing
-            .iter()
-            .map(|row| type_from(row, &source.id))
-            .collect();
-        if current.len() == 1 && current.contains(relation_type) {
-            unchanged.push(target.identifier());
-        } else {
-            let first = current.iter().next().cloned().unwrap_or_default();
-            let mut conflict = Map::with_capacity(2);
-            conflict.insert("identifier".to_owned(), Value::String(target.identifier()));
-            conflict.insert("existing_relation".to_owned(), Value::String(first));
-            conflicts.push(Value::Object(conflict));
-        }
-    }
-    if !created.is_empty() {
+                .map(crate::operations::core::relations::CoreTarget::from)
+                .collect::<Vec<_>>(),
+            relation_type,
+            actor_id: *actor_id,
+            own_project: false,
+            pair_exact,
+            raw_targets,
+            newest_only: false,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        crate::operations::core::CoreError::Request(message) => Error::BadError(message),
+        crate::operations::core::CoreError::Db(_domain_error) => Error::ServerError,
+        crate::operations::core::CoreError::Sqlx(_sqlx_error) => Error::ServerError,
+    })?;
+    let conflicts: Vec<Value> = outcome
+        .conflicts
+        .iter()
+        .map(|conflict| {
+            let mut map = Map::with_capacity(2);
+            map.insert(
+                "identifier".to_owned(),
+                Value::String(conflict.identifier.clone()),
+            );
+            map.insert(
+                "existing_relation".to_owned(),
+                Value::String(conflict.existing_relation.clone()),
+            );
+            Value::Object(map)
+        })
+        .collect();
+    if !outcome.created.is_empty() {
         let mut requested = Map::with_capacity(2);
         requested.insert(
             "relation_type".to_owned(),
@@ -1044,7 +890,8 @@ async fn relate_op(
         requested.insert(
             "issues".to_owned(),
             Value::Array(
-                created
+                outcome
+                    .created
                     .iter()
                     .map(|target| Value::String(target.id.to_string()))
                     .collect(),
@@ -1075,7 +922,8 @@ async fn relate_op(
     out.insert(
         "created".to_owned(),
         Value::Array(
-            created
+            outcome
+                .created
                 .iter()
                 .map(|target| Value::String(target.identifier()))
                 .collect(),
@@ -1084,7 +932,8 @@ async fn relate_op(
     out.insert(
         "unchanged".to_owned(),
         Value::Array(
-            unchanged
+            outcome
+                .unchanged
                 .iter()
                 .map(|ident| Value::String(ident.clone()))
                 .collect(),
@@ -1096,12 +945,11 @@ async fn relate_op(
 
 /// `unrelate` (`relations.py:235-266`): remove "source \<type\> each
 /// target", idempotent — only exactly that type is removed. Returns the
-/// response map minus `relations`. With `newest_only`, only the first
-/// match is removed: [`fetch_pair_rows`] returns newest-first (the
-/// model's `-created_at` ordering), so that is the row the MCP
-/// queryset's `.first()` deletes. With `raw_targets`, self ids and
-/// duplicate ids are processed per-iteration instead of
-/// refused/deduped (the MCP loop over the raw `related_issue_ids`).
+/// response map minus `relations`. The check, pair fetch, match and
+/// soft deletes run in the shared core
+/// ([`crate::operations::core::relations::unrelate`]); the sweep
+/// enqueue, the per-target activity emission and the `relations`
+/// payload stay with this wrapper.
 #[allow(clippy::too_many_arguments)]
 async fn unrelate_op(
     deps: &Deps,
@@ -1113,59 +961,41 @@ async fn unrelate_op(
     newest_only: bool,
     raw_targets: bool,
 ) -> Result<Map<String, Value>, Error> {
-    let pool = &deps.pool;
-    let targets = check_targets(source, targets, raw_targets)?;
-    let mut removed: Vec<String> = Vec::new();
-    let mut not_related: Vec<String> = Vec::new();
-    for target in &targets {
-        let rows = fetch_pair_rows(pool, &source.id, &target.id).await?;
-        // Self targets only arrive in raw mode (the default refuses
-        // them in `check_targets`): the MCP queryset names the stored
-        // endpoints and the canonical type
-        // (`pi_dash_cloud/mcp/tools.py:726-732`), so a reverse-named
-        // request (`blocking`) still matches the canonically stored
-        // self row (`blocked_by`) — the viewpoint classifier would
-        // only echo the stored name from the issue side.
-        let self_target = target.id == source.id;
-        let mut matching: Vec<&PairRow> = rows
-            .iter()
-            .filter(|row| {
-                if self_target {
-                    row.relation_type == actual_relation(relation_type)
-                } else {
-                    type_from(row, &source.id) == relation_type
-                }
-            })
-            .collect();
-        if matching.is_empty() {
-            not_related.push(target.identifier());
-            continue;
-        }
-        // `row.delete()`: `deleted_at = now`, full `save()` (`updated_at`
-        // re-stamped, `updated_by` = actor per REL-5), then the sweep.
-        // The filter keeps `fetch_pair_rows` order (newest first), so
-        // truncating to one keeps the MCP `.first()` row.
-        if newest_only {
-            matching.truncate(1);
-        }
-        for row in matching {
-            relation_domain::soft_delete_relation_row(
-                &pidash_db::pool::sea_orm_connection(pool),
-                row.id,
-                *actor_id,
-                now_utc(),
-                now_utc(),
-            )
-            .await
-            .map_err(|error| db_error(error, "unrelate-delete"))?;
-            let (sweep_args, sweep_kwargs) =
-                soft_delete_sweep("issuerelation", &row.id.to_string());
-            deps.enqueue
-                .enqueue_task(SOFT_DELETE_TASK, sweep_args, sweep_kwargs)
-                .await;
-        }
-        removed.push(target.identifier());
-        // One activity per removed target (inside the loop).
+    // The shared core (NEWPIDASH-190 §4.3): check, pair fetch, match
+    // and soft deletes on the ORM connection; the sweep enqueue, the
+    // per-target activity emission and the `relations` payload stay
+    // with this wrapper.
+    let outcome = crate::operations::core::relations::unrelate(
+        &deps.orm,
+        &crate::operations::core::relations::RelationBatch {
+            source: &crate::operations::core::relations::CoreSource::from(source),
+            targets: &targets
+                .iter()
+                .map(crate::operations::core::relations::CoreTarget::from)
+                .collect::<Vec<_>>(),
+            relation_type,
+            actor_id: *actor_id,
+            own_project: false,
+            pair_exact: false,
+            raw_targets,
+            newest_only,
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        crate::operations::core::CoreError::Request(message) => Error::BadError(message),
+        crate::operations::core::CoreError::Db(_domain_error) => Error::ServerError,
+        crate::operations::core::CoreError::Sqlx(_sqlx_error) => Error::ServerError,
+    })?;
+    // Sweep follows the delete per row, in the same order.
+    for row_id in &outcome.rows_affected {
+        let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuerelation", &row_id.to_string());
+        deps.enqueue
+            .enqueue_task(SOFT_DELETE_TASK, sweep_args, sweep_kwargs)
+            .await;
+    }
+    // One activity per removed target (inside the loop).
+    for removed_id in &outcome.removed_ids {
         let mut requested = Map::with_capacity(2);
         requested.insert(
             "relation_type".to_owned(),
@@ -1173,7 +1003,7 @@ async fn unrelate_op(
         );
         requested.insert(
             "related_issue".to_owned(),
-            Value::String(target.id.to_string()),
+            Value::String(removed_id.to_string()),
         );
         let mut current = Map::with_capacity(1);
         current.insert(
@@ -1205,7 +1035,8 @@ async fn unrelate_op(
     out.insert(
         "removed".to_owned(),
         Value::Array(
-            removed
+            outcome
+                .removed
                 .iter()
                 .map(|ident| Value::String(ident.clone()))
                 .collect(),
@@ -1214,7 +1045,8 @@ async fn unrelate_op(
     out.insert(
         "not_related".to_owned(),
         Value::Array(
-            not_related
+            outcome
+                .not_related
                 .iter()
                 .map(|ident| Value::String(ident.clone()))
                 .collect(),
@@ -1656,19 +1488,19 @@ mod tests {
         let target = Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("uuid");
         // Forward wires keep sides; reverse wires swap.
         assert_eq!(
-            stored_edge(source, "blocked_by", target),
+            crate::orchestration::relations::stored_edge(source, "blocked_by", target),
             (source, target, "blocked_by".to_owned())
         );
         assert_eq!(
-            stored_edge(source, "blocking", target),
+            crate::orchestration::relations::stored_edge(source, "blocking", target),
             (target, source, "blocked_by".to_owned())
         );
         assert_eq!(
-            stored_edge(source, "implements", target),
+            crate::orchestration::relations::stored_edge(source, "implements", target),
             (target, source, "implemented_by".to_owned())
         );
         assert_eq!(
-            stored_edge(source, "relates_to", target),
+            crate::orchestration::relations::stored_edge(source, "relates_to", target),
             (source, target, "relates_to".to_owned())
         );
         assert_eq!(inverse_relation("blocked_by"), "blocking");
@@ -1683,7 +1515,6 @@ mod tests {
         let viewpoint = Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid");
         let other = Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("uuid");
         let row = |issue: Uuid, related: Uuid, stored: &str| PairRow {
-            id: Uuid::nil(),
             issue_id: issue,
             related_issue_id: related,
             relation_type: stored.to_owned(),
@@ -1715,25 +1546,28 @@ mod tests {
     }
 
     #[test]
-    fn check_targets_matrix() {
+    fn core_check_targets_shapes() {
+        use crate::operations::core::relations::{check_targets, CoreSource, CoreTarget};
+        use crate::operations::core::CoreError;
         let workspace = Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("uuid");
-        let source = SourceIssue {
+        let source = CoreSource {
             id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("uuid"),
-            project_id: Uuid::nil(),
             workspace_id: workspace,
+            project_id: Uuid::nil(),
             project_identifier: "CT".to_owned(),
             sequence_id: 1,
         };
-        let target = |id: &str, ws: Uuid| ResolvedIssue {
+        let target = |id: &str, ws: Uuid| CoreTarget {
             id: id.parse().expect("uuid"),
             workspace_id: ws,
+            project_id: Uuid::nil(),
             project_identifier: "CT".to_owned(),
             sequence_id: 2,
         };
         // Dedupe preserves first-seen order.
         let kept = check_targets(
             &source,
-            vec![
+            &[
                 target("22222222-2222-2222-2222-222222222222", workspace),
                 target("22222222-2222-2222-2222-222222222222", workspace),
             ],
@@ -1742,33 +1576,35 @@ mod tests {
         .expect("dedupe");
         assert_eq!(kept.len(), 1);
         // Self-relation 400s, even duplicated.
-        assert_eq!(
-            check_targets(
-                &source,
-                vec![target("11111111-1111-1111-1111-111111111111", workspace)],
-                false,
-            ),
-            Err(Error::BadError(
-                "CT-1 cannot be related to itself".to_owned()
-            )),
-        );
+        match check_targets(
+            &source,
+            &[target("11111111-1111-1111-1111-111111111111", workspace)],
+            false,
+        ) {
+            Err(CoreError::Request(message)) => {
+                assert_eq!(message, "Issue CT-1 cannot relate to itself")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
         // Cross-workspace 400s.
         let elsewhere = Uuid::parse_str("44444444-4444-4444-4444-444444444444").expect("uuid");
-        assert!(matches!(
-            check_targets(
-                &source,
-                vec![target(
-                    "22222222-2222-2222-2222-222222222222",
-                    elsewhere
-                )],
-                false,
-            ),
-            Err(Error::BadError(message)) if message.ends_with("is in a different workspace"),
-        ));
+        match check_targets(
+            &source,
+            &[target("22222222-2222-2222-2222-222222222222", elsewhere)],
+            false,
+        ) {
+            Err(CoreError::Request(message)) => {
+                assert!(
+                    message.ends_with("is in a different workspace"),
+                    "{message}"
+                )
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
         // Raw targets: self passes through and duplicates are kept.
         let kept = check_targets(
             &source,
-            vec![
+            &[
                 target("11111111-1111-1111-1111-111111111111", workspace),
                 target("22222222-2222-2222-2222-222222222222", workspace),
                 target("22222222-2222-2222-2222-222222222222", workspace),
@@ -1778,17 +1614,19 @@ mod tests {
         .expect("raw keeps self and dupes");
         assert_eq!(kept.len(), 3);
         // Raw targets still refuse cross-workspace ids.
-        assert!(matches!(
-            check_targets(
-                &source,
-                vec![target(
-                    "22222222-2222-2222-2222-222222222222",
-                    elsewhere
-                )],
-                true,
-            ),
-            Err(Error::BadError(message)) if message.ends_with("is in a different workspace"),
-        ));
+        match check_targets(
+            &source,
+            &[target("22222222-2222-2222-2222-222222222222", elsewhere)],
+            true,
+        ) {
+            Err(CoreError::Request(message)) => {
+                assert!(
+                    message.ends_with("is in a different workspace"),
+                    "{message}"
+                )
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
@@ -1913,6 +1751,7 @@ mod tests {
             vec![ResolvedIssue {
                 id: self.target_id,
                 workspace_id: self.workspace_id,
+                project_id: self.project_id,
                 project_identifier: self.project_identifier.clone(),
                 sequence_id: self.target_seq,
             }]
@@ -1922,6 +1761,7 @@ mod tests {
             let one = ResolvedIssue {
                 id: self.target_id,
                 workspace_id: self.workspace_id,
+                project_id: self.project_id,
                 project_identifier: self.project_identifier.clone(),
                 sequence_id: self.target_seq,
             };
@@ -1946,6 +1786,7 @@ mod tests {
             vec![ResolvedIssue {
                 id: self.source_id,
                 workspace_id: self.workspace_id,
+                project_id: self.project_id,
                 project_identifier: self.project_identifier.clone(),
                 sequence_id: self.source_seq,
             }]
