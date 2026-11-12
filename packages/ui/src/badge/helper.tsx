@@ -82,50 +82,50 @@ export const badgeStyling: IBadgeStyling = {
   },
 
   success: {
-    default: `text-on-color bg-green-500`,
-    hover: `hover:bg-green-600`,
-    disabled: `cursor-not-allowed !bg-green-300`,
+    default: `text-on-color bg-success-primary`,
+    hover: `hover:bg-success-primary-hover`,
+    disabled: `cursor-not-allowed !bg-success-primary/60 hover:bg-success-primary/60`,
   },
   "accent-success": {
-    default: `text-success-primary bg-green-50`,
-    hover: `hover:bg-green-100 hover:text-success-primary`,
+    default: `text-success-primary bg-success-subtle`,
+    hover: `hover:bg-success-subtle-1 hover:text-success-primary`,
     disabled: `cursor-not-allowed text-success-secondary!`,
   },
   "outline-success": {
     default: `text-success-primary bg-surface-1 border border-success-strong`,
-    hover: `hover:text-success-primary hover:bg-green-50`,
+    hover: `hover:text-success-primary hover:bg-success-subtle`,
     disabled: `cursor-not-allowed text-success-secondary! border-success-subtle`,
   },
 
   warning: {
-    default: `text-on-color bg-amber-500`,
-    hover: `hover:bg-amber-600`,
-    disabled: `cursor-not-allowed !bg-amber-300`,
+    default: `text-on-color bg-warning-primary`,
+    hover: `hover:bg-warning-primary-hover`,
+    disabled: `cursor-not-allowed !bg-warning-primary/60 hover:bg-warning-primary/60`,
   },
   "accent-warning": {
-    default: `text-amber-500 bg-amber-50`,
-    hover: `hover:bg-amber-100 hover:text-amber-600`,
-    disabled: `cursor-not-allowed !text-amber-300`,
+    default: `text-warning-primary bg-warning-subtle`,
+    hover: `hover:bg-warning-subtle-1 hover:text-warning-primary`,
+    disabled: `cursor-not-allowed text-warning-secondary!`,
   },
   "outline-warning": {
-    default: `text-amber-500 bg-surface-1 border border-amber-500`,
-    hover: `hover:text-amber-600 hover:bg-amber-50`,
-    disabled: `cursor-not-allowed !text-amber-300 border-amber-300`,
+    default: `text-warning-primary bg-surface-1 border border-warning-strong`,
+    hover: `hover:text-warning-primary hover:bg-warning-subtle`,
+    disabled: `cursor-not-allowed text-warning-secondary! border-warning-subtle`,
   },
 
   destructive: {
-    default: `text-on-color bg-red-500`,
-    hover: `hover:bg-red-600`,
-    disabled: `cursor-not-allowed !bg-red-300`,
+    default: `text-on-color bg-danger-primary`,
+    hover: `hover:bg-danger-primary-hover`,
+    disabled: `cursor-not-allowed !bg-danger-primary/60 hover:bg-danger-primary/60`,
   },
   "accent-destructive": {
-    default: `text-danger-primary bg-red-50`,
-    hover: `hover:bg-red-100 hover:text-danger-primary`,
+    default: `text-danger-primary bg-danger-subtle`,
+    hover: `hover:bg-danger-subtle-hover hover:text-danger-primary`,
     disabled: `cursor-not-allowed text-danger-secondary!`,
   },
   "outline-destructive": {
     default: `text-danger-primary bg-surface-1 border border-danger-strong`,
-    hover: `hover:text-danger-primary hover:bg-red-50`,
+    hover: `hover:text-danger-primary hover:bg-danger-subtle`,
     disabled: `cursor-not-allowed text-danger-secondary! border-danger-subtle`,
   },
 };

@@ -1,0 +1,20 @@
+{
+ "method": "Ran _stagger() with fixed UUIDs under settings.test (no DB).",
+ "source": "apps/api/pi_dash/bgtasks/loop.py:44-49 (window LOOP_STAGGER_WINDOW_MINUTES default 60)",
+ "vectors": [
+  {
+   "crc32": 1455023688,
+   "job_id": "00000000-0000-0000-0000-000000000001",
+   "offset_minutes": 48.0,
+   "user_id": "00000000-0000-0000-0000-000000000003",
+   "workspace_id": "00000000-0000-0000-0000-000000000002"
+  },
+  {
+   "job_id": "00000000-0000-0000-0000-000000000001",
+   "offset_minutes": 51.0,
+   "user_id": "00000000-0000-0000-0000-000000000004",
+   "workspace_id": "00000000-0000-0000-0000-000000000002"
+  }
+ ],
+ "window_setting": "LOOP_STAGGER_WINDOW_MINUTES default 60"
+}

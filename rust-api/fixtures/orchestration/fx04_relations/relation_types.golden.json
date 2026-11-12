@@ -1,0 +1,129 @@
+{
+  "_trace": "orchestration/relations.py:55-66 (RELATION_TYPES), :70 (REVERSE_TYPES), :74 (GROUP_LIMIT), :77-85 (validate_relation_type), :92-97 (_stored_edge), :100-114 (_type_from)",
+  "_method": "pure calls (no DB) + unsaved IssueRelation rows for _type_from; mapper via get_actual_relation/get_inverse_relation",
+  "RELATION_TYPES": [
+    "blocked_by",
+    "blocking",
+    "relates_to",
+    "duplicate",
+    "start_before",
+    "start_after",
+    "finish_before",
+    "finish_after",
+    "implemented_by",
+    "implements"
+  ],
+  "REVERSE_TYPES": [
+    "blocking",
+    "finish_after",
+    "implements",
+    "start_after"
+  ],
+  "GROUP_LIMIT": 100,
+  "validate_ok": {
+    "blocked_by": "blocked_by",
+    " Blocking ": "blocking",
+    "START_AFTER": "start_after",
+    "relates_to": "relates_to"
+  },
+  "validate_errors": {
+    "'blocking_typo'": "relation_type must be one of: blocked_by, blocking, relates_to, duplicate, start_before, start_after, finish_before, finish_after, implemented_by, implements",
+    "''": "relation_type must be one of: blocked_by, blocking, relates_to, duplicate, start_before, start_after, finish_before, finish_after, implemented_by, implements",
+    "None": "relation_type must be one of: blocked_by, blocking, relates_to, duplicate, start_before, start_after, finish_before, finish_after, implemented_by, implements",
+    "'depends_on'": "relation_type must be one of: blocked_by, blocking, relates_to, duplicate, start_before, start_after, finish_before, finish_after, implemented_by, implements"
+  },
+  "stored_edge_matrix": {
+    "blocked_by": {
+      "issue_is_source": true,
+      "stored_type": "blocked_by"
+    },
+    "blocking": {
+      "issue_is_source": false,
+      "stored_type": "blocked_by"
+    },
+    "relates_to": {
+      "issue_is_source": true,
+      "stored_type": "relates_to"
+    },
+    "duplicate": {
+      "issue_is_source": true,
+      "stored_type": "duplicate"
+    },
+    "start_before": {
+      "issue_is_source": true,
+      "stored_type": "start_before"
+    },
+    "start_after": {
+      "issue_is_source": false,
+      "stored_type": "start_before"
+    },
+    "finish_before": {
+      "issue_is_source": true,
+      "stored_type": "finish_before"
+    },
+    "finish_after": {
+      "issue_is_source": false,
+      "stored_type": "finish_before"
+    },
+    "implemented_by": {
+      "issue_is_source": true,
+      "stored_type": "implemented_by"
+    },
+    "implements": {
+      "issue_is_source": false,
+      "stored_type": "implemented_by"
+    }
+  },
+  "type_from_matrix": [
+    {
+      "stored": "(0001->0002, blocked_by)",
+      "from_source": "blocked_by",
+      "from_target": "blocking"
+    },
+    {
+      "stored": "(0001->0002, relates_to)",
+      "from_source": "relates_to",
+      "from_target": "relates_to"
+    },
+    {
+      "stored": "(0001->0002, duplicate)",
+      "from_source": "duplicate",
+      "from_target": "duplicate"
+    },
+    {
+      "stored": "(0001->0002, start_before)",
+      "from_source": "start_before",
+      "from_target": "start_after"
+    },
+    {
+      "stored": "(0001->0002, finish_before)",
+      "from_source": "finish_before",
+      "from_target": "finish_after"
+    },
+    {
+      "stored": "(0001->0002, implemented_by)",
+      "from_source": "implemented_by",
+      "from_target": "implements"
+    },
+    {
+      "stored": "legacy (0001->0002, blocking)",
+      "from_source": "blocking",
+      "from_target": "blocked_by"
+    },
+    {
+      "stored": "legacy (0001->0002, start_after)",
+      "from_source": "start_after",
+      "from_target": "start_before"
+    },
+    {
+      "stored": "legacy (0001->0002, finish_after)",
+      "from_source": "finish_after",
+      "from_target": "finish_before"
+    },
+    {
+      "stored": "legacy (0001->0002, implements)",
+      "from_source": "implements",
+      "from_target": "implemented_by"
+    }
+  ]
+}

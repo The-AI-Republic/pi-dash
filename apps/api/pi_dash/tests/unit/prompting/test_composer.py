@@ -541,6 +541,18 @@ def test_session_framing_omits_trigger_block_for_scheduler():
     assert "Ticking schedule" not in out
 
 
+@pytest.mark.unit
+def test_scheduler_prompt_documents_run_yield_without_the_ticking_clock():
+    # A scheduler run may report its outcome (PDASHOSS01-276) but has no
+    # issue clock: the scheduler variant must not offer --stop-ticking as
+    # something that does anything, nor carry the issue-run wording.
+    out = compose("scheduler", workspace=None, project=None, user=None, context=_ctx("scheduler")).text
+    assert "pidash run yield --outcome" in out
+    assert '"run_kind": "scheduler"' in out
+    assert "`--stop-ticking` is accepted and ignored" in out
+    assert "the issue's ticking clock" not in out
+
+
 # ----------------------------------------------------------------------
 # Ancestor-chain required reading + parent-readiness (PDASHOSS01-97)
 # ----------------------------------------------------------------------
