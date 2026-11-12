@@ -74,7 +74,12 @@ jobs:
       matrix:
         suite: ${{ fromJSON(needs.setup.outputs.matrix) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The runner shard runs 421 contract tests against each backend
+    # (Django leg alone measured 659.59s on run 43127234676); with the
+    # cached Rust build and the two legs the job needs ~35 min, well
+    # past the old 30-min cap, which cancelled it mid-Rust-leg on every
+    # main run. 60 covers a cold cargo cache with headroom.
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16
