@@ -1257,6 +1257,7 @@ mod tests {
                 "open-claw",
                 "grok",
                 "muse-code",
+                "engine",
             ]
         );
     }
