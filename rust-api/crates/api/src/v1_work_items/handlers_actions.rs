@@ -1,0 +1,2500 @@
+//! Orchestration action handlers (D-18 handlers F, PIDASHCONV-678).
+//!
+//! Ports `apps/api/pi_dash/api/views/issue.py` (4 units):
+//!
+//! * `IssueReTickAPIEndpoint.post` (`:940-986`) — re-grant budget and start a
+//!   run via `scheduling.re_tick_ticker`; 200 `granted` envelope.
+//! * `IssueWaitAPIEndpoint.post` (`:987-1069`) — buy back one tick via
+//!   `scheduling.wait_ticker`; always 200 (`applied` + `reason`, ticker keys
+//!   only when a row exists).
+//! * `IssueRunAiAPIEndpoint.post` (`:1175-1254`) — dispatch a run via
+//!   `scheduling.run_ai_for_human`; 201 with `{id, status, executor}` or 409
+//!   with `{error, reason}`, 403 from inside an agent run.
+//! * `AgentRunYieldAPIEndpoint.post` (`:1255-1327`, `3869a226`) — record the run outcome
+//!   plus the optional `stop_ticking` flag
+//!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write).
+//!
+//! Registered by [`super::routes`] at the four
+//! `apps/api/pi_dash/api/urls/work_item.py:133-151` paths.
+//!
+//! Layering (all foundation use is read-only): dispatch semantics come from
+//! the merged D-12 drivers — the services control flow plus the jobs
+//! transaction drivers (`pidash_jobs::orchestration::{re_tick_ticker,
+//! run_ai_for_human, wait_ticker}`), outcomes from
+//! `pidash_types::orchestration`, agent guards from [`super::perms`], gates
+//! from the F-06 kernel. This module owns the HTTP shell: API-key auth, the
+//! slug→UUID rewrite, permission wiring, the live seam inputs the drivers
+//! need, and the DRF byte rendering.
+//!
+//! Request order (preserved, not redesigned): UUID-segment shape (proxy when
+//! Django's `<uuid:>` converter would not match — before auth, as URL
+//! resolving precedes it), API-key authentication, the slug→UUID rewrite
+//! (`api/views/base.py:51-98`, skipped for anonymous callers), gate check,
+//! then the handler body (`:954-984`, `:1033-1064`, `:1222-1252`,
+//! `:1268-1311`).
+//!
+//! Live seam inputs for the drivers:
+//!
+//! * `PodRunnerMatcher` is implemented live over the merged D-14 guards
+//!   helpers (`eligible_owner_ids`, `POD_HAS_RUNNER_MANAGED_SQL`,
+//!   `pod_has_runner_general_sql`, `ISSUE_ASSIGNEE_IDS_SQL`).
+//! * `has_usable_llm_config` closes over per-user verdicts from the
+//!   installed assistant seam over LLM-key presence pre-fetched for the
+//!   actor plus every fallback-creator candidate (issue creator, project
+//!   lead, default assignee, live assignees) — the only users the drivers
+//!   ever query; `managed_llm_profile` closes over the same presence
+//!   decided through the `assistant::seams` pure function over the
+//!   `assistant_user_llm_config` row.
+//! * `extra_toolsets_enabled` is `false`, exactly as CE
+//!   (`ee/cloud_agent/toolsets.py:23-32`).
+//! * The admission cache is the shared Redis (PIDASHCONV-1487): the
+//!   sync `AdmissionCache` trait opens a short sync connection per call
+//!   (the `project_move_handoff::RedisAdmissionCache` position), so the
+//!   per-user / per-workspace minute buckets match Django's exactly,
+//!   sequentially as well as under concurrent load. The drivers consult
+//!   it only when building a cloud-executor run, so every CE/local path
+//!   answers identically with no Redis traffic.
+//!
+//! Ported bugs: none found in these four units on read-through (the
+//! agent-guard ownership bug is P1's, listed on PIDASHCONV-671).
+//!
+//! Deliberate edges (both unpinned — no fixture or contract case sends them):
+//!
+//! * A non-object JSON body on yield answers the generic 500: Python calls
+//!   `.get` on the parsed list and raises `AttributeError` into the base
+//!   500 path.
+//! * Datetime rendering uses the `to_rfc3339_opts(AutoSi, false)` isoformat
+//!   port (the `app_integrations` precedent): identical to
+//!   `datetime.isoformat()` except microseconds with trailing zeros, which
+//!   CPython pads and `AutoSi` trims.
+//!
+//! Fixture: `F18-11` (`rust-api/fixtures/v1_work_items/handlers/` —
+//! `retick`, `wait`, `run_ai`, `yield_*` calls).
+//!
+//! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
+use sea_orm::sea_query::{Expr, Query};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait,
+};
+use serde_json::Value;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use pidash_auth::permissions::project;
+use pidash_auth::scope::TenantScope;
+use pidash_db::entity::{
+    agent_run, assistant_user_llm_config, issue_assignees, issues, projects, states, users,
+    workspaces,
+};
+use pidash_db::pool::sea_orm_connection;
+use pidash_db::redis::client_from_settings;
+use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
+
+use crate::project_move_handoff::RedisAdmissionCache;
+use crate::state::AppState;
+
+use super::perms::{
+    gate_for, refuse_agent_action, refuse_agent_retick, resolve_moved_by_run, run_belongs_to,
+    RunFacts, V1WorkItemsRoute,
+};
+use pidash_compat::response::json_response;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
+
+// ---------------------------------------------------------------------------
+// Responses
+// ---------------------------------------------------------------------------
+
+/// Exact bytes of the DRF `IsAuthenticated` denial (anonymous on a guarded
+/// endpoint).
+pub const UNAUTHENTICATED_BODY: &str =
+    r#"{"detail":"Authentication credentials were not provided."}"#;
+/// `APIKeyAuthentication` failure (`api/middleware/api_authentication.py`):
+/// every token rejection maps to this single 403 body.
+pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
+/// The three issue-scoped endpoints' lookup miss
+/// (`views/issue.py:963,1042,1231`).
+pub const WORK_ITEM_NOT_FOUND_BODY: &str = r#"{"error":"Work item not found"}"#;
+/// The yield endpoint's lookup / membership / ownership miss
+/// (`views/issue.py:1298-1304`).
+pub const RUN_NOT_FOUND_BODY: &str = r#"{"error":"run not found"}"#;
+/// The yield endpoint's inactive-run refusal (`views/issue.py:1305-1306`).
+pub const RUN_NOT_ACTIVE_BODY: &str = r#"{"error":"run is not active"}"#;
+/// The yield endpoint's missing/invalid outcome (`views/issue.py:1275-1280`);
+/// the `allowed` list renders `sorted(RUN_OUTCOMES)`.
+pub const OUTCOME_REQUIRED_ERROR: &str = "outcome is required";
+/// The yield endpoint's non-boolean `stop_ticking` refusal
+/// (`views/issue.py:1281-1286`, `3869a226`).
+pub const STOP_TICKING_BOOL_BODY: &str = r#"{"error":"stop_ticking must be a boolean"}"#;
+/// The yield endpoint's header/URL mismatch (`views/issue.py:1287-1291`).
+pub const HEADER_MISMATCH_BODY: &str =
+    r#"{"error":"X-Pi-Dash-Run-Id does not match the run in the URL"}"#;
+/// `_RUN_AI_REASON_MESSAGES` (`views/issue.py:1168-1172`), plus the `.get`
+/// default (`:1240`) for a reason outside the trio.
+pub const RUN_AI_ACTIVE_RUN_MESSAGE: &str = "the work item already has an active or queued run";
+pub const RUN_AI_NO_POD_MESSAGE: &str = "no pod is available to run this work item";
+pub const RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE: &str =
+    "no eligible runner or execution principal is available for this work item";
+pub const RUN_AI_FALLBACK_MESSAGE: &str = "could not dispatch a run";
+pub const RUN_AI_POD_ONCE_NOT_ALLOWED_MESSAGE: &str =
+    "only the issue's creator and assignees may use pod_once";
+pub const RUN_AI_POD_ONCE_NOT_APPLICABLE_MESSAGE: &str =
+    "pod_once requires a dedicated runner on the issue";
+pub const RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD_MESSAGE: &str = "no eligible runner in the pod";
+
+/// Handler failure with its exact status + body.
+#[derive(Debug)]
+pub enum Denial {
+    /// 401, DRF `NotAuthenticated` (no `X-Api-Key` header).
+    Unauthorized,
+    /// 403, invalid/expired/inactive API or machine token.
+    InvalidToken,
+    /// 403, the DRF-default `PermissionDenied` body (no D-18 guard class
+    /// sets `message`).
+    Forbidden,
+    /// 404, `{"detail":"Project not found"}` (identifier rewrite miss).
+    ProjectNotFound,
+    /// 400, `{"Detail": ...}` (DRF `ParseError`: malformed JSON).
+    BadDetail(String),
+    /// 400, view-inline `{"error": ...}` with a custom message.
+    BadError(String),
+    /// 404, view-inline `{"error": ...}` with a custom message.
+    NotFoundError(String),
+    /// 409, view-inline `{"error": ...}` with a custom message.
+    ConflictError(String),
+    /// 500, generic branch.
+    ServerError,
+}
+
+impl Denial {
+    fn status_and_body(&self) -> (StatusCode, String) {
+        match self {
+            Denial::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHENTICATED_BODY.to_owned()),
+            Denial::InvalidToken => (StatusCode::FORBIDDEN, INVALID_TOKEN_BODY.to_owned()),
+            Denial::Forbidden => (
+                StatusCode::FORBIDDEN,
+                super::perms::CLASS_DENIAL_BODY.to_owned(),
+            ),
+            Denial::ProjectNotFound => (
+                StatusCode::NOT_FOUND,
+                r#"{"detail":"Project not found"}"#.to_owned(),
+            ),
+            Denial::BadDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"Detail\":{}}}", json_string(message)),
+            ),
+            Denial::BadError(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::NotFoundError(message) => (
+                StatusCode::NOT_FOUND,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::ConflictError(message) => (
+                StatusCode::CONFLICT,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::ServerError => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                SERVER_ERROR_BODY.to_owned(),
+            ),
+        }
+    }
+}
+
+impl IntoResponse for Denial {
+    fn into_response(self) -> Response {
+        let (status, body) = self.status_and_body();
+        Response::builder()
+            .status(status)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body))
+            .expect("static denial response")
+    }
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("json string")
+}
+
+/// Map a database/driver failure to the generic 500 while logging the site
+/// and error for operators (no secrets: messages never include tokens).
+fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
+    tracing::warn!(%error, site, "v1_work_items actions database failure");
+    Denial::ServerError
+}
+
+/// Drain the creation driver's post-commit pod decisions. Django
+/// drains the pod inline (`dispatch.py:61-70`, via `on_commit`); the
+/// jobs driver only *returns* the decision, so a `PodDrain` must be
+/// acted on here or the new run stays QUEUED (PIDASHCONV-1494). A
+/// drain failure is the generic 500 with the committed rows
+/// standing, exactly like an `on_commit` raise.
+async fn drain_dispatch_decisions(
+    pool: &PgPool,
+    state: &AppState,
+    decisions: &[(Uuid, pidash_jobs::dispatch::DispatchDecision)],
+    site: &str,
+) -> Result<(), Denial> {
+    for (_, decision) in decisions {
+        if let pidash_jobs::dispatch::DispatchDecision::PodDrain { pod_id } = decision {
+            if crate::runner_sessions::runner_poll::drain_pod_by_id(pool, state, *pod_id)
+                .await
+                .is_err()
+            {
+                tracing::warn!(site, "v1_work_items actions pod-drain failure");
+                return Err(Denial::ServerError);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pool_of(state: &AppState) -> Result<PgPool, Denial> {
+    state
+        .pools()
+        .map(|pools| pools.primary().clone())
+        .ok_or(Denial::ServerError)
+}
+
+// ---------------------------------------------------------------------------
+// Cutover wiring
+// ---------------------------------------------------------------------------
+
+/// Route registration is the cutover granularity (the pilot `owned()`
+/// pattern shared with `v1_projects`): the owned methods serve from Rust,
+/// every other method on the path proxies to Django so its 405-after-auth
+/// and metadata responses are preserved byte for byte.
+fn owned(
+    router: axum::routing::MethodRouter<AppState>,
+    methods: &[&str],
+) -> axum::routing::MethodRouter<AppState> {
+    let mut router = router;
+    for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
+        if !methods.contains(&method) {
+            router = match method {
+                "GET" => router.get(crate::edge::proxy),
+                "POST" => router.post(crate::edge::proxy),
+                "PUT" => router.put(crate::edge::proxy),
+                "PATCH" => router.patch(crate::edge::proxy),
+                "DELETE" => router.delete(crate::edge::proxy),
+                "HEAD" => router.head(crate::edge::proxy),
+                _ => router.options(crate::edge::proxy),
+            };
+        }
+    }
+    router
+}
+
+/// The four action paths own POST only (`urls/work_item.py:133-151`, each
+/// `as_view(http_method_names=["post"])`).
+pub fn owned_action(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["POST"])
+}
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+/// The authenticated actor: user id plus the RAW stored time-zone name.
+/// The zone is NOT parsed here — `TimezoneMixin.initial`
+/// (`api/views/base.py:43-48`) calls `super().initial()`
+/// (auth + permissions) first and only then activates the zone, so a
+/// denying gate answers 403 even when the stored zone is unknown (which
+/// 400s only for survivors, via [`activate_timezone`]).
+pub struct Actor {
+    pub id: uuid::Uuid,
+    pub timezone: Option<String>,
+}
+
+/// `APIKeyAuthentication` (`api/middleware/api_authentication.py:19-88`):
+/// the `X-Api-Key` header carries either an `api_tokens` token or an
+/// `mt_`-prefixed machine token. No header means anonymous (`authenticate`
+/// returns `None`); the permission layer then 401s before any view code.
+pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Result<Actor, Denial> {
+    let raw = headers
+        .get(pidash_auth::token::API_KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if raw.is_empty() {
+        return Err(Denial::Unauthorized);
+    }
+    let user_id = match pidash_auth::token::classify_token(raw) {
+        None => return Err(Denial::Unauthorized),
+        Some(pidash_auth::token::TokenKind::Api) => resolve_api_token(pool, raw).await?,
+        Some(pidash_auth::token::TokenKind::Machine) => {
+            resolve_machine_token(pool, raw, secret_key).await?
+        }
+    };
+    let timezone = load_timezone_name(pool, &user_id).await?;
+    // `api_tokens.last_used` is stamped on every validated call
+    // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
+    // Best-effort: a failed stamp must not fail the request.
+    if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
+        let _ = pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(pool),
+            raw,
+        )
+        .await;
+    }
+    // The token loggers stamp this id on the `process_logs` payload
+    // (Django reads `request.user` post-view; PIDASHCONV-937).
+    crate::middleware::publish_logger_user_id(&user_id.to_string());
+    Ok(Actor {
+        id: user_id,
+        timezone,
+    })
+}
+
+/// The `api_tokens` columns the validator reads (`db/models/api.py:35-57`).
+/// The `deleted_at IS NULL` conjunct is the `SoftDeletionManager` scope
+/// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
+/// rows, so a soft-deleted token 403s instead of authenticating.
+async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
+    let row =
+        super::auth_reads::live_api_token(&pidash_db::pool::sea_orm_connection(pool), presented)
+            .await
+            .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let Some(super::auth_reads::ApiTokenLookup {
+        token,
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
+        return Err(Denial::InvalidToken);
+    };
+    let now_unix = chrono::Utc::now().timestamp();
+    let row = pidash_auth::token::ApiTokenRow {
+        token,
+        is_active,
+        expired_at_unix: expired_at.map(|dt| dt.timestamp()),
+    };
+    pidash_auth::token::validate_api_token(Some(&row), presented, now_unix)
+        .map_err(|_| Denial::InvalidToken)?;
+    // No `users.is_active` check: `validate_api_token` returns
+    // `api_token.user` unchecked, and neither DRF `IsAuthenticated` nor
+    // the project permission classes consult it — Django serves a
+    // deactivated user's token when membership passes. Port the wart.
+    Ok(user_id)
+}
+
+/// The machine-token path (`api_authentication.py:47-70`, table
+/// `machine_token`): HMAC lookup, revoke checks, dev-machine check, then
+/// the workspace-membership check (revoke-then-deny like Python).
+async fn resolve_machine_token(
+    pool: &PgPool,
+    presented: &str,
+    secret_key: &[u8],
+) -> Result<uuid::Uuid, Denial> {
+    let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
+    let row = super::auth_reads::machine_token_with_device(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
+    )
+    .await
+    .map_err(|error| db_error(error, "machine-token-lookup"))?;
+    let Some(super::auth_reads::MachineTokenLookup {
+        token_hash,
+        user_id,
+        workspace_id,
+        revoked_at,
+        dev_revoked,
+        expires_at,
+        ..
+    }) = row
+    else {
+        return Err(Denial::InvalidToken);
+    };
+    let static_row = pidash_auth::token::MachineTokenRow {
+        token_hash,
+        revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
+        dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
+    };
+    // Hash match is implied by the lookup; the kernel still checks the
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
+    // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
+    // a `false` revokes the token, then denies.
+    let member = super::auth_reads::is_active_workspace_member(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
+    )
+    .await
+    .map_err(|error| db_error(error, "machine-token-member"))?;
+    if !member {
+        // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
+        // `last_used_at` is stamped on success only.
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
+        )
+        .await;
+        return Err(Denial::InvalidToken);
+    }
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
+    )
+    .await;
+    Ok(user_id)
+}
+
+/// The request time zone (`TimezoneMixin.initial`): the user's stored zone
+/// name, loaded but NOT parsed — parsing happens after the gate in
+/// [`activate_timezone`].
+async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
+    super::auth_reads::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))
+}
+
+/// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
+/// after `super().initial()`). A missing zone defaults to UTC; an unknown
+/// zone name 400s: `zoneinfo.ZoneInfo` raises `ZoneInfoNotFoundError`,
+/// which subclasses `KeyError`, so `handle_exception` answers the
+/// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
+/// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
+/// through to the generic 500 (`api/views/base.py:166-171`).
+fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+    match timezone {
+        None => Ok(chrono_tz::UTC),
+        Some("") => Err(Denial::ServerError),
+        Some(zone) => zone
+            .parse()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Identifier rewrite + permissions
+// ---------------------------------------------------------------------------
+
+/// Request preamble: pool, actor and optional workspace id. An unknown slug
+/// yields `None`: every gate then denies 403, exactly like the
+/// slug-filtered membership checks missing in Python.
+pub struct Preamble {
+    pub pool: PgPool,
+    pub actor: Actor,
+    pub workspace_id: Option<uuid::Uuid>,
+}
+
+pub async fn preamble(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+) -> Result<Preamble, Denial> {
+    // Anonymous callers 401 before any pool or database access
+    // (`APIKeyAuthentication.authenticate` returns `None` without a key).
+    if headers
+        .get(pidash_auth::token::API_KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err(Denial::Unauthorized);
+    }
+    let pool = pool_of(state)?;
+    let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
+    let workspace_id =
+        super::auth_reads::workspace_id_by_slug(&pidash_db::pool::sea_orm_connection(&pool), slug)
+            .await
+            .map_err(|error| db_error(error, "preamble-workspace"))?;
+    Ok(Preamble {
+        pool,
+        actor,
+        workspace_id,
+    })
+}
+
+/// `_rewrite_project_kwarg` (`api/views/base.py:51-98`): a slug-or-UUID
+/// `project_id` becomes the canonical project UUID before permission
+/// checks. UUID-looking input passes through unverified (the view body
+/// 404/403s it as before); identifier misses answer the
+/// `{"detail":"Project not found"}` 404. Reuses the `v1_projects`
+/// `Project.resolve` port — the rewrite is shared view code, never
+/// re-ported per domain.
+pub async fn rewrite_project_id(
+    pool: &PgPool,
+    workspace_slug: &str,
+    raw: &str,
+) -> Result<uuid::Uuid, Denial> {
+    use pidash_db::v1_projects::models::project::{classify_lookup, ProjectLookup};
+    use pidash_db::v1_projects::queries_projmem as q;
+    let scope = q::TenantScope {
+        workspace_slug,
+        actor_id: uuid::Uuid::nil(),
+    };
+    match classify_lookup(raw) {
+        ProjectLookup::Pk(id) => Ok(id),
+        ProjectLookup::Identifier(_) => {
+            q::fetch_project_id(&pidash_db::pool::sea_orm_connection(pool), &scope, raw)
+                .await
+                .map_err(|error| db_error(error, "rewrite-project"))?
+                .ok_or(Denial::ProjectNotFound)
+        }
+    }
+}
+
+/// Fetch the `ProjectEntityPermission` POST facts
+/// (`app/permissions/project.py:85-116`): active project membership with
+/// role Admin/Member, workspace- and project-scoped. The `*_member`
+/// columns share one row read; the entity gate's POST branch only consults
+/// `has_project_admin_or_member`.
+async fn entity_facts(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    workspace_slug: &str,
+    user_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+) -> Result<project::ProjectFacts, Denial> {
+    // `role` is `smallint`: sqlx does not widen `INT2` into `i32` on
+    // decode, so read `i16` and compare as integers. `deleted_at IS NULL`
+    // is the `SoftDeletionManager` scope (`db/mixins.py:56-58`).
+    let roles = super::auth_reads::project_member_roles(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *workspace_id,
+        *user_id,
+        *project_id,
+    )
+    .await
+    .map_err(|error| db_error(error, "entity-roles"))?;
+    Ok(project::ProjectFacts {
+        workspace: pidash_types::WorkspaceId::from(workspace_slug.to_owned()),
+        project_id: pidash_types::ProjectId::from(project_id.to_string()),
+        authenticated: true,
+        is_workspace_member: false,
+        has_workspace_admin_or_member: false,
+        is_workspace_admin: false,
+        is_project_member: !roles.is_empty(),
+        is_project_admin: roles.contains(&20),
+        has_project_admin_or_member: roles.iter().any(|r| *r == 20 || *r == 15),
+        has_identifier_membership: false,
+        has_project_identifier: false,
+    })
+}
+
+/// Run the route's gate; deny 403 on failure. The three issue-action
+/// routes carry `ProjectEntityPermission` (POST → project Admin/Member);
+/// the yield route carries `IsAuthenticated` only (`AuthOnly`, always
+/// true past the auth layer).
+async fn require_gate(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    workspace_slug: &str,
+    user_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+    route: V1WorkItemsRoute,
+) -> Result<(), Denial> {
+    let gate = gate_for(route, "POST");
+    let facts = entity_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
+    let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
+    if super::perms::decide(gate, "POST", &scope, &facts) {
+        Ok(())
+    } else {
+        Err(Denial::Forbidden)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lookups
+// ---------------------------------------------------------------------------
+
+/// One issue row as the action endpoints read it:
+/// `Issue.objects.select_related("project", "workspace", "state").filter(
+/// workspace__slug, project_id, pk).first()` (`:957-961`, `:1036-1040`,
+/// `:1225-1229`). `Issue.objects` is the plain `SoftDeletionManager`
+/// (`deleted_at IS NULL` only — the triage/archived/draft exclusions live
+/// on `issue_objects`, which these views do not use).
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct IssueRow {
+    pub id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub workspace_id: Uuid,
+    pub created_by_id: Option<Uuid>,
+    pub agent_executor: Option<String>,
+    pub state_id: Option<Uuid>,
+    pub state_name: Option<String>,
+    pub state_group: Option<String>,
+}
+
+/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
+/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
+fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::ProjectId,
+            issues::Column::WorkspaceId,
+            issues::Column::CreatedById,
+            issues::Column::AgentExecutor,
+            issues::Column::StateId,
+        ])
+        .column_as(states::Column::Name, "state_name")
+        .column_as(states::Column::Group, "state_group")
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(issues::Column::ProjectId.eq(*project_id))
+        .filter(issues::Column::Id.eq(*pk))
+        .filter(issues::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+pub async fn fetch_issue(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Option<IssueRow>, Denial> {
+    issue_row_select(slug, project_id, pk)
+        .into_model::<IssueRow>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-issue"))
+}
+
+/// `AgentRun.objects.select_related("runner").filter(pk=run_id).first()`
+/// (`:1113`, `:1127`, `:1153`): the header paths' row.
+async fn fetch_run_by_id(pool: &PgPool, run_id: &Uuid) -> Result<Option<RunFacts>, Denial> {
+    super::auth_reads::run_facts_by_id(&sea_orm_connection(pool), *run_id)
+        .await
+        .map(|row| row.map(super::auth_reads::RunFactsRow::into_facts))
+        .map_err(|error| db_error(error, "fetch-run"))
+}
+
+/// `AgentRun.objects.select_related("runner").filter(work_item_id=issue.pk)
+/// .order_by("-created_at")[:5]` (`:1127`): the no-header inference rows.
+async fn fetch_newest_runs_on_issue(
+    pool: &PgPool,
+    issue_id: &Uuid,
+) -> Result<Vec<RunFacts>, Denial> {
+    super::auth_reads::newest_run_facts_on_issue(&sea_orm_connection(pool), *issue_id)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(super::auth_reads::RunFactsRow::into_facts)
+                .collect()
+        })
+        .map_err(|error| db_error(error, "fetch-runs"))
+}
+
+/// One yield run row:
+/// `AgentRun.objects.select_related("workspace", "work_item", "runner")
+/// .filter(pk=run_id, workspace__slug=slug).first()` (`:1285-1289`).
+pub struct YieldRun {
+    pub facts: RunFacts,
+    pub workspace_id: Uuid,
+    pub done_payload: Option<Value>,
+}
+
+async fn fetch_yield_run(
+    pool: &PgPool,
+    slug: &str,
+    run_id: &Uuid,
+) -> Result<Option<YieldRun>, Denial> {
+    let row = super::auth_reads::yield_run_by_id(&sea_orm_connection(pool), slug, *run_id)
+        .await
+        .map_err(|error| db_error(error, "fetch-yield-run"))?;
+    Ok(row.map(|row| YieldRun {
+        facts: row.facts(),
+        workspace_id: row.workspace_id,
+        done_payload: row.done_payload,
+    }))
+}
+
+/// `is_workspace_member` (`core/permissions.py:28-34`): any active
+/// membership row. `deleted_at IS NULL` is the manager scope.
+async fn is_workspace_member(
+    pool: &PgPool,
+    user_id: &Uuid,
+    workspace_id: &Uuid,
+) -> Result<bool, Denial> {
+    super::auth_reads::is_active_workspace_member(
+        &sea_orm_connection(pool),
+        *workspace_id,
+        *user_id,
+    )
+    .await
+    .map_err(|error| db_error(error, "is-workspace-member"))
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch seam inputs
+// ---------------------------------------------------------------------------
+
+/// One project row as the action endpoints read it: the clock policy
+/// (`PROJECT_CLOCK_POLICY_SQL` column order) plus the executor default
+/// and the fallback-creator candidates.
+pub struct ProjectRow {
+    pub policy: pidash_services::orchestration::clock::ProjectClockPolicy,
+    pub default_agent_executor: String,
+    pub project_lead_id: Option<Uuid>,
+    pub default_assignee_id: Option<Uuid>,
+}
+
+/// The `projects` columns [`fetch_project`] reads, decoded by name.
+#[derive(Debug, Clone, FromQueryResult)]
+struct ProjectLookup {
+    agent_ticking_enabled: Option<bool>,
+    agent_default_max_ticks: Option<i32>,
+    agent_default_interval_seconds: Option<i32>,
+    agent_review_default_interval_seconds: Option<i32>,
+    agent_test_default_interval_seconds: Option<i32>,
+    default_agent_executor: String,
+    project_lead_id: Option<Uuid>,
+    default_assignee_id: Option<Uuid>,
+}
+
+pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<ProjectRow>, Denial> {
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::DefaultAgentExecutor,
+            projects::Column::ProjectLeadId,
+            projects::Column::DefaultAssigneeId,
+        ])
+        .filter(projects::Column::Id.eq(*project_id))
+        .limit(1)
+        .into_model::<ProjectLookup>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-project"))?;
+    Ok(row.map(|row| {
+        // The cadence columns are INT4; the policy widens them to i64
+        // (the jobs `map_policy` precedent).
+        let policy = pidash_services::orchestration::clock::ProjectClockPolicy {
+            agent_ticking_enabled: row.agent_ticking_enabled,
+            agent_default_max_ticks: row.agent_default_max_ticks,
+            agent_default_interval_seconds: row.agent_default_interval_seconds.map(i64::from),
+            agent_review_default_interval_seconds: row
+                .agent_review_default_interval_seconds
+                .map(i64::from),
+            agent_test_default_interval_seconds: row
+                .agent_test_default_interval_seconds
+                .map(i64::from),
+        };
+        ProjectRow {
+            policy,
+            default_agent_executor: row.default_agent_executor,
+            project_lead_id: row.project_lead_id,
+            default_assignee_id: row.default_assignee_id,
+        }
+    }))
+}
+
+/// LLM-key presence for the D-11 closures: the actor plus every
+/// fallback-creator candidate the drivers may query (issue creator,
+/// project lead, default assignee, live assignees), read from
+/// `assistant_user_llm_config` the way the assistant gate reads it.
+async fn fetch_llm_presence(
+    pool: &PgPool,
+    user_ids: &[Uuid],
+) -> Result<HashMap<Uuid, bool>, Denial> {
+    let mut presence: HashMap<Uuid, bool> = HashMap::with_capacity(user_ids.len());
+    if user_ids.is_empty() {
+        return Ok(presence);
+    }
+    let rows: Vec<(Uuid, Option<Vec<u8>>)> = assistant_user_llm_config::Entity::find()
+        .select_only()
+        .columns([
+            assistant_user_llm_config::Column::UserId,
+            assistant_user_llm_config::Column::ApiKeyEncrypted,
+        ])
+        .filter(assistant_user_llm_config::Column::UserId.is_in(user_ids.iter().copied()))
+        .into_tuple()
+        .all(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-llm-presence"))?;
+    for id in user_ids {
+        presence.insert(*id, false);
+    }
+    for (id, key) in rows {
+        presence.insert(id, pidash_db::assistant::models::has_secret(&key));
+    }
+    Ok(presence)
+}
+
+/// The creator-candidate universe the drivers may consult
+/// (`_resolve_creator_for_trigger`, `scheduling.py:887-952`): the actor
+/// first, then the fallback chain.
+async fn creator_universe(
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue: &IssueRow,
+    project: &ProjectRow,
+) -> Result<Vec<Uuid>, Denial> {
+    let mut ids: Vec<Uuid> = vec![actor_id];
+    for id in [
+        issue.created_by_id,
+        project.project_lead_id,
+        project.default_assignee_id,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let assignees = live_assignee_candidate_ids(&sea_orm_connection(pool), issue.id)
+        .await
+        .map_err(|error| db_error(error, "fetch-assignees"))?;
+    for id in assignees {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// The live-assignee candidate ids, the SeaORM form of
+/// `pidash_services::orchestration::dispatch::LIVE_ASSIGNEE_CANDIDATES_SQL`
+/// (`users` whose id is a live `issue_assignees.assignee_id` of the issue,
+/// `ORDER BY users.id`). The callers consume only the ids, so the
+/// `is_active` / `is_bot` columns the constant also selects are not read.
+async fn live_assignee_candidate_ids<C: ConnectionTrait>(
+    db: &C,
+    issue_id: Uuid,
+) -> Result<Vec<Uuid>, DbErr> {
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.in_subquery(live_assignee_ids_subquery(issue_id)))
+        .order_by_asc(users::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await
+}
+
+/// `SELECT assignee_id FROM issue_assignees WHERE issue_id = ? AND
+/// deleted_at IS NULL`: the `IssueAssignee.objects` through-table scope.
+fn live_assignee_ids_subquery(issue_id: Uuid) -> sea_orm::sea_query::SelectStatement {
+    Query::select()
+        .column(issue_assignees::Column::AssigneeId)
+        .from(issue_assignees::Entity)
+        .and_where(issue_assignees::Column::IssueId.eq(issue_id))
+        .and_where(issue_assignees::Column::DeletedAt.is_null())
+        .to_owned()
+}
+
+/// Live `PodRunnerMatcher`: the single SeaORM implementation shared
+/// with jobs (alias kept for the v1 actions call sites).
+pub struct LiveMatcher {
+    inner: pidash_services::runner_sessions::SeaOrmPodMatcher,
+}
+
+impl LiveMatcher {
+    pub fn new(pool: PgPool) -> Self {
+        Self {
+            inner: pidash_services::runner_sessions::SeaOrmPodMatcher::new(
+                pidash_db::pool::sea_orm_connection(&pool),
+            ),
+        }
+    }
+}
+
+impl pidash_services::orchestration::dispatch::PodRunnerMatcher for LiveMatcher {
+    fn pod_has_runner_for_issue_principal(
+        &self,
+        pod_id: Uuid,
+        issue_id: Uuid,
+        creator_id: Option<Uuid>,
+        human: bool,
+        pod_once: bool,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<bool, pidash_services::orchestration::dispatch::DispatchError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner
+            .pod_has_runner_for_issue_principal(pod_id, issue_id, creator_id, human, pod_once)
+    }
+}
+
+/// LLM-key presence for the creator universe (see [`creator_universe`]).
+async fn fetch_presence(
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue: &IssueRow,
+    project: &ProjectRow,
+) -> Result<Arc<HashMap<Uuid, bool>>, Denial> {
+    let universe = creator_universe(pool, actor_id, issue, project).await?;
+    Ok(Arc::new(fetch_llm_presence(pool, &universe).await?))
+}
+
+/// The `has_usable_llm_config` verdicts for the creator universe: one
+/// installed-seam consult per user over the pre-fetched key bits
+/// (`user_has_llm_config`, `agent_execution.py:69-80`). The CE default
+/// answers the key bit; the overlay routes OpenHub/Codex/BYOK through
+/// the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
+async fn gate_verdicts(state: &AppState, presence: &HashMap<Uuid, bool>) -> HashMap<Uuid, bool> {
+    let mut verdicts = HashMap::with_capacity(presence.len());
+    for (uid, has_key) in presence {
+        verdicts.insert(
+            *uid,
+            state
+                .assistant_seam()
+                .has_usable_llm_config(*uid, *has_key)
+                .await,
+        );
+    }
+    verdicts
+}
+
+/// The `has_usable_llm_config` closure over pre-fetched verdicts. A user
+/// outside the pre-fetched universe (only reachable through a concurrent
+/// insert between the prefetch and the driver) answers closed, the same
+/// as a missing config row.
+pub fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Clone + Send + Sync {
+    move |uid: Uuid| -> bool { verdicts.get(&uid).copied().unwrap_or(false) }
+}
+
+/// The `managed_llm_profile` closure over pre-fetched presence.
+pub fn profile_fn(
+    presence: Arc<HashMap<Uuid, bool>>,
+) -> impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync {
+    move |uid: Option<Uuid>| -> pidash_services::dispatch::LlmProfile {
+        let key = uid
+            .and_then(|uid| presence.get(&uid).copied())
+            .unwrap_or(false);
+        let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
+        pidash_services::dispatch::LlmProfile {
+            available: profile.available,
+            reason_code: profile.reason_code,
+        }
+    }
+}
+
+/// Live [`StoreDeps`](pidash_jobs::orchestration::StoreDeps): settings from
+/// the app state, LLM presence for the creator universe, the installed
+/// toolsets seam, and the shared Redis admission cache.
+/// Returns the opaque struct so each driver call site keeps its concrete
+/// closure types.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_deps(
+    state: &AppState,
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue: &IssueRow,
+    project: &ProjectRow,
+    now_unix_secs: i64,
+) -> Result<
+    (
+        pidash_jobs::orchestration::StoreDeps<
+            RedisAdmissionCache,
+            impl Fn(Uuid) -> bool + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+        >,
+        LiveMatcher,
+    ),
+    Denial,
+> {
+    let presence = fetch_presence(pool, actor_id, issue, project).await?;
+    let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let cache = RedisAdmissionCache {
+        client: client_from_settings(state.settings()),
+    };
+    Ok((
+        pidash_jobs::orchestration::StoreDeps {
+            cloud: state.settings().cloud_agent.clone(),
+            managed: state.settings().managed_runner.clone(),
+            cache,
+            has_usable_llm_config: gate_fn(verdicts),
+            toolsets: state.toolsets().clone(),
+            llm_profile: profile_fn(presence),
+            now_unix_secs,
+        },
+        LiveMatcher::new(pool.clone()),
+    ))
+}
+
+/// Same as [`dispatch_deps`] but for callers that hold ids rather than the
+/// v1 action rows (the orchestration signal fire, which runs after the save
+/// committed). Builds the same creator universe and LLM presence from the
+/// issue/project rows directly, so the closure types are identical.
+pub async fn dispatch_deps_for_ids(
+    state: &AppState,
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue_id: Uuid,
+    now_unix_secs: i64,
+) -> Result<
+    (
+        pidash_jobs::orchestration::StoreDeps<
+            RedisAdmissionCache,
+            impl Fn(Uuid) -> bool + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+        >,
+        LiveMatcher,
+    ),
+    Denial,
+> {
+    let universe = creator_universe_for_ids(pool, actor_id, issue_id).await?;
+    let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
+    let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let cache = RedisAdmissionCache {
+        client: client_from_settings(state.settings()),
+    };
+    Ok((
+        pidash_jobs::orchestration::StoreDeps {
+            cloud: state.settings().cloud_agent.clone(),
+            managed: state.settings().managed_runner.clone(),
+            cache,
+            has_usable_llm_config: gate_fn(verdicts),
+            toolsets: state.toolsets().clone(),
+            llm_profile: profile_fn(presence),
+            now_unix_secs,
+        },
+        LiveMatcher::new(pool.clone()),
+    ))
+}
+
+/// The id-only twin of [`creator_universe`]: the actor first, then the
+/// issue creator, project lead, default assignee, and live assignees.
+async fn creator_universe_for_ids(
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue_id: Uuid,
+) -> Result<Vec<Uuid>, Denial> {
+    let mut ids: Vec<Uuid> = vec![actor_id];
+    let db = sea_orm_connection(pool);
+    let issue: Option<(Option<Uuid>, Option<Uuid>)> = issues::Entity::find()
+        .select_only()
+        .columns([issues::Column::CreatedById, issues::Column::ProjectId])
+        .filter(issues::Column::Id.eq(issue_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "fetch-issue-creator"))?;
+    let (created_by_id, project_id) = issue.unwrap_or((None, None));
+    if let Some(id) = created_by_id {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if let Some(project_id) = project_id {
+        let project: Option<(Option<Uuid>, Option<Uuid>)> = projects::Entity::find()
+            .select_only()
+            .columns([
+                projects::Column::ProjectLeadId,
+                projects::Column::DefaultAssigneeId,
+            ])
+            .filter(projects::Column::Id.eq(project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(|error| db_error(error, "fetch-project-creators"))?;
+        if let Some((lead, assignee)) = project {
+            for id in [lead, assignee].into_iter().flatten() {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    let assignees = live_assignee_candidate_ids(&sea_orm_connection(pool), issue_id)
+        .await
+        .map_err(|error| db_error(error, "fetch-assignees"))?;
+    for id in assignees {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Draw the call's jitter from the issue's effective interval
+/// (`jitter_seconds(effective_interval_seconds())`), as the scheduling
+/// functions do before each re-time.
+pub fn draw_jitter(
+    issue: &IssueRow,
+    policy: &pidash_services::orchestration::clock::ProjectClockPolicy,
+) -> f64 {
+    let state = match (issue.state_group.as_deref(), issue.state_name.as_deref()) {
+        (Some(group), Some(name)) => Some(pidash_types::orchestration::StateRef { group, name }),
+        _ => None,
+    };
+    let interval =
+        pidash_services::orchestration::clock::effective_interval_seconds(state.as_ref(), policy);
+    pidash_db::tasks_ticker::jitter_seconds(interval, &mut rand08::thread_rng())
+}
+
+// ---------------------------------------------------------------------------
+// Response shapers (pure; key order is the contract)
+// ---------------------------------------------------------------------------
+
+/// Render an aware datetime the way `ticker.next_run_at.isoformat()` /
+/// `timezone.now().isoformat()` render: the stored instant with its offset,
+/// microseconds only when nonzero (the `app_integrations` precedent).
+/// Python datetimes carry only micros, so sub-microsecond nanos truncate
+/// first (PIDASHCONV-867); `AutoSi` would otherwise emit 9 digits.
+fn isoformat(dt: &DateTime<Utc>) -> String {
+    let truncated =
+        DateTime::from_timestamp_micros(dt.timestamp_micros()).expect("micros in range");
+    truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+}
+
+/// `{"granted","reason","run_id"}` plus the ticker keys when a row exists
+/// (`:970-984`): `used`, `tick_count` (= `used`), `max_ticks`, `enabled`,
+/// `pending_entry`, `next_run_at`. Always 200.
+pub fn retick_response(
+    granted: bool,
+    reason: &str,
+    run_id: Option<Uuid>,
+    ticker: Option<(&pidash_db::tasks_ticker::IssueAgentTicker, i32)>,
+) -> (StatusCode, String) {
+    let mut map = serde_json::Map::with_capacity(9);
+    map.insert("granted".to_owned(), Value::Bool(granted));
+    map.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    map.insert(
+        "run_id".to_owned(),
+        run_id
+            .map(|id| Value::String(id.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    if let Some((ticker, pool)) = ticker {
+        map.insert("used".to_owned(), Value::from(ticker.used));
+        map.insert("tick_count".to_owned(), Value::from(ticker.tick_count()));
+        map.insert(
+            "max_ticks".to_owned(),
+            Value::from(ticker.effective_max_ticks(pool)),
+        );
+        map.insert("enabled".to_owned(), Value::Bool(ticker.enabled));
+        map.insert(
+            "pending_entry".to_owned(),
+            Value::Bool(ticker.pending_entry),
+        );
+        map.insert(
+            "next_run_at".to_owned(),
+            ticker
+                .next_run_at
+                .as_ref()
+                .map(|dt| Value::String(isoformat(dt)))
+                .unwrap_or(Value::Null),
+        );
+    }
+    let body = serde_json::to_string(&Value::Object(map)).expect("retick body");
+    (StatusCode::OK, body)
+}
+
+/// `{"applied","reason"}` plus the ticker keys when a row exists
+/// (`:1050-1063`): `used`, `granted`, `waited`, `cap`,
+/// `wait_allowance_remaining`. Always 200.
+pub fn wait_response(
+    applied: bool,
+    reason: &str,
+    ticker: Option<(&pidash_db::tasks_ticker::IssueAgentTicker, i32)>,
+) -> (StatusCode, String) {
+    let mut map = serde_json::Map::with_capacity(7);
+    map.insert("applied".to_owned(), Value::Bool(applied));
+    map.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    if let Some((ticker, pool)) = ticker {
+        map.insert("used".to_owned(), Value::from(ticker.used));
+        map.insert("granted".to_owned(), Value::from(ticker.granted));
+        map.insert("waited".to_owned(), Value::from(ticker.waited));
+        map.insert(
+            "cap".to_owned(),
+            Value::from(ticker.effective_max_ticks(pool)),
+        );
+        map.insert(
+            "wait_allowance_remaining".to_owned(),
+            Value::from(ticker.wait_allowance(pool)),
+        );
+    }
+    let body = serde_json::to_string(&Value::Object(map)).expect("wait body");
+    (StatusCode::OK, body)
+}
+
+/// The run-ai refusal (`:1237-1244`): 409 `{"error","reason"}` with the
+/// `_RUN_AI_REASON_MESSAGES` text, or the `.get` default. `None` (creation
+/// refused after preflight passed, so `dispatch_run_ai_run_with_reason`
+/// returns `(None, None)`) renders `"reason":null`, exactly as the view's
+/// `{"error": ..., "reason": reason}` does for `reason=None`. The two
+/// `pod_once` codes ride 403/400 with the same shape (`:1227-1241`).
+pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
+    let message = match reason {
+        Some("active_run_exists") => RUN_AI_ACTIVE_RUN_MESSAGE,
+        Some("no_pod") => RUN_AI_NO_POD_MESSAGE,
+        Some("no_eligible_runner") => RUN_AI_NO_ELIGIBLE_RUNNER_MESSAGE,
+        Some("assigned_runner_offline") => {
+            "the dedicated runner is offline; bring it online or run on the pod"
+        }
+        Some("assigned_runner_paused") => {
+            "the dedicated runner is paused; resume it or run on the pod"
+        }
+        Some("assigned_runner_not_owner") => {
+            "the dedicated runner cannot take this run; use pod_once or change the runner"
+        }
+        Some("pod_once_not_allowed") => RUN_AI_POD_ONCE_NOT_ALLOWED_MESSAGE,
+        Some("pod_once_not_applicable") => RUN_AI_POD_ONCE_NOT_APPLICABLE_MESSAGE,
+        Some("no_eligible_runner_in_pod") => RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD_MESSAGE,
+        _ => RUN_AI_FALLBACK_MESSAGE,
+    };
+    let status = match reason {
+        Some("pod_once_not_allowed") => StatusCode::FORBIDDEN,
+        Some("pod_once_not_applicable") => StatusCode::BAD_REQUEST,
+        _ => StatusCode::CONFLICT,
+    };
+    let mut map = serde_json::Map::with_capacity(2);
+    map.insert("error".to_owned(), Value::String(message.to_owned()));
+    map.insert(
+        "reason".to_owned(),
+        reason
+            .map(|reason| Value::String(reason.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    let body = serde_json::to_string(&Value::Object(map)).expect("run-ai body");
+    (status, body)
+}
+
+/// The v1 dedicated refusal (`:1244-1251`): the full §11.2 body.
+async fn dedicated_refusal_response(
+    pool: &PgPool,
+    issue_id: Uuid,
+    code: &'static str,
+) -> Result<Response, Denial> {
+    use pidash_db::entity::issues;
+    use sea_orm::EntityTrait;
+
+    let orm_pool = pidash_db::pool::sea_orm_connection(pool);
+    let Some(issue) = issues::Entity::find_by_id(issue_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|error| db_error(error, "dedicated-refusal-issue"))?
+    else {
+        return Err(Denial::ServerError);
+    };
+    let body =
+        pidash_services::domain::issue_assignment::dedicated_refusal_body(&orm_pool, &issue, code)
+            .await
+            .map_err(|error| db_error(error, "dedicated-refusal-body"))?;
+    Ok(json_response(StatusCode::CONFLICT, body.to_string()))
+}
+
+/// The run-ai success (`:1245-1252`): 201 `{"id","status","executor"}`.
+pub fn run_ai_created(run_id: Uuid, status: &str, executor_kind: &str) -> (StatusCode, String) {
+    let mut map = serde_json::Map::with_capacity(3);
+    map.insert("id".to_owned(), Value::String(run_id.to_string()));
+    map.insert("status".to_owned(), Value::String(status.to_owned()));
+    map.insert(
+        "executor".to_owned(),
+        Value::String(executor_kind.to_owned()),
+    );
+    let body = serde_json::to_string(&Value::Object(map)).expect("run-ai body");
+    (StatusCode::CREATED, body)
+}
+
+/// The yield success (`:1318-1327`, `3869a226`):
+/// `{"ok","run_id","work_item_id","outcome","stop_ticking"}`. Always 200.
+pub fn yield_response(
+    run_id: Uuid,
+    work_item_id: Uuid,
+    outcome: &str,
+    stop_ticking: bool,
+) -> (StatusCode, String) {
+    let mut map = serde_json::Map::with_capacity(5);
+    map.insert("ok".to_owned(), Value::Bool(true));
+    map.insert("run_id".to_owned(), Value::String(run_id.to_string()));
+    map.insert(
+        "work_item_id".to_owned(),
+        Value::String(work_item_id.to_string()),
+    );
+    map.insert("outcome".to_owned(), Value::String(outcome.to_owned()));
+    map.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
+    let body = serde_json::to_string(&Value::Object(map)).expect("yield body");
+    (StatusCode::OK, body)
+}
+
+/// The yield outcome refusal (`:1275-1280`): 400
+/// `{"error":"outcome is required","allowed":sorted(RUN_OUTCOMES)}`.
+pub fn outcome_required_response() -> (StatusCode, String) {
+    let mut allowed: Vec<&str> = RUN_OUTCOMES.to_vec();
+    allowed.sort_unstable();
+    let mut map = serde_json::Map::with_capacity(2);
+    map.insert(
+        "error".to_owned(),
+        Value::String(OUTCOME_REQUIRED_ERROR.to_owned()),
+    );
+    map.insert(
+        "allowed".to_owned(),
+        Value::Array(
+            allowed
+                .into_iter()
+                .map(|s| Value::String(s.to_owned()))
+                .collect(),
+        ),
+    );
+    let body = serde_json::to_string(&Value::Object(map)).expect("yield body");
+    (StatusCode::BAD_REQUEST, body)
+}
+
+/// `note.strip()[:2000]` (`:1312-1313`): blank notes are dropped, the rest
+/// stripped and cut at 2000 code points (never mid-character).
+pub fn truncate_note(note: &str) -> Option<String> {
+    let stripped = note.trim();
+    if stripped.is_empty() {
+        return None;
+    }
+    if stripped.len() <= 2000 {
+        return Some(stripped.to_owned());
+    }
+    Some(stripped.chars().take(2000).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// Read the whole body.
+async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
+    pidash_compat::http::read_body(body)
+        .await
+        .map_err(|error| db_error(error, "read-body"))
+}
+
+/// `POST .../work-items/<pk>/re-tick/` (`views/issue.py:940-986`).
+pub async fn post_retick(
+    State(state): State<AppState>,
+    Path((slug, project_id, pk)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&pk) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    let (_parts, body) = req.into_parts();
+    if read_body(body).await.is_err() {
+        return Denial::ServerError.into_response();
+    }
+    match retick_inner(&state, &headers, &slug, &project_id, &pk).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn retick_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    pk: &Uuid,
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    // Rewrite before the gate (`base.py:107-111`): an identifier miss 404s
+    // even under an unknown slug, exactly as `Project.resolve` raising
+    // inside `initial()` does before `check_permissions` runs.
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::IssueReTick,
+    )
+    .await?;
+    // `TimezoneMixin.initial` runs after the gate: survivors with an
+    // unknown stored zone 400 here (an empty zone 500s). No action
+    // response renders a zone-shifted field, so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
+    let issue = fetch_issue(&pre.pool, slug, &project_id, pk)
+        .await?
+        .ok_or(Denial::NotFoundError("Work item not found".to_owned()))?;
+    let header = headers
+        .get(super::perms::RUN_ID_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let run_by_id = match header.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(raw) => match Uuid::parse_str(raw) {
+            Ok(id) => fetch_run_by_id(&pre.pool, &id).await?,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    if let Some(refused) = refuse_agent_retick(header, issue.id, run_by_id.as_ref()) {
+        return Ok(json_response(
+            StatusCode::from_u16(refused.status).unwrap_or(StatusCode::FORBIDDEN),
+            refused.body,
+        ));
+    }
+    let project = fetch_project(&pre.pool, &project_id)
+        .await?
+        .ok_or(Denial::ServerError)?;
+    let now = Utc::now();
+    let jitter = draw_jitter(&issue, &project.policy);
+    let (deps, matcher) = dispatch_deps(
+        state,
+        &pre.pool,
+        pre.actor.id,
+        &issue,
+        &project,
+        now.timestamp(),
+    )
+    .await?;
+    let out = pidash_jobs::orchestration::re_tick_ticker(
+        &pre.pool,
+        deps,
+        &matcher,
+        now,
+        jitter,
+        issue.id,
+        Some(pre.actor.id),
+    )
+    .await
+    .map_err(|error| db_error(error, "retick-driver"))?;
+    let outcome = out.outcome;
+    let pool =
+        pidash_db::tasks_ticker::pool_size_or_default(project.policy.agent_default_max_ticks);
+    let (status, body) = retick_response(
+        outcome.granted,
+        &outcome.reason,
+        outcome.run_id,
+        outcome.ticker.as_ref().map(|ticker| (ticker, pool)),
+    );
+    // Drain after the body is built: the re-tick body carries no run
+    // status, and the committed row must be assigned before the
+    // response returns (PIDASHCONV-1494).
+    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "retick-drain").await?;
+    Ok(json_response(status, body))
+}
+
+/// `POST .../work-items/<pk>/wait/` (`views/issue.py:987-1069`).
+pub async fn post_wait(
+    State(state): State<AppState>,
+    Path((slug, project_id, pk)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&pk) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    let (_parts, body) = req.into_parts();
+    if read_body(body).await.is_err() {
+        return Denial::ServerError.into_response();
+    }
+    match wait_inner(&state, &headers, &slug, &project_id, &pk).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn wait_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    pk: &Uuid,
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::IssueWait,
+    )
+    .await?;
+    // `TimezoneMixin.initial` runs after the gate: survivors with an
+    // unknown stored zone 400 here (an empty zone 500s). No action
+    // response renders a zone-shifted field, so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
+    let issue = fetch_issue(&pre.pool, slug, &project_id, pk)
+        .await?
+        .ok_or(Denial::NotFoundError("Work item not found".to_owned()))?;
+    // Best-effort attribution only (`:1044-1047`): the resolve error is
+    // ignored and the wait still applies.
+    let header = headers
+        .get(super::perms::RUN_ID_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let run_by_id = match header.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(raw) => match Uuid::parse_str(raw) {
+            Ok(id) => fetch_run_by_id(&pre.pool, &id).await?,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let newest = fetch_newest_runs_on_issue(&pre.pool, &issue.id).await?;
+    let (run_id, _) = resolve_moved_by_run(
+        header,
+        Some(pre.actor.id),
+        issue.id,
+        run_by_id.as_ref(),
+        &newest,
+    );
+    let project = fetch_project(&pre.pool, &project_id)
+        .await?
+        .ok_or(Denial::ServerError)?;
+    let now = Utc::now();
+    let jitter = draw_jitter(&issue, &project.policy);
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    // The wait driver takes no matcher (no dispatch leg); the underscore
+    // keeps the shared constructor.
+    let (deps, _matcher) = dispatch_deps(
+        state,
+        &pre.pool,
+        pre.actor.id,
+        &issue,
+        &project,
+        now.timestamp(),
+    )
+    .await?;
+    let out = pidash_jobs::orchestration::wait_ticker(
+        &pre.pool,
+        deps,
+        now,
+        jitter,
+        epoch_secs,
+        issue.id,
+        run_id,
+        Some(pre.actor.id),
+        Some(pre.actor.id),
+    )
+    .await
+    .map_err(|error| db_error(error, "wait-driver"))?;
+    let outcome = out.outcome;
+    let pool =
+        pidash_db::tasks_ticker::pool_size_or_default(project.policy.agent_default_max_ticks);
+    let (status, body) = wait_response(
+        outcome.applied,
+        &outcome.reason,
+        outcome.ticker.as_ref().map(|ticker| (ticker, pool)),
+    );
+    Ok(json_response(status, body))
+}
+
+/// `POST .../work-items/<pk>/run-ai/` (`views/issue.py:1175-1254`).
+pub async fn post_run_ai(
+    State(state): State<AppState>,
+    Path((slug, project_id, pk)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&pk) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let pk = pk.parse::<Uuid>().expect("checked segment");
+    let (_parts, body) = req.into_parts();
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    // `pod_once = (request.data.get("pin") or "").strip() == "pod_once"`
+    // (`views/issue.py:1242`).
+    let pod_once = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("pin")
+                .and_then(|value| value.as_str())
+                .map(|v| v.trim() == "pod_once")
+        })
+        .unwrap_or(false);
+    match run_ai_inner(&state, &headers, &slug, &project_id, &pk, pod_once).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn run_ai_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    pk: &Uuid,
+    pod_once: bool,
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::IssueRunAi,
+    )
+    .await?;
+    // `TimezoneMixin.initial` runs after the gate: survivors with an
+    // unknown stored zone 400 here (an empty zone 500s). No action
+    // response renders a zone-shifted field, so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
+    let issue = fetch_issue(&pre.pool, slug, &project_id, pk)
+        .await?
+        .ok_or(Denial::NotFoundError("Work item not found".to_owned()))?;
+    let header = headers
+        .get(super::perms::RUN_ID_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let run_by_id = match header.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(raw) => match Uuid::parse_str(raw) {
+            Ok(id) => fetch_run_by_id(&pre.pool, &id).await?,
+            Err(_) => None,
+        },
+        None => None,
+    };
+    if let Some(refused) = refuse_agent_action(header, issue.id, run_by_id.as_ref(), "Run AI") {
+        return Ok(json_response(
+            StatusCode::from_u16(refused.status).unwrap_or(StatusCode::FORBIDDEN),
+            refused.body,
+        ));
+    }
+    let project = fetch_project(&pre.pool, &project_id)
+        .await?
+        .ok_or(Denial::ServerError)?;
+    let now = Utc::now();
+    let jitter = draw_jitter(&issue, &project.policy);
+    let (deps, matcher) = dispatch_deps(
+        state,
+        &pre.pool,
+        pre.actor.id,
+        &issue,
+        &project,
+        now.timestamp(),
+    )
+    .await?;
+    let out = pidash_jobs::orchestration::run_ai_for_human(
+        &pre.pool,
+        deps,
+        &matcher,
+        now,
+        jitter,
+        issue.id,
+        Some(pre.actor.id),
+        Some(pre.actor.id),
+        pod_once,
+    )
+    .await
+    .map_err(|error| db_error(error, "run-ai-driver"))?;
+    let outcome = out.outcome;
+    let reason = outcome.reason.clone();
+    let Some(run_id) = outcome.run_id else {
+        // Dedicated refusals carry the full §11.2 body on v1 too
+        // (`views/issue.py:1244-1251`).
+        let reason: Option<&'static str> = match reason.as_deref() {
+            Some("assigned_runner_offline") => Some("assigned_runner_offline"),
+            Some("assigned_runner_paused") => Some("assigned_runner_paused"),
+            Some("assigned_runner_not_owner") => Some("assigned_runner_not_owner"),
+            _ => None,
+        };
+        let (status, body) = match reason {
+            Some(code)
+                if matches!(
+                    code,
+                    "assigned_runner_offline"
+                        | "assigned_runner_paused"
+                        | "assigned_runner_not_owner"
+                ) =>
+            {
+                match dedicated_refusal_response(&pre.pool, issue.id, code).await {
+                    Ok(response) => return Ok(response),
+                    Err(denial) => return Err(denial),
+                }
+            }
+            _ => run_ai_refusal(outcome.reason.as_deref()),
+        };
+        return Ok(json_response(status, body));
+    };
+    let row: Option<(Uuid, String, String)> = agent_run::Entity::find()
+        .select_only()
+        .columns([
+            agent_run::Column::Id,
+            agent_run::Column::Status,
+            agent_run::Column::ExecutorKind,
+        ])
+        .filter(agent_run::Column::Id.eq(run_id))
+        .into_tuple()
+        .one(&sea_orm_connection(&pre.pool))
+        .await
+        .map_err(|error| db_error(error, "run-ai-readback"))?;
+    let Some((id, status_text, executor)) = row else {
+        return Err(Denial::ServerError);
+    };
+    let (status, body) = run_ai_created(id, &status_text, &executor);
+    // Drain after the readback: the body renders the stale pre-drain
+    // row exactly as Django's in-memory run does, while the committed
+    // row is assigned before the response returns (PIDASHCONV-1494).
+    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "run-ai-drain").await?;
+    Ok(json_response(status, body))
+}
+
+/// `run.done_payload = payload; run.save(update_fields=["done_payload"])`
+/// (`:1300-1308`): one column, no other stamp. `agent_run` is not a
+/// design §4 table, so the entity write runs here.
+async fn write_done_payload<C: ConnectionTrait>(
+    db: &C,
+    run_id: Uuid,
+    payload: Value,
+) -> Result<(), DbErr> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::DonePayload, Expr::value(payload))
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(db)
+        .await
+        .map(|_| ())
+}
+
+/// `POST .../agent-runs/<run_id>/yield/` (`views/issue.py:1255-1327`, `3869a226`).
+pub async fn post_yield(
+    State(state): State<AppState>,
+    Path((slug, run_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&run_id) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let run_id = run_id.parse::<Uuid>().expect("checked segment");
+    let (_parts, body) = req.into_parts();
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(denial) => return denial.into_response(),
+    };
+    match yield_inner(&state, &headers, &slug, &run_id, &bytes).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn yield_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    run_id: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    // `AuthOnly`: the base `IsAuthenticated` already passed, so the
+    // authenticated caller reaches the handler body.
+    let _ = pre.workspace_id;
+    // `TimezoneMixin.initial` runs after auth, before the view body: an
+    // unknown stored zone 400s here (an empty zone 500s), even before
+    // the body parses. No action response renders a zone-shifted field,
+    // so the value is discarded.
+    activate_timezone(pre.actor.timezone.as_deref())?;
+    let data: Value = if raw_body.is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_slice(raw_body)
+            .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?
+    };
+    let obj = data.as_object().ok_or(Denial::ServerError)?;
+    let outcome = normalize_outcome(obj.get("outcome").unwrap_or(&Value::Null), "");
+    let Some(outcome) = outcome else {
+        let (status, body) = outcome_required_response();
+        return Ok(json_response(status, body));
+    };
+    // `stop_ticking is not None and not isinstance(stop_ticking, bool)`:
+    // a missing key and an explicit null both read as absent; anything
+    // present must be a JSON boolean (`1` / `"yes"` 400, as in Python).
+    let stop_ticking = match obj.get("stop_ticking") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(flag)) => Some(*flag),
+        Some(_) => {
+            return Ok(json_response(
+                StatusCode::BAD_REQUEST,
+                STOP_TICKING_BOOL_BODY.to_owned(),
+            ));
+        }
+    };
+    let header_run = headers
+        .get(super::perms::RUN_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    if !header_run.is_empty() && header_run.to_lowercase() != run_id.to_string().to_lowercase() {
+        return Ok(json_response(
+            StatusCode::BAD_REQUEST,
+            HEADER_MISMATCH_BODY.to_owned(),
+        ));
+    }
+    let run = fetch_yield_run(&pre.pool, slug, run_id)
+        .await?
+        .filter(|run| run.facts.work_item_id.is_some())
+        .ok_or(Denial::NotFoundError("run not found".to_owned()))?;
+    if !is_workspace_member(&pre.pool, &pre.actor.id, &run.workspace_id).await? {
+        return Err(Denial::NotFoundError("run not found".to_owned()));
+    }
+    if !run_belongs_to(Some(pre.actor.id), Some(&run.facts)) {
+        return Err(Denial::NotFoundError("run not found".to_owned()));
+    }
+    if !run.facts.status.is_active() {
+        return Err(Denial::ConflictError("run is not active".to_owned()));
+    }
+    let mut payload: serde_json::Map<String, Value> = match run.done_payload.as_ref() {
+        Some(Value::Object(map)) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    payload.insert("status".to_owned(), Value::String(outcome.to_owned()));
+    payload.insert(
+        "yielded_at".to_owned(),
+        Value::String(isoformat(&Utc::now())),
+    );
+    if let Some(Value::String(note)) = obj.get("note") {
+        if let Some(note) = truncate_note(note) {
+            payload.insert("note".to_owned(), Value::String(note));
+        }
+    }
+    if let Some(stop_ticking) = stop_ticking {
+        payload.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
+    }
+    write_done_payload(
+        &sea_orm_connection(&pre.pool),
+        run.facts.id,
+        Value::Object(payload),
+    )
+    .await
+    .map_err(|error| db_error(error, "yield-write"))?;
+    let work_item_id = run.facts.work_item_id.expect("checked above");
+    let (status, body) = yield_response(
+        run.facts.id,
+        work_item_id,
+        outcome,
+        stop_ticking.unwrap_or(false),
+    );
+    Ok(json_response(status, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static F18_11: &str =
+        include_str!("../../../../fixtures/v1_work_items/handlers/F18-11.work_items.json");
+
+    fn calls() -> Value {
+        let fx: Value = serde_json::from_str(F18_11).expect("F18-11 parses");
+        fx.get("calls").expect("calls").clone()
+    }
+
+    fn call_body(name: &str) -> (u16, String) {
+        let call = calls().get(name).unwrap_or(&Value::Null).clone();
+        let status = call.get("status").and_then(Value::as_u64).expect("status") as u16;
+        let body = serde_json::to_string(call.get("body").expect("body")).expect("body");
+        (status, body)
+    }
+
+    fn ticker_row() -> pidash_db::tasks_ticker::IssueAgentTicker {
+        pidash_db::tasks_ticker::IssueAgentTicker {
+            id: Uuid::nil(),
+            created_at: DateTime::from_timestamp(0, 0).expect("epoch"),
+            updated_at: DateTime::from_timestamp(0, 0).expect("epoch"),
+            created_by_id: None,
+            updated_by_id: None,
+            deleted_at: None,
+            issue_id: Uuid::nil(),
+            used: 3,
+            granted: 10,
+            waited: 2,
+            user_disabled: false,
+            next_run_at: Some(
+                DateTime::parse_from_rfc3339("2026-10-04T12:34:56.789012+00:00")
+                    .expect("dt")
+                    .with_timezone(&Utc),
+            ),
+            last_tick_at: None,
+            enabled: true,
+            disarm_reason: String::new(),
+            pending_entry: false,
+            pending_entry_free: false,
+            pending_entry_actor_id: None,
+            pending_entry_trigger: String::new(),
+            resume_parent_run_id: None,
+        }
+    }
+
+    /// The 9 action-route calls this issue replays. Fails if the fixture
+    /// drops or renames one, so coverage cannot silently shrink.
+    #[test]
+    fn replay_count() {
+        let calls = calls();
+        for name in [
+            "retick",
+            "wait",
+            "run_ai",
+            "yield_ok",
+            "yield_stop_true",
+            "yield_bad_outcome",
+            "yield_bad_stop_ticking",
+            "yield_header_mismatch",
+            "yield_inactive",
+        ] {
+            assert!(calls.get(name).is_some(), "fixture call {name}");
+        }
+    }
+
+    #[test]
+    fn replay_retick_no_ticker() {
+        let (status, body) = retick_response(false, "no_ticker", None, None);
+        let (fx_status, fx_body) = call_body("retick");
+        assert_eq!(status.as_u16(), fx_status);
+        assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_wait_no_ticker() {
+        let (status, body) = wait_response(false, "no_ticker", None);
+        let (fx_status, fx_body) = call_body("wait");
+        assert_eq!(status.as_u16(), fx_status);
+        assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_run_ai_no_pod() {
+        let (status, body) = run_ai_refusal(Some("no_pod"));
+        let (fx_status, fx_body) = call_body("run_ai");
+        assert_eq!(status.as_u16(), fx_status);
+        assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_ok() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
+            .parse()
+            .expect("uuid");
+        let (status, body) = yield_response(run_id, work_item_id, "progressed", false);
+        let (fx_status, fx_body) = call_body("yield_ok");
+        assert_eq!(status.as_u16(), fx_status);
+        assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_stop_true() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
+            .parse()
+            .expect("uuid");
+        let (status, body) = yield_response(run_id, work_item_id, "done", true);
+        let (fx_status, fx_body) = call_body("yield_stop_true");
+        assert_eq!(status.as_u16(), fx_status);
+        assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_bad_outcome() {
+        let (status, body) = outcome_required_response();
+        let (fx_status, fx_body) = call_body("yield_bad_outcome");
+        assert_eq!(status.as_u16(), fx_status);
+        assert_eq!(body, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_bad_stop_ticking() {
+        let (fx_status, fx_body) = call_body("yield_bad_stop_ticking");
+        assert_eq!(400, fx_status);
+        assert_eq!(STOP_TICKING_BOOL_BODY, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_header_mismatch() {
+        let (fx_status, fx_body) = call_body("yield_header_mismatch");
+        assert_eq!(400, fx_status);
+        assert_eq!(HEADER_MISMATCH_BODY, fx_body);
+    }
+
+    #[test]
+    fn replay_yield_inactive() {
+        let (fx_status, fx_body) = call_body("yield_inactive");
+        assert_eq!(409, fx_status);
+        assert_eq!(RUN_NOT_ACTIVE_BODY, fx_body);
+    }
+
+    #[test]
+    fn retick_with_ticker_shape() {
+        let ticker = ticker_row();
+        let (status, body) = retick_response(true, "granted", None, Some((&ticker, 10)));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"granted":true,"reason":"granted","run_id":null,"used":3,"tick_count":3,"max_ticks":22,"enabled":true,"pending_entry":false,"next_run_at":"2026-10-04T12:34:56.789012+00:00"}"#
+        );
+        let mut no_time = ticker_row();
+        no_time.next_run_at = None;
+        let (_, body) = retick_response(true, "granted", None, Some((&no_time, 10)));
+        assert!(body.ends_with(r#""next_run_at":null}"#), "{body}");
+    }
+
+    #[test]
+    fn wait_with_ticker_shape() {
+        let ticker = ticker_row();
+        let (status, body) = wait_response(true, "waited", Some((&ticker, 10)));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"applied":true,"reason":"waited","used":3,"granted":10,"waited":2,"cap":22,"wait_allowance_remaining":8}"#
+        );
+        let (_, body) = wait_response(false, "infinite_pool", Some((&ticker, -1)));
+        assert_eq!(
+            body,
+            r#"{"applied":false,"reason":"infinite_pool","used":3,"granted":10,"waited":2,"cap":-1,"wait_allowance_remaining":0}"#
+        );
+    }
+
+    #[test]
+    fn run_ai_refusal_table() {
+        for (reason, message) in [
+            (
+                Some("active_run_exists"),
+                "the work item already has an active or queued run",
+            ),
+            (Some("no_pod"), "no pod is available to run this work item"),
+            (
+                Some("no_eligible_runner"),
+                "no eligible runner or execution principal is available for this work item",
+            ),
+            (Some("something-new"), "could not dispatch a run"),
+        ] {
+            let (status, body) = run_ai_refusal(reason);
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(
+                body,
+                format!(
+                    "{{\"error\":{message},\"reason\":{reason}}}",
+                    message = serde_json::to_string(message).expect("str"),
+                    reason = serde_json::to_string(&reason).expect("str"),
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn run_ai_refusal_none_reason_renders_null() {
+        // `dispatch_run_ai_run_with_reason` returns `(None, None)` when
+        // creation refuses after preflight passed; the view renders
+        // `{"error": <default>, "reason": None}` (`:1238-1244`).
+        let (status, body) = run_ai_refusal(None);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body,
+            r#"{"error":"could not dispatch a run","reason":null}"#
+        );
+    }
+
+    #[test]
+    fn run_ai_created_shape() {
+        let id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let (status, body) = run_ai_created(id, "queued", "local_runner");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(
+            body,
+            r#"{"id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","status":"queued","executor":"local_runner"}"#
+        );
+    }
+
+    #[test]
+    fn activate_timezone_empty_zone_500s() {
+        // `ZoneInfo('')` raises `ValueError` (not `KeyError`), so an
+        // empty stored zone is the generic 500 while an unknown zone is
+        // the `KeyError`-branch 400 (PIDASHCONV-747, live-probed).
+        assert!(matches!(
+            activate_timezone(Some("")),
+            Err(Denial::ServerError)
+        ));
+        assert!(matches!(
+            activate_timezone(Some("Not/AZone")),
+            Err(Denial::BadError(_))
+        ));
+        assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
+        assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    /// `isoformat` truncates sub-microsecond nanos to micros
+    /// (PIDASHCONV-867): Python datetimes carry only micros, so
+    /// `AutoSi` must never emit 9 digits (`yielded_at` stamps
+    /// `Utc::now()` and the archive detail serves it back).
+    #[test]
+    fn isoformat_truncates_sub_micro_nanos() {
+        use chrono::TimeZone;
+        let whole = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 2, 22, 22, 34)
+            .unwrap();
+        assert_eq!(isoformat(&whole), "2026-10-02T22:22:34+00:00");
+        let nanos =
+            whole + chrono::Duration::microseconds(118_933) + chrono::Duration::nanoseconds(789);
+        assert_eq!(isoformat(&nanos), "2026-10-02T22:22:34.118933+00:00");
+    }
+
+    #[test]
+    fn truncate_note_edges() {
+        assert_eq!(truncate_note(""), None);
+        assert_eq!(truncate_note("   "), None);
+        assert_eq!(truncate_note("  hi  "), Some("hi".to_owned()));
+        let long = "é".repeat(3000);
+        let cut = truncate_note(&long).expect("cut");
+        assert_eq!(cut.chars().count(), 2000);
+        assert!(cut.is_char_boundary(cut.len()));
+        let short = "x".repeat(2000);
+        assert_eq!(truncate_note(&short), Some(short));
+    }
+
+    /// Overlay-shaped seam: a keyless user still counts as configured
+    /// (the gateway lane, not BYOK).
+    #[derive(Debug)]
+    struct GatewaySeam;
+
+    impl pidash_services::extensions::AssistantModelSeam for GatewaySeam {
+        fn has_usable_llm_config(
+            &self,
+            user_id: Uuid,
+            has_api_key: bool,
+        ) -> pidash_services::extensions::SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key);
+            Box::pin(async move { true })
+        }
+
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("seam title".to_owned()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn deps_verdicts_use_the_installed_seam() {
+        let state = AppState::new("test").with_assistant_seam(std::sync::Arc::new(GatewaySeam));
+        let keyless = Uuid::new_v4();
+        let presence = HashMap::from([(keyless, false)]);
+        let verdicts = gate_verdicts(&state, &presence).await;
+        assert_eq!(
+            verdicts.get(&keyless),
+            Some(&true),
+            "an installed seam that accepts the user must open the gate without a key"
+        );
+        let gate = gate_fn(Arc::new(verdicts));
+        assert!(gate(keyless));
+        assert!(
+            !gate(Uuid::new_v4()),
+            "a user outside the universe still answers closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn deps_verdicts_keep_the_ce_default() {
+        // No `with_assistant_seam`: the default CE seam answers each key
+        // bit exactly like the pre-seam free function did.
+        let state = AppState::new("test");
+        let keyed = Uuid::new_v4();
+        let keyless = Uuid::new_v4();
+        let presence = HashMap::from([(keyed, true), (keyless, false)]);
+        let verdicts = gate_verdicts(&state, &presence).await;
+        assert_eq!(verdicts.get(&keyed), Some(&true));
+        assert_eq!(verdicts.get(&keyless), Some(&false));
+        let gate = gate_fn(Arc::new(verdicts));
+        assert!(gate(keyed));
+        assert!(!gate(keyless));
+        assert!(!gate(Uuid::new_v4()));
+    }
+
+    // ---- SeaORM statement shapes (no database) -------------------------------
+
+    use sea_orm::{DbBackend, QueryTrait};
+
+    #[test]
+    fn issue_row_statement_joins_workspace_inner_and_state_left() {
+        let sql = issue_row_select("acme", &Uuid::nil(), &Uuid::nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains(
+                r#"INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""states"."name" AS "state_name""#), "{sql}");
+        assert!(
+            sql.contains(r#""states"."group" AS "state_group""#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issues"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.ends_with("LIMIT 1"), "{sql}");
+    }
+
+    #[test]
+    fn live_assignee_subquery_scopes_on_issue_and_liveness() {
+        let sql = live_assignee_ids_subquery(Uuid::nil())
+            .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(sql.contains(r#"FROM "issue_assignees""#), "{sql}");
+        assert!(sql.contains(r#""issue_id" = "#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
+    }
+
+    /// Every new read/write against constraint-free temp copies on one
+    /// connection (skips without `DATABASE_URL`).
+    #[tokio::test]
+    async fn live_action_reads_and_yield_write() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issues",
+            "workspaces",
+            "states",
+            "projects",
+            "assistant_user_llm_config",
+            "users",
+            "issue_assignees",
+            "runner",
+            "agent_run",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, project, state, pod) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (issue, stateless_issue, dead_issue) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (creator, lead, assignee_a, assignee_b, stale_assignee) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (run, other_run) = (Uuid::new_v4(), Uuid::new_v4());
+        let user_rows: Vec<String> = [creator, lead, assignee_a, assignee_b, stale_assignee]
+            .iter()
+            .map(|id| format!("('{id}', true, false)"))
+            .collect();
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug) VALUES ('{ws}', 'acme')"),
+            format!("INSERT INTO states (id, name, \"group\") VALUES ('{state}', 'Doing', 'started')"),
+            format!(
+                "INSERT INTO projects (id, agent_ticking_enabled, agent_default_max_ticks, \
+                 agent_default_interval_seconds, agent_review_default_interval_seconds, \
+                 agent_test_default_interval_seconds, default_agent_executor, project_lead_id, \
+                 default_assignee_id) VALUES ('{project}', false, 7, 60, 120, 180, 'codex', '{lead}', NULL)"
+            ),
+            format!(
+                "INSERT INTO issues (id, project_id, workspace_id, created_by_id, agent_executor, state_id, deleted_at) VALUES \
+                 ('{issue}', '{project}', '{ws}', '{creator}', 'claude', '{state}', NULL), \
+                 ('{stateless_issue}', '{project}', '{ws}', NULL, NULL, NULL, NULL), \
+                 ('{dead_issue}', '{project}', '{ws}', '{creator}', NULL, '{state}', now())"
+            ),
+            format!("INSERT INTO users (id, is_active, is_bot) VALUES {}", user_rows.join(", ")),
+            format!(
+                "INSERT INTO issue_assignees (id, issue_id, assignee_id, created_at, deleted_at) VALUES \
+                 (gen_random_uuid(), '{issue}', '{assignee_a}', '2024-01-01T00:00:00Z', NULL), \
+                 (gen_random_uuid(), '{issue}', '{assignee_b}', '2024-01-02T00:00:00Z', NULL), \
+                 (gen_random_uuid(), '{issue}', '{stale_assignee}', '2024-01-03T00:00:00Z', now())"
+            ),
+            format!(
+                "INSERT INTO assistant_user_llm_config (id, user_id, api_key_encrypted) VALUES \
+                 (1, '{creator}', '\\x6b6579'::bytea), (2, '{lead}', NULL), (3, '{assignee_a}', ''::bytea)"
+            ),
+            format!(
+                "INSERT INTO runner (id, owner_id, pod_id, provisioning, status) VALUES \
+                 (gen_random_uuid(), '{creator}', '{pod}', 'desktop_bundled', 'online'), \
+                 (gen_random_uuid(), '{assignee_a}', '{pod}', 'desktop_bundled', 'revoked'), \
+                 (gen_random_uuid(), '{assignee_b}', '{pod}', 'cloud', 'offline'), \
+                 (gen_random_uuid(), '{lead}', '{pod}', 'cloud', 'revoked')"
+            ),
+            format!(
+                "INSERT INTO agent_run (id, status, executor_kind, done_payload) VALUES \
+                 ('{run}', 'running', 'claude', NULL), ('{other_run}', 'done', 'codex', '{{\"status\":\"ok\"}}')"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect(&sql);
+        }
+        let db = sea_orm_connection(&pool);
+
+        // fetch_issue: slug + project + pk, live rows only, LEFT state.
+        let found = fetch_issue(&pool, "acme", &project, &issue)
+            .await
+            .expect("issue")
+            .expect("found");
+        assert_eq!(found.project_id, Some(project));
+        assert_eq!(found.workspace_id, ws);
+        assert_eq!(found.created_by_id, Some(creator));
+        assert_eq!(found.agent_executor.as_deref(), Some("claude"));
+        assert_eq!(found.state_id, Some(state));
+        assert_eq!(found.state_name.as_deref(), Some("Doing"));
+        assert_eq!(found.state_group.as_deref(), Some("started"));
+        let stateless = fetch_issue(&pool, "acme", &project, &stateless_issue)
+            .await
+            .expect("issue")
+            .expect("found");
+        assert_eq!((stateless.state_id, stateless.state_name), (None, None));
+        assert!(fetch_issue(&pool, "acme", &project, &dead_issue)
+            .await
+            .expect("issue")
+            .is_none());
+        assert!(fetch_issue(&pool, "other", &project, &issue)
+            .await
+            .expect("issue")
+            .is_none());
+
+        // fetch_project: policy widening plus the creator candidates.
+        let proj = fetch_project(&pool, &project)
+            .await
+            .expect("project")
+            .expect("found");
+        assert_eq!(proj.policy.agent_ticking_enabled, Some(false));
+        assert_eq!(proj.policy.agent_default_max_ticks, Some(7));
+        assert_eq!(proj.policy.agent_default_interval_seconds, Some(60));
+        assert_eq!(proj.policy.agent_review_default_interval_seconds, Some(120));
+        assert_eq!(proj.policy.agent_test_default_interval_seconds, Some(180));
+        assert_eq!(proj.default_agent_executor, "codex");
+        assert_eq!(proj.project_lead_id, Some(lead));
+        assert_eq!(proj.default_assignee_id, None);
+        assert!(fetch_project(&pool, &Uuid::new_v4())
+            .await
+            .expect("project")
+            .is_none());
+
+        // fetch_llm_presence: a non-empty key is present, NULL/empty is not,
+        // an unknown user defaults to false.
+        let presence = fetch_llm_presence(&pool, &[creator, lead, assignee_a, assignee_b])
+            .await
+            .expect("presence");
+        assert_eq!(presence.get(&creator), Some(&true));
+        assert_eq!(presence.get(&lead), Some(&false));
+        assert_eq!(presence.get(&assignee_a), Some(&false));
+        assert_eq!(presence.get(&assignee_b), Some(&false));
+        assert!(fetch_llm_presence(&pool, &[])
+            .await
+            .expect("presence")
+            .is_empty());
+
+        // live assignee candidates: live through rows only, by user id.
+        let mut expected = vec![assignee_a, assignee_b];
+        expected.sort();
+        assert_eq!(
+            live_assignee_candidate_ids(&db, issue)
+                .await
+                .expect("cands"),
+            expected
+        );
+        // creator universes: actor, creator, lead, (no default assignee), assignees.
+        let actor = Uuid::new_v4();
+        let universe = creator_universe(&pool, actor, &found, &proj)
+            .await
+            .expect("universe");
+        assert_eq!(&universe[..3], &[actor, creator, lead]);
+        let mut tail = universe[3..].to_vec();
+        tail.sort();
+        assert_eq!(tail, expected);
+        assert_eq!(
+            creator_universe_for_ids(&pool, actor, issue)
+                .await
+                .expect("universe"),
+            universe
+        );
+        // Duplicates collapse (actor == creator).
+        let dup = creator_universe_for_ids(&pool, creator, issue)
+            .await
+            .expect("universe");
+        assert_eq!(dup.iter().filter(|id| **id == creator).count(), 1);
+
+        // The run-ai readback tuple.
+        let readback: Option<(Uuid, String, String)> = agent_run::Entity::find()
+            .select_only()
+            .columns([
+                agent_run::Column::Id,
+                agent_run::Column::Status,
+                agent_run::Column::ExecutorKind,
+            ])
+            .filter(agent_run::Column::Id.eq(run))
+            .into_tuple()
+            .one(&db)
+            .await
+            .expect("readback");
+        assert_eq!(readback, Some((run, "running".into(), "claude".into())));
+
+        // The yield write touches only the addressed row's done_payload.
+        let mut payload = serde_json::Map::new();
+        payload.insert("status".to_owned(), Value::String("done".into()));
+        payload.insert("stop_ticking".to_owned(), Value::Bool(true));
+        write_done_payload(&db, run, Value::Object(payload.clone()))
+            .await
+            .expect("write");
+        let (written, untouched): (Option<Value>, Option<Value>) = (
+            agent_run::Entity::find()
+                .select_only()
+                .column(agent_run::Column::DonePayload)
+                .filter(agent_run::Column::Id.eq(run))
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("read")
+                .expect("row"),
+            agent_run::Entity::find()
+                .select_only()
+                .column(agent_run::Column::DonePayload)
+                .filter(agent_run::Column::Id.eq(other_run))
+                .into_tuple()
+                .one(&db)
+                .await
+                .expect("read")
+                .expect("row"),
+        );
+        assert_eq!(written, Some(Value::Object(payload)));
+        assert_eq!(untouched, Some(serde_json::json!({"status": "ok"})));
+    }
+}

@@ -58,7 +58,11 @@ mod tests {
     #[test]
     fn digit_resolves_to_tab_switch_in_tabs_context() {
         let reg = default_bindings::defaults();
-        let r = resolve(&key(KeyCode::Char('1')), &[Context::Tabs, Context::Global], &reg);
+        let r = resolve(
+            &key(KeyCode::Char('1')),
+            &[Context::Tabs, Context::Global],
+            &reg,
+        );
         assert_eq!(r, Resolution::Match(Action::GoToTab(0)));
     }
 
@@ -82,7 +86,11 @@ mod tests {
         let reg = default_bindings::defaults();
         // 'q' is bound in Global. If we put List first (which doesn't
         // bind 'q'), Global still resolves it.
-        let r = resolve(&key(KeyCode::Char('q')), &[Context::List, Context::Global], &reg);
+        let r = resolve(
+            &key(KeyCode::Char('q')),
+            &[Context::List, Context::Global],
+            &reg,
+        );
         assert_eq!(r, Resolution::Match(Action::Quit));
     }
 }
