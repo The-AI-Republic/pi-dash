@@ -135,7 +135,13 @@ import {
   updateSidebarPreferences,
 } from "./contracts/sidebar.js";
 import { searchWorkspace } from "./contracts/search.js";
-import { agentToolsEnabled, getProfile, OpenhubAppSettings, updateProfile } from "./contracts/profile.js";
+import {
+  agentToolsEnabled,
+  freeQuotaReminderEnabled,
+  getProfile,
+  OpenhubAppSettings,
+  updateProfile,
+} from "./contracts/profile.js";
 import { listTimezones, updateMyTimezone } from "./contracts/locale.js";
 import {
   createAssistantConnection,
@@ -7205,6 +7211,16 @@ describe("profile app-settings contracts", () => {
     expect(agentToolsEnabled({ openhub: { apps_enabled: false } })).toBe(false);
     expect(agentToolsEnabled({ openhub: { apps_enabled: "yes" } })).toBe(false);
     expect(agentToolsEnabled({ openhub: { apps_enabled: true } })).toBe(true);
+  });
+
+  it("reads the free-quota reminder flag off by default", () => {
+    expect(freeQuotaReminderEnabled({})).toBe(false);
+    expect(freeQuotaReminderEnabled({ openhub: null })).toBe(false);
+    expect(freeQuotaReminderEnabled({ openhub: "yes" })).toBe(false);
+    expect(freeQuotaReminderEnabled({ openhub: {} })).toBe(false);
+    expect(freeQuotaReminderEnabled({ openhub: { free_quota_reminder: false } })).toBe(false);
+    expect(freeQuotaReminderEnabled({ openhub: { free_quota_reminder: "yes" } })).toBe(false);
+    expect(freeQuotaReminderEnabled({ openhub: { free_quota_reminder: true } })).toBe(true);
   });
 });
 

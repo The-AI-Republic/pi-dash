@@ -613,7 +613,14 @@ export {
 export type { FavoriteCreate, FavoritePatch, SidebarPreferencePatch } from "./contracts/sidebar.js";
 export { SEARCH_ENTITIES, SearchResults, searchWorkspace } from "./contracts/search.js";
 export type { SearchEntity, WorkspaceSearchQuery } from "./contracts/search.js";
-export { OpenhubAppSettings, Profile, agentToolsEnabled, getProfile, updateProfile } from "./contracts/profile.js";
+export {
+  OpenhubAppSettings,
+  Profile,
+  agentToolsEnabled,
+  freeQuotaReminderEnabled,
+  getProfile,
+  updateProfile,
+} from "./contracts/profile.js";
 export type { ProfilePatch } from "./contracts/profile.js";
 export { MeTimezone, TimezoneEntry, TimezoneList, listTimezones, updateMyTimezone } from "./contracts/locale.js";
 export {

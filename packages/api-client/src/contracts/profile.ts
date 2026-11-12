@@ -74,6 +74,17 @@ export function agentToolsEnabled(settings: Profile["settings"]): boolean {
   return (openhub as Record<string, unknown>)["apps_enabled"] === true;
 }
 
+/**
+ * Read the free-quota reminder flag out of a profile settings bag
+ * (NEWPIDASH-181). Anything but an explicit true reads as off; the
+ * server defaults it to false, so this mirrors the stored default.
+ */
+export function freeQuotaReminderEnabled(settings: Profile["settings"]): boolean {
+  const openhub = settings["openhub"];
+  if (typeof openhub !== "object" || openhub === null) return false;
+  return (openhub as Record<string, unknown>)["free_quota_reminder"] === true;
+}
+
 export interface ProfilePatch {
   theme?: Record<string, unknown>;
   language?: string;
@@ -88,7 +99,7 @@ export interface ProfilePatch {
   has_marketing_email_consent?: boolean;
   onboarding_step?: Record<string, unknown>;
   last_workspace_id?: string | null;
-  settings?: { openhub?: { apps_enabled?: boolean } };
+  settings?: { openhub?: { apps_enabled?: boolean; free_quota_reminder?: boolean } };
 }
 
 export async function updateProfile(client: ApiClient, input: ProfilePatch): Promise<Profile> {
