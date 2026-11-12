@@ -634,6 +634,11 @@ def _pinned_runner_for(
     :func:`pi_dash.runner.services.issue_assignment.resolve_run_pin`;
     this helper is its locality arm, kept under its old name for
     back-compat (``test_engine_dispatch`` imports it).
+
+    A retry is **not** pinned back to a runner that just failed the work for
+    an infra or startup reason
+    (:func:`~pi_dash.runner.services.issue_assignment.parent_failed_on_its_runner`,
+    PDASHOSS01-272); ``locality_runner_for`` applies that guard.
     """
     from pi_dash.runner.services.issue_assignment import locality_runner_for
 

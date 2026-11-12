@@ -17,6 +17,7 @@ main before dispatch honours it (H-5).
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from django.conf import settings
@@ -24,6 +25,8 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from pi_dash.core.agent_execution import AgentExecutorKind, normalize_executor_write
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_issue_executor(attrs: dict, *, instance) -> None:
@@ -373,6 +376,45 @@ def AgentRunCountAhead(run) -> int:
 # ---------------------------------------------------------------------------
 
 
+#: Terminal ``error_code`` values that blame the machine rather than the work:
+#: the run died because its runner stopped answering or never got the Assign,
+#: not because the agent hit a problem in the repo.
+RUNNER_INFRA_ERROR_CODES = frozenset(
+    {
+        "heartbeat_reaped",
+        "dispatch_timeout",
+        "runner_revoked",
+    }
+)
+
+
+def parent_failed_on_its_runner(parent) -> bool:
+    """Did ``parent`` fail in a way that implicates the runner it ran on?
+
+    Two signals, both terminal-FAILED only — a COMPLETED, CANCELLED or
+    REFUSED parent says nothing bad about the machine:
+
+    - ``started_at is None``: the Assign reached the runner but the agent
+      never started there. That is a startup failure on that machine, e.g.
+      PIDASHCONV-491's ``timed out waiting for muse exec's
+      run.lifecycle.started`` — ``started_at`` is written only by
+      ``RunStartedEndpoint``, so its absence is exactly "never got going".
+    - an infra ``error_code`` (:data:`RUNNER_INFRA_ERROR_CODES`): the runner
+      went dark mid-run or never received the dispatch at all.
+
+    A run that started and *then* failed is deliberately **not** covered: the
+    agent got its session, so the failure is about the work, and re-pinning
+    keeps the repo-locality win.
+    """
+    from pi_dash.runner.models import AgentRunStatus
+
+    if parent.status != AgentRunStatus.FAILED:
+        return False
+    if parent.error_code in RUNNER_INFRA_ERROR_CODES:
+        return True
+    return parent.started_at is None
+
+
 def locality_runner_for(parent, target_pod, *, creator, trigger, issue):
     """Locality pin: the parent's runner while it takes pod work now.
 
@@ -380,6 +422,17 @@ def locality_runner_for(parent, target_pod, *, creator, trigger, issue):
     fresh, not paused, same pod, ``locality_pin_allowed`` (an engine only
     while ``engine_takes_pod_work``), and for an engine ``runner_may_take``
     for the new run's creator and trigger.
+
+    A retry is **not** pinned back to a runner that just failed the work for
+    an infra or startup reason (:func:`parent_failed_on_its_runner`).
+    PIDASHCONV-491 is the case: a run died on ``macmini-muse-s11`` without
+    the agent ever starting, the retry was pinned straight back to that
+    machine, and then sat behind a 7-hour run for 6 h 44 m. The pin wait
+    budget (PDASHOSS01-272, ``matcher.releasable_overbudget_pin_ids``) bounds
+    that wait, but only when some runner in the pod is idle — so not
+    choosing the bad pin in the first place is the real fix. A dedicated pin
+    is the issue's own choice and is not subject to this guard
+    (:func:`resolve_run_pin` resolves it before the locality arm).
     """
     from pi_dash.runner.models import HUMAN_TRIGGERS, RunnerStatus
     from pi_dash.runner.services.dispatch_rules import locality_pin_allowed, runner_may_take
@@ -395,6 +448,16 @@ def locality_runner_for(parent, target_pod, *, creator, trigger, issue):
     if runner.paused_at is not None:
         return None
     if runner.last_heartbeat_at is None or runner.last_heartbeat_at < timezone.now() - HEARTBEAT_GRACE:
+        return None
+    if parent_failed_on_its_runner(parent):
+        logger.info(
+            "orchestration: not pinning follow-up to runner=%s — parent run=%s failed there "
+            "(error_code=%r, started=%s)",
+            runner.id,
+            parent.id,
+            parent.error_code,
+            parent.started_at is not None,
+        )
         return None
     if target_pod is not None and runner.pod_id != target_pod.id:
         return None
