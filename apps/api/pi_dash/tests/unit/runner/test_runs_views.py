@@ -1103,3 +1103,181 @@ def test_comment_and_run_409_leaves_ticker_untouched(db, session_client, workspa
     # The clock re-time and the dispatch share one transaction: a click
     # that produced no run leaves the ticker exactly as it was.
     assert sched.next_run_at == stale
+
+
+# ---------------------------------------------------------------------------
+# POST /api/runners/runs/<id>/cancel/ — issue-page abort on private runners
+# (PDASHOSS01-351). The private-runner gate in _can_view_run hides a run
+# that executes on another participant's PRIVATE runner from issue
+# participants, but _can_cancel_run must still allow the issue creator /
+# live assignee to abort it, otherwise the "Abort run" button shown by
+# agent_status (which bypasses the gate) always 404s.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_cancel_issue_creator_can_abort_run_on_others_private_runner(
+    db, session_client, workspace, project
+):
+    """Issue creator can abort a tick run (created_by=bot) on someone else's
+    private runner."""
+    from django.utils import timezone
+
+    from pi_dash.runner.models import Runner, RunnerStatus
+
+    issue = _make_issue(workspace, created_by=workspace.owner)
+    runner_owner = _make_other_user()
+    WorkspaceMember.objects.create(workspace=workspace, member=runner_owner, role=15)
+    runner = Runner.objects.create(
+        owner=runner_owner,
+        workspace=workspace,
+        pod=Pod.default_for_project(project),
+        name="other-private",
+        status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
+    bot = _make_other_user()
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=bot,
+        pod=Pod.default_for_project(project),
+        runner=runner,
+        work_item=issue,
+        prompt="tick on private",
+        status=AgentRunStatus.RUNNING,
+        assigned_at=timezone.now(),
+        started_at=timezone.now(),
+    )
+    resp = session_client.post(
+        f"/api/runners/runs/{run.id}/cancel/",
+        {"reason": "user"},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_200_OK
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.CANCEL_REQUESTED
+    assert run.cancel_reason == "user"
+    assert run.cancel_requested_at is not None
+
+
+@pytest.mark.unit
+def test_cancel_assignee_can_abort_run_on_others_private_runner(
+    db, session_client, workspace, project
+):
+    """Live assignee (not creator, not runner owner) can abort."""
+    from django.utils import timezone
+
+    from pi_dash.runner.models import Runner, RunnerStatus
+
+    issue_creator = _make_other_user()
+    assignee = _make_other_user()
+    for u in (issue_creator, assignee):
+        WorkspaceMember.objects.create(workspace=workspace, member=u, role=15)
+    issue = _make_issue(workspace, created_by=issue_creator, assignees=[assignee])
+    runner_owner = _make_other_user()
+    WorkspaceMember.objects.create(workspace=workspace, member=runner_owner, role=15)
+    runner = Runner.objects.create(
+        owner=runner_owner,
+        workspace=workspace,
+        pod=Pod.default_for_project(project),
+        name="other-private2",
+        status=RunnerStatus.ONLINE,
+        last_heartbeat_at=timezone.now(),
+    )
+    bot = _make_other_user()
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=bot,
+        pod=Pod.default_for_project(project),
+        runner=runner,
+        work_item=issue,
+        prompt="tick on private assignee",
+        status=AgentRunStatus.RUNNING,
+        assigned_at=timezone.now(),
+        started_at=timezone.now(),
+    )
+    session_client.force_authenticate(user=assignee)
+    resp = session_client.post(
+        f"/api/runners/runs/{run.id}/cancel/",
+        {"reason": "user"},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_200_OK
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.CANCEL_REQUESTED
+
+
+@pytest.mark.unit
+def test_cancel_uninvolved_member_cannot_abort_private_runner(db, session_client, workspace, project):
+    """A workspace member who is neither creator, owner, nor issue
+    participant still gets 404 on a private runner — privacy preserved."""
+    from django.utils import timezone
+
+    from pi_dash.runner.models import Runner, RunnerStatus
+
+    issue = _make_issue(workspace, created_by=workspace.owner)
+    runner = _add_online_runner(workspace, project)
+    bot = _make_other_user()
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=bot,
+        pod=Pod.default_for_project(project),
+        runner=runner,
+        work_item=issue,
+        prompt="private for uninvolved",
+        status=AgentRunStatus.RUNNING,
+        assigned_at=timezone.now(),
+        started_at=timezone.now(),
+    )
+    outsider = _make_other_user()
+    WorkspaceMember.objects.create(workspace=workspace, member=outsider, role=15)
+    session_client.force_authenticate(user=outsider)
+    resp = session_client.post(
+        f"/api/runners/runs/{run.id}/cancel/",
+        {"reason": "user"},
+        format="json",
+    )
+    assert resp.status_code == status.HTTP_404_NOT_FOUND
+    run.refresh_from_db()
+    assert run.status == AgentRunStatus.RUNNING
+    assert run.cancel_requested_at is None
+
+
+@pytest.mark.unit
+def test_agent_status_surfaces_cancel_stamp_for_cloud_running(db, workspace, project):
+    """Cloud RUNNING with a cancel stamp surfaces cancel_requested_at so the
+    card can show Stopping while status remains RUNNING (capacity hold).
+
+    Uses the serializer directly to avoid the issue-detail GET's broker
+    dependency (Celery unavailable in unit tests).
+    """
+    from django.utils import timezone
+
+    from pi_dash.app.serializers.issue import IssueDetailSerializer
+    from pi_dash.core.agent_execution import AgentExecutorKind
+
+    issue = _make_issue(workspace, created_by=workspace.owner)
+    run = AgentRun.objects.create(
+        workspace=workspace,
+        created_by=workspace.owner,
+        pod=Pod.default_for_project(issue.project),
+        work_item=issue,
+        prompt="cloud",
+        status=AgentRunStatus.RUNNING,
+        executor_kind=AgentExecutorKind.CLOUD_AGENT,
+        started_at=timezone.now(),
+        cancel_requested_at=timezone.now(),
+        cancel_reason="user",
+    )
+    serializer = IssueDetailSerializer(context={"request": None})
+    serialized = serializer._serialize_agent_run(run, include_live_state=False)
+    assert serialized["status"] == "running"
+    assert serialized["cancel_requested_at"] is not None
+    assert serialized["cancel_reason"] == "user"
+    # And through get_agent_status (the active-run path the detail page uses)
+    issue.refresh_from_db
+    status_data = serializer.get_agent_status(issue)
+    assert status_data is not None
+    active = status_data["active_run"]
+    assert active["status"] == "running"
+    assert active["cancel_requested_at"] is not None

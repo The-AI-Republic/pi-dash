@@ -3,12 +3,20 @@
 // See the LICENSE file for details.
 // List grouping model (parity/specs/issues.md §2, ISS-007/009). Maps the
 // stored group dimension to the server's group key, then turns a grouped
-// envelope's buckets into ordered sections. Section order follows the
-// server's declared group list (states in workflow order, priorities in
-// the fixed severity order) with the "None" bucket last; the flat list
-// always has the single section the oracle names.
+// envelope's buckets into ordered sections. The envelope's key order is
+// not a display order (each backend emits its own), so a caller that
+// knows the dimension's domain passes it as an explicit order: states
+// read in workflow order (group, then sequence; NEWPIDASH-39). Keys the
+// order does not name follow in envelope order, the "None" bucket last;
+// the flat list always has the single section the oracle names.
 
-import type { GroupedIssueListResponse, GroupedIssueRow, IssueGroupBucket, IssueListItem } from "@pidash/api-client";
+import type {
+  GroupedIssueListResponse,
+  GroupedIssueRow,
+  IssueGroupBucket,
+  IssueListItem,
+  State,
+} from "@pidash/api-client";
 
 import { GROUP_NONE_LABEL } from "../display/matrix.js";
 import { formatDay } from "../dropdowns/calendar.js";
@@ -126,16 +134,38 @@ function unknownGroupTitle(key: string, dimension: string | null): string {
   return defaultGroupTitle(dimension, key) ?? key;
 }
 
+/** Workflow groups in display order; a group outside it sorts first. */
+const WORKFLOW_GROUP_ORDER: readonly string[] = [
+  "backlog",
+  "unstarted",
+  "started",
+  "review",
+  "test",
+  "completed",
+  "cancelled",
+];
+
 /**
- * Bucket order. Known order lists carry ids for states/cycles/modules/
- * labels/members, so the server's own group-field order is the truth;
- * `knownOrder` is the explicit id sequence (empty when unavailable),
- * and anything absent follows in envelope order with "None" last.
+ * State ids in workflow order: by workflow group, then by ascending
+ * sequence inside a group; equal positions keep the input order.
  */
-export function orderGroupKeys(keys: readonly string[]): string[] {
+export function stateWorkflowOrder(states: readonly Pick<State, "id" | "group" | "sequence">[]): string[] {
+  const rank = (group: string): number => WORKFLOW_GROUP_ORDER.indexOf(group);
+  return [...states].sort((a, b) => rank(a.group) - rank(b.group) || a.sequence - b.sequence).map((state) => state.id);
+}
+
+/**
+ * Bucket order. `knownOrder` is the dimension's explicit id sequence
+ * (empty when the caller has none): named keys it lists come first in
+ * its order, the rest follow in envelope order, and "None" goes last.
+ */
+export function orderGroupKeys(keys: readonly string[], knownOrder: readonly string[] = []): string[] {
+  const rank = new Map(knownOrder.map((key, index) => [key, index]));
   const named = keys.filter((key) => !isNoneKey(key));
+  const known = named.filter((key) => rank.has(key)).sort((a, b) => rank.get(a)! - rank.get(b)!);
+  const rest = named.filter((key) => !rank.has(key));
   const none = keys.filter(isNoneKey);
-  return [...named, ...none];
+  return [...known, ...rest, ...none];
 }
 
 /** Known label for a group key, falling back to the empty-value label. */
@@ -196,9 +226,9 @@ export function flatSection(rows: readonly IssueListItem[], total: number): Issu
 export function groupedSections(
   response: Pick<GroupedIssueListResponse, "results">,
   labels: ReadonlyMap<string, string>,
-  options: { showEmptyGroups: boolean; dimension?: string | null }
+  options: { showEmptyGroups: boolean; dimension?: string | null; order?: readonly string[] }
 ): IssueGroupSection[] {
-  const keys = orderGroupKeys(Object.keys(response.results));
+  const keys = orderGroupKeys(Object.keys(response.results), options.order);
   const sections: IssueGroupSection[] = [];
   for (const key of keys) {
     const bucket = response.results[key] as IssueGroupBucket | undefined;
@@ -219,7 +249,8 @@ export function groupedSections(
 /** Merge the next grouped page into the current sections. */
 export function mergeGroupedPage(
   current: readonly IssueGroupSection[],
-  incoming: readonly IssueGroupSection[]
+  incoming: readonly IssueGroupSection[],
+  order: readonly string[] = []
 ): IssueGroupSection[] {
   const byKey = new Map(current.map((section) => [section.key, section]));
   for (const section of incoming) {
@@ -235,9 +266,10 @@ export function mergeGroupedPage(
       total: section.total,
     });
   }
-  // Keep the server's discovered order: incoming keys extend the tail.
-  const order = orderGroupKeys([...byKey.keys()]);
-  return order.map((key) => byKey.get(key)!).filter(Boolean);
+  // Known keys keep the explicit order; incoming unknown keys extend the tail.
+  return orderGroupKeys([...byKey.keys()], order)
+    .map((key) => byKey.get(key)!)
+    .filter(Boolean);
 }
 
 /** Whether a section still has unseen rows. */

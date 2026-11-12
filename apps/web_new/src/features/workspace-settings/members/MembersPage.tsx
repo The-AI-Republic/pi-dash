@@ -22,6 +22,7 @@ import type { WorkspaceInvitation } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import { useMe, usePermissions, useWorkspaces } from "../../../core/session/index.js";
 import { notifySuccess, resolveFileUrl } from "../../../shared/shell/index.js";
+import { shareableOrigin } from "../../../shared/shell/shareLink.js";
 import { usePendingInvitations, useWorkspaceRoster } from "./api.js";
 import { InviteDialog } from "./InviteDialog.js";
 import { copyInvitationLink } from "./invitations.js";
@@ -113,9 +114,15 @@ export function MembersPage({ workspaceSlug, onLeaveWorkspace }: MembersPageProp
 
   function copyInviteLink(invitation: WorkspaceInvitation): void {
     // §11: a refused clipboard stays silent; a landed copy confirms.
-    copyInvitationLink(invitation, window.location.origin, navigator.clipboard, () =>
-      notifySuccess(INVITE_LINK_COPIED_TITLE)
-    );
+    // The stored link resolves against the hosted origin, so the
+    // desktop bundle never hands out its private bundle origin.
+    let origin: string;
+    try {
+      origin = shareableOrigin();
+    } catch {
+      return;
+    }
+    copyInvitationLink(invitation, origin, navigator.clipboard, () => notifySuccess(INVITE_LINK_COPIED_TITLE));
   }
 
   function confirmTarget(target: RemoveTarget): void {

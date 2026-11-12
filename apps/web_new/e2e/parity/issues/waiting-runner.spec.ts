@@ -3,10 +3,11 @@
 // See the LICENSE file for details.
 // New-app-first scenarios (NEWFRONT-907): the waiting-for-runner banner on
 // the issue detail. While the issue's active run is queued behind a pinned
-// runner, the detail names the runner and the reason, and offers the three
-// ways out — release the run to the pod once, change the issue's runner,
-// or cancel the run. The old UI gains the surface with PDASHOSS01-299, so
-// these run on apps/web_new only.
+// runner, the detail names the runner and the reason. A locality pin
+// offers release the run to the pod once, change the issue's runner, and
+// cancel the run; a dedicated pin is never released (H-13), so it offers
+// only change runner and cancel. The old UI gains the surface with
+// PDASHOSS01-299, so these run on apps/web_new only.
 //
 // The OSS backend does not yet compute `agent_status.active_run.dispatch_wait`
 // (that is PDASHOSS01-297), so each scenario answers the issue-detail read
@@ -23,6 +24,8 @@ interface WaitingStub {
   runsAhead?: number;
   runnerLastSeenAt?: string | null;
   releasable?: boolean;
+  /** Pin kind under test; only a locality pin offers the release action (H-13). */
+  pinKind?: "dedicated" | "locality";
   /** Set for read-only viewers: the issue reads as archived. */
   archived?: boolean;
   podId?: string;
@@ -72,10 +75,10 @@ async function stubWaitingDetail(
         runner_name: null,
         pinned_runner: "5b0f1cc0-3f5a-4a43-9a1f-1f6f5b7d0a11",
         pinned_runner_name: runnerName,
-        pin_kind: "dedicated",
+        pin_kind: stub.pinKind ?? "locality",
         dispatch_wait: {
           reason: stub.reason,
-          pin_kind: "dedicated",
+          pin_kind: stub.pinKind ?? "locality",
           runner: "5b0f1cc0-3f5a-4a43-9a1f-1f6f5b7d0a11",
           runner_name: runnerName,
           queued_at: "2026-10-25T10:00:00Z",
@@ -291,9 +294,19 @@ test(
         await expect.poll(() => driver.pickerOpen(), { timeout: 30_000 }).toBe(true);
         const options = await driver.pickerOptionTexts();
         expect(options.some((text) => text.includes("Any runner in"))).toBe(true);
-        expect(options.some((text) => text.includes("Pi Dash Cloud Agent"))).toBe(true);
+        // Runner is the only executor (built-in engine design §6): the
+        // deprecated Cloud Agent row is no longer offered.
+        expect(options.some((text) => text.includes("Pi Dash Cloud Agent"))).toBe(false);
         await driver.pickerPressEscape();
         await driver.pickerClickOutside();
+      });
+
+      await test.step("a dedicated pin offers change runner and cancel only", async () => {
+        stub.pinKind = "dedicated";
+        await driver.page.reload();
+        await expect.poll(() => driver.waitingBannerPresent(), { timeout: 60_000 }).toBe(true);
+        const actions = await driver.waitingBannerActions();
+        expect(actions).toEqual(["Change runner", "Cancel run"]);
       });
 
       await test.step("cancel stops the run", async () => {

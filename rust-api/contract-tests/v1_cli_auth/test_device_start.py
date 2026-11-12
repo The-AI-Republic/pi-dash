@@ -17,7 +17,9 @@ def test_start_shape(api, web_base, db):
         "verification_uri",
         "expires_in",
         "interval",
+        "scope",
     }
+    assert body["scope"] == "cli"
     assert isinstance(body["device_code"], str) and len(body["device_code"]) >= 32
     assert USER_CODE_RE.match(body["user_code"]), body["user_code"]
     assert body["verification_uri"] == f"{web_base}/auth/device/"

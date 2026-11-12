@@ -27,7 +27,9 @@ vi.mock("../../../shared/shell/toaster.js", () => ({
   notifyError: toaster.notifyError,
 }));
 
-const appClient = vi.hoisted(() => ({ getAppClient: vi.fn(() => ({ kind: "app-client" })) }));
+const appClient = vi.hoisted(() => ({
+  getAppClient: vi.fn(() => ({ kind: "app-client", baseUrl: "https://api.test" })),
+}));
 vi.mock("../../../core/api/client.js", () => ({ getAppClient: appClient.getAppClient }));
 
 const pageAssets = vi.hoisted(() => ({
@@ -388,7 +390,7 @@ describe(
       });
       await vi.waitFor(() => {
         expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe(
-          "/api/assets/v2/workspaces/acme/projects/project-1/asset-9/"
+          "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/asset-9/"
         );
       });
     });
@@ -426,9 +428,27 @@ describe(
       const editable = await body();
       await vi.waitFor(() =>
         expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe(
-          "/api/assets/v2/workspaces/acme/projects/project-1/asset-7/"
+          "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/asset-7/"
         )
       );
+    });
+
+    it("paints a freshly inserted picture from the API origin while keeping its stored id", async () => {
+      const uploadImage = vi.fn().mockResolvedValue({
+        assetId: "asset-3",
+        assetUrl: "/api/assets/v2/workspaces/acme/projects/project-1/asset-3/",
+      });
+      mount({ uploadImage });
+      const editable = await body();
+      const input = screen.getByTestId("page-toolbar-image-input");
+      fireEvent.change(input, { target: { files: [new File(["x"], "shot.png", { type: "image/png" })] } });
+      await vi.waitFor(() => {
+        expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe(
+          "https://api.test/api/assets/v2/workspaces/acme/projects/project-1/asset-3/"
+        );
+      });
+      const inserted = editable.querySelector("image-component");
+      expect(inserted?.getAttribute("data-stored-src")).toBe("asset-3");
     });
 
     it("uploads through the shared pipeline when no uploader is injected", async () => {

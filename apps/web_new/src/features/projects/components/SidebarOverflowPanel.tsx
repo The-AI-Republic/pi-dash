@@ -3,13 +3,14 @@
 // See the LICENSE file for details.
 // Projects overflow slide-over (parity/specs/shell.md §4, SHELL-052).
 // The panel behind the Projects group's overflow toggle: the joined
-// collection searchable by name or short code, with per-row links,
-// copy-link, pointer-drag reorder and a creation action for admins
-// and members. A hopeless query shows the empty state; outside
-// clicks, Escape and sidebar collapse close the panel.
+// collection searchable by name or short code, with per-row links, the
+// shared quick menu, expandable section sub-navs, pointer-drag reorder
+// and a creation action for admins and members. A hopeless query shows
+// the empty state; outside clicks, Escape and sidebar collapse close
+// the panel.
 
 import type { Project } from "@pidash/api-client";
-import { Copy, Ellipsis, GripVertical, Plus, Search } from "lucide-react";
+import { Ellipsis, GripVertical, Plus, Search } from "lucide-react";
 import * as React from "react";
 
 import { isClientSideClick, useShellChrome } from "../../../shared/shell/index.js";
@@ -17,7 +18,8 @@ import { isClientSideClick, useShellChrome } from "../../../shared/shell/index.j
 import { useUpdateProjectOrder } from "../api/projectOrder.js";
 import { filterOverflowProjects } from "../overflow.js";
 import { resolveDropTarget, resolveReorder, type SidebarDropRow, type SidebarDropTarget } from "../sidebar.js";
-import { copyMessages } from "./SidebarProjectRow.js";
+import { SidebarProjectQuickMenu } from "./SidebarProjectQuickMenu.js";
+import { SidebarProjectExpandToggle, SidebarProjectSubnav } from "./SidebarProjectSubnav.js";
 
 export interface SidebarOverflowPanelProps {
   workspaceSlug: string;
@@ -25,6 +27,12 @@ export interface SidebarOverflowPanelProps {
   projects: Project[];
   /** Workspace admin/member standing; guests read false. */
   canCreateProject: boolean;
+  /** Tabbed mode navigates on row clicks; accordion mode expands instead. */
+  tabbed: boolean;
+  /** Current pathname; null while the router has not reported it. */
+  currentPath: string | null;
+  /** Project id of the route in view, if any. */
+  activeProjectId: string | null;
   onCreateProject: () => void;
   /** Client-side navigation for plain left clicks. */
   onNavigate: (href: string) => void;
@@ -35,6 +43,9 @@ export function SidebarOverflowPanel({
   workspaceSlug,
   projects,
   canCreateProject,
+  tabbed,
+  currentPath,
+  activeProjectId,
   onCreateProject,
   onNavigate,
   onClose,
@@ -42,6 +53,11 @@ export function SidebarOverflowPanel({
   const [query, setQuery] = React.useState("");
   const [sourceId, setSourceId] = React.useState<string | null>(null);
   const [target, setTarget] = React.useState<SidebarDropTarget | null>(null);
+  // Expanded rows by project id, held at the panel so filtered-out rows
+  // keep their state while typing hides them.
+  const [expandedIds, setExpandedIds] = React.useState<string[]>(() =>
+    activeProjectId === null ? [] : [activeProjectId]
+  );
   const targetRef = React.useRef<SidebarDropTarget | null>(null);
   const panelRef = React.useRef<HTMLDivElement>(null);
   const listRef = React.useRef<HTMLUListElement>(null);
@@ -55,22 +71,39 @@ export function SidebarOverflowPanel({
   }, [sidebarCollapsed, onClose]);
 
   React.useEffect(() => {
+    if (activeProjectId === null) return;
+    setExpandedIds((prev) => (prev.includes(activeProjectId) ? prev : [...prev, activeProjectId]));
+  }, [activeProjectId]);
+
+  React.useEffect(() => {
     // Set: effects run after mount, so the panel is always present here.
     const panel = panelRef.current as HTMLDivElement;
     const outside = (event: PointerEvent): void => {
       const point = event.target as Element;
       if (panel.contains(point)) return;
       if (point.closest('[data-testid="projects-overflow-toggle"]') !== null) return;
+      // Row menus and their dialogs portal outside the panel's DOM: a
+      // press inside them acts on the row instead of dismissing the panel.
+      if (point.closest('[role="menu"], [role="dialog"]') !== null) return;
       onClose();
     };
     const escape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      // Capture runs before the overlay's own dismiss, so an open row
+      // menu or dialog still owns this keypress: it closes first and the
+      // panel only on a later Escape.
+      if (document.querySelector('[role="menu"]') !== null) return;
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      for (const dialog of dialogs) {
+        if (dialog !== panel && !panel.contains(dialog)) return;
+      }
+      onClose();
     };
     document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", escape);
+    document.addEventListener("keydown", escape, true);
     return () => {
       document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", escape);
+      document.removeEventListener("keydown", escape, true);
     };
   }, [onClose]);
 
@@ -119,9 +152,22 @@ export function SidebarOverflowPanel({
     onNavigate(href);
   }
 
-  async function copyLink(project: Project): Promise<void> {
-    const { copyWorkItemLink } = await import("../../../shared/shell/shareLink.js");
-    await copyWorkItemLink(`/${workspaceSlug}/projects/${project.id}/issues`, copyMessages);
+  function sectionClick(event: React.MouseEvent<HTMLAnchorElement>, href: string): void {
+    if (!isClientSideClick(event)) return;
+    event.preventDefault();
+    onNavigate(href);
+    onClose();
+  }
+
+  function runnersClick(event: React.MouseEvent<HTMLAnchorElement>): void {
+    // The runners entry navigates through the router itself; the panel
+    // only closes, and leaves modified clicks to the browser.
+    if (!isClientSideClick(event)) return;
+    onClose();
+  }
+
+  function toggleExpanded(projectId: string): void {
+    setExpandedIds((prev) => (prev.includes(projectId) ? prev.filter((id) => id !== projectId) : [...prev, projectId]));
   }
 
   return (
@@ -176,6 +222,9 @@ export function SidebarOverflowPanel({
           {filtered.map((project) => {
             const href = `/${workspaceSlug}/projects/${project.id}/issues`;
             const indicator = target !== null && target.id === project.id ? (target.after ? "below" : "above") : null;
+            // A drag collapses the sub-navs so the drop math measures
+            // header heights only; the stored state restores them after.
+            const shown = sourceId === null && expandedIds.includes(project.id);
             return (
               <li key={project.id} data-overflow-row={project.id} className="relative">
                 {indicator === "above" ? (
@@ -204,9 +253,17 @@ export function SidebarOverflowPanel({
                   >
                     <GripVertical size={14} strokeWidth={2} aria-hidden="true" />
                   </button>
+                  {tabbed ? null : (
+                    <SidebarProjectExpandToggle
+                      projectName={project.name}
+                      expanded={shown}
+                      onToggle={() => toggleExpanded(project.id)}
+                    />
+                  )}
                   <a
                     href={href}
                     onClick={(event) => rowClick(event, href)}
+                    data-testid="project-row-link"
                     className="text-body flex min-w-0 flex-1 items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
                   >
                     <span className="text-caption shrink-0 rounded-(--radius-control) border border-(--border) px-(--space-2) py-px font-[family-name:var(--font-mono)]">
@@ -214,17 +271,22 @@ export function SidebarOverflowPanel({
                     </span>
                     <span className="truncate">{project.name}</span>
                   </a>
-                  <button
-                    type="button"
-                    aria-label={`Copy link to ${project.name}`}
-                    title="Copy link"
-                    data-testid="overflow-row-copy"
-                    onClick={() => void copyLink(project)}
-                    className="shrink-0 cursor-pointer rounded-(--radius-control) p-(--space-1) text-(--text-muted) opacity-0 group-hover/row:opacity-100 hover:bg-(--subtle) focus-visible:opacity-100"
-                  >
-                    <Copy size={14} strokeWidth={2} aria-hidden="true" />
-                  </button>
+                  <SidebarProjectQuickMenu
+                    workspaceSlug={workspaceSlug}
+                    project={project}
+                    onNavigate={onNavigate}
+                    onActionNavigate={onClose}
+                  />
                 </div>
+                {tabbed || !shown ? null : (
+                  <SidebarProjectSubnav
+                    workspaceSlug={workspaceSlug}
+                    project={project}
+                    currentPath={currentPath}
+                    onEntryClick={sectionClick}
+                    onRunnersClick={runnersClick}
+                  />
+                )}
                 {indicator === "below" ? (
                   <span
                     data-testid="overflow-drop-indicator"

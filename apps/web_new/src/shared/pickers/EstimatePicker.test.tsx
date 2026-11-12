@@ -316,3 +316,20 @@ describe("EstimatePicker", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load estimates.");
   });
 });
+
+describe("EstimatePicker chip", () => {
+  it("shows the property name while empty", () => {
+    const { queryClient } = harness(POINTS_SYSTEM);
+    renderPicker({ chip: true, label: "Estimate", placeholder: "Estimate" }, queryClient);
+    expect(screen.getByRole("button", { name: "Estimate" })).toHaveTextContent("Estimate");
+  });
+
+  it("names the picked point once the list answers", async () => {
+    const { queryClient } = harness(POINTS_SYSTEM);
+    renderPicker(
+      { value: POINT_3, chip: true, label: "Estimate", placeholder: "Estimate", preload: true },
+      queryClient
+    );
+    expect(await screen.findByRole("button", { name: "Estimate: 3" })).toHaveTextContent("3");
+  });
+});

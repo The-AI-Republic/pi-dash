@@ -12,8 +12,10 @@ import * as React from "react";
 
 import type { AgentRun } from "@pidash/api-client";
 import { useRunnersArea } from "../area.js";
+import { useRunners } from "../api/queries.js";
 import { useCancelRun, useRun, useRuns } from "../api/runs.js";
 import { RUN_CANCEL_FAILED, RUN_CANCEL_FAILED_TITLE, RunDetail } from "./RunDetail.js";
+import { runExecutorLabel } from "./runsModel.js";
 import { parseRunsPage, runsHref } from "./runsPage.js";
 import { RunsList } from "./RunsList.js";
 import { notifyError } from "../../../shared/shell/index.js";
@@ -37,6 +39,8 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
   const list = useRuns(area.scope.workspaceSlug, area.workspaceId, area.scope.projectId ?? null, page);
   const detail = useRun(area.scope.workspaceSlug, selectedRunId);
   const cancel = useCancelRun(area.scope.workspaceSlug);
+  // Shares the overview's list cache: names engine runs by their machine.
+  const runners = useRunners(area.scope.workspaceSlug, area.workspaceId, area.scope.projectId ?? null, area.allowed);
 
   function goToPage(next: number): void {
     void navigate({ href: runsHref(area.base, next), replace: true });
@@ -68,6 +72,7 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
           run={detail.data ?? null}
           cancelling={cancel.isPending}
           onCancel={cancelRun}
+          executorText={(run) => runExecutorLabel(run, runners.data)}
           schedulerHref={(run) => {
             const href = schedulerBindingHref(run);
             return href === null ? null : `/${area.scope.workspaceSlug}${href}`;

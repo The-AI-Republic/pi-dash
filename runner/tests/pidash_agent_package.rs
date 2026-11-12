@@ -93,6 +93,7 @@ fn configures_every_supported_protocol_without_changing_other_runner_fields() {
             AgentKind::OpenClaw => expected.openclaw.binary = binary,
             AgentKind::Grok => expected.grok.binary = binary,
             AgentKind::MuseCode => expected.muse_code.binary = binary,
+            AgentKind::Engine => unreachable!("the engine is not an agent package"),
         }
         package.apply_to_runner(&mut actual).unwrap();
         assert_eq!(

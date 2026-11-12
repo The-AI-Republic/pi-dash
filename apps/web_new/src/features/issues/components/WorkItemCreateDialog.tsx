@@ -33,6 +33,7 @@ import {
   PriorityPicker,
   ProjectPicker,
   StatePicker,
+  usePickerPods,
   usePickerProject,
   type ExecutionSelection,
   type PriorityLevel,
@@ -67,6 +68,7 @@ import {
   buildCreatePayload,
   buildDraftInput,
   canGenerateTitle,
+  defaultExecutionSelection,
   descriptionText,
   emptyCreateForm,
   GIT_BRANCH_MAX_LENGTH,
@@ -78,14 +80,16 @@ import {
   normalizeTitle,
   resetForCreateMore,
   resolveProjectId,
+  seedForForm,
   selectCreatableProjects,
   targetProjectId,
   toCreateProjectOption,
   titleError,
   visibleDescriptionHtml,
+  withDefaultExecution,
   type CreateFormInitialValues,
   type CreateFormState,
-  type CreateMembership,
+  type CreateSeed,
 } from "../create/createForm.js";
 import {
   baselineFor,
@@ -336,20 +340,13 @@ function contextForm(
   return state;
 }
 
-/** One property slot: muted caption above the picker's trigger. */
-function FieldSlot({
-  label,
-  hideLabel = false,
-  children,
-}: {
-  label: string;
-  /** True when the control itself names the slot (dates, cycle, modules). */
-  hideLabel?: boolean;
-  children: React.ReactNode;
-}): React.ReactElement {
+/** One captioned slot: muted caption above the picker's trigger. The
+ * property strip itself renders chipless (NEWPIDASH-10); only the
+ * project selector and the cloud type slots still use captions. */
+function FieldSlot({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
   return (
     <div className="flex min-w-0 flex-col gap-(--space-1)">
-      {hideLabel ? null : <span className="text-meta text-(--text-muted)">{label}</span>}
+      <span className="text-meta text-(--text-muted)">{label}</span>
       <div className="flex min-w-0 flex-wrap items-center gap-(--space-2)">{children}</div>
     </div>
   );
@@ -544,9 +541,10 @@ export function WorkItemCreateDialog({
   // The description panel keeps its own upload state out of `busy`, so it
   // reports whether a close may proceed (ISS-125).
   const [descriptionReady, setDescriptionReady] = React.useState(true);
-  // The memberships the route seeded for this visit: the discard guard
-  // treats them as context, not as something the user entered (ISS-124).
-  const routeMembership = React.useRef<CreateMembership>({ cycleId: null, moduleIds: [] });
+  // The form the opener seeded for this visit: the discard guard treats
+  // every seeded value as context, not as something the user entered
+  // (ISS-124, NEWPIDASH-143).
+  const routeSeed = React.useRef<CreateSeed>({ cycleId: null, moduleIds: [] });
   // The description the edit opened with, so a late detail read can tell
   // an untouched editor from one the user already typed into.
   const openedDescription = React.useRef<string | null>(null);
@@ -630,7 +628,7 @@ export function WorkItemCreateDialog({
       seededCopyForm ??
       contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
-    routeMembership.current = membershipForForm(next);
+    routeSeed.current = seedForForm(next);
     openedDescription.current = starting?.descriptionHtml ?? null;
     openedBranch.current = starting?.gitWorkBranch ?? "";
     adoptedBranch.current = starting?.gitWorkBranch ?? "";
@@ -780,6 +778,22 @@ export function WorkItemCreateDialog({
       : edit !== null
         ? stateOptionGate(projectId, baseline?.form.stateId ?? null)
         : creationStateGate(projectId);
+  // A new item starts on the project's default pod, as the old create
+  // form did (NEWPIDASH-23): once the pods load, an empty target takes
+  // the default pod (else the first pod). The reads key on the project, so a project switch or a Create
+  // more reset, which both clear the target, fill it again from the new
+  // project. An edit keeps the row's own target.
+  const creating = open && !editing;
+  const targetReads = creating && projectId !== "";
+  const pods = usePickerPods(workspaceSlug, projectId, targetReads);
+  const seededExecution = React.useMemo(
+    () => (creating && pods.data !== undefined ? defaultExecutionSelection(pods.data) : null),
+    [creating, pods.data]
+  );
+  React.useEffect(() => {
+    if (seededExecution === null) return;
+    setForm((current) => withDefaultExecution(current, seededExecution));
+  }, [seededExecution, form.execution]);
   const busy =
     create.isPending ||
     writeEdit.isPending ||
@@ -848,7 +862,7 @@ export function WorkItemCreateDialog({
       return;
     }
     // An edit never prompts: there is a stored row to fall back on.
-    if (editing || !hasDraftWorthKeeping(form, routeMembership.current)) {
+    if (editing || !hasDraftWorthKeeping(form, routeSeed.current, seededExecution)) {
       finishClose();
       return;
     }
@@ -953,7 +967,6 @@ export function WorkItemCreateDialog({
         },
         onSuccess: (created) => {
           clearWorkItemDraft(workspaceSlug);
-          onCreated?.(created.id);
           const membership = membershipForForm(named);
           if (hasMembership(membership)) {
             attachMembership.mutate(
@@ -969,16 +982,27 @@ export function WorkItemCreateDialog({
             attachAssets.mutate({ projectId, issueId: created.id, assetIds });
           }
           if (!createMore) {
+            // Fired only when the dialog is actually finishing: the
+            // board/list parents unmount on it, so firing while Create
+            // more is on would drop the reset form below (ISS-119).
+            onCreated?.(created.id);
             finishClose();
             return;
           }
-          // Keep the project and the route's cycle/module context, then
-          // re-focus the title; everything else is a new item (ISS-119).
+          // Keep the project and the opener's seed, then re-focus the
+          // title; name and description are a new item (ISS-119). The
+          // seed is the listing prefill the dialog opened with plus the
+          // route cycle/module context, as contextForm built the opener.
           // A seeded parent stays attached to the next item (ISS-175).
+          const opener: CreateFormInitialValues = {
+            ...(initialValues ?? {}),
+            ...(context?.cycleId != null ? { cycleId: context.cycleId } : {}),
+            ...(context?.moduleId != null ? { moduleIds: [context.moduleId] } : {}),
+          };
           setForm(
             seededParent === null
-              ? resetForCreateMore(named)
-              : { ...resetForCreateMore(named), parentId: seededParent.id }
+              ? resetForCreateMore(named, "", opener)
+              : { ...resetForCreateMore(named, "", opener), parentId: seededParent.id }
           );
           setFieldError(null);
           setExecutionError(null);
@@ -1338,8 +1362,12 @@ export function WorkItemCreateDialog({
             tabIndex={MODAL_TAB_ORDER.description}
             onReadinessChange={setDescriptionReady}
           />
-          <div className="flex flex-wrap items-start gap-(--space-4)">
-            <FieldSlot label="State">
+          {/* One wrapping row of chips, as on the old form (NEWPIDASH-10):
+              no captions; each chip names its property to assistive tech
+              ("State: Backlog", "Assignees") and truncates long values
+              with the full text on hover. */}
+          <div data-testid="property-chips" className="flex flex-wrap items-center gap-(--space-2)">
+            <div className="flex min-w-0 flex-col gap-(--space-1)">
               <StatePicker
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
@@ -1349,6 +1377,11 @@ export function WorkItemCreateDialog({
                   patch({ stateId });
                 }}
                 disabled={busy}
+                chip
+                label="State"
+                placeholder="State"
+                fallbackToDefault
+                preload
                 tabIndex={MODAL_TAB_ORDER.state}
                 optionGate={stateGate}
               />
@@ -1357,139 +1390,139 @@ export function WorkItemCreateDialog({
                   {stateError}
                 </p>
               )}
-            </FieldSlot>
-            <FieldSlot label="Runs on">
-              <PodPicker
+            </div>
+            <PodPicker
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              value={form.execution}
+              onChange={(execution: ExecutionSelection) => {
+                setExecutionError(null);
+                patch({ execution });
+              }}
+              disabled={busy}
+              chip
+              label="Runs on"
+              placeholder="Runs on"
+              // A create names its preselected default pod right away.
+              preload={!editing}
+              saveError={executionError}
+            />
+            <PriorityPicker
+              value={form.priority as PriorityLevel}
+              onChange={(priority) => patch({ priority })}
+              disabled={busy}
+              chip
+              label="Priority"
+              tabIndex={MODAL_TAB_ORDER.priority}
+            />
+            <MemberPicker
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              multiple
+              value={form.assigneeIds}
+              onChange={(assigneeIds) => patch({ assigneeIds })}
+              disabled={busy}
+              chip
+              label="Assignees"
+              placeholder="Assignees"
+              preload={form.assigneeIds.length > 0}
+              tabIndex={MODAL_TAB_ORDER.assignees}
+            />
+            <div role="group" aria-label="Labels" tabIndex={MODAL_TAB_ORDER.labels} className="flex items-center">
+              <LabelPicker
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
-                value={form.execution}
-                onChange={(execution: ExecutionSelection) => {
-                  setExecutionError(null);
-                  patch({ execution });
-                }}
+                value={form.labelIds}
+                onChange={(labelIds) => patch({ labelIds })}
                 disabled={busy}
-                saveError={executionError}
+                emptyText="Labels"
+                chip
               />
-            </FieldSlot>
-            <FieldSlot label="Priority">
-              <PriorityPicker
-                value={form.priority as PriorityLevel}
-                onChange={(priority) => patch({ priority })}
+            </div>
+            <div
+              role="group"
+              aria-label="Start date"
+              tabIndex={MODAL_TAB_ORDER.startDate}
+              className="flex items-center"
+            >
+              <DatePicker
+                label="Start date"
+                placeholder="Start date"
+                value={form.startDate}
+                onChange={(startDate) => patch({ startDate })}
+                max={form.targetDate}
+                weekStart={weekStart}
                 disabled={busy}
-                tabIndex={MODAL_TAB_ORDER.priority}
+                chip
               />
-            </FieldSlot>
-            <FieldSlot label="Assignees">
-              <MemberPicker
+            </div>
+            <div role="group" aria-label="Due date" tabIndex={MODAL_TAB_ORDER.dueDate} className="flex items-center">
+              <DatePicker
+                label="Due date"
+                placeholder="Due date"
+                value={form.targetDate}
+                onChange={(targetDate) => patch({ targetDate })}
+                min={form.startDate}
+                weekStart={weekStart}
+                disabled={busy}
+                chip
+              />
+            </div>
+            {showCycle ? (
+              <CyclePicker
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                value={form.cycleId}
+                onChange={(cycleId) => patch({ cycleId })}
+                disabled={busy}
+                chip
+                label="Cycle"
+                placeholder="Cycle"
+                triggerId="Cycle"
+                tabIndex={MODAL_TAB_ORDER.cycle}
+              />
+            ) : null}
+            {showModules ? (
+              <ModulePicker
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
                 multiple
-                value={form.assigneeIds}
-                onChange={(assigneeIds) => patch({ assigneeIds })}
+                value={form.moduleIds}
+                onChange={(moduleIds) => patch({ moduleIds })}
                 disabled={busy}
-                tabIndex={MODAL_TAB_ORDER.assignees}
+                chip
+                label="Modules"
+                placeholder="Modules"
+                triggerId="Modules"
+                tabIndex={MODAL_TAB_ORDER.modules}
               />
-            </FieldSlot>
-            <FieldSlot label="Labels">
-              <div role="group" aria-label="Labels" tabIndex={MODAL_TAB_ORDER.labels} className="flex items-center">
-                <span className="sr-only">Labels</span>
-                <LabelPicker
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  value={form.labelIds}
-                  onChange={(labelIds) => patch({ labelIds })}
-                  disabled={busy}
-                  emptyText=""
-                />
-              </div>
-            </FieldSlot>
-            <FieldSlot label="Start date" hideLabel>
-              <div
-                role="group"
-                aria-label="Start date"
-                tabIndex={MODAL_TAB_ORDER.startDate}
-                className="flex items-center"
-              >
-                <DatePicker
-                  label="Start date"
-                  placeholder="Start date"
-                  value={form.startDate}
-                  onChange={(startDate) => patch({ startDate })}
-                  max={form.targetDate}
-                  weekStart={weekStart}
-                  disabled={busy}
-                />
-              </div>
-            </FieldSlot>
-            <FieldSlot label="Due date" hideLabel>
-              <div role="group" aria-label="Due date" tabIndex={MODAL_TAB_ORDER.dueDate} className="flex items-center">
-                <DatePicker
-                  label="Due date"
-                  placeholder="Due date"
-                  value={form.targetDate}
-                  onChange={(targetDate) => patch({ targetDate })}
-                  min={form.startDate}
-                  weekStart={weekStart}
-                  disabled={busy}
-                />
-              </div>
-            </FieldSlot>
-            {showCycle ? (
-              <FieldSlot label="Cycle" hideLabel>
-                <CyclePicker
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  value={form.cycleId}
-                  onChange={(cycleId) => patch({ cycleId })}
-                  disabled={busy}
-                  placeholder="Cycle"
-                  triggerId="Cycle"
-                  tabIndex={MODAL_TAB_ORDER.cycle}
-                />
-              </FieldSlot>
-            ) : null}
-            {showModules ? (
-              <FieldSlot label="Modules" hideLabel>
-                <ModulePicker
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  multiple
-                  value={form.moduleIds}
-                  onChange={(moduleIds) => patch({ moduleIds })}
-                  disabled={busy}
-                  placeholder="Modules"
-                  triggerId="Modules"
-                  tabIndex={MODAL_TAB_ORDER.modules}
-                />
-              </FieldSlot>
             ) : null}
             {showEstimate ? (
-              <FieldSlot label="Estimate">
-                <EstimatePicker
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  value={form.estimatePoint}
-                  onChange={(estimatePoint) => patch({ estimatePoint })}
-                  disabled={busy}
-                  tabIndex={MODAL_TAB_ORDER.estimate}
-                  preload={form.estimatePoint != null}
-                />
-              </FieldSlot>
+              <EstimatePicker
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                value={form.estimatePoint}
+                onChange={(estimatePoint) => patch({ estimatePoint })}
+                disabled={busy}
+                chip
+                label="Estimate"
+                placeholder="Estimate"
+                tabIndex={MODAL_TAB_ORDER.estimate}
+                preload={form.estimatePoint != null}
+              />
             ) : null}
-            <FieldSlot label="Parent">
-              <TabStop index={MODAL_TAB_ORDER.parent} label="Parent">
-                <ParentPicker
-                  workspaceSlug={workspaceSlug}
-                  projectId={projectId}
-                  value={parentHit}
-                  onChange={(hit) => {
-                    setParentHit(hit);
-                    patch({ parentId: hit?.id ?? null });
-                  }}
-                  disabled={busy || lockedParent}
-                />
-              </TabStop>
-            </FieldSlot>
+            <TabStop index={MODAL_TAB_ORDER.parent} label="Parent">
+              <ParentPicker
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                value={parentHit}
+                onChange={(hit) => {
+                  setParentHit(hit);
+                  patch({ parentId: hit?.id ?? null });
+                }}
+                disabled={busy || lockedParent}
+              />
+            </TabStop>
           </div>
           <div className="flex flex-col gap-(--space-2)">
             <Button

@@ -2,9 +2,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// TitleBar desktop chrome (NEWFRONT-18): the drag region, the macOS
-// traffic-light inset and the native title sync all key off
-// platform.window, so the web build renders plain chrome.
+// TitleBar desktop chrome: the header mirrors the location in the native
+// window title (the shell keeps a standard native title bar, so there is
+// no drag region and no traffic-light inset), while the web build renders
+// plain chrome with no title sync.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
@@ -56,23 +57,25 @@ describe("TitleBar platform chrome", () => {
     expect(screen.getByText("Pi Dash")).toBeInTheDocument();
   });
 
-  it("adds the drag region, traffic-light inset and title sync on desktop", () => {
+  it("syncs the window title on desktop with no drag region", () => {
     const setTitle = vi.fn();
     const fake: TitleBarApi = { trafficLightInset: true, setTitle };
     platform.window = fake;
     renderBar("Issues");
     const header = screen.getByRole("banner");
-    expect(header).toHaveAttribute("data-tauri-drag-region", "true");
+    expect(header).not.toHaveAttribute("data-tauri-drag-region");
+    expect(header.className).not.toContain("select-none");
     expect(header.className).toContain("pl-20");
     expect(setTitle).toHaveBeenCalledWith("Issues — Pi Dash");
   });
 
-  it("keeps the drag region but skips the inset off macOS", () => {
+  it("leaves normal padding when the desktop platform reports no inset", () => {
     const setTitle = vi.fn();
     platform.window = { trafficLightInset: false, setTitle };
     renderBar("");
     const header = screen.getByRole("banner");
-    expect(header).toHaveAttribute("data-tauri-drag-region");
+    expect(header).not.toHaveAttribute("data-tauri-drag-region");
+    expect(header.className).not.toContain("select-none");
     expect(header.className).not.toContain("pl-20");
     expect(setTitle).toHaveBeenCalledWith("Pi Dash");
   });
@@ -92,8 +95,8 @@ describe("TitleBar search box", () => {
 });
 
 describe("desktop window capability", () => {
-  it("exposes a boolean traffic-light inset", () => {
-    expect(typeof desktopPlatform.window?.trafficLightInset).toBe("boolean");
+  it("reports no traffic-light inset (native title bar)", () => {
+    expect(desktopPlatform.window?.trafficLightInset).toBe(false);
   });
 
   it("setTitle updates the document title without a shell", () => {

@@ -25,6 +25,7 @@ import {
 } from "../../../shared/pickers/reference.js";
 import { selectMemberOptions } from "../../../shared/pickers/members.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { shareableAddress } from "../../../shared/shell/shareLink.js";
 import { WorkItemCreateDialog, type WorkItemCreateProject } from "../components/WorkItemCreateDialog.js";
 import { AddExistingDialog } from "./AddExistingDialog.js";
 import {
@@ -287,7 +288,13 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
   }
 
   function copyLink(row: SubIssueItem): void {
-    const url = `${globalThis.location?.origin ?? ""}/${workspaceSlug}/browse/${identifierOf(row)}-${row.sequence_id}`;
+    let url: string;
+    try {
+      url = shareableAddress(`/${workspaceSlug}/browse/${identifierOf(row)}-${row.sequence_id}`);
+    } catch (error) {
+      notifyError(SUB_ISSUE_LINK_COPY_FAILED_TITLE, error instanceof Error ? error.message : undefined);
+      return;
+    }
     void globalThis.navigator?.clipboard?.writeText(url).then(
       () => notifySuccess(SUB_ISSUE_LINK_COPIED_TITLE),
       () => notifyError(SUB_ISSUE_LINK_COPY_FAILED_TITLE, "Copy the address from the work item instead.")

@@ -23,6 +23,8 @@ import {
   WEEKDAY_CODES,
   WEEKDAY_LABELS,
   defaultEndDate,
+  hourlyHelper,
+  intervalError,
   parseRecurrence,
   serializeRecurrence,
   withMonthlyMode,
@@ -217,9 +219,16 @@ export function RecurrenceBuilder({
   const rawVisible = rawOpen || rawForced;
   const ids = {
     repeat: `${idPrefix}-repeat`,
+    repeatError: `${idPrefix}-repeat-error`,
+    repeatHelper: `${idPrefix}-repeat-helper`,
     raw: `${idPrefix}-rrule`,
     rawDisclosure: `${idPrefix}-raw`,
   };
+  // The hourly step is range-checked live; the copy follows the kit field
+  // convention (error wins over the helper, wired through describedby).
+  const countError = intervalError(state);
+  const countDescribedBy =
+    state.unit === "hour" ? (countError === null ? ids.repeatHelper : ids.repeatError) : undefined;
 
   const emit = (next: RecurrenceState): void => onChange(serializeRecurrence(next));
 
@@ -235,9 +244,11 @@ export function RecurrenceBuilder({
             type="number"
             min={1}
             aria-label="Repeat interval"
+            aria-invalid={countError === null ? undefined : true}
+            aria-describedby={countDescribedBy}
             value={state.interval}
             disabled={disabled}
-            className={cn(controlClass, "w-20")}
+            className={cn(controlClass, "w-20", countError === null ? null : "border-(--danger)")}
             onChange={(event) => emit({ ...state, interval: Number(event.target.value) })}
           />
         )}
@@ -255,6 +266,18 @@ export function RecurrenceBuilder({
           ))}
         </select>
       </div>
+
+      {state.unit === "hour" ? (
+        countError === null ? (
+          <p id={ids.repeatHelper} className="text-meta text-(--text-muted)">
+            {hourlyHelper(state.interval)}
+          </p>
+        ) : (
+          <p id={ids.repeatError} role="alert" className="text-meta text-(--danger)">
+            {countError}
+          </p>
+        )
+      ) : null}
 
       {state.unit === "week" ? (
         <div role="group" aria-label="Repeat on" className="flex flex-wrap gap-(--space-2)">

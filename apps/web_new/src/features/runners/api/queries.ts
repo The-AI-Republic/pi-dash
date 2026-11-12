@@ -30,7 +30,14 @@ export function runnersQueryOptions(
 ) {
   return queryOptions({
     queryKey: runnersKeys.list(workspaceSlug, projectId),
-    queryFn: () => listRunners(client, workspaceId, projectId === null ? {} : { projectId }),
+    // Engines are listed beside own-agent runners (built-in engine design
+    // §11); older servers hide them unless asked.
+    queryFn: () =>
+      listRunners(
+        client,
+        workspaceId,
+        projectId === null ? { includeBundled: true } : { projectId, includeBundled: true }
+      ),
     staleTime: 0,
     refetchInterval: RUNNERS_POLL_INTERVAL_MS,
   });

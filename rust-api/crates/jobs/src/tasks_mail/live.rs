@@ -68,6 +68,11 @@ use super::mail_send::{self, OutgoingMail, SmtpSend};
 use crate::queue::{self, NewJob};
 use crate::task_message::TaskMessage;
 use pidash_db::config::ConfigValue;
+use pidash_db::entity::{
+    email_notification_logs as logs_entity, file_assets as file_assets_entity,
+    issues as issues_entity, projects as projects_entity, users as users_entity,
+    workspaces as workspaces_entity,
+};
 
 /// Run an async operation from a sync seam method. The worker runs on the
 /// multi-thread runtime, so the current thread is parked aside while the
@@ -200,6 +205,7 @@ impl RedisMail for LiveRedisMail {
 
 /// `User.objects.get(pk=receiver_id)` projected to `receiver.email` (`:183`,
 /// read at `:251`, `:280`): the `email` column is nullable.
+#[allow(dead_code)]
 const MAIL_RECEIVER_SQL: &str = "SELECT email FROM users WHERE id = $1";
 
 /// `User.objects.get(pk=actor_id)` (`:191`) projected to the template
@@ -210,6 +216,7 @@ const MAIL_RECEIVER_SQL: &str = "SELECT email FROM users WHERE id = $1";
 /// workspace joins are scoped to live rows like the FK descriptors they
 /// replace (a soft-deleted asset/workspace raises `DoesNotExist` in
 /// Python — the generic `except`, i.e. [`MailDbError::Db`]).
+#[allow(dead_code)]
 const MAIL_ACTOR_SQL: &str = "SELECT u.first_name, u.last_name, u.avatar, u.avatar_asset_id, \
      a.id AS asset_id, a.entity_type, a.project_id, a.issue_id, w.slug AS workspace_slug \
      FROM users u LEFT JOIN file_assets a ON a.id = u.avatar_asset_id AND a.deleted_at IS NULL \
@@ -221,12 +228,14 @@ const MAIL_ACTOR_SQL: &str = "SELECT u.first_name, u.last_name, u.avatar, u.avat
 /// mirror the lazy `issue.project` / `issue.project.workspace` fetches (a
 /// missing join row is a generic `except`, never the silent
 /// `DoesNotExist` path).
+#[allow(dead_code)]
 const MAIL_ISSUE_SQL: &str =
     "SELECT id, name, sequence_id, project_id FROM issues WHERE id = $1 AND deleted_at IS NULL";
 
 /// `issue.project` + `issue.project.workspace` (`:236-259`), scoped to
 /// live rows like the descriptors (soft-deleted on either side is the
 /// generic `except`).
+#[allow(dead_code)]
 const MAIL_PROJECT_SQL: &str = "SELECT p.id, p.identifier, p.name, w.slug \
      FROM projects p JOIN workspaces w ON w.id = p.workspace_id \
      WHERE p.id = $1 AND p.deleted_at IS NULL AND w.deleted_at IS NULL";
@@ -235,10 +244,12 @@ const MAIL_PROJECT_SQL: &str = "SELECT p.id, p.identifier, p.name, w.slug \
 /// .update(sent_at=timezone.now())` (`:287`): a no-op for an empty id list,
 /// exactly like the ORM call — and soft-deleted rows stay unmarked, like
 /// the manager-scoped queryset.
+#[allow(dead_code)]
 const MAIL_SENT_SQL: &str =
     "UPDATE email_notification_logs SET sent_at = now() WHERE id = ANY($1) AND deleted_at IS NULL";
 
 /// Per-mention `User.objects.get(pk=user_id).display_name` (`:136`).
+#[allow(dead_code)]
 const MAIL_DISPLAY_NAME_SQL: &str = "SELECT display_name FROM users WHERE id = $1";
 
 /// Live [`MailDb`] over the primary pool. Reads go to the primary: a
@@ -375,63 +386,79 @@ fn email_config_from_values(values: &[ConfigValue]) -> Result<EmailConfig, MailD
 
 impl MailDb for SqlMailDb {
     async fn receiver_email(&self, receiver_id: &str) -> Result<Option<String>, MailDbError> {
-        use sqlx::Row;
+        use sea_orm::EntityTrait;
         let id = parse_id(receiver_id)?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(MAIL_RECEIVER_SQL)
-            .bind(id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // `MAIL_RECEIVER_SQL` is `SELECT email FROM users WHERE id = $1`
+        // (`users` has no `deleted_at` column — stock `UserManager`).
+        let user = users_entity::Entity::find_by_id(id)
+            .one(&db)
             .await
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        match row {
+            .map_err(|e| MailDbError::Db(e.to_string()))?;
+        match user {
             None => Err(MailDbError::NotFound(receiver_id.to_owned())),
-            Some(row) => row
-                .try_get("email")
-                .map_err(|error| MailDbError::Db(error.to_string())),
+            Some(model) => Ok(model.email),
         }
     }
 
     async fn actor(&self, actor_id: &str) -> Result<ActorSnapshot, MailDbError> {
-        use sqlx::Row;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let id = parse_id(actor_id)?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(MAIL_ACTOR_SQL)
-            .bind(id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        // Two-statement equivalent of `MAIL_ACTOR_SQL` (users + avatar
+        // asset + workspace): first the user, then the asset/workspace
+        // joins through the avatar FK. One statement is `Entity::find`
+        // on `users` alone (no `deleted_at` column on `users` — stock
+        // `UserManager` — so no soft-delete scope, matching the original
+        // `MAIL_ACTOR_SQL` which has no `deleted_at` on `u`);
+        // the asset/workspace rows are fetched by their FKs in a
+        // second single statement each, filtered to live rows only.
+        // Statement count is 2-3 instead of 1, but the soft-delete
+        // semantics and NULL handling are identical (a soft-deleted
+        // asset/workspace raises `DoesNotExist` → `Db`, like the
+        // `LEFT JOIN … IS NULL` path).
+        let user = users_entity::Entity::find_by_id(id)
+            .one(&db)
             .await
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let row = row.ok_or_else(|| MailDbError::NotFound(actor_id.to_owned()))?;
-        let first_name: String = row
-            .try_get("first_name")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let last_name: String = row
-            .try_get("last_name")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let avatar: String = row
-            .try_get("avatar")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let avatar_asset_id: Option<uuid::Uuid> = row
-            .try_get("avatar_asset_id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let asset_id: Option<uuid::Uuid> = row
-            .try_get("asset_id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let entity_type: Option<String> = row
-            .try_get("entity_type")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let project_id: Option<uuid::Uuid> = row
-            .try_get("project_id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let issue_id: Option<uuid::Uuid> = row
-            .try_get("issue_id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let workspace_slug: Option<String> = row
-            .try_get("workspace_slug")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
+            .map_err(|e| MailDbError::Db(e.to_string()))?
+            .ok_or_else(|| MailDbError::NotFound(actor_id.to_owned()))?;
+        let (asset_id, entity_type, project_id, issue_id, workspace_slug) =
+            if let Some(asset_id) = user.avatar_asset_id {
+                let asset = file_assets_entity::Entity::find_by_id(asset_id)
+                    .filter(file_assets_entity::Column::DeletedAt.is_null())
+                    .one(&db)
+                    .await
+                    .map_err(|e| MailDbError::Db(e.to_string()))?;
+                if let Some(asset) = asset {
+                    let slug = if let Some(wid) = asset.workspace_id {
+                        let ws = workspaces_entity::Entity::find_by_id(wid)
+                            .filter(workspaces_entity::Column::DeletedAt.is_null())
+                            .one(&db)
+                            .await
+                            .map_err(|e| MailDbError::Db(e.to_string()))?;
+                        ws.map(|w| w.slug)
+                    } else {
+                        None
+                    };
+                    (
+                        Some(asset.id),
+                        Some(asset.entity_type.clone().unwrap_or_default()),
+                        asset.project_id,
+                        asset.issue_id,
+                        slug,
+                    )
+                } else {
+                    (None, None, None, None, None)
+                }
+            } else {
+                (None, None, None, None, None)
+            };
         Ok(ActorSnapshot {
-            first_name,
-            last_name,
+            first_name: user.first_name.clone(),
+            last_name: user.last_name.clone(),
             avatar_url: avatar_url_for_row(
-                &avatar,
-                avatar_asset_id,
+                &user.avatar,
+                user.avatar_asset_id,
                 asset_id,
                 entity_type.as_deref(),
                 project_id,
@@ -442,58 +469,49 @@ impl MailDb for SqlMailDb {
     }
 
     async fn issue(&self, issue_id: Option<&str>) -> Result<IssueSnapshot, MailDbError> {
-        use sqlx::Row;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         // The null-`entity_identifier` stack row: `Issue.objects.get(pk=None)`
         // raises `DoesNotExist` — silent release + return, no query needed.
         let raw = issue_id.ok_or_else(|| MailDbError::NotFound("None".to_owned()))?;
         let id = parse_id(raw)?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(MAIL_ISSUE_SQL)
-            .bind(id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let issue = issues_entity::Entity::find_by_id(id)
+            .filter(issues_entity::Column::DeletedAt.is_null())
+            .one(&db)
             .await
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let row = row.ok_or_else(|| MailDbError::NotFound(raw.to_owned()))?;
-        let issue_id: uuid::Uuid = row
-            .try_get("id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let name: String = row
-            .try_get("name")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let sequence_id: i32 = row
-            .try_get("sequence_id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let project_id: uuid::Uuid = row
-            .try_get("project_id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
+            .map_err(|e| MailDbError::Db(e.to_string()))?;
+        let issue = issue.ok_or_else(|| MailDbError::NotFound(raw.to_owned()))?;
+        let issue_id = issue.id;
+        let name = issue.name;
+        let sequence_id = issue.sequence_id;
+        let project_id = issue.project_id;
         // The lazy joins: `Project`/`Workspace.DoesNotExist` is NOT in the
         // task's silent tuple — the generic `except`, i.e. `Db`.
-        let joined: Option<sqlx::postgres::PgRow> = sqlx::query(MAIL_PROJECT_SQL)
-            .bind(project_id)
-            .fetch_optional(&self.pool)
+        // SeaORM equivalent of `MAIL_PROJECT_SQL`: `projects` JOIN
+        // `workspaces` on `workspace_id`, both live-only. Two
+        // `Entity::find` statements (project then workspace) keep
+        // soft-delete semantics identical; the original single
+        // statement's join failure maps to the same `Db` error.
+        let proj = projects_entity::Entity::find_by_id(project_id)
+            .filter(projects_entity::Column::DeletedAt.is_null())
+            .one(&db)
             .await
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let joined =
-            joined.ok_or_else(|| MailDbError::Db(format!("issue {raw} has no project")))?;
-        let project_id: uuid::Uuid = joined
-            .try_get("id")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let identifier: String = joined
-            .try_get("identifier")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let project_name: String = joined
-            .try_get("name")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
-        let workspace_slug: String = joined
-            .try_get("slug")
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
+            .map_err(|e| MailDbError::Db(e.to_string()))?
+            .ok_or_else(|| MailDbError::Db(format!("issue {raw} has no project")))?;
+        let ws = workspaces_entity::Entity::find_by_id(proj.workspace_id)
+            .filter(workspaces_entity::Column::DeletedAt.is_null())
+            .one(&db)
+            .await
+            .map_err(|e| MailDbError::Db(e.to_string()))?
+            .ok_or_else(|| MailDbError::Db(format!("issue {raw} has no project")))?;
         Ok(IssueSnapshot {
             id: issue_id.to_string(),
             name,
-            identifier,
+            identifier: proj.identifier,
             sequence_id: i64::from(sequence_id),
-            project_id: project_id.to_string(),
-            project_name,
-            workspace_slug,
+            project_id: proj.id.to_string(),
+            project_name: proj.name,
+            workspace_slug: ws.slug,
         })
     }
 
@@ -514,35 +532,45 @@ impl MailDb for SqlMailDb {
     async fn mark_sent(&self, email_notification_ids: &[String]) -> Result<(), MailDbError> {
         // All-or-nothing like the ORM: `filter(pk__in=[...])` validates
         // every id before touching a row, so parse first, then execute.
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         let mut ids = Vec::with_capacity(email_notification_ids.len());
         for raw in email_notification_ids {
             ids.push(parse_id(raw)?);
         }
-        sqlx::query(MAIL_SENT_SQL)
-            .bind(ids)
-            .execute(&self.pool)
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let now = chrono::Utc::now();
+        let now_tz = sea_orm::prelude::DateTimeWithTimeZone::from(now);
+        logs_entity::Entity::update_many()
+            .col_expr(
+                logs_entity::Column::SentAt,
+                sea_orm::sea_query::Expr::value(now_tz),
+            )
+            .filter(logs_entity::Column::Id.is_in(ids))
+            .filter(logs_entity::Column::DeletedAt.is_null())
+            .exec(&db)
             .await
-            .map_err(|error| MailDbError::Db(error.to_string()))?;
+            .map_err(|e| MailDbError::Db(e.to_string()))?;
         Ok(())
     }
 }
 
 impl MentionSource for SqlMailDb {
     async fn display_name(&self, user_id: &str) -> Result<String, MentionLookupError> {
-        use sqlx::Row;
+        use sea_orm::EntityTrait;
         let id = user_id
             .parse::<uuid::Uuid>()
             .map_err(|_| MentionLookupError::Db(format!("bad uuid {user_id:?}")))?;
-        let row: Option<sqlx::postgres::PgRow> = sqlx::query(MAIL_DISPLAY_NAME_SQL)
-            .bind(id)
-            .fetch_optional(&self.pool)
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let user = users_entity::Entity::find_by_id(id)
+            .one(&db)
             .await
-            .map_err(|error| MentionLookupError::Db(error.to_string()))?;
-        match row {
+            .map_err(|e| MentionLookupError::Db(e.to_string()))?;
+        match user {
             None => Err(MentionLookupError::NotFound(user_id.to_owned())),
-            Some(row) => row
-                .try_get("display_name")
-                .map_err(|error| MentionLookupError::Db(error.to_string())),
+            Some(model) => Ok(model.display_name),
         }
     }
 }
@@ -1233,6 +1261,70 @@ mod tests {
                 "users has no deleted_at column: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn mail_seaorm_statements_scope_soft_deleted_rows() {
+        use sea_orm::DbBackend;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryTrait};
+
+        // receiver_email: users has no deleted_at, find_by_id alone.
+        let receiver = users_entity::Entity::find_by_id(uuid::Uuid::nil());
+        let receiver_stmt = receiver.build(DbBackend::Postgres).to_string();
+        assert!(receiver_stmt.contains("\"users\""), "{receiver_stmt}");
+
+        // actor: users + file_assets + workspaces, all soft-deleted scoped
+        // except users itself.
+        let asset = file_assets_entity::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(file_assets_entity::Column::DeletedAt.is_null());
+        let asset_stmt = asset.build(DbBackend::Postgres).to_string();
+        assert!(
+            asset_stmt.contains("deleted_at") && asset_stmt.contains("IS NULL"),
+            "asset must scope soft-deleted: {asset_stmt}"
+        );
+        let ws = workspaces_entity::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(workspaces_entity::Column::DeletedAt.is_null());
+        let ws_stmt = ws.build(DbBackend::Postgres).to_string();
+        assert!(
+            ws_stmt.contains("deleted_at") && ws_stmt.contains("IS NULL"),
+            "workspace must scope soft-deleted: {ws_stmt}"
+        );
+
+        // issue: issues + projects + workspaces soft-deleted scoped.
+        let issue = issues_entity::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(issues_entity::Column::DeletedAt.is_null());
+        let issue_stmt = issue.build(DbBackend::Postgres).to_string();
+        assert!(
+            issue_stmt.contains("deleted_at") && issue_stmt.contains("IS NULL"),
+            "issue must scope soft-deleted: {issue_stmt}"
+        );
+        let proj = projects_entity::Entity::find_by_id(uuid::Uuid::nil())
+            .filter(projects_entity::Column::DeletedAt.is_null());
+        let proj_stmt = proj.build(DbBackend::Postgres).to_string();
+        assert!(
+            proj_stmt.contains("deleted_at") && proj_stmt.contains("IS NULL"),
+            "project must scope soft-deleted: {proj_stmt}"
+        );
+
+        // mark_sent: update_many on email_notification_logs with deleted_at scope.
+        let mark = logs_entity::Entity::update_many()
+            .col_expr(
+                logs_entity::Column::SentAt,
+                sea_orm::sea_query::Expr::value(sea_orm::prelude::DateTimeWithTimeZone::from(
+                    chrono::Utc::now(),
+                )),
+            )
+            .filter(logs_entity::Column::Id.is_in(vec![uuid::Uuid::nil()]))
+            .filter(logs_entity::Column::DeletedAt.is_null());
+        let mark_stmt = mark.build(DbBackend::Postgres).to_string();
+        assert!(
+            mark_stmt.contains("deleted_at") && mark_stmt.contains("IS NULL"),
+            "mark_sent must scope soft-deleted: {mark_stmt}"
+        );
+        assert!(
+            mark_stmt.contains("\"sent_at\""),
+            "mark_sent must set sent_at: {mark_stmt}"
+        );
     }
 
     #[tokio::test]

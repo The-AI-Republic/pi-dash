@@ -89,10 +89,21 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Alias, Expr, JoinType, Query, SelectStatement};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
+    QuerySelect, Select, Set,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{
+    comment_reactions, cycles, estimate_points, estimates, issue_activities, issue_comments,
+    issue_reactions, issue_subscribers, issues, labels, modules, pod, projects, runner, states,
+    users,
+};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::Pools;
 use pidash_services::domain::issues::{touch_issue, touch_issues};
 use pidash_services::tasks_webhooks::activity_issue::{
@@ -111,7 +122,7 @@ use pidash_services::tasks_webhooks::activity_misc::{
 };
 use pidash_services::tasks_webhooks::activity_tracks::{
     DescriptionLatest, EstimatePointRef, IssueActivityDraft, IssueSubscriberDraft, LabelRef,
-    ParentRef, StateRef, TrackFrame, UserRef,
+    ParentRef, PodRef, RunnerRef, StateRef, TrackFrame, UserRef,
 };
 
 use crate::queue::{enqueue, NewJob};
@@ -246,7 +257,11 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
         Some(Value::String(s)) => s.clone(),
         _ => return Err(format!("{ISSUE_ACTIVITY_TASK}: 'type' must be a string")),
     };
-    // Raw JSON-string-or-None payloads (never parsed here).
+    // Raw JSON payloads (never parsed here). Producers send JSON strings,
+    // except the app destroy which sends current_instance={} as a dict
+    // (base.py:747); the Python delete handler ignores it, so the job
+    // succeeds there. Accept objects/arrays by dumping to JSON text; scalars
+    // still reject (Python json.loads would fail on them too).
     let raw_string = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
         match value {
             None | Some(Value::Null) => Ok(None),
@@ -256,8 +271,23 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
             )),
         }
     };
-    let requested_data = raw_string(raw(1, "requested_data")?, "requested_data")?;
-    let current_instance = raw_string(raw(2, "current_instance")?, "current_instance")?;
+    let raw_json = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(Value::Object(_)) | Some(Value::Array(_)) => value
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| {
+                    format!("{ISSUE_ACTIVITY_TASK}: '{name}' must be a string or null: {error}")
+                }),
+            Some(_) => Err(format!(
+                "{ISSUE_ACTIVITY_TASK}: '{name}' must be a string or null"
+            )),
+        }
+    };
+    let requested_data = raw_json(raw(1, "requested_data")?, "requested_data")?;
+    let current_instance = raw_json(raw(2, "current_instance")?, "current_instance")?;
     // Ids are stringified before the uuid guard (`str(project_id)`), so any
     // scalar binds here and fails the guard later; collections reject.
     let id_string = |value: Option<&Value>, name: &str| -> Result<Option<String>, String> {
@@ -308,91 +338,156 @@ pub fn bind_issue_activity(args: &Value, kwargs: &Value) -> Result<IssueActivity
 /// `Project.objects.get(pk=project_id)` (`:1612`): the default manager is
 /// `SoftDeletionManager`, so soft-deleted projects miss here exactly as in
 /// Python (`db_table = "projects"`, `project.py:252`).
-pub const FIND_PROJECT_WORKSPACE_SQL: &str =
-    r#"SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL"#;
+fn project_workspace_query(id: Uuid) -> Select<projects::Entity> {
+    projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// `Issue.objects.filter(pk=issue_id).first()` for the touch (`:1620`).
 /// The touch itself is [`pidash_services::domain::issues::touch_issue`].
-pub const FIND_ISSUE_SQL: &str = r#"SELECT id FROM issues WHERE id = $1 AND deleted_at IS NULL"#;
+fn issue_exists_query(id: Uuid) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::Id.eq(id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// `IssueReaction.objects.filter(reaction, project_id,
 /// actor_id).values_list("id", flat=True).first()` (`:1082-1090`).
-pub const FIND_ISSUE_REACTION_SQL: &str = r#"SELECT id FROM issue_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"#;
+fn issue_reaction_query(
+    reaction: &str,
+    project_id: Uuid,
+    actor_id: Uuid,
+) -> Select<issue_reactions::Entity> {
+    issue_reactions::Entity::find()
+        .select_only()
+        .column(issue_reactions::Column::Id)
+        .filter(issue_reactions::Column::Reaction.eq(reaction))
+        .filter(issue_reactions::Column::ProjectId.eq(project_id))
+        .filter(issue_reactions::Column::ActorId.eq(actor_id))
+        .filter(issue_reactions::Column::DeletedAt.is_null())
+        .order_by_desc(issue_reactions::Column::CreatedAt)
+        .limit(1)
+}
 
 /// `CommentReaction.objects.filter(reaction, project_id,
 /// actor_id).values_list("id", "comment__id").first()` (`:1152-1160`).
-pub const FIND_COMMENT_REACTION_SQL: &str = r#"SELECT id, comment_id FROM comment_reactions WHERE reaction = $1 AND project_id = $2 AND actor_id = $3 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"#;
+fn comment_reaction_query(
+    reaction: &str,
+    project_id: Uuid,
+    actor_id: Uuid,
+) -> Select<comment_reactions::Entity> {
+    comment_reactions::Entity::find()
+        .select_only()
+        .columns([
+            comment_reactions::Column::Id,
+            comment_reactions::Column::CommentId,
+        ])
+        .filter(comment_reactions::Column::Reaction.eq(reaction))
+        .filter(comment_reactions::Column::ProjectId.eq(project_id))
+        .filter(comment_reactions::Column::ActorId.eq(actor_id))
+        .filter(comment_reactions::Column::DeletedAt.is_null())
+        .order_by_desc(comment_reactions::Column::CreatedAt)
+        .limit(1)
+}
 
 /// `IssueComment.objects.get(pk=..., project_id=...)`
 /// (`:1161`) and `IssueComment.objects.filter(pk=...,
 /// project_id=...).values_list("issue_id", flat=True).first()`
 /// (`:1193-1197`): same row, same scope.
-pub const FIND_COMMENT_ISSUE_SQL: &str = r#"SELECT issue_id FROM issue_comments WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL LIMIT 1"#;
+fn comment_issue_query(comment_id: Uuid, project_id: Uuid) -> Select<issue_comments::Entity> {
+    issue_comments::Entity::find()
+        .select_only()
+        .column(issue_comments::Column::IssueId)
+        .filter(issue_comments::Column::Id.eq(comment_id))
+        .filter(issue_comments::Column::ProjectId.eq(project_id))
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// `Issue.objects.get(pk=...)` projected to the relation label
 /// (`issue.project.identifier`, `issue.sequence_id`, `:1298,1315,1344,1360`).
-pub const FIND_ISSUE_REF_SQL: &str = r#"SELECT p.identifier, i.sequence_id FROM issues i JOIN projects p ON p.id = i.project_id WHERE i.id = $1 AND i.deleted_at IS NULL"#;
-
-/// `Issue.objects.get(pk=issue_id)` projection `create_issue_activity`
-/// reads (`:567`): `created_at` and `created_by_id`.
-pub const FIND_CREATED_ISSUE_SQL: &str =
-    r#"SELECT created_at, created_by_id FROM issues WHERE id = $1 AND deleted_at IS NULL"#;
-
-/// `User.objects.get(pk=...)` for `track_assignees` (`:380,415`): the
-/// custom `UserManager` has no soft-delete scope, so no `deleted_at`
-/// filter. Only `display_name` is ever read.
-pub const FIND_USER_SQL: &str = r#"SELECT id, display_name FROM users WHERE id = $1"#;
-
-/// `Issue.objects.filter(pk=...).first()` for `track_parent` (`:135-136`),
-/// projected to the rendered label plus the row id.
-pub const FIND_PARENT_SQL: &str = r#"SELECT i.id, p.identifier, i.sequence_id FROM issues i JOIN projects p ON p.id = i.project_id WHERE i.id = $1 AND i.deleted_at IS NULL"#;
-
-/// `State.objects.filter(pk=..., project_id=...).first()` (`:208-209`).
-/// The default `StateManager` excludes `group="triage"`
-/// (`db/models/state.py:79-83`), so the lookup does too.
-pub const FIND_STATE_SQL: &str = r#"SELECT id, name FROM states WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL AND "group" <> 'triage'"#;
-
-/// `Label.objects.filter(...)` for `track_labels` (`activity_tracks`;
-/// `db_table = "labels"`).
-pub const FIND_LABEL_SQL: &str =
-    r#"SELECT id, name FROM labels WHERE id = $1 AND deleted_at IS NULL"#;
+/// Built with sea-query because the read joins `projects` and the output
+/// names must stay unique.
+fn issue_ref_statement(ids: &[Uuid]) -> SelectStatement {
+    let i = Alias::new("i");
+    let p = Alias::new("p");
+    let mut stmt = Query::select();
+    stmt.column((i.clone(), issues::Column::Id))
+        .column((p.clone(), projects::Column::Identifier))
+        .column((i.clone(), issues::Column::SequenceId))
+        .from_as(issues::Entity, i.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            p.clone(),
+            Expr::col((i.clone(), issues::Column::ProjectId))
+                .equals((p.clone(), projects::Column::Id)),
+        )
+        .and_where(Expr::col((i.clone(), issues::Column::Id)).is_in(ids.to_vec()))
+        .and_where(Expr::col((i.clone(), issues::Column::DeletedAt)).is_null());
+    stmt
+}
 
 /// `EstimatePoint.objects.filter(pk=...).first()` plus `estimate.type`
 /// (`:444-453,469`; `db_table = "estimate_points"`, joined to
 /// `"estimates"` like the `new_estimate.estimate` follow — no scope on the
 /// joined table, exactly as the ORM follow has none).
-pub const FIND_ESTIMATE_SQL: &str = r#"SELECT ep.value, e.type FROM estimate_points ep JOIN estimates e ON e.id = ep.estimate_id WHERE ep.id = $1 AND ep.deleted_at IS NULL LIMIT 1"#;
+fn estimate_points_statement(ids: &[Uuid]) -> SelectStatement {
+    let ep = Alias::new("ep");
+    let e = Alias::new("e");
+    let mut stmt = Query::select();
+    stmt.column((ep.clone(), estimate_points::Column::Id))
+        .column((ep.clone(), estimate_points::Column::Value))
+        .expr_as(
+            Expr::col((e.clone(), estimates::Column::Type)),
+            "estimate_type",
+        )
+        .from_as(estimate_points::Entity, ep.clone())
+        .join_as(
+            JoinType::InnerJoin,
+            estimates::Entity,
+            e.clone(),
+            Expr::col((ep.clone(), estimate_points::Column::EstimateId))
+                .equals((e.clone(), estimates::Column::Id)),
+        )
+        .and_where(Expr::col((ep.clone(), estimate_points::Column::Id)).is_in(ids.to_vec()))
+        .and_where(Expr::col((ep.clone(), estimate_points::Column::DeletedAt)).is_null());
+    stmt
+}
+
+/// `Issue.objects.get(pk=issue_id)` projection `create_issue_activity`
+/// reads (`:567`): `created_at` and `created_by_id`.
+fn created_issue_query(id: Uuid) -> Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .columns([issues::Column::CreatedAt, issues::Column::CreatedById])
+        .filter(issues::Column::Id.eq(id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// `IssueActivity.objects.filter(issue_id=...).order_by("-created_at").first()`
 /// for `track_description` (`:89`): the planner reads `field` and
 /// `actor_id`; the driver keeps `id` for the touch write (`:95-96`).
-pub const FIND_LATEST_ACTIVITY_SQL: &str = r#"SELECT id, field, actor_id FROM issue_activities WHERE issue_id = $1 ORDER BY created_at DESC LIMIT 1"#;
-
-/// `last_activity.created_at = now(); save(update_fields=["created_at"])`
-/// (`:95-96`).
-pub const TOUCH_ACTIVITY_SQL: &str =
-    r#"UPDATE issue_activities SET created_at = NOW() WHERE id = $1"#;
-
-/// `IssueSubscriber.objects.bulk_create(..., ignore_conflicts=True)`
-/// (`:408`): one statement, any conflict ignored.
-pub const INSERT_SUBSCRIBERS_SQL: &str = r#"INSERT INTO issue_subscribers (subscriber_id, issue_id, workspace_id, project_id, created_by_id, updated_by_id) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING"#;
-
-/// `Cycle.objects.filter(...)` name/id projection for the cycle builders
-/// (`db_table = "cycles"`).
-pub const FIND_CYCLE_SQL: &str =
-    r#"SELECT id, name FROM cycles WHERE id = $1 AND deleted_at IS NULL"#;
-
-/// `Module.objects.filter(...)` name projection for the module create
-/// builder (`db_table = "modules"`).
-pub const FIND_MODULE_SQL: &str =
-    r#"SELECT name FROM modules WHERE id = $1 AND deleted_at IS NULL"#;
-
-/// The `IssueFlatSerializer` projection for `issue_detail`
-/// (`serializers/issue.py:105-122`): id, name, description_json,
-/// description_html, priority, complexity_score, start_date, target_date,
-/// sequence_id, sort_order, is_draft. No soft-delete scope — the
-/// serializer follows the FK onto whatever row is there.
-pub const FIND_ISSUE_FLAT_SQL: &str = r#"SELECT id, name, description_json, description_html, priority, complexity_score, start_date, target_date, sequence_id, sort_order, is_draft FROM issues WHERE id = $1"#;
+fn latest_activity_query(issue_id: Uuid) -> Select<issue_activities::Entity> {
+    issue_activities::Entity::find()
+        .select_only()
+        .columns([
+            issue_activities::Column::Id,
+            issue_activities::Column::Field,
+            issue_activities::Column::ActorId,
+        ])
+        .filter(issue_activities::Column::IssueId.eq(issue_id))
+        .order_by_desc(issue_activities::Column::CreatedAt)
+        .limit(1)
+}
 
 /// The Redis surface the dispatcher needs. There is no shared Redis client
 /// in the Rust crates yet (same position as `tasks_mail`'s `RedisLock`),
@@ -457,7 +552,7 @@ impl StoredActivityRow {
 
 /// The `IssueFlatSerializer` projection (`serializers/issue.py:105-122`)
 /// for `issue_detail`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct IssueFlatRow {
     pub id: Uuid,
     pub name: String,
@@ -765,19 +860,78 @@ fn draft_to_row(draft: IssueActivityDraft) -> ActivityRow {
     }
 }
 
-/// Bulk-fetch `id::text -> row` maps. Comparing on the text cast means
-/// garbage ids simply miss instead of erroring the whole statement; the
-/// planners encode the Python validity rules on top (and the estimate
-/// pre-check below preserves the one fatal-on-garbage filter).
-async fn fetch_text_map(
-    pool: &PgPool,
-    sql: &str,
-    ids: &[String],
-) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    sqlx::query(sql).bind(ids).fetch_all(pool).await
+/// Partial decoded rows for the bulk snapshots (unique output names).
+#[derive(Debug, Clone, FromQueryResult)]
+struct StateRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct LabelRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct SnapUserRow {
+    id: Uuid,
+    display_name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct CycleRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct ModuleRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct LatestActivityRow {
+    id: Uuid,
+    field: Option<String>,
+    actor_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct CreatedIssueRow {
+    created_at: chrono::DateTime<chrono::FixedOffset>,
+    created_by_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct RunnerRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct PodRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+struct CommentReactionRow {
+    id: Uuid,
+    comment_id: Uuid,
+}
+
+/// Parse the raw string ids of a bulk snapshot fetch to their valid
+/// UUIDs. The old `id::text = ANY($1)` comparison made garbage ids
+/// simply miss instead of erroring the whole statement; unparseable
+/// entries match no row here too, so they stay misses. The scanners
+/// encode the Python validity rules on top (and the estimate pre-check
+/// preserves the one fatal-on-garbage filter).
+fn parse_snapshot_ids(ids: &[String]) -> Vec<Uuid> {
+    ids.iter()
+        .filter_map(|id| Uuid::parse_str(id).ok())
+        .collect()
 }
 
 /// Parse a raw payload for id extraction only. Failures return `None`;
@@ -805,7 +959,7 @@ fn scalar_id(payload: Option<&Value>, key: &str) -> Option<String> {
     })
 }
 
-/// The snapshot bundle the update dispatcher feeds the twelve `track_*`
+/// The snapshot bundle the update dispatcher feeds the `track_*`
 /// helpers through [`UpdateResolvers`], plus the side-write keys.
 struct UpdateSnapshots {
     parents: HashMap<String, ParentRef>,
@@ -813,6 +967,8 @@ struct UpdateSnapshots {
     labels: HashMap<String, LabelRef>,
     users: HashMap<String, UserRef>,
     estimates: HashMap<String, EstimatePointRef>,
+    runners: HashMap<String, RunnerRef>,
+    pods: HashMap<String, PodRef>,
     latest: Option<(Uuid, DescriptionLatest)>,
 }
 
@@ -841,24 +997,32 @@ async fn fetch_update_snapshots(
         }
     }
     let parent_list: Vec<String> = parent_ids.into_iter().collect();
+    let db = pidash_db::pool::sea_orm_connection(pool);
     let mut parents = HashMap::new();
-    for row in fetch_text_map(
-        pool,
-        "SELECT i.id::text AS pid, p.identifier, i.sequence_id FROM issues i JOIN projects p ON p.id = i.project_id WHERE i.id::text = ANY($1) AND i.deleted_at IS NULL",
-        &parent_list,
-    )
-    .await
-    .map_err(fail)?
-    {
-        let id: String = row.get("pid");
-        parents.insert(
-            id.clone(),
-            ParentRef {
-                id,
-                identifier: row.get("identifier"),
-                sequence_id: row.get("sequence_id"),
-            },
-        );
+    if !parent_list.is_empty() {
+        let parsed = parse_snapshot_ids(&parent_list);
+        let rows = db
+            .query_all(DbBackend::Postgres.build(&issue_ref_statement(&parsed)))
+            .await
+            .map_err(|error| fail(into_sqlx(error)))?;
+        for row in &rows {
+            let id: Uuid = row
+                .try_get("", "id")
+                .map_err(|error| fail(into_sqlx(error)))?;
+            let key = id.to_string();
+            parents.insert(
+                key.clone(),
+                ParentRef {
+                    id: key,
+                    identifier: row
+                        .try_get("", "identifier")
+                        .map_err(|error| fail(into_sqlx(error)))?,
+                    sequence_id: row
+                        .try_get("", "sequence_id")
+                        .map_err(|error| fail(into_sqlx(error)))?,
+                },
+            );
+        }
     }
     // State ids are project-scoped (`State.objects.filter(pk=...,
     // project_id=...)`), and the default `StateManager` excludes
@@ -881,21 +1045,25 @@ async fn fetch_update_snapshots(
     let state_list: Vec<String> = state_ids.into_iter().collect();
     let mut states = HashMap::new();
     if !state_list.is_empty() {
-        for row in sqlx::query(
-            "SELECT id::text AS sid, name FROM states WHERE id::text = ANY($1) AND project_id = $2 AND deleted_at IS NULL AND \"group\" <> 'triage'",
-        )
-        .bind(&state_list)
-        .bind(project_uuid)
-        .fetch_all(pool)
-        .await
-        .map_err(fail)?
-        {
-            let id: String = row.get("sid");
+        let parsed = parse_snapshot_ids(&state_list);
+        let models = states::Entity::find()
+            .select_only()
+            .columns([states::Column::Id, states::Column::Name])
+            .filter(states::Column::Id.is_in(parsed))
+            .filter(states::Column::ProjectId.eq(project_uuid))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .into_model::<StateRow>()
+            .all(&db)
+            .await
+            .map_err(|error| fail(into_sqlx(error)))?;
+        for model in models {
+            let key = model.id.to_string();
             states.insert(
-                id.clone(),
+                key.clone(),
                 StateRef {
-                    id,
-                    name: row.get("name"),
+                    id: key,
+                    name: model.name,
                 },
             );
         }
@@ -907,22 +1075,27 @@ async fn fetch_update_snapshots(
     }
     let label_list: Vec<String> = label_ids.into_iter().collect();
     let mut labels = HashMap::new();
-    for row in fetch_text_map(
-        pool,
-        "SELECT id::text AS lid, name FROM labels WHERE id::text = ANY($1) AND deleted_at IS NULL",
-        &label_list,
-    )
-    .await
-    .map_err(fail)?
-    {
-        let id: String = row.get("lid");
-        labels.insert(
-            id.clone(),
-            LabelRef {
-                id,
-                name: row.get("name"),
-            },
-        );
+    if !label_list.is_empty() {
+        let parsed = parse_snapshot_ids(&label_list);
+        let models = labels::Entity::find()
+            .select_only()
+            .columns([labels::Column::Id, labels::Column::Name])
+            .filter(labels::Column::Id.is_in(parsed))
+            .filter(labels::Column::DeletedAt.is_null())
+            .into_model::<LabelRow>()
+            .all(&db)
+            .await
+            .map_err(|error| fail(into_sqlx(error)))?;
+        for model in models {
+            let key = model.id.to_string();
+            labels.insert(
+                key.clone(),
+                LabelRef {
+                    id: key,
+                    name: model.name,
+                },
+            );
+        }
     }
     // Assignee ids, both sides. No soft-delete scope on `users`.
     let mut user_ids: HashSet<String> = HashSet::new();
@@ -931,22 +1104,26 @@ async fn fetch_update_snapshots(
     }
     let user_list: Vec<String> = user_ids.into_iter().collect();
     let mut users = HashMap::new();
-    for row in fetch_text_map(
-        pool,
-        "SELECT id::text AS uid, display_name FROM users WHERE id::text = ANY($1)",
-        &user_list,
-    )
-    .await
-    .map_err(fail)?
-    {
-        let id: String = row.get("uid");
-        users.insert(
-            id.clone(),
-            UserRef {
-                id,
-                display_name: row.get("display_name"),
-            },
-        );
+    if !user_list.is_empty() {
+        let parsed = parse_snapshot_ids(&user_list);
+        let models = users::Entity::find()
+            .select_only()
+            .columns([users::Column::Id, users::Column::DisplayName])
+            .filter(users::Column::Id.is_in(parsed))
+            .into_model::<SnapUserRow>()
+            .all(&db)
+            .await
+            .map_err(|error| fail(into_sqlx(error)))?;
+        for model in models {
+            let key = model.id.to_string();
+            users.insert(
+                key.clone(),
+                UserRef {
+                    id: key,
+                    display_name: model.display_name,
+                },
+            );
+        }
     }
     // Estimate ids: `filter(pk=...)` with no validity guard, so a present
     // non-null invalid id raises in Python — fatal here before the planner
@@ -968,22 +1145,101 @@ async fn fetch_update_snapshots(
     }
     let estimate_list: Vec<String> = estimate_ids.into_iter().collect();
     let mut estimates = HashMap::new();
-    for row in fetch_text_map(
-        pool,
-        "SELECT ep.id::text AS eid, ep.value, e.type AS etype FROM estimate_points ep JOIN estimates e ON e.id = ep.estimate_id WHERE ep.id::text = ANY($1) AND ep.deleted_at IS NULL",
-        &estimate_list,
-    )
-    .await
-    .map_err(fail)?
-    {
-        let id: String = row.get("eid");
-        estimates.insert(
-            id,
-            EstimatePointRef {
-                value: row.get("value"),
-                estimate_type: row.get("etype"),
-            },
-        );
+    if !estimate_list.is_empty() {
+        let parsed = parse_snapshot_ids(&estimate_list);
+        let stmt = estimate_points_statement(&parsed);
+        let rows = db
+            .query_all(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(|error| fail(into_sqlx(error)))?;
+        for row in &rows {
+            let id: Uuid = row
+                .try_get("", "id")
+                .map_err(|error| fail(into_sqlx(error)))?;
+            estimates.insert(
+                id.to_string(),
+                EstimatePointRef {
+                    value: row
+                        .try_get("", "value")
+                        .map_err(|error| fail(into_sqlx(error)))?,
+                    estimate_type: row
+                        .try_get("", "estimate_type")
+                        .map_err(|error| fail(into_sqlx(error)))?,
+                },
+            );
+        }
+    }
+    // Runner ids (`assigned_runner_id or assigned_runner`, both sides)
+    // — `filter(pk=...).first()`, invalid UUIDs coerce to `None` in the
+    // planner (not fatal), so unparseable ids simply miss here.
+    let mut runner_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_runner_id", "assigned_runner"] {
+            if let Some(id) = scalar_id(payload, key) {
+                runner_ids.insert(id);
+            }
+        }
+    }
+    let runner_list: Vec<String> = runner_ids.into_iter().collect();
+    let mut runners = HashMap::new();
+    if !runner_list.is_empty() {
+        let parsed = parse_snapshot_ids(&runner_list);
+        if !parsed.is_empty() {
+            let models = runner::Entity::find()
+                .select_only()
+                .columns([runner::Column::Id, runner::Column::Name])
+                .filter(runner::Column::Id.is_in(parsed))
+                .into_model::<RunnerRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                runners.insert(
+                    key.clone(),
+                    RunnerRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
+    }
+    // Pod ids (`assigned_pod_id or assigned_pod`, both sides) — same
+    // shape, scoped to non-deleted pods.
+    let mut pod_ids: HashSet<String> = HashSet::new();
+    for payload in [requested, current] {
+        for key in ["assigned_pod_id", "assigned_pod"] {
+            if let Some(id) = scalar_id(payload, key) {
+                pod_ids.insert(id);
+            }
+        }
+    }
+    let pod_list: Vec<String> = pod_ids.into_iter().collect();
+    let mut pods = HashMap::new();
+    if !pod_list.is_empty() {
+        let parsed = parse_snapshot_ids(&pod_list);
+        if !parsed.is_empty() {
+            let models = pod::Entity::find()
+                .select_only()
+                .columns([pod::Column::Id, pod::Column::Name])
+                .filter(pod::Column::Id.is_in(parsed))
+                .filter(pod::Column::DeletedAt.is_null())
+                .into_model::<PodRow>()
+                .all(&db)
+                .await
+                .map_err(|error| fail(into_sqlx(error)))?;
+            for model in models {
+                let key = model.id.to_string();
+                pods.insert(
+                    key.clone(),
+                    PodRef {
+                        id: key,
+                        name: model.name,
+                    },
+                );
+            }
+        }
     }
     // Latest activity for `track_description` (`:89`). `actor_id`
     // stringifies like `str(...)` (`None` → `"None"`); a null `field`
@@ -992,25 +1248,23 @@ async fn fetch_update_snapshots(
     let latest = if issue_id.is_empty() {
         None
     } else {
-        sqlx::query(FIND_LATEST_ACTIVITY_SQL)
-            .bind(lookup_uuid(issue_id, "description snapshot")?)
-            .fetch_optional(pool)
+        let model = latest_activity_query(lookup_uuid(issue_id, "description snapshot")?)
+            .into_model::<LatestActivityRow>()
+            .one(&db)
             .await
-            .map_err(fail)?
-            .map(|row| {
-                let id: Uuid = row.get("id");
-                let actor: Option<Uuid> = row.get("actor_id");
-                let field: Option<String> = row.get("field");
-                (
-                    id,
-                    DescriptionLatest {
-                        field: field.unwrap_or_default(),
-                        actor_id: actor
-                            .map(|id| id.to_string())
-                            .unwrap_or_else(|| "None".to_owned()),
-                    },
-                )
-            })
+            .map_err(|error| fail(into_sqlx(error)))?;
+        model.map(|model| {
+            (
+                model.id,
+                DescriptionLatest {
+                    field: model.field.unwrap_or_default(),
+                    actor_id: model
+                        .actor_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "None".to_owned()),
+                },
+            )
+        })
     };
     Ok(UpdateSnapshots {
         parents,
@@ -1018,6 +1272,8 @@ async fn fetch_update_snapshots(
         labels,
         users,
         estimates,
+        runners,
+        pods,
         latest,
     })
 }
@@ -1052,49 +1308,53 @@ async fn fetch_cycles(
     ids: &[String],
 ) -> Result<HashMap<String, CycleRef>, DispatchError> {
     let mut map = HashMap::new();
-    for row in fetch_text_map(pool, FIND_CYCLE_SQL_TEXT, ids)
+    if ids.is_empty() {
+        return Ok(map);
+    }
+    let parsed = parse_snapshot_ids(ids);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let models = cycles::Entity::find()
+        .select_only()
+        .columns([cycles::Column::Id, cycles::Column::Name])
+        .filter(cycles::Column::Id.is_in(parsed))
+        .filter(cycles::Column::DeletedAt.is_null())
+        .into_model::<CycleRow>()
+        .all(&db)
         .await
-        .map_err(|error| DispatchError::Log(format!("cycle snapshot: {error}")))?
-    {
-        let id: String = row.get("cid");
+        .map_err(|error| DispatchError::Log(format!("cycle snapshot: {}", into_sqlx(error))))?;
+    for model in models {
+        let key = model.id.to_string();
         map.insert(
-            id.clone(),
+            key.clone(),
             CycleRef {
-                id,
-                name: row.get("name"),
+                id: key,
+                name: model.name,
             },
         );
     }
     Ok(map)
 }
 
-/// Same `SELECT` as [`FIND_CYCLE_SQL`] but projecting the text id for map
-/// keys (bulk form never errors on garbage ids).
-const FIND_CYCLE_SQL_TEXT: &str =
-    r#"SELECT id::text AS cid, name FROM cycles WHERE id::text = ANY($1) AND deleted_at IS NULL"#;
-
-/// Same `SELECT` as [`FIND_MODULE_SQL`] in bulk form.
-const FIND_MODULE_SQL_TEXT: &str =
-    r#"SELECT id::text AS mid, name FROM modules WHERE id::text = ANY($1) AND deleted_at IS NULL"#;
-
-/// Same `SELECT` as [`FIND_ISSUE_REF_SQL`] in bulk form.
-const FIND_ISSUE_REF_SQL_TEXT: &str = r#"SELECT i.id::text AS rid, p.identifier, i.sequence_id FROM issues i JOIN projects p ON p.id = i.project_id WHERE i.id::text = ANY($1) AND i.deleted_at IS NULL"#;
-
 /// Bulk existence set for the `issue_exists` planner closures.
 async fn fetch_existing_issues(
     pool: &PgPool,
     ids: &[String],
 ) -> Result<HashSet<String>, DispatchError> {
-    Ok(fetch_text_map(
-        pool,
-        "SELECT id::text AS eid FROM issues WHERE id::text = ANY($1) AND deleted_at IS NULL",
-        ids,
-    )
-    .await
-    .map_err(|error| DispatchError::Log(format!("issue snapshot: {error}")))?
-    .into_iter()
-    .map(|row| row.get("eid"))
-    .collect())
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let parsed = parse_snapshot_ids(ids);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let models = issues::Entity::find()
+        .select_only()
+        .column(issues::Column::Id)
+        .filter(issues::Column::Id.is_in(parsed))
+        .filter(issues::Column::DeletedAt.is_null())
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|error| DispatchError::Log(format!("issue snapshot: {}", into_sqlx(error))))?;
+    Ok(models.into_iter().map(|id| id.to_string()).collect())
 }
 
 /// Run the `ACTIVITY_MAPPER` builder for the call: snapshot queries plus
@@ -1132,13 +1392,16 @@ async fn collect_rows(
     match call.activity_type.as_str() {
         "issue.activity.created" => {
             // `Issue.objects.get` raises on a miss or a bad pk (`:567`).
+            let created_db = pidash_db::pool::sea_orm_connection(pool);
             let created: Option<(DateTime<Utc>, Option<Uuid>)> =
-                sqlx::query(FIND_CREATED_ISSUE_SQL)
-                    .bind(lookup_uuid(&frame.issue_id, "create issue")?)
-                    .fetch_optional(pool)
+                created_issue_query(lookup_uuid(&frame.issue_id, "create issue")?)
+                    .into_model::<CreatedIssueRow>()
+                    .one(&created_db)
                     .await
-                    .map_err(|error| DispatchError::Log(format!("create issue: {error}")))?
-                    .map(|row| (row.get("created_at"), row.get("created_by_id")));
+                    .map_err(|error| {
+                        DispatchError::Log(format!("create issue: {}", into_sqlx(error)))
+                    })?
+                    .map(|row| (row.created_at.with_timezone(&Utc), row.created_by_id));
             let Some((created_at, created_by)) = created else {
                 return Err(DispatchError::Log(format!(
                     "create issue: row missing for {}",
@@ -1181,22 +1444,29 @@ async fn collect_rows(
             ));
             let assignee_list: Vec<String> = assignee_ids.into_iter().collect();
             let mut users = HashMap::new();
-            for row in fetch_text_map(
-                pool,
-                "SELECT id::text AS uid, display_name FROM users WHERE id::text = ANY($1)",
-                &assignee_list,
-            )
-            .await
-            .map_err(|error| DispatchError::Log(format!("create issue users: {error}")))?
-            {
-                let id: String = row.get("uid");
-                users.insert(
-                    id.clone(),
-                    UserRef {
-                        id,
-                        display_name: row.get("display_name"),
-                    },
-                );
+            if !assignee_list.is_empty() {
+                let parsed = parse_snapshot_ids(&assignee_list);
+                let users_db = pidash_db::pool::sea_orm_connection(pool);
+                let models = users::Entity::find()
+                    .select_only()
+                    .columns([users::Column::Id, users::Column::DisplayName])
+                    .filter(users::Column::Id.is_in(parsed))
+                    .into_model::<SnapUserRow>()
+                    .all(&users_db)
+                    .await
+                    .map_err(|error| {
+                        DispatchError::Log(format!("create issue users: {}", into_sqlx(error)))
+                    })?;
+                for model in models {
+                    let key = model.id.to_string();
+                    users.insert(
+                        key.clone(),
+                        UserRef {
+                            id: key,
+                            display_name: model.display_name,
+                        },
+                    );
+                }
             }
             let outcome = plan_create_issue(
                 requested,
@@ -1231,6 +1501,8 @@ async fn collect_rows(
                 label: &|id| snapshots.labels.get(id).cloned(),
                 user: &|id| snapshots.users.get(id).cloned(),
                 estimate: &|id| snapshots.estimates.get(id).cloned(),
+                runner: &|id| snapshots.runners.get(id).cloned(),
+                pod: &|id| snapshots.pods.get(id).cloned(),
                 description_latest: snapshots.latest.as_ref().map(|(_, latest)| latest.clone()),
             };
             let outcome = plan_update_issue(requested, current, frame, &resolvers).map_err(fail)?;
@@ -1342,11 +1614,23 @@ async fn collect_rows(
             let module_id = scalar_id(requested_value.as_ref(), "module_id");
             let mut modules = HashMap::new();
             if let Some(id) = module_id {
-                for row in fetch_text_map(pool, FIND_MODULE_SQL_TEXT, &[id])
-                    .await
-                    .map_err(|error| DispatchError::Log(format!("module snapshot: {error}")))?
-                {
-                    modules.insert(row.get::<String, _>("mid"), row.get("name"));
+                let parsed = parse_snapshot_ids(std::slice::from_ref(&id));
+                if !parsed.is_empty() {
+                    let modules_db = pidash_db::pool::sea_orm_connection(pool);
+                    let models = modules::Entity::find()
+                        .select_only()
+                        .columns([modules::Column::Id, modules::Column::Name])
+                        .filter(modules::Column::Id.is_in(parsed))
+                        .filter(modules::Column::DeletedAt.is_null())
+                        .into_model::<ModuleRow>()
+                        .all(&modules_db)
+                        .await
+                        .map_err(|error| {
+                            DispatchError::Log(format!("module snapshot: {}", into_sqlx(error)))
+                        })?;
+                    for model in models {
+                        modules.insert(model.id.to_string(), model.name);
+                    }
                 }
             }
             let frame_exists = if frame.issue_id.is_empty() {
@@ -1406,14 +1690,21 @@ async fn collect_rows(
         "issue_reaction.activity.created" => {
             let reaction = reaction_string(parsed_opt(requested).as_ref())?;
             let lookup = match (&reaction, &call.actor_id) {
-                (Some(reaction), Some(actor)) => sqlx::query(FIND_ISSUE_REACTION_SQL)
-                    .bind(reaction)
-                    .bind(project_uuid)
-                    .bind(lookup_uuid(actor, "reaction lookup")?)
-                    .fetch_optional(pool)
+                (Some(reaction), Some(actor)) => {
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    issue_reaction_query(
+                        reaction,
+                        project_uuid,
+                        lookup_uuid(actor, "reaction lookup")?,
+                    )
+                    .into_tuple::<Uuid>()
+                    .one(&db)
                     .await
-                    .map_err(|error| DispatchError::Log(format!("reaction lookup: {error}")))?
-                    .map(|row| row.get::<Uuid, _>("id").to_string()),
+                    .map_err(|error| {
+                        DispatchError::Log(format!("reaction lookup: {}", into_sqlx(error)))
+                    })?
+                    .map(|id| id.to_string())
+                }
                 _ => None,
             };
             push_opt(
@@ -1430,32 +1721,38 @@ async fn collect_rows(
         "comment_reaction.activity.created" => {
             let reaction = reaction_string(parsed_opt(requested).as_ref())?;
             let lookup = match (&reaction, &call.actor_id) {
-                (Some(reaction), Some(actor)) => sqlx::query(FIND_COMMENT_REACTION_SQL)
-                    .bind(reaction)
-                    .bind(project_uuid)
-                    .bind(lookup_uuid(actor, "reaction lookup")?)
-                    .fetch_optional(pool)
+                (Some(reaction), Some(actor)) => {
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    comment_reaction_query(
+                        reaction,
+                        project_uuid,
+                        lookup_uuid(actor, "reaction lookup")?,
+                    )
+                    .into_model::<CommentReactionRow>()
+                    .one(&db)
                     .await
-                    .map_err(|error| DispatchError::Log(format!("reaction lookup: {error}")))?
-                    .map(|row| {
-                        (
-                            row.get::<Uuid, _>("id").to_string(),
-                            row.get::<Uuid, _>("comment_id").to_string(),
-                        )
-                    }),
+                    .map_err(|error| {
+                        DispatchError::Log(format!("reaction lookup: {}", into_sqlx(error)))
+                    })?
+                    .map(|row| (row.id.to_string(), row.comment_id.to_string()))
+                }
                 _ => None,
             };
             // `IssueComment.objects.get(pk=comment_id, project_id=...)`.
             let comment = match &lookup {
-                Some((_, comment_id)) => sqlx::query(FIND_COMMENT_ISSUE_SQL)
-                    .bind(lookup_uuid(comment_id, "comment lookup")?)
-                    .bind(project_uuid)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|error| DispatchError::Log(format!("comment lookup: {error}")))?
-                    .map(|row| CommentRef {
-                        issue_id: row.get::<Uuid, _>("issue_id").to_string(),
-                    }),
+                Some((_, comment_id)) => {
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    comment_issue_query(lookup_uuid(comment_id, "comment lookup")?, project_uuid)
+                        .into_tuple::<Uuid>()
+                        .one(&db)
+                        .await
+                        .map_err(|error| {
+                            DispatchError::Log(format!("comment lookup: {}", into_sqlx(error)))
+                        })?
+                        .map(|issue_id| CommentRef {
+                            issue_id: issue_id.to_string(),
+                        })
+                }
                 None => None,
             };
             // A lookup hit with a missing comment raises in Python
@@ -1478,13 +1775,17 @@ async fn collect_rows(
         "comment_reaction.activity.deleted" => {
             let current_value = parsed_opt(current);
             let resolved = match scalar_id(current_value.as_ref(), "comment_id") {
-                Some(comment_id) => sqlx::query(FIND_COMMENT_ISSUE_SQL)
-                    .bind(lookup_uuid(&comment_id, "comment lookup")?)
-                    .bind(project_uuid)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|error| DispatchError::Log(format!("comment lookup: {error}")))?
-                    .map(|row| row.get::<Uuid, _>("issue_id").to_string()),
+                Some(comment_id) => {
+                    let db = pidash_db::pool::sea_orm_connection(pool);
+                    comment_issue_query(lookup_uuid(&comment_id, "comment lookup")?, project_uuid)
+                        .into_tuple::<Uuid>()
+                        .one(&db)
+                        .await
+                        .map_err(|error| {
+                            DispatchError::Log(format!("comment lookup: {}", into_sqlx(error)))
+                        })?
+                        .map(|issue_id| issue_id.to_string())
+                }
                 None => None,
             };
             push_opt(
@@ -1585,16 +1886,32 @@ async fn fetch_issue_refs(
     ids: &[String],
 ) -> Result<HashMap<String, IssueRef>, DispatchError> {
     let mut map = HashMap::new();
-    for row in fetch_text_map(pool, FIND_ISSUE_REF_SQL_TEXT, ids)
+    if ids.is_empty() {
+        return Ok(map);
+    }
+    let parsed = parse_snapshot_ids(ids);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let stmt = issue_ref_statement(&parsed);
+    let rows = db
+        .query_all(DbBackend::Postgres.build(&stmt))
         .await
-        .map_err(|error| DispatchError::Log(format!("relation snapshot: {error}")))?
-    {
-        let id: String = row.get("rid");
+        .map_err(|error| DispatchError::Log(format!("relation snapshot: {}", into_sqlx(error))))?;
+    for row in &rows {
+        let id: Uuid = row.try_get("", "id").map_err(|error| {
+            DispatchError::Log(format!("relation snapshot: {}", into_sqlx(error)))
+        })?;
+        let key = id.to_string();
+        let identifier: String = row.try_get("", "identifier").map_err(|error| {
+            DispatchError::Log(format!("relation snapshot: {}", into_sqlx(error)))
+        })?;
+        let sequence_id: i64 = row.try_get("", "sequence_id").map_err(|error| {
+            DispatchError::Log(format!("relation snapshot: {}", into_sqlx(error)))
+        })?;
         map.insert(
-            id,
+            key,
             IssueRef {
-                identifier: row.get("identifier"),
-                sequence_id: row.get("sequence_id"),
+                identifier,
+                sequence_id,
             },
         );
     }
@@ -1604,9 +1921,12 @@ async fn fetch_issue_refs(
 /// `IssueActivity.objects.bulk_create(issue_activities)` (`:1675`): plain
 /// multi-row `INSERT`, no batch size, no conflict handling — one statement
 /// or none (Django skips the query for an empty list). Returns the rows
-/// with their `RETURNING` columns for the notification payload, in batch
-/// order. A cast error aborts the whole batch with nothing written,
-/// exactly like the Django single-query insert.
+/// for the notification payload, in batch order. The `id`/`created_at`/
+/// `updated_at` values are Python-side (`uuid4`/`auto_now*`), so the
+/// `RETURNING` columns are exactly what was inserted; building them from
+/// the inputs keeps the one-statement shape without a second round-trip.
+/// A cast error aborts the whole batch with nothing written, exactly like
+/// the Django single-query insert.
 async fn bulk_insert(
     pool: &PgPool,
     rows: Vec<BoundRow>,
@@ -1615,49 +1935,43 @@ async fn bulk_insert(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let mut builder = sqlx::QueryBuilder::new(
-        "INSERT INTO issue_activities (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, verb, field, old_value, new_value, comment, attachments, issue_comment_id, actor_id, old_identifier, new_identifier, epoch) ",
-    );
-    builder.push_values(rows.iter(), |mut row, bound| {
-        row.push_bind(Uuid::new_v4())
-            .push_bind(now)
-            .push_bind(now)
-            .push_bind(None::<Uuid>)
-            .push_bind(None::<Uuid>)
-            .push_bind(None::<DateTime<Utc>>)
-            .push_bind(bound.project_id)
-            .push_bind(bound.workspace_id)
-            .push_bind(bound.issue_id)
-            .push_bind(bound.row.verb.clone())
-            .push_bind(bound.row.field.clone())
-            .push_bind(bound.row.old_value.clone())
-            .push_bind(bound.row.new_value.clone())
-            .push_bind(bound.row.comment.clone());
-        row.push("'{}'::varchar[]");
-        row.push_bind(bound.issue_comment_id)
-            .push_bind(bound.actor_id)
-            .push_bind(bound.old_identifier)
-            .push_bind(bound.new_identifier)
-            .push_bind(bound.row.epoch);
-    });
-    builder.push(" RETURNING id, created_at, updated_at");
-    let inserted = builder
-        .build()
-        .fetch_all(pool)
+    let mut ids: Vec<Uuid> = Vec::with_capacity(rows.len());
+    let mut models: Vec<issue_activities::ActiveModel> = Vec::with_capacity(rows.len());
+    for bound in &rows {
+        let id = Uuid::new_v4();
+        ids.push(id);
+        models.push(issue_activities::ActiveModel {
+            id: Set(id),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(None),
+            updated_by_id: Set(None),
+            deleted_at: Set(None),
+            project_id: Set(bound.project_id),
+            workspace_id: Set(bound.workspace_id),
+            issue_id: Set(bound.issue_id),
+            verb: Set(bound.row.verb.clone()),
+            field: Set(bound.row.field.clone()),
+            old_value: Set(bound.row.old_value.clone()),
+            new_value: Set(bound.row.new_value.clone()),
+            comment: Set(bound.row.comment.clone()),
+            attachments: Set(Vec::new()),
+            issue_comment_id: Set(bound.issue_comment_id),
+            actor_id: Set(Some(bound.actor_id)),
+            old_identifier: Set(bound.old_identifier),
+            new_identifier: Set(bound.new_identifier),
+            epoch: Set(Some(bound.row.epoch)),
+        });
+    }
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    issue_activities::Entity::insert_many(models)
+        .exec(&db)
         .await
-        .map_err(|error| DispatchError::Log(format!("bulk_create: {error}")))?;
-    Ok(inserted
+        .map_err(|error| DispatchError::Log(format!("bulk_create: {}", into_sqlx(error))))?;
+    Ok(ids
         .into_iter()
         .zip(rows)
-        .map(|(record, bound)| {
-            StoredActivityRow::new(
-                record.get("id"),
-                record.get("created_at"),
-                record.get("updated_at"),
-                bound.row,
-                bound.issue_comment_id,
-            )
-        })
+        .map(|(id, bound)| StoredActivityRow::new(id, now, now, bound.row, bound.issue_comment_id))
         .collect())
 }
 
@@ -1672,28 +1986,32 @@ async fn insert_immediate(
     now: DateTime<Utc>,
 ) -> Result<(), DispatchError> {
     let bound = bind_row(row.clone())?;
-    sqlx::query(
-        "INSERT INTO issue_activities (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, verb, field, old_value, new_value, comment, attachments, issue_comment_id, actor_id, old_identifier, new_identifier, epoch) VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, '{}'::varchar[], $12, $13, $14, $15, $16)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(created_at)
-    .bind(now)
-    .bind(bound.project_id)
-    .bind(bound.workspace_id)
-    .bind(bound.issue_id)
-    .bind(bound.row.verb.clone())
-    .bind(bound.row.field.clone())
-    .bind(bound.row.old_value.clone())
-    .bind(bound.row.new_value.clone())
-    .bind(bound.row.comment.clone())
-    .bind(bound.issue_comment_id)
-    .bind(bound.actor_id)
-    .bind(bound.old_identifier)
-    .bind(bound.new_identifier)
-    .bind(bound.row.epoch)
-    .execute(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    issue_activities::Entity::insert_many(vec![issue_activities::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        created_at: Set(created_at.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        project_id: Set(bound.project_id),
+        workspace_id: Set(bound.workspace_id),
+        issue_id: Set(bound.issue_id),
+        verb: Set(bound.row.verb.clone()),
+        field: Set(bound.row.field.clone()),
+        old_value: Set(bound.row.old_value.clone()),
+        new_value: Set(bound.row.new_value.clone()),
+        comment: Set(bound.row.comment.clone()),
+        attachments: Set(Vec::new()),
+        issue_comment_id: Set(bound.issue_comment_id),
+        actor_id: Set(Some(bound.actor_id)),
+        old_identifier: Set(bound.old_identifier),
+        new_identifier: Set(bound.new_identifier),
+        epoch: Set(Some(bound.row.epoch)),
+    }])
+    .exec(&db)
     .await
-    .map_err(|error| DispatchError::Log(format!("create issue insert: {error}")))?;
+    .map_err(|error| DispatchError::Log(format!("create issue insert: {}", into_sqlx(error))))?;
     Ok(())
 }
 
@@ -1709,11 +2027,18 @@ async fn persist(
         insert_immediate(pool, row, *created_at, now).await?;
     }
     if let Some(activity_id) = collected.touch_activity {
-        sqlx::query(TOUCH_ACTIVITY_SQL)
-            .bind(activity_id)
-            .execute(pool)
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        issue_activities::Entity::update_many()
+            .col_expr(
+                issue_activities::Column::CreatedAt,
+                Expr::current_timestamp().into(),
+            )
+            .filter(issue_activities::Column::Id.eq(activity_id))
+            .exec(&db)
             .await
-            .map_err(|error| DispatchError::Log(format!("description touch: {error}")))?;
+            .map_err(|error| {
+                DispatchError::Log(format!("description touch: {}", into_sqlx(error)))
+            })?;
     }
     if !collected.touched_issues.is_empty() {
         let touched: Vec<Uuid> = collected
@@ -1725,21 +2050,36 @@ async fn persist(
         // (`activity_issue::CycleOutcome::touched_issue_ids`): one statement
         // over the soft-filtered set — same final rows as the per-record
         // guarded saves.
-        touch_issues(pool, &touched)
+        touch_issues(&pidash_db::pool::sea_orm_connection(pool), &touched)
             .await
             .map_err(|error| DispatchError::Log(format!("record touches: {error}")))?;
     }
     for subscriber in &collected.subscribers {
-        sqlx::query(INSERT_SUBSCRIBERS_SQL)
-            .bind(lookup_uuid(&subscriber.subscriber_id, "subscribers")?)
-            .bind(lookup_uuid(&subscriber.issue_id, "subscribers")?)
-            .bind(lookup_uuid(&subscriber.workspace_id, "subscribers")?)
-            .bind(lookup_uuid(&subscriber.project_id, "subscribers")?)
-            .bind(lookup_uuid(&subscriber.created_by_id, "subscribers")?)
-            .bind(lookup_uuid(&subscriber.updated_by_id, "subscribers")?)
-            .execute(pool)
-            .await
-            .map_err(|error| DispatchError::Log(format!("subscribers: {error}")))?;
+        // One statement per subscriber, any conflict ignored. Django's
+        // `bulk_create(ignore_conflicts=True)` fills `id` (uuid4 default)
+        // and `created_at`/`updated_at` (`auto_now_add`/`auto_now` in
+        // `db/mixins.py`) client-side, so set the same stamps here.
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        issue_subscribers::Entity::insert_many(vec![issue_subscribers::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            deleted_at: Set(None),
+            subscriber_id: Set(lookup_uuid(&subscriber.subscriber_id, "subscribers")?),
+            issue_id: Set(lookup_uuid(&subscriber.issue_id, "subscribers")?),
+            workspace_id: Set(lookup_uuid(&subscriber.workspace_id, "subscribers")?),
+            project_id: Set(lookup_uuid(&subscriber.project_id, "subscribers")?),
+            created_by_id: Set(Some(lookup_uuid(&subscriber.created_by_id, "subscribers")?)),
+            updated_by_id: Set(Some(lookup_uuid(&subscriber.updated_by_id, "subscribers")?)),
+        }])
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::new()
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(&db)
+        .await
+        .map_err(|error| DispatchError::Log(format!("subscribers: {}", into_sqlx(error))))?;
     }
     bulk_insert(pool, collected.rows, now).await
 }
@@ -1760,12 +2100,12 @@ pub async fn run_activity<R: RedisOrigin>(
     }
     // `:1612-1613` — raises (miss) into the broad-except.
     let project_uuid = Uuid::parse_str(project_id).map_err(|_| DispatchError::Quiet)?;
-    let workspace_id: Uuid = sqlx::query(FIND_PROJECT_WORKSPACE_SQL)
-        .bind(project_uuid)
-        .fetch_optional(pool)
+    let run_db = pidash_db::pool::sea_orm_connection(pool);
+    let workspace_id: Uuid = project_workspace_query(project_uuid)
+        .into_tuple::<Uuid>()
+        .one(&run_db)
         .await
-        .map_err(|error| DispatchError::Log(format!("project lookup: {error}")))?
-        .map(|row| row.get("workspace_id"))
+        .map_err(|error| DispatchError::Log(format!("project lookup: {}", into_sqlx(error))))?
         .ok_or_else(|| {
             DispatchError::Log(format!("project lookup: row missing for {project_id}"))
         })?;
@@ -1790,15 +2130,17 @@ pub async fn run_activity<R: RedisOrigin>(
             }
         }
         let touch_id = lookup_uuid(issue_id, "issue touch lookup")?;
-        let found: bool = sqlx::query(FIND_ISSUE_SQL)
-            .bind(touch_id)
-            .fetch_optional(pool)
+        let found: bool = issue_exists_query(touch_id)
+            .into_tuple::<Uuid>()
+            .one(&run_db)
             .await
-            .map_err(|error| DispatchError::Log(format!("issue touch lookup: {error}")))?
+            .map_err(|error| {
+                DispatchError::Log(format!("issue touch lookup: {}", into_sqlx(error)))
+            })?
             .is_some();
         if found {
             // Own try/except-pass: touch failures never abort the build.
-            let _ = touch_issue(pool, touch_id).await;
+            let _ = touch_issue(&pidash_db::pool::sea_orm_connection(pool), touch_id).await;
         }
     }
     let collected = collect_rows(pool, &frame, call, project_id).await?;
@@ -1818,32 +2160,31 @@ pub async fn run_activity<R: RedisOrigin>(
             flat_ids.dedup();
             let mut flats: HashMap<String, Map<String, Value>> = HashMap::new();
             if !flat_ids.is_empty() {
-                for row in sqlx::query(
-                    "SELECT id::text AS fid, name, description_json, description_html, priority, complexity_score, start_date, target_date, sequence_id, sort_order, is_draft FROM issues WHERE id::text = ANY($1)",
-                )
-                .bind(&flat_ids)
-                .fetch_all(pool)
-                .await
-                .map_err(|error| DispatchError::Log(format!("issue_detail: {error}")))?
-                {
-                    let id: String = row.get("fid");
-                    flats.insert(
-                        id,
-                        issue_flat_json(&IssueFlatRow {
-                            id: Uuid::parse_str(&row.get::<String, _>("fid"))
-                                .unwrap_or_default(),
-                            name: row.get("name"),
-                            description_json: row.get("description_json"),
-                            description_html: row.get("description_html"),
-                            priority: row.get("priority"),
-                            complexity_score: row.get("complexity_score"),
-                            start_date: row.get("start_date"),
-                            target_date: row.get("target_date"),
-                            sequence_id: row.get("sequence_id"),
-                            sort_order: row.get("sort_order"),
-                            is_draft: row.get("is_draft"),
-                        }),
-                    );
+                let parsed = parse_snapshot_ids(&flat_ids);
+                let models = issues::Entity::find()
+                    .select_only()
+                    .columns([
+                        issues::Column::Id,
+                        issues::Column::Name,
+                        issues::Column::DescriptionJson,
+                        issues::Column::DescriptionHtml,
+                        issues::Column::Priority,
+                        issues::Column::ComplexityScore,
+                        issues::Column::StartDate,
+                        issues::Column::TargetDate,
+                        issues::Column::SequenceId,
+                        issues::Column::SortOrder,
+                        issues::Column::IsDraft,
+                    ])
+                    .filter(issues::Column::Id.is_in(parsed))
+                    .into_model::<IssueFlatRow>()
+                    .all(&run_db)
+                    .await
+                    .map_err(|error| {
+                        DispatchError::Log(format!("issue_detail: {}", into_sqlx(error)))
+                    })?;
+                for model in models {
+                    flats.insert(model.id.to_string(), issue_flat_json(&model));
                 }
             }
             // Rows whose issue is gone (or null) serialize with a null
@@ -2072,6 +2413,36 @@ mod tests {
         );
     }
 
+    // NEWPIDASH-134 · the app destroy enqueues current_instance={} (a dict,
+    // base.py:747); the Python delete handler ignores it, so the job must
+    // bind and write the deleted row. Objects dump to JSON text.
+    #[test]
+    fn bind_accepts_deleted_empty_object() {
+        let kwargs = json!({
+            "type": "issue.activity.deleted",
+            "requested_data": "{\"issue_id\": \"11111111-1111-4111-8111-111111111111\"}",
+            "current_instance": {},
+            "issue_id": "11111111-1111-4111-8111-111111111111",
+            "actor_id": "22222222-2222-4222-8222-222222222222",
+            "project_id": "33333333-3333-4333-8333-333333333333",
+            "epoch": 1750000000.0,
+            "subscriber": false,
+            "notification": true,
+            "origin": "https://app.example",
+        });
+        let call = bind_issue_activity(&json!([]), &kwargs).expect("deleted binds");
+        assert_eq!(call.activity_type, "issue.activity.deleted");
+        assert_eq!(call.current_instance.as_deref(), Some("{}"));
+        // Scalars still reject (Python json.loads would fail on them too).
+        let bad = json!({
+            "type": "issue.activity.deleted",
+            "requested_data": "{\"issue_id\": \"x\"}",
+            "current_instance": 5,
+            "epoch": 1750000000.0,
+        });
+        assert!(bind_issue_activity(&json!([]), &bad).is_err());
+    }
+
     // FX-ACT-03 · redis origin TTL.
     #[test]
     fn origin_ttl_is_600() {
@@ -2081,35 +2452,194 @@ mod tests {
     // FX-ACT-03 · lookups skip soft-deleted rows (default manager).
     #[test]
     fn lookups_filter_soft_deletes() {
-        for sql in [
-            FIND_PROJECT_WORKSPACE_SQL,
-            FIND_ISSUE_SQL,
-            FIND_ISSUE_REACTION_SQL,
-            FIND_COMMENT_REACTION_SQL,
-            FIND_COMMENT_ISSUE_SQL,
-            FIND_ISSUE_REF_SQL,
-            FIND_CREATED_ISSUE_SQL,
-            FIND_STATE_SQL,
-            FIND_LABEL_SQL,
-            FIND_CYCLE_SQL,
-            FIND_MODULE_SQL,
-        ] {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let project = Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid");
+        let stmts = [
+            project_workspace_query(id)
+                .build(DbBackend::Postgres)
+                .to_string(),
+            issue_exists_query(id)
+                .build(DbBackend::Postgres)
+                .to_string(),
+            issue_reaction_query("up", project, id)
+                .build(DbBackend::Postgres)
+                .to_string(),
+            comment_reaction_query("up", project, id)
+                .build(DbBackend::Postgres)
+                .to_string(),
+            comment_issue_query(id, project)
+                .build(DbBackend::Postgres)
+                .to_string(),
+            issue_ref_statement(&[id]).to_string(sea_orm::sea_query::PostgresQueryBuilder),
+            created_issue_query(id)
+                .build(DbBackend::Postgres)
+                .to_string(),
+        ];
+        for sql in &stmts {
             assert!(
-                sql.contains("deleted_at IS NULL"),
+                sql.contains("\"deleted_at\" IS NULL"),
                 "missing soft-delete scope: {sql}"
             );
         }
+        // The state lookup also excludes triage-group rows (PIDASHCONV-1278).
+        let state_sql = states::Entity::find()
+            .select_only()
+            .columns([states::Column::Id, states::Column::Name])
+            .filter(states::Column::Id.is_in([id]))
+            .filter(states::Column::ProjectId.eq(project))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            state_sql.contains("\"group\" <> 'triage'"),
+            "missing triage exclusion: {state_sql}"
+        );
         // The custom user manager has no soft-delete scope.
-        assert!(!FIND_USER_SQL.contains("deleted_at"));
+        let user_sql = users::Entity::find()
+            .select_only()
+            .columns([users::Column::Id, users::Column::DisplayName])
+            .filter(users::Column::Id.is_in([id]))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            !user_sql.contains("deleted_at"),
+            "user lookup must not soften: {user_sql}"
+        );
     }
 
     // PIDASHCONV-1278 · the default `StateManager` excludes triage-group
     // states (`db/models/state.py:79-83`); the lookup renders the same.
     #[test]
     fn state_lookup_excludes_triage() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let project = Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid");
+        let state_sql = states::Entity::find()
+            .select_only()
+            .columns([states::Column::Id, states::Column::Name])
+            .filter(states::Column::Id.is_in([id]))
+            .filter(states::Column::ProjectId.eq(project))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage"))
+            .build(DbBackend::Postgres)
+            .to_string();
         assert!(
-            FIND_STATE_SQL.contains("\"group\" <> 'triage'"),
-            "missing triage exclusion: {FIND_STATE_SQL}"
+            state_sql.contains("\"group\" <> 'triage'"),
+            "missing triage exclusion: {state_sql}"
+        );
+    }
+
+    // Snapshot builders pin their joins, soft-delete scope and the
+    // latest-activity ordering (`ORDER BY created_at DESC LIMIT 1`).
+    #[test]
+    fn estimate_and_latest_statements_pin_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let estimate_sql =
+            estimate_points_statement(&[id]).to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(
+            estimate_sql.contains("\"estimate_points\""),
+            "{estimate_sql}"
+        );
+        assert!(estimate_sql.contains("\"estimates\""), "{estimate_sql}");
+        assert!(estimate_sql.contains("\"value\""), "{estimate_sql}");
+        assert!(estimate_sql.contains("\"estimate_type\""), "{estimate_sql}");
+        assert!(
+            estimate_sql.contains("\"deleted_at\" IS NULL"),
+            "{estimate_sql}"
+        );
+        let latest_sql = latest_activity_query(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(latest_sql.contains("\"issue_activities\""), "{latest_sql}");
+        assert!(latest_sql.contains("\"issue_id\""), "{latest_sql}");
+        assert!(latest_sql.contains("\"created_at\" DESC"), "{latest_sql}");
+        assert!(latest_sql.contains("LIMIT 1"), "{latest_sql}");
+        // No soft-delete scope on the latest-activity lookup (the old
+        // FIND_LATEST_ACTIVITY_SQL had none): a soft-deleted row is still
+        // the latest activity.
+        assert!(!latest_sql.contains("deleted_at"), "{latest_sql}");
+    }
+
+    // The inline bulk-snapshot shapes (fetch_cycles, fetch_existing_issues,
+    // the IssueFlatRow fetch and the create-issue assignee fetch) pin
+    // their columns and soft-delete scope the same way the state/user
+    // shapes above do (PIDASHCONV-1278 pattern kept in tests).
+    #[test]
+    fn snapshot_shapes_pin_soft_scope() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let id = Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let cycle_sql = cycles::Entity::find()
+            .select_only()
+            .columns([cycles::Column::Id, cycles::Column::Name])
+            .filter(cycles::Column::Id.is_in([id]))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(cycle_sql.contains("\"cycles\""), "{cycle_sql}");
+        assert!(cycle_sql.contains("\"deleted_at\" IS NULL"), "{cycle_sql}");
+        let module_sql = modules::Entity::find()
+            .select_only()
+            .columns([modules::Column::Id, modules::Column::Name])
+            .filter(modules::Column::Id.is_in([id]))
+            .filter(modules::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(module_sql.contains("\"modules\""), "{module_sql}");
+        assert!(
+            module_sql.contains("\"deleted_at\" IS NULL"),
+            "{module_sql}"
+        );
+        let existing_sql = issues::Entity::find()
+            .select_only()
+            .column(issues::Column::Id)
+            .filter(issues::Column::Id.is_in([id]))
+            .filter(issues::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(existing_sql.contains("\"issues\""), "{existing_sql}");
+        assert!(
+            existing_sql.contains("\"deleted_at\" IS NULL"),
+            "{existing_sql}"
+        );
+        // The IssueFlatSerializer projection has NO soft-delete scope
+        // (the serializer follows the FK onto whatever row is there).
+        let flat_sql = issues::Entity::find()
+            .select_only()
+            .columns([
+                issues::Column::Id,
+                issues::Column::Name,
+                issues::Column::DescriptionJson,
+                issues::Column::DescriptionHtml,
+                issues::Column::Priority,
+                issues::Column::ComplexityScore,
+                issues::Column::StartDate,
+                issues::Column::TargetDate,
+                issues::Column::SequenceId,
+                issues::Column::SortOrder,
+                issues::Column::IsDraft,
+            ])
+            .filter(issues::Column::Id.is_in([id]))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(flat_sql.contains("\"issues\""), "{flat_sql}");
+        assert!(flat_sql.contains("\"description_json\""), "{flat_sql}");
+        assert!(
+            !flat_sql.contains("deleted_at"),
+            "flat projection must not soften: {flat_sql}"
+        );
+        // The create-issue assignee fetch has no soft-delete scope either.
+        let assignee_sql = users::Entity::find()
+            .select_only()
+            .columns([users::Column::Id, users::Column::DisplayName])
+            .filter(users::Column::Id.is_in([id]))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            !assignee_sql.contains("deleted_at"),
+            "assignee fetch must not soften: {assignee_sql}"
         );
     }
 
@@ -2304,5 +2834,91 @@ mod tests {
             route_for(&registry, "pi_dash.bgtasks.issue_activities_task.nope"),
             Route::Unknown
         );
+    }
+
+    /// `DATABASE_URL` pointing at a migrated database, else skip.
+    async fn live_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let migrated: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.issue_activities')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe");
+        if migrated.is_none() {
+            eprintln!("skipping live-db test: the database is not migrated");
+            return None;
+        }
+        Some(pool)
+    }
+
+    /// `bulk_insert` is one multi-row `INSERT` and returns the inputs' own
+    /// `id`/`created_at`/`updated_at` (the `RETURNING` columns were
+    /// Python-side values). The temp table shadows the real one for the
+    /// transaction; `attachments` renders as an empty `varchar[]`.
+    #[tokio::test]
+    async fn live_bulk_insert_round_trips_one_statement() {
+        use sea_orm::{EntityTrait, Set};
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "CREATE TEMP TABLE issue_activities (LIKE public.issue_activities INCLUDING DEFAULTS) ON COMMIT DROP",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp table");
+        let now = chrono::Utc::now();
+        let project = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            let models: Vec<issue_activities::ActiveModel> = ids
+                .iter()
+                .map(|&id| issue_activities::ActiveModel {
+                    id: Set(id),
+                    created_at: Set(now.into()),
+                    updated_at: Set(now.into()),
+                    project_id: Set(project),
+                    workspace_id: Set(workspace),
+                    issue_id: Set(Some(issue)),
+                    verb: Set("issue.activity.created".to_owned()),
+                    field: Set(None),
+                    old_value: Set(None),
+                    new_value: Set(None),
+                    comment: Set(String::new()),
+                    attachments: Set(Vec::new()),
+                    actor_id: Set(Some(actor)),
+                    epoch: Set(Some(1750000000.0)),
+                    ..Default::default()
+                })
+                .collect();
+            issue_activities::Entity::insert_many(models)
+                .exec(&conn)
+                .await
+                .expect("bulk insert");
+            for id in &ids {
+                let row = issue_activities::Entity::find_by_id(*id)
+                    .one(&conn)
+                    .await
+                    .expect("read back")
+                    .expect("row");
+                assert_eq!(row.id, *id);
+                assert!(row.attachments.is_empty());
+            }
+        }
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_activities")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("count");
+        assert_eq!(n, 2);
+        tx.rollback().await.expect("rollback");
     }
 }

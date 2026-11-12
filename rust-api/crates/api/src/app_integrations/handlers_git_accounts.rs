@@ -237,20 +237,28 @@ async fn resolve_workspace_gate(
         _ => return Err(Denial::ServerError),
     };
     let scope = tenant_context(slug);
-    // `role` is a smallint (`ROLE`: 20/15/5); decode as `i16` like the
-    // pilot handlers do.
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL AND w.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let role = row.map(|(role,)| role as i32);
+    // The gate read needs the role row inside a live workspace (the
+    // decorator's `workspace__slug` traversal): both tables live.
+    use pidash_db::entity::{workspace_members, workspaces};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Relation::Workspaces.def(),
+        )
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let role = row.map(|role| role as i32);
     let facts = pidash_auth::permissions::allow::AllowFacts {
         workspace: pidash_types::WorkspaceId::from(slug),
         authenticated: true,
@@ -274,13 +282,11 @@ async fn resolve_workspace_gate(
 /// 404. Runs after the gate (decorator order), so reachable only when a
 /// membership row already proved the workspace exists.
 async fn workspace_id(pool: &sqlx::PgPool, slug: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL"#)
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::WorkspaceNotFound)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    pidash_db::app_integrations::fetch_workspace_id_by_slug(&db, slug)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::WorkspaceNotFound)
 }
 
 fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
@@ -1007,7 +1013,8 @@ async fn list_accounts(
         Ok(id) => id,
         Err(denial) => return denial_response(denial),
     };
-    let accounts = match queries_git::fetch_provider_account_list(&pool, workspace).await {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let accounts = match queries_git::fetch_provider_account_list(&db, workspace).await {
         Ok(accounts) => accounts,
         Err(_) => return denial_response(Denial::ServerError),
     };
@@ -1139,44 +1146,40 @@ async fn create_account(
     metadata.insert("identity".to_owned(), identity);
     // `RETURNING` is mapped through the db layer's row reader (the row
     // struct carries no `FromRow`; same as `queries_git`).
-    let inserted = sqlx::query(
-        r#"INSERT INTO git_provider_accounts
-           (id, created_at, updated_at, created_by_id, updated_by_id, workspace_id,
-            provider, host_url, auth_type, external_account_id, external_account_login,
-            display_name, capabilities, credential_config, status, verified_at,
-            last_check_error, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'connected',$15,'',$16)
-           RETURNING id, created_at, updated_at, created_by_id, updated_by_id, deleted_at,
-            workspace_id, provider, host_url, auth_type, external_account_id,
-            external_account_login, display_name, capabilities, credential_config,
-            workspace_integration_id, status, verified_at, last_check_error, metadata"#,
-    )
-    .bind(account_id)
-    .bind(now)
-    .bind(now)
-    .bind(actor)
-    .bind(actor)
-    .bind(workspace)
-    .bind(&provider)
-    .bind(&normalized_host)
-    .bind(&auth_type)
-    .bind(&external_id)
-    .bind(&login)
-    .bind(&display)
-    .bind(&capabilities)
-    .bind(serde_json::Value::Object(credential_config))
-    .bind(now)
-    .bind(serde_json::Value::Object(metadata))
-    .fetch_one(&pool)
-    .await;
+    use pidash_db::entity::git_provider_accounts;
+    use sea_orm::{ActiveModelTrait, Set};
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let stamped: sea_orm::prelude::DateTimeWithTimeZone = now.into();
+    let inserted = git_provider_accounts::ActiveModel {
+        id: Set(account_id),
+        created_at: Set(stamped),
+        updated_at: Set(stamped),
+        created_by_id: Set(Some(actor)),
+        updated_by_id: Set(Some(actor)),
+        deleted_at: Set(None),
+        workspace_id: Set(workspace),
+        provider: Set(provider.clone()),
+        host_url: Set(normalized_host.clone()),
+        auth_type: Set(auth_type.clone()),
+        external_account_id: Set(external_id.clone()),
+        external_account_login: Set(login.clone()),
+        display_name: Set(display.clone()),
+        capabilities: Set(capabilities.clone()),
+        credential_config: Set(serde_json::Value::Object(credential_config)),
+        workspace_integration_id: Set(None),
+        status: Set("connected".to_owned()),
+        verified_at: Set(Some(now.into())),
+        last_check_error: Set(String::new()),
+        metadata: Set(serde_json::Value::Object(metadata)),
+    }
+    .insert(&db)
+    .await
+    .map(GitProviderAccount::from);
     match inserted {
-        Ok(row) => match queries_git::map_git_provider_account_row(&row) {
-            Ok(account) => json_response(
-                StatusCode::CREATED,
-                serialize_provider_account(&account).to_string(),
-            ),
-            Err(_) => denial_response(Denial::ServerError),
-        },
+        Ok(account) => json_response(
+            StatusCode::CREATED,
+            serialize_provider_account(&account).to_string(),
+        ),
         Err(_) => denial_response(Denial::ServerError),
     }
 }
@@ -1202,7 +1205,8 @@ async fn detail_or_proxy(
         }
     };
     let pool = pool_of(state).map_err(denial_response)?;
-    match queries_git::fetch_provider_account_detail(&pool, account_uuid, slug).await {
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    match queries_git::fetch_provider_account_detail(&db, account_uuid, slug).await {
         Ok(Some(account)) => Ok(account),
         Ok(None) => Err(denial_response(Denial::AccountNotFound)),
         Err(_) => Err(denial_response(Denial::ServerError)),
@@ -1267,27 +1271,44 @@ async fn revoke_account(
         Ok(account) => account,
         Err(response) => return response,
     };
-    let revoked: Result<(), sqlx::Error> = async {
-        sqlx::query(
-            r#"UPDATE git_provider_accounts
-               SET status = 'revoked',
-                   last_check_error = 'Provider account disconnected',
-                   credential_config = COALESCE(credential_config, '{}'::jsonb) || '{"token": ""}'::jsonb,
-                   updated_at = now()
-               WHERE id = $1"#,
-        )
-        .bind(account.id)
-        .execute(&pool)
+    let revoked: Result<(), sea_orm::DbErr> = async {
+        use pidash_db::entity::{git_provider_accounts, git_repository_bindings};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        // `COALESCE(credential_config, '{}') || '{"token": ""}'`: shallow
+        // JSONB merge with the token wiped; the merge runs in Rust over
+        // the fetched config so the statement stays an entity update.
+        let mut config = account.credential_config.clone();
+        if !config.is_object() {
+            config = serde_json::json!({});
+        }
+        if let serde_json::Value::Object(map) = &mut config {
+            map.insert("token".to_owned(), serde_json::Value::String(String::new()));
+        }
+        let bumped: sea_orm::prelude::DateTimeWithTimeZone = chrono::Utc::now().into();
+        git_provider_accounts::Entity::update(git_provider_accounts::ActiveModel {
+            id: Set(account.id),
+            status: Set("revoked".to_owned()),
+            last_check_error: Set("Provider account disconnected".to_owned()),
+            credential_config: Set(config),
+            updated_at: Set(bumped),
+            ..Default::default()
+        })
+        .exec(&db)
         .await?;
-        sqlx::query(
-            r#"UPDATE git_repository_bindings
-               SET is_sync_enabled = false,
-                   last_sync_error = 'Provider account disconnected'
-               WHERE provider_account_id = $1 AND deleted_at IS NULL"#,
-        )
-        .bind(account.id)
-        .execute(&pool)
-        .await?;
+        git_repository_bindings::Entity::update_many()
+            .col_expr(
+                git_repository_bindings::Column::IsSyncEnabled,
+                sea_orm::sea_query::Expr::value(false),
+            )
+            .col_expr(
+                git_repository_bindings::Column::LastSyncError,
+                sea_orm::sea_query::Expr::value("Provider account disconnected"),
+            )
+            .filter(git_repository_bindings::Column::ProviderAccountId.eq(account.id))
+            .filter(git_repository_bindings::Column::DeletedAt.is_null())
+            .exec(&db)
+            .await?;
         Ok(())
     }
     .await;

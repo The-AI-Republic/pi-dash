@@ -50,10 +50,14 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use serde_json::Value;
 
+use sea_orm::sea_query::{Condition, Expr, OnConflict};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
+
 use crate::state::AppState;
 use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
 
 use pidash_compat::response::json_value as error_response;
+use pidash_db::entity::{loop_jobs, loop_user_preferences};
 use pidash_db::r#loop::models::loop_job::LoopJob;
 use pidash_services::r#loop::shape::{public_job_payload, PublicJobRow};
 
@@ -257,15 +261,16 @@ fn settings_body(
 /// The three settings reads (`views.py:24-49`): master flag (absent row =
 /// enabled), off-job-id set, enabled jobs in display order.
 async fn read_settings(pool: &sqlx::PgPool, user_id: uuid::Uuid) -> Result<Value, Denial> {
-    let master = pidash_db::r#loop::queries::fetch_master_enabled(pool, user_id)
+    let db = pidash_db::sea_orm_connection(pool);
+    let master = pidash_db::r#loop::queries::fetch_master_enabled(&db, user_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let off: HashSet<uuid::Uuid> = pidash_db::r#loop::queries::fetch_off_job_ids(pool, user_id)
+    let off: HashSet<uuid::Uuid> = pidash_db::r#loop::queries::fetch_off_job_ids(&db, user_id)
         .await
         .map_err(|_| Denial::ServerError)?
         .into_iter()
         .collect();
-    let jobs = pidash_db::r#loop::queries::fetch_enabled_jobs(pool)
+    let jobs = pidash_db::r#loop::queries::fetch_enabled_jobs(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(settings_body(master, &off, &jobs))
@@ -285,6 +290,61 @@ async fn read_settings(pool: &sqlx::PgPool, user_id: uuid::Uuid) -> Result<Value
 /// `loop_pref_unique_user_job_when_active` per job) and turns into the
 /// same in-place update.
 ///
+/// The `ON CONFLICT` arm of the preference upsert: the conflict target
+/// is the live partial unique index for the master switch
+/// (`loop_pref_unique_user_master_when_active`: `(user_id) WHERE
+/// job_id IS NULL AND deleted_at IS NULL`) or per job
+/// (`loop_pref_unique_user_job_when_active`: `(user_id, job_id)
+/// WHERE deleted_at IS NULL`), and the in-place update names
+/// `enabled` and `updated_at` only (the `update_fields` of
+/// `update_or_create`'s save). Pinned by the statement-shape test
+/// below (`orm-migration.md` §3.2).
+fn preference_conflict(job_id: Option<uuid::Uuid>) -> OnConflict {
+    use loop_user_preferences::Column as C;
+    let (target, cond) = match job_id {
+        None => (
+            vec![C::UserId],
+            Condition::all()
+                .add(Expr::col(C::JobId).is_null())
+                .add(Expr::col(C::DeletedAt).is_null()),
+        ),
+        Some(_) => (
+            vec![C::UserId, C::JobId],
+            Condition::all().add(Expr::col(C::DeletedAt).is_null()),
+        ),
+    };
+    OnConflict::columns(target)
+        .target_cond_where(cond)
+        .update_columns([C::Enabled, C::UpdatedAt])
+        .to_owned()
+}
+
+/// The preference upsert insert (`update_or_create`). Every field is
+/// set explicitly (no entity defaults): `created_at`/`updated_at` ride
+/// at the same instant, `updated_by_id`/`deleted_at` stay NULL on
+/// create, and the id is client-generated (the raw bind order was
+/// `(created_at, updated_at, created_by_id, updated_by_id,
+/// deleted_at, id, user_id, job_id, enabled)`).
+fn preference_upsert_insert(
+    user_id: uuid::Uuid,
+    job_id: Option<uuid::Uuid>,
+    enabled: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> sea_orm::Insert<loop_user_preferences::ActiveModel> {
+    let model = loop_user_preferences::ActiveModel {
+        id: Set(uuid::Uuid::new_v4()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        deleted_at: Set(None),
+        enabled: Set(enabled),
+        created_by_id: Set(Some(user_id)),
+        updated_by_id: Set(None),
+        user_id: Set(user_id),
+        job_id: Set(job_id),
+    };
+    loop_user_preferences::Entity::insert(model).on_conflict(preference_conflict(job_id))
+}
+
 /// `update_or_create` persists the update branch via
 /// `obj.save(update_fields={"enabled", <auto_now fields>})`
 /// (`django/db/models/query.py`): `BaseModel.save` still assigns
@@ -300,40 +360,25 @@ async fn upsert_preference(
     enabled: bool,
 ) -> Result<(), Denial> {
     let now = chrono::Utc::now();
-    let sql = match job_id {
-        None => {
-            r#"INSERT INTO loop_user_preferences
-               (created_at, updated_at, created_by_id, updated_by_id,
-                deleted_at, id, user_id, job_id, enabled)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT (user_id) WHERE job_id IS NULL AND deleted_at IS NULL
-               DO UPDATE SET enabled = EXCLUDED.enabled,
-                             updated_at = EXCLUDED.updated_at"#
-        }
-        Some(_) => {
-            r#"INSERT INTO loop_user_preferences
-               (created_at, updated_at, created_by_id, updated_by_id,
-                deleted_at, id, user_id, job_id, enabled)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-               ON CONFLICT (user_id, job_id) WHERE deleted_at IS NULL
-               DO UPDATE SET enabled = EXCLUDED.enabled,
-                             updated_at = EXCLUDED.updated_at"#
-        }
-    };
-    sqlx::query(sql)
-        .bind(now)
-        .bind(now)
-        .bind(user_id)
-        .bind(None::<uuid::Uuid>)
-        .bind(None::<chrono::DateTime<chrono::Utc>>)
-        .bind(uuid::Uuid::new_v4())
-        .bind(user_id)
-        .bind(job_id)
-        .bind(enabled)
-        .execute(pool)
+    let db = pidash_db::sea_orm_connection(pool);
+    preference_upsert_insert(user_id, job_id, enabled, now)
+        .exec_without_returning(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
+}
+
+/// Enabled live job by slug (`views.py:86-99`): the `filter(slug,
+/// enabled=True, deleted_at__isnull=True).first()` read. At most one
+/// live row per slug exists (the partial unique), so `LIMIT 1` without
+/// `ORDER BY` is `.first()` on both planes. Pinned by the
+/// statement-shape test below (`orm-migration.md` §3.2).
+fn job_by_slug_select(slug: &str) -> sea_orm::Select<loop_jobs::Entity> {
+    loop_jobs::Entity::find()
+        .filter(loop_jobs::Column::Slug.eq(slug))
+        .filter(loop_jobs::Column::Enabled.eq(true))
+        .filter(loop_jobs::Column::DeletedAt.is_null())
+        .limit(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -408,25 +453,19 @@ async fn patch_job(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
+    let db = pidash_db::sea_orm_connection(&pool);
     // `filter(slug, enabled=True, deleted_at__isnull=True).first()`:
     // at most one live row per slug (partial unique), so `LIMIT 1` without
     // `ORDER BY` is the same row `.first()` (default `-created_at`) finds.
     // A database error is the generic 500; an empty result is the 404 below.
-    let job: Option<(uuid::Uuid,)> = match sqlx::query_as(
-        r#"SELECT id FROM loop_jobs
-           WHERE slug = $1 AND enabled = TRUE
-             AND deleted_at IS NULL AND deleted_at IS NULL
-           LIMIT 1"#,
-    )
-    .bind(slug.as_str())
-    .fetch_optional(&pool)
-    .await
-    {
+    // The doubled `deleted_at IS NULL` of the hand-written SQL (default
+    // manager plus explicit filter) collapses to one identical conjunct.
+    let job: Option<loop_jobs::Model> = match job_by_slug_select(&slug).one(&db).await {
         Ok(row) => row,
         Err(_) => return Denial::ServerError.into_response(),
     };
     let job_id = match job {
-        Some((id,)) => id,
+        Some(row) => row.id,
         None => {
             let body: Value = serde_json::from_str(crate::r#loop::guards::LOOP_NOT_FOUND_BODY)
                 .expect("not_found const parses");
@@ -449,6 +488,7 @@ async fn patch_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DbBackend, QueryTrait};
 
     fn fixtures_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/loop/handlers")
@@ -651,6 +691,67 @@ mod tests {
             let body: Value = serde_json::from_str(raw).expect("vector parses");
             assert_eq!(crate::r#loop::guards::read_enabled(&body), Ok(expected));
         }
+    }
+
+    // SeaORM statement shape (`orm-migration.md` §3.2): the preference
+    // upsert targets the live partial unique index for each branch and
+    // updates `enabled` + `updated_at` only on conflict (the
+    // `update_fields` of `update_or_create`'s save); the slug read
+    // filters slug + enabled + live with no narrower column list than
+    // the original `SELECT id … LIMIT 1` and no ordering.
+    #[test]
+    fn preference_upsert_targets_partial_unique_on_conflict() {
+        let now =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).expect("epoch valid");
+        let user = uuid::Uuid::from_bytes([7; 16]);
+        let job = uuid::Uuid::from_bytes([9; 16]);
+        let master = preference_upsert_insert(user, None, false, now);
+        let master_sql = master.build(DbBackend::Postgres).to_string();
+        assert!(
+            master_sql.contains("\"loop_user_preferences\""),
+            "missing table: {master_sql}"
+        );
+        assert!(master_sql.contains("ON CONFLICT"), "{master_sql}");
+        assert!(master_sql.contains("\"user_id\""), "{master_sql}");
+        assert!(master_sql.contains("\"job_id\" IS NULL"), "{master_sql}");
+        assert!(
+            master_sql.contains("\"deleted_at\" IS NULL"),
+            "{master_sql}"
+        );
+        assert!(
+            master_sql.contains("\"enabled\""),
+            "conflict update names enabled: {master_sql}"
+        );
+        assert!(
+            master_sql.contains("\"updated_at\""),
+            "conflict update names updated_at: {master_sql}"
+        );
+        let per_job = preference_upsert_insert(user, Some(job), true, now);
+        let per_job_sql = per_job.build(DbBackend::Postgres).to_string();
+        assert!(per_job_sql.contains("ON CONFLICT"), "{per_job_sql}");
+        assert!(per_job_sql.contains("\"job_id\""), "{per_job_sql}");
+        assert!(
+            per_job_sql.contains("\"deleted_at\" IS NULL"),
+            "{per_job_sql}"
+        );
+        // Both branches write the same row shape with no RETURNING.
+        assert!(!master_sql.contains("RETURNING"), "{master_sql}");
+        assert!(!per_job_sql.contains("RETURNING"), "{per_job_sql}");
+    }
+
+    #[test]
+    fn job_by_slug_filters_live_enabled_with_limit() {
+        let sql = DbBackend::Postgres
+            .build(&job_by_slug_select("fxloop-job").into_query())
+            .to_string();
+        assert!(sql.contains("\"loop_jobs\""), "missing table: {sql}");
+        assert!(sql.contains("\"slug\""), "{sql}");
+        assert!(sql.contains("\"enabled\""), "{sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
+        // No ordering: `.first()` on a partial-unique slug has no
+        // tiebreaker on either plane.
+        assert!(!sql.contains("ORDER BY"), "{sql}");
     }
 
     #[test]

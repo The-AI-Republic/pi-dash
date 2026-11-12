@@ -13,6 +13,7 @@
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import * as React from "react";
 
+import { PropertyChip } from "./PropertyChip.js";
 import { usePickerStates } from "./reference.js";
 import { selectStateOptions, STATE_GROUP_ICONS, type StateOption } from "./states.js";
 
@@ -26,6 +27,16 @@ export interface StatePickerProps {
   variant?: ButtonVariant;
   /** Default trigger shows the glyph without the name. */
   iconOnly?: boolean;
+  /** Compact chip trigger for the create dialog's property row. */
+  chip?: boolean;
+  /** Accessible property name; the chip reads "State: Backlog" when set. */
+  label?: string | undefined;
+  /**
+   * Name the project's default state while nothing is picked, as the old
+   * create form did. Display only: the value stays null and the server
+   * still applies the default on save.
+   */
+  fallbackToDefault?: boolean;
   /** Fully custom trigger; overrides the default value button. */
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
@@ -82,6 +93,9 @@ export function StatePicker({
   disabled = false,
   variant = "secondary",
   iconOnly = false,
+  chip = false,
+  label = "State",
+  fallbackToDefault = false,
   trigger,
   placeholder = "Select state",
   tabIndex,
@@ -105,6 +119,23 @@ export function StatePicker({
 
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
     const current = value === null ? undefined : options.find((option) => option.id === value);
+    if (chip) {
+      const defaultId = value === null && fallbackToDefault ? states.data?.find((row) => row.default)?.id : undefined;
+      const shown =
+        current ?? (defaultId === undefined ? undefined : options.find((option) => option.id === defaultId));
+      const text = shown?.name ?? placeholder;
+      const filled = shown !== undefined;
+      return (
+        <PropertyChip
+          label={filled ? `${label}: ${text}` : label}
+          icon={shown === undefined ? undefined : <StateGlyph option={shown} />}
+          text={text}
+          placeholder={!filled}
+          {...(filled ? { title: text } : {})}
+          {...(tabIndex === undefined ? {} : { tabIndex })}
+        />
+      );
+    }
     const text = current?.name ?? placeholder;
     if (iconOnly) {
       return (

@@ -10,7 +10,7 @@ from _harness.redirects import assert_error_redirect, assert_success_redirect, l
 from _harness.sessions import SESSION_COOKIE_NAME
 from _harness.settings import database_url
 
-from .conftest import _unique_email
+from .conftest import _unique_email, make_user
 
 
 def _assert_prefs_row(email):
@@ -82,3 +82,44 @@ def test_space_existing_user_redirects_with_error_code(browser, space_base, user
         "/auth/spaces/sign-up/", data={"email": user["email"], "password": user["password"]}
     )
     assert_error_redirect(res, base=space_base, error_code=5030)
+
+
+def test_signup_disabled_ignores_soft_deleted_invite(browser, base, db):
+    """ENABLE_SIGNUP=0 with only a revoked invite: 302 5015, no user.
+
+    NEWPIDASH-11: the gate (`adapter/base.py:111`) reads through the
+    soft-delete manager, so a revoked (soft-deleted) invite does not
+    count as an invitation. FAILS on pre-fix Rust, which creates the
+    user and signs them in.
+    """
+    email = _unique_email()
+    owner = make_user(db, _unique_email())
+    slug = email.split("@")[0]
+    workspace = db.make_workspace(slug, slug, owner["id"])
+    invite = db.make_invite(workspace["id"], email, token=f"tok-{slug}")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE workspace_member_invites SET deleted_at = now() WHERE id = %s",
+                (invite["id"],),
+            )
+        conn.commit()
+    db.make_config("ENABLE_SIGNUP", "0")
+    try:
+        res = browser().post(
+            "/auth/sign-up/", data={"email": email, "password": "Fresh-Strong-Pass-9!x"}
+        )
+    finally:
+        with db.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM instance_configurations WHERE key = 'ENABLE_SIGNUP'")
+                cur.execute(
+                    "DELETE FROM workspace_member_invites WHERE id = %s", (invite["id"],)
+                )
+                cur.execute("DELETE FROM workspaces WHERE id = %s", (workspace["id"],))
+            conn.commit()
+    assert_error_redirect(res, base=base, error_code=5015)
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            assert cur.fetchone() is None, "revoked invite must not let the address sign up"

@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@pi-dash/constants", () => ({ API_BASE_URL: "http://localhost:18002" }));
 
 import type { TauriBridge } from "@/services/local-chat-transport";
-import { ChatFrameTranslator, LocalChatTransport } from "@/services/local-chat-transport";
+import { ChatFrameTranslator, LocalChatTransport, RoutingChatTransport } from "@/services/local-chat-transport";
 
 const SESSION = "11111111-1111-1111-1111-111111111111";
 
@@ -21,7 +21,7 @@ type Listeners = Record<string, Set<(payload: unknown) => void>>;
 
 function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
   const listeners: Listeners = {};
-  const invoke = vi.fn(async (command: string) => {
+  const invoke = vi.fn(async (command: string, _args?: Record<string, unknown>): Promise<unknown> => {
     if (command in overrides) return overrides[command];
     if (command === "chat_get_session")
       return {
@@ -45,11 +45,10 @@ function makeBridge(overrides: Partial<Record<string, unknown>> = {}) {
   const refreshModelCredential = vi.fn(async () => {});
   const topUpUrl = vi.fn(() => "");
   const bridge: TauriBridge = {
-    invoke,
+    invoke: invoke as TauriBridge["invoke"],
     listen,
     getAccount: () => "acct-1",
     ensureRuntime,
-    workspaceSlug: () => "acme",
     refreshModelCredential,
     topUpUrl,
   };
@@ -407,21 +406,18 @@ describe("LocalChatTransport verbs", () => {
     expect(order).toEqual(["ensureRuntime", "chat_warm", "ensureRuntime", "chat_send"]);
   });
 
-  it("carries the workspace slug — the daemon's socket lives in that workspace's tree", async () => {
-    // The daemon runs per workspace with its data dir re-rooted under
-    // `managed/pidash/<workspace>/data`, so its control socket is
-    // `<that>/runtime/pidash.sock`. Without the slug the host resolved the
-    // shared `managed/runtime/` instead and every send failed with
-    // "connecting to managed daemon" while the daemon was up.
+  it("carries no workspace — one daemon at the standard socket serves every workspace", async () => {
+    // Older builds ran a daemon per workspace and had to pick its socket by
+    // slug; the computer's daemon has one socket (design §4.4).
     await transport.warmChatSession(SESSION);
     await transport.cancelChat(SESSION);
-    const chatCalls = ctx.invoke.mock.calls.filter(([command]) => String(command).startsWith("chat_"));
-    const commandCalls = chatCalls.filter(([command]) =>
+    await transport.decideChatApproval(SESSION, "ap-1", "accept");
+    const commandCalls = ctx.invoke.mock.calls.filter(([command]) =>
       ["chat_warm", "chat_send", "chat_cancel", "chat_close", "chat_decide"].includes(String(command))
     );
-    expect(commandCalls.length).toBeGreaterThan(0);
+    expect(commandCalls.length).toBe(3);
     for (const [command, args] of commandCalls) {
-      expect((args as Record<string, unknown>).workspace, `${command} must carry the workspace`).toBe("acme");
+      expect(args as Record<string, unknown>, `${command} must not carry a workspace`).not.toHaveProperty("workspace");
     }
   });
 
@@ -430,8 +426,8 @@ describe("LocalChatTransport verbs", () => {
     // (`resolve_runner`, runner/src/ipc/server.rs). The id this transport holds
     // is the synthetic route id `pidash-builtin`, which no daemon is
     // configured under, so sending it failed every request with
-    // `no runner named "pidash-builtin"`. Omitting it selects the daemon's
-    // single managed runner.
+    // `no runner named "pidash-builtin"`. Local chat runs on the daemon's
+    // machine-level engine profile, not on a project runner (design §12.1).
     ctx = makeBridge({
       chat_append_event: {
         id: "u1",
@@ -899,5 +895,116 @@ describe("LocalChatTransport.subscribeChatEvents", () => {
       .map((c) => (c[1] as { event: { content: string } }).event.content);
     expect(appended).toEqual(["first", "second"]);
     unsubscribe();
+  });
+});
+
+/** Local commands a test caused, apart from the session lookups routing makes. */
+function localCommands(ctx: ReturnType<typeof makeBridge>) {
+  return ctx.invoke.mock.calls.map(([c]) => String(c)).filter((c) => c !== "chat_get_session");
+}
+
+describe("RoutingChatTransport (design §12.1, PIDESKAPP-62)", () => {
+  const CLOUD_SESSION = "22222222-2222-2222-2222-222222222222";
+
+  function cloudTransport() {
+    const session = (id: string, runner: string) =>
+      ({ id, runner, workspace: "ws" }) as unknown as Awaited<ReturnType<LocalChatTransport["createChatSession"]>>;
+    return {
+      listChatSessions: vi.fn(async (_ws: string, runner?: string) => [session(CLOUD_SESSION, runner ?? "r-cloud")]),
+      createChatSession: vi.fn(async (input: { runner: string }) => session(CLOUD_SESSION, input.runner)),
+      listChatMessages: vi.fn(async () => []),
+      sendChatMessage: vi.fn(async () => ({ id: "m" }) as never),
+      warmChatSession: vi.fn(async () => ({ ok: true })),
+      cancelChat: vi.fn(async () => ({ ok: true })),
+      closeChat: vi.fn(async () => session(CLOUD_SESSION, "r-cloud")),
+      subscribeChatEvents: vi.fn(() => () => {}),
+    };
+  }
+
+  function setup() {
+    // The local store knows only SESSION.
+    const ctx = makeBridge();
+    ctx.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "chat_get_session") {
+        return args?.sessionId === SESSION
+          ? {
+              id: SESSION,
+              title: "",
+              workspace: "ws",
+              project: "pidash-builtin",
+              working_dir: "/tmp/chat/ws/proj",
+              engine_version: "",
+              engine_thread_id: null,
+              created_at: 1,
+              updated_at: 1,
+            }
+          : null;
+      }
+      if (command === "chat_list_sessions") return [];
+      if (command === "chat_create_session")
+        return {
+          id: SESSION,
+          title: "",
+          workspace: "ws",
+          project: "pidash-builtin",
+          working_dir: "/tmp/chat",
+          engine_version: "",
+          engine_thread_id: null,
+          created_at: 1,
+          updated_at: 1,
+        };
+      return undefined;
+    });
+    const cloud = cloudTransport();
+    const router = new RoutingChatTransport(new LocalChatTransport(ctx.bridge), cloud);
+    return { ctx, cloud, router };
+  }
+
+  it("sends the This computer contact to the daemon and every other runner to the cloud", async () => {
+    const { ctx, cloud, router } = setup();
+    await router.createChatSession({ workspace: "ws", runner: "pidash-builtin" });
+    expect(localCommands(ctx)).toEqual(["chat_create_session"]);
+    expect(cloud.createChatSession).not.toHaveBeenCalled();
+
+    await router.createChatSession({ workspace: "ws", runner: "runner-on-other-computer" });
+    expect(cloud.createChatSession).toHaveBeenCalledWith({ workspace: "ws", runner: "runner-on-other-computer" });
+    await router.listChatSessions("ws", "own-agent-runner-here");
+    expect(cloud.listChatSessions).toHaveBeenCalledWith("ws", "own-agent-runner-here");
+    expect(localCommands(ctx)).toEqual(["chat_create_session"]);
+  });
+
+  it("resolves session-scoped calls from the session, even for a session it never listed", async () => {
+    const { ctx, cloud, router } = setup();
+    await router.warmChatSession(CLOUD_SESSION);
+    await router.cancelChat(CLOUD_SESSION);
+    expect(cloud.warmChatSession).toHaveBeenCalledWith(CLOUD_SESSION);
+    expect(cloud.cancelChat).toHaveBeenCalledWith(CLOUD_SESSION, undefined);
+    expect(localCommands(ctx)).toEqual([]);
+
+    await router.cancelChat(SESSION);
+    expect(localCommands(ctx)).toEqual(["chat_cancel"]);
+    expect(cloud.cancelChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("subscribes to the owner's event stream, also when the owner is resolved later", async () => {
+    const { cloud, router } = setup();
+    const unsubscribe = router.subscribeChatEvents(CLOUD_SESSION, 0, () => {});
+    await vi.waitFor(() => expect(cloud.subscribeChatEvents).toHaveBeenCalledTimes(1));
+    unsubscribe();
+    // Unsubscribed before resolution: never subscribes.
+    const other = "33333333-3333-3333-3333-333333333333";
+    router.subscribeChatEvents(other, 0, () => {})();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cloud.subscribeChatEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("approvals follow: inline only for the local contact, decided locally only for local sessions", async () => {
+    const { ctx, router } = setup();
+    expect(router.supportsLocalApprovals("pidash-builtin")).toBe(true);
+    expect(router.supportsLocalApprovals("runner-on-other-computer")).toBe(false);
+    await router.decideChatApproval(SESSION, "ap-1", "accept");
+    expect(localCommands(ctx)).toEqual(["chat_decide"]);
+    await expect(router.decideChatApproval(CLOUD_SESSION, "ap-2", "accept")).rejects.toThrow("Approvals page");
+    expect(localCommands(ctx)).toEqual(["chat_decide"]);
   });
 });
