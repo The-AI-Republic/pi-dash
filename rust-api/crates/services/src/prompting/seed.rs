@@ -590,7 +590,7 @@ mod tests {
 
     #[test]
     fn default_body_assembles_from_fragments_in_order() {
-        // `FIX-seed / statics.default_body_*`: 53586 chars, sha over UTF-8 bytes.
+        // `FIX-seed / statics.default_body_*`: 55046 chars, sha over UTF-8 bytes.
         assert_eq!(FRAGMENT_FILES.len(), 14);
         let names: Vec<&str> = FRAGMENT_FILES.iter().map(|(n, _)| *n).collect();
         let mut sorted = names.clone();
@@ -598,10 +598,10 @@ mod tests {
         assert_eq!(names, sorted, "fragments embed in lexical order");
         let body = read_default_body();
         assert_eq!(DEFAULT_TEMPLATE_NAME, "coding-task");
-        assert_eq!(char_len(&body), 53586);
+        assert_eq!(char_len(&body), 55046);
         assert_eq!(
             sha_hex(&body),
-            "73c67bd04707eb279471a363b8d177431952bee5dc9eb39bfcb5d25defaddaf6"
+            "064c13b177d595a08990d9ea617e8a14200e50b36fa205373b8766cd758a0c0f"
         );
         assert!(body.ends_with('\n') && !body.ends_with("\n\n"));
     }

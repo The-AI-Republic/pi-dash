@@ -33,31 +33,25 @@ pub mod handlers_bind;
 pub mod handlers_occ;
 pub mod handlers_sched;
 
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::{Extension, Router};
+use pidash_db::entity::{projects, workspaces};
+use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
 use sqlx::PgPool;
 
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+use pidash_compat::response::json_response as json_body;
 
 /// `Project.resolve` miss (`db/models/project.py:213-217`): verbatim
 /// `Http404` args through DRF's handler (no trailing period). Shared by
 /// the project-level handler files (bindings + occurrences).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 
-fn json_body(status: StatusCode, body: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body.to_owned()))
-        .expect("static scheduler response")
-}
-
 /// Render a JSON success/error body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    json_body(status, &body)
-}
+/// Canonical `pidash_compat::response::json_response` (OVL-04).
+pub use pidash_compat::response::json_response;
 
 /// The request pool, or the `handle_exception` 500 when the server runs
 /// pool-less (unreachable in `serve`, which fail-fasts at boot).
@@ -94,6 +88,21 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// [`PROJECT_NOT_FOUND_BODY`]. Callers run this for authenticated
 /// requests only (anonymous callers 401 inside [`gate::resolve_gate`],
 /// never 404 here) — see [`session_authenticated`].
+/// SeaORM select for [`resolve_project_id`]: the project id by workspace
+/// slug + identifier, live rows only. A `Select` (not an inline query) so
+/// statement-shape tests pin the join/filter without a database
+/// (orm-migration.md §3.2). The `INNER JOIN` on `workspaces` has no
+/// `deleted_at` predicate — exactly the old SQL, which never filtered it.
+fn resolve_project_id_select(slug: &str, upper: &str) -> sea_orm::Select<projects::Entity> {
+    projects::Entity::find()
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .select_only()
+        .columns([projects::Column::Id])
+}
+
 #[allow(clippy::result_large_err)]
 pub async fn resolve_project_id(
     pool: &PgPool,
@@ -104,18 +113,13 @@ pub async fn resolve_project_id(
         return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| json_body(StatusCode::INTERNAL_SERVER_ERROR, gate::SERVER_ERROR_BODY))?;
-    row.map(|row| row.0)
-        .ok_or_else(|| json_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = resolve_project_id_select(slug, &upper)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| json_body(StatusCode::INTERNAL_SERVER_ERROR, gate::SERVER_ERROR_BODY))?;
+    row.ok_or_else(|| json_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
 }
 
 /// Whether the request looks authenticated: the session carries a UUID
@@ -203,7 +207,23 @@ pub fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod pidashconv_736_tests {
-    use super::normalize_resolve_identifier;
+    use super::{normalize_resolve_identifier, resolve_project_id_select};
+    use sea_orm::{DbBackend, QueryTrait};
+
+    #[test]
+    fn resolve_project_id_select_pins_join_and_filters() {
+        let sql = resolve_project_id_select("acme", "ENG")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("INNER JOIN"), "INNER JOIN workspaces: {sql}");
+        assert!(sql.contains("\"slug\""), "slug filter: {sql}");
+        assert!(sql.contains("\"identifier\""), "identifier filter: {sql}");
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL"),
+            "live-rows filter: {sql}"
+        );
+        assert!(sql.contains("\"id\""), "id column: {sql}");
+    }
 
     #[test]
     fn resolve_identifier_strips_py_whitespace() {

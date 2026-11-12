@@ -62,8 +62,6 @@
 
 pub mod strip;
 
-mod entities;
-
 use serde::{Deserialize, Serialize};
 
 /// Django-level FK delete behavior (ORM-emulated; same shape as the D-32

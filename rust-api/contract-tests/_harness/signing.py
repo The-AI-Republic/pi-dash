@@ -70,6 +70,25 @@ def encode_session(session_dict, secret):
     return f"{stamped}:{sig}"
 
 
+def decode_session(session_data, secret):
+    """Verify (TimestampSigner) and decode a ``sessions.session_data`` value.
+
+    Inverse of :func:`encode_session`: splits ``value:stamp:sig``, checks the
+    HMAC-SHA256 signature (salt ``SESSION_SALT + "signer"``), then base64url /
+    zlib-decodes the compact-JSON payload. Raises ``AssertionError`` on a bad
+    signature so suites fail loudly instead of asserting on garbage.
+    """
+    value, stamp, sig = session_data.rsplit(":", 2)
+    expect = b64_encode(salted_hmac(SESSION_SALT + "signer", f"{value}:{stamp}", secret))
+    if not hmac.compare_digest(expect, sig):
+        raise AssertionError("bad session_data signature")
+    encoded = value[1:] if value.startswith(".") else value
+    raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    if value.startswith("."):
+        raw = zlib.decompress(raw)
+    return json.loads(raw.decode("latin-1"))
+
+
 def session_payload(user_id, password_hash, secret, device_info=None):
     auth_hash = salted_hmac(AUTH_HASH_SALT, password_hash, secret).hex()
     return {

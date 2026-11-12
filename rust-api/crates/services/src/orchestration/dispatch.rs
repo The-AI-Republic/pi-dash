@@ -68,24 +68,26 @@ use std::pin::Pin;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::{check_project_role, ProjectRoleFacts};
-use pidash_db::orchestration::workpad::AgentUserCollisionError;
+use pidash_db::entity::comment_hooks::comment_stripped_for;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
 };
 use pidash_db::tasks_ticker::{pool_size_or_default, TickerDisarmReason};
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
     auto_pauses_on_cap, is_ticking_state, ticking_state_names_by_group, MACHINE_TRIGGERS,
-    RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER, RUN_AI_NO_POD, TRIGGER_RUN_AI,
-    WAIT_CAP_REACHED, WAIT_GRANTED, WAIT_INFINITE_POOL, WAIT_NO_TICKER, WAIT_REARMABLE_DISARMS,
+    RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER, RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
+    RUN_AI_NO_POD, TRIGGER_RUN_AI, WAIT_CAP_REACHED, WAIT_GRANTED, WAIT_INFINITE_POOL,
+    WAIT_NO_TICKER, WAIT_REARMABLE_DISARMS,
 };
 use pidash_types::orchestration::{StateRef, TickerEvent};
 
 use super::clock::{self, ClockIssue, ClockOutcome, ClockWrite, ProjectClockPolicy};
 use super::creation::{
     self, ContinuationRequest, CreateDispatchRequest, CreationError, CreationSeam,
-    FinalizeAgentRunSeam, IssueView, StateView,
+    DedicatedPinArgs, FinalizeAgentRunSeam, IssueView, StateView,
 };
 use crate::dispatch::{effective_executor_for_issue, user_has_llm_config, LlmProfile, UserFlags};
 
@@ -95,27 +97,38 @@ use crate::dispatch::{effective_executor_for_issue, user_has_llm_config, LlmProf
 
 /// Default `_bounce_issue_no_eligible_runner` reason (`:1029`).
 pub const REASON_NO_ELIGIBLE_RUNNER: &str = "no-eligible-runner";
-/// Cloud `_bounce_issue_no_eligible_runner` reason (`:985`): the execution
+/// Cloud `_bounce_issue_no_eligible_runner` reason (`:967`): the execution
 /// principal holds no usable LLM config.
 pub const REASON_NO_LLM_CONFIG: &str = "no-llm-config";
-/// Managed `_bounce_issue_no_eligible_runner` reason (`:998`, `:1014`):
-/// no creator, or nobody enrolled.
-pub const REASON_NO_MANAGED_RUNNER: &str = "no-managed-runner";
+/// Dedicated `_bounce_issue_no_eligible_runner` reason
+/// (`scheduling.py:994`): the assigned runner's usage rule excludes
+/// the run's creator or trigger.
+pub const REASON_DEDICATED_RUNNER_NOT_ELIGIBLE: &str = "dedicated-runner-not-eligible";
+/// Dedicated lost-runner `_bounce_issue_no_eligible_runner` reason
+/// (`scheduling.py:1174`): the assigned runner was revoked or
+/// deleted (§13.1).
+pub const REASON_DEDICATED_RUNNER_REVOKED: &str = "dedicated-runner-revoked";
 
 /// The `no-llm-config` bounce body (`:1064-1070`), byte-verbatim.
 /// `format_html` with no args is a plain literal.
 pub const BOUNCE_BODY_NO_LLM_CONFIG: &str = "<p><strong>Agent run skipped — no AI provider configured.</strong></p><p>This project uses the Pi Dash Cloud Agent, which runs against the triggering user's AI provider. Configure one in Pi Dash AI settings, or assign this issue to a member who has one configured.</p>";
 
-/// The default bounce body (`:1072-1077`), byte-verbatim: every reason
-/// except `no-llm-config` (including the managed reasons, B2b).
+/// The default bounce body (`:1002-1007`), byte-verbatim: every reason
+/// except `no-llm-config`.
 pub const BOUNCE_BODY_DEFAULT: &str = "<p><strong>Agent run skipped — no eligible runner.</strong></p><p>No runner is registered in this pod that can serve this issue. Add a runner under your account, or assign this issue to a workspace member whose runner is registered here.</p>";
 
-/// Pick the bounce body (`:1064-1077`): only `no-llm-config` differs.
-pub fn bounce_body(reason: &str) -> &'static str {
-    if reason == REASON_NO_LLM_CONFIG {
-        BOUNCE_BODY_NO_LLM_CONFIG
-    } else {
-        BOUNCE_BODY_DEFAULT
+/// Pick the bounce body (`:1064-1077`), with `reason_name` naming the
+/// runner for the dedicated arms (`:1165-1182`).
+pub fn bounce_body(reason: &str, reason_name: &str) -> String {
+    match reason {
+        REASON_NO_LLM_CONFIG => BOUNCE_BODY_NO_LLM_CONFIG.to_owned(),
+        REASON_DEDICATED_RUNNER_NOT_ELIGIBLE => format!(
+            "<p><strong>Agent run skipped — dedicated runner not eligible.</strong></p><p>Runner <strong>{reason_name}</strong> cannot serve this run: its usage rule excludes the run's creator or trigger. Reassign the issue to a runner that can serve it, or return it to the pod.</p>"
+        ),
+        REASON_DEDICATED_RUNNER_REVOKED => format!(
+            "<p><strong>Dedicated runner lost.</strong></p><p>Runner <strong>{reason_name}</strong> was revoked or deleted, so this issue is no longer assigned to a dedicated runner. Choose a new runner or return the issue to the pod.</p>"
+        ),
+        _ => BOUNCE_BODY_DEFAULT.to_owned(),
     }
 }
 
@@ -181,42 +194,14 @@ pub const PROJECT_DEFAULT_STATE_SQL: &str = "SELECT default_state_id FROM projec
 /// project id.
 pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1";
 
-/// The state-move write (`:1109`, `:696`, `:1463`):
-/// `save(update_fields=["state", "updated_at"])` — ONLY these columns
-/// (the `updated_by` assignments never reach the row). `$1` state id,
-/// `$2` now, `$3` issue id.
-pub const ISSUE_STATE_UPDATE_SQL: &str =
-    "UPDATE issues SET state_id = $1, updated_at = $2 WHERE id = $3";
-
-/// Bounce comment INSERT (`IssueComment.objects.create`, `:1118-1125`,
-/// through the custom `save()` `:598-627`): full column list with the
-/// Django-side defaults (no DB default to fall back on). `$1` now
-/// (`created_at`), `$2` now (`updated_at`), `$3` id, `$4` project, `$5`
-/// workspace, `$6` stripped (`strip_tags` of `$7`), `$7` body, `$8`
-/// issue, `$9` actor (the system user; `created_by_id` stays NULL — the
-/// bounce path has no crum user, and the fixture pins no audit column).
-pub const COMMENT_INSERT_SQL: &str = "INSERT INTO issue_comments (created_at, updated_at, id, project_id, workspace_id, comment_stripped, comment_html, issue_id, actor_id, created_by_id, updated_by_id, deleted_at, comment_json, description_id, attachments, labels, access, external_source, external_id, speaker_type, speaker_label, speaker_agent_run_id, edited_at, parent_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, NULL, '{}', NULL, '{}', '{}', 'INTERNAL', NULL, NULL, 'agent', '', NULL, NULL, NULL)";
-
-/// Bounce comment `Description` side row (`:623-625`):
-/// `Description.objects.create(workspace, project, created_by,
-/// updated_by, description_stripped, description_json, description_html)`.
-/// `$1` now, `$2` now, `$3` id, `$4` workspace, `$5` project, `$6` body,
-/// `$7` stripped.
-pub const DESCRIPTION_INSERT_SQL: &str = "INSERT INTO descriptions (created_at, updated_at, id, workspace_id, project_id, description_html, description_stripped, created_by_id, updated_by_id, deleted_at, description_json, description_binary) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, NULL, '{}', NULL)";
-
-/// Comment↔description link (`:627`):
-/// `save(update_fields=["description_id"])`. `$1` description id, `$2`
-/// comment id.
-pub const COMMENT_DESCRIPTION_UPDATE_SQL: &str =
-    "UPDATE issue_comments SET description_id = $1 WHERE id = $2";
-
 /// Wait activity row (`_record_wait_activity`, `:839-852`): full column
 /// list with the Django-side defaults. `$1` now, `$2` now, `$3` id, `$4`
 /// project, `$5` workspace, `$6` issue, `$7` pool (`old_value`), `$8`
 /// waited (`new_value`), `$9` comment ([`wait_activity_comment`]), `$10`
-/// actor (or the system user; `created_by_id` stays NULL — the fixture
-/// pins no audit column), `$11` epoch (`time.time()`).
-pub const WAIT_ACTIVITY_INSERT_SQL: &str = "INSERT INTO issue_activities (created_at, updated_at, id, project_id, workspace_id, issue_id, old_value, new_value, comment, actor_id, epoch, created_by_id, updated_by_id, deleted_at, verb, field, attachments, issue_comment_id, old_identifier, new_identifier) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, NULL, 'updated', 'agent_wait', '{}', NULL, NULL, NULL)";
+/// actor (or the system user), `$11` epoch (`time.time()`), `$12`
+/// creator (the crum user `BaseModel.save` stamps on a Django create;
+/// `updated_by_id` stays NULL as there).
+pub const WAIT_ACTIVITY_INSERT_SQL: &str = "INSERT INTO issue_activities (created_at, updated_at, id, project_id, workspace_id, issue_id, old_value, new_value, comment, actor_id, epoch, created_by_id, updated_by_id, deleted_at, verb, field, attachments, issue_comment_id, old_identifier, new_identifier) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, NULL, 'updated', 'agent_wait', '{}', NULL, NULL, NULL)";
 
 /// Wait write without re-arm (`:792-793, :816`):
 /// `save(update_fields=["waited", "updated_at"])`. `$1` waited, `$2`
@@ -354,42 +339,10 @@ pub fn agent_wait_log_line(
 // Pure units
 // ---------------------------------------------------------------------------
 
-/// Django `strip_tags` (`django.utils.html.strip_tags`, the
-/// `tasks_cleanup::versions` algorithm as a per-module copy): scan for
-/// `<...>` spans and drop them; an unclosed `<` is kept verbatim.
-/// ASCII-only delimiters, so every slice lands on a char boundary.
-pub fn strip_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        rest = &rest[lt..];
-        match rest.find('>') {
-            Some(rel) => rest = &rest[rel + 1..],
-            None => {
-                out.push_str(rest);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 /// `triggered_by in _MACHINE_TRIGGERS` (`:868, :895`): the clock's own
 /// triggers resolve like a tick.
 pub fn is_machine_trigger(triggered_by: &str) -> bool {
     MACHINE_TRIGGERS.contains(&triggered_by)
-}
-
-/// `profile.reason_code or ManagedRunnerReason.LLM_CONFIG_MISSING`
-/// (`:1010`): an empty reason falls back, mirroring Python's `or`.
-pub fn managed_profile_reason_code(profile: &LlmProfile) -> &str {
-    if profile.reason_code.is_empty() {
-        ManagedRunnerReason::LLM_CONFIG_MISSING
-    } else {
-        profile.reason_code.as_str()
-    }
 }
 
 /// The wait activity comment (`:849`): `Waited on a blocker ({waited}
@@ -532,9 +485,8 @@ pub struct RoleVerdict {
     pub is_workspace_admin: bool,
 }
 
-/// One bounce comment ([`COMMENT_INSERT_SQL`] +
-/// [`DESCRIPTION_INSERT_SQL`] + [`COMMENT_DESCRIPTION_UPDATE_SQL`]):
-/// the driver builds it, the seam writes all three rows in order.
+/// One bounce comment (the driver builds it, the seam writes the
+/// three domain executor rows in order).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewIssueComment {
     pub id: Uuid,
@@ -548,7 +500,9 @@ pub struct NewIssueComment {
     pub comment_stripped: String,
 }
 
-/// One wait activity ([`WAIT_ACTIVITY_INSERT_SQL`]).
+/// One wait activity ([`WAIT_ACTIVITY_INSERT_SQL`]). `created_by` is
+/// the crum user `BaseModel.save` stamps on a Django create (`None`
+/// where the caller has no request user).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewWaitActivity {
     pub id: Uuid,
@@ -560,6 +514,7 @@ pub struct NewWaitActivity {
     pub waited: i32,
     pub run_id: Option<Uuid>,
     pub actor_id: Uuid,
+    pub created_by: Option<Uuid>,
     pub epoch_secs: f64,
 }
 
@@ -592,18 +547,27 @@ pub enum DispatchError {
 // Seams
 // ---------------------------------------------------------------------------
 
-/// The one-method D-14 seam (`runner/services/matcher.py:375-412`):
+/// The one-method D-14 seam (`runner/services/matcher.py:436-490`):
 /// does a runner registered in `pod_id` accept a run on `issue_id`
-/// created by `creator_id`? D-14 (runner, downstream of D-12 — no edge,
-/// it would deadlock) implements this later; the D-10 `FireTickSeam`
-/// precedent. Boxed future, so the trait stays object-safe for the
-/// `&dyn` driver parameter.
+/// created by `creator_id`? `human` is `triggered_by in
+/// HUMAN_TRIGGERS` — the engine usage rule distinguishes a person's
+/// click from the clock (§8). D-14 (runner, downstream of D-12 — no
+/// edge, it would deadlock) implements this later; the D-10
+/// `FireTickSeam` precedent. Boxed future, so the trait stays
+/// object-safe for the `&dyn` driver parameter.
 pub trait PodRunnerMatcher: Send + Sync {
+    /// Does a runner registered in `pod_id` accept a run on `issue_id`
+    /// created by `creator_id`? `pod_once` (§23.3) runs in the pod's
+    /// shared queue, so the check is pod-scoped even on a dedicated
+    /// issue; without it, a dedicated issue is served only by its
+    /// assigned runner (§9.4).
     fn pod_has_runner_for_issue_principal(
         &self,
         pod_id: Uuid,
         issue_id: Uuid,
         creator_id: Option<Uuid>,
+        human: bool,
+        pod_once: bool,
     ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>>;
 }
 
@@ -687,7 +651,8 @@ pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
         &mut self,
         project_id: Uuid,
     ) -> Result<ProjectClockPolicy, DispatchError>;
-    /// The state-move write ([`ISSUE_STATE_UPDATE_SQL`]).
+    /// The state-move write
+    /// ([`update_issue_state_no_audit`](crate::domain::issues::update_issue_state_no_audit)).
     async fn update_issue_state(
         &mut self,
         issue_id: Uuid,
@@ -722,14 +687,6 @@ pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
         workspace_slug: &str,
         project_id: Uuid,
     ) -> Result<RoleVerdict, DispatchError>;
-    /// `enrolled_managed_runners(project, user).exists()`
-    /// ([`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`][crate::dispatch::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL]).
-    async fn enrolled_managed_exists(
-        &mut self,
-        project_id: Uuid,
-        user_id: Uuid,
-        workspace_id: Uuid,
-    ) -> Result<bool, DispatchError>;
     /// The operator kill switch (`managed_runner_is_enabled`, L3).
     fn managed_runner_enabled(&self) -> bool;
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
@@ -932,7 +889,7 @@ async fn effective_executor<S: DispatchSeam>(
 }
 
 /// A current human execution principal; bots never own tool authority
-/// (`_resolve_creator_for_trigger`, `:887-952`).
+/// (`_resolve_creator_for_trigger`, `:891-946`).
 pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
     seam: &mut S,
     issue_id: Uuid,
@@ -943,7 +900,12 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
         .await
         .map_err(DispatchError::Store)?;
     let effective = effective_executor(seam, &issue).await?;
-    if effective == AgentExecutorKind::LocalRunner.value() {
+    // Every machine executor (including a stale `managed_runner`
+    // value, the legacy spelling of one) takes the machine branch.
+    if pidash_types::dispatch::MACHINE_EXECUTORS
+        .iter()
+        .any(|kind| kind.value() == effective)
+    {
         if let Some(actor) = actor {
             return Ok(Some(actor));
         }
@@ -961,7 +923,6 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
     let project = CreationSeam::project(seam, project_id)
         .await
         .map_err(DispatchError::Store)?;
-    let managed = effective == AgentExecutorKind::ManagedRunner.value();
     let mut candidates: Vec<CandidateUser> = Vec::new();
     if let Some(id) = actor.filter(|_| !is_machine_trigger(triggered_by)) {
         let flags = CreationSeam::user_flags(seam, id)
@@ -1004,13 +965,6 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
             is_bot: candidate.is_bot,
         };
         if !user_has_llm_config(Some(&flags), || seam.has_usable_llm_config(candidate.id)) {
-            continue;
-        }
-        if managed
-            && !seam
-                .enrolled_managed_exists(project_id, candidate.id, project.workspace_id)
-                .await?
-        {
             continue;
         }
         let verdict = seam
@@ -1084,6 +1038,7 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
             issue_id,
             triggered_by,
             REASON_NO_LLM_CONFIG,
+            "",
             now,
             jitter_secs,
         )
@@ -1094,63 +1049,18 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
         });
     }
 
-    if effective == AgentExecutorKind::ManagedRunner.value() {
-        let reason = match run_creator {
-            None => Some(REASON_NO_MANAGED_RUNNER.to_owned()),
-            Some(_) if !seam.managed_runner_enabled() => {
-                Some(ManagedRunnerReason::DISABLED.to_owned())
-            }
-            Some(creator) => {
-                let profile = seam.llm_profile_for(creator);
-                if !profile.available {
-                    Some(managed_profile_reason_code(&profile).to_owned())
-                } else {
-                    let project_id = issue.project_id.ok_or_else(|| {
-                        DispatchError::Store(CreationError::MissingRow(
-                            "issue has no project".to_owned(),
-                        ))
-                    })?;
-                    let project = CreationSeam::project(seam, project_id)
-                        .await
-                        .map_err(DispatchError::Store)?;
-                    if !seam
-                        .enrolled_managed_exists(project_id, creator, project.workspace_id)
-                        .await?
-                    {
-                        Some(REASON_NO_MANAGED_RUNNER.to_owned())
-                    } else {
-                        None
-                    }
-                }
-            }
-        };
-        match reason {
-            None => {
-                return Ok(PreflightOutcome {
-                    proceed: true,
-                    logs: Vec::new(),
-                });
-            }
-            Some(reason) => {
-                let bounced = bounce_issue_no_eligible_runner(
-                    seam,
-                    issue_id,
-                    triggered_by,
-                    &reason,
-                    now,
-                    jitter_secs,
-                )
-                .await?;
-                return Ok(PreflightOutcome {
-                    proceed: false,
-                    logs: bounced.logs,
-                });
-            }
-        }
-    }
-
+    // Every other executor is a runner (built_engine_as_runner §6; a
+    // stale `managed_runner` value is the legacy spelling of one).
+    // "The runner is offline right now" is never a reason to bounce:
+    // the run waits in the pod.
     if matcher
-        .pod_has_runner_for_issue_principal(pod_id, issue_id, run_creator)
+        .pod_has_runner_for_issue_principal(
+            pod_id,
+            issue_id,
+            run_creator,
+            creation::is_human_triggered(triggered_by),
+            false,
+        )
         .await?
     {
         return Ok(PreflightOutcome {
@@ -1158,11 +1068,25 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
             logs: Vec::new(),
         });
     }
+    // §9.4: a dedicated issue bounced for usage-rule exclusion reports
+    // dedicated-runner-not-eligible and names the runner + failing rule.
+    let (reason, reason_name): (&str, String) = match issue.assigned_runner_id {
+        Some(assigned_id) => {
+            let name = CreationSeam::runner(seam, assigned_id)
+                .await
+                .map_err(DispatchError::Store)?
+                .map(|runner| runner.name)
+                .unwrap_or_else(|| "the dedicated runner".to_owned());
+            (REASON_DEDICATED_RUNNER_NOT_ELIGIBLE, name)
+        }
+        None => (REASON_NO_ELIGIBLE_RUNNER, String::new()),
+    };
     let bounced = bounce_issue_no_eligible_runner(
         seam,
         issue_id,
         triggered_by,
-        REASON_NO_ELIGIBLE_RUNNER,
+        reason,
+        &reason_name,
         now,
         jitter_secs,
     )
@@ -1186,12 +1110,13 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     issue_id: Uuid,
     triggered_by: &str,
     reason: &str,
+    reason_name: &str,
     now: DateTime<Utc>,
     jitter_secs: f64,
 ) -> Result<BounceOutcome, DispatchError> {
     let mut logs = Vec::new();
     logs.push(bounce_log_line(issue_id, reason, triggered_by));
-    let body = bounce_body(reason);
+    let body = bounce_body(reason, reason_name);
 
     let issue = CreationSeam::issue(seam, issue_id)
         .await
@@ -1272,6 +1197,11 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     }
 
     let actor_id = seam.agent_system_user_id().await?;
+    // The bounce posts via `IssueComment.objects.create`
+    // (`scheduling.py:1122-1129`), so `save()` recomputes the comment
+    // column with MLStripper (entities decoded — `issue.py:606`),
+    // even though the fixed bodies below carry no entities today
+    // (PIDASHCONV-1581 item 4).
     seam.insert_bounce_comment(&NewIssueComment {
         id: Uuid::new_v4(),
         description_id: Uuid::new_v4(),
@@ -1281,15 +1211,15 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
         issue_id,
         actor_id,
         comment_html: body.to_owned(),
-        comment_stripped: strip_tags(body),
+        comment_stripped: comment_stripped_for(&body),
     })
     .await?;
     Ok(BounceOutcome { moved_to, logs })
 }
 
 /// The no-creator bounce shared by the continuation and Run AI paths
-/// (`:1173-1185`, `:1283-1290`): cloud / managed bounce loudly, local
-/// stays silent.
+/// (`:1173-1185`, `:1283-1290`): cloud bounces loudly, every runner
+/// value stays silent (the run waits in the pod).
 async fn bounce_no_creator<S: DispatchSeam>(
     seam: &mut S,
     issue: &IssueView,
@@ -1306,17 +1236,7 @@ async fn bounce_no_creator<S: DispatchSeam>(
             issue_id,
             triggered_by,
             REASON_NO_LLM_CONFIG,
-            now,
-            jitter_secs,
-        )
-        .await?;
-        logs.extend(bounced.logs);
-    } else if effective == AgentExecutorKind::ManagedRunner.value() {
-        let bounced = bounce_issue_no_eligible_runner(
-            seam,
-            issue_id,
-            triggered_by,
-            REASON_NO_MANAGED_RUNNER,
+            "",
             now,
             jitter_secs,
         )
@@ -1334,11 +1254,45 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
     issue_id: Uuid,
     triggered_by: &str,
     actor: Option<Uuid>,
+    pod_once: bool,
+    held_entry: bool,
     matcher: &dyn PodRunnerMatcher,
     now: DateTime<Utc>,
     jitter_secs: f64,
 ) -> Result<ContinuationDispatchOutcome, DispatchError> {
     let mut logs = Vec::new();
+    // A person's run on an offline, paused or usage-excluded dedicated
+    // runner is refused here, before any persistence (Django
+    // `dispatch_continuation_run`, `scheduling.py:1264-1291`, H-11/H-10
+    // §11/§23.3). A held entry already passed the check when the person
+    // asked: skip the refusal, keep the preflight.
+    if !held_entry {
+        let pin = CreationSeam::dedicated_pin(
+            seam,
+            &DedicatedPinArgs {
+                issue_id,
+                parent: None,
+                pod_id: None,
+                fresh_session: false,
+                creator_id: actor,
+                trigger: triggered_by,
+                pod_once,
+                actor_id: actor.unwrap_or_else(Uuid::nil),
+                now,
+            },
+        )
+        .await
+        .map_err(DispatchError::Store)?;
+        if let Some(code) = pin.refusal {
+            logs.push(skip_dispatch_log_line(issue_id, code, triggered_by, "INFO"));
+            if let Some(comment) = pin.refusal_comment {
+                CreationSeam::insert_system_comment(seam, &comment)
+                    .await
+                    .map_err(DispatchError::Store)?;
+            }
+            return Ok(ContinuationDispatchOutcome { run_id: None, logs });
+        }
+    }
     let active = CreationSeam::active_run_for(seam, issue_id)
         .await
         .map_err(DispatchError::Store)?;
@@ -1402,22 +1356,44 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
         ));
         return Ok(ContinuationDispatchOutcome { run_id: None, logs });
     };
-    let preflight = preflight_eligibility_or_bounce(
-        seam,
-        issue_id,
-        Some(creator),
-        pod,
-        triggered_by,
-        matcher,
-        now,
-        jitter_secs,
-    )
-    .await?;
-    if !preflight.proceed {
+    if pod_once {
+        // §23.3: pod-branch preflight, no bounce — the issue stays dedicated.
+        let pod_has = matcher
+            .pod_has_runner_for_issue_principal(
+                pod,
+                issue_id,
+                Some(creator),
+                creation::is_human_triggered(triggered_by),
+                true,
+            )
+            .await?;
+        if !pod_has {
+            logs.push(skip_dispatch_log_line(
+                issue_id,
+                RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
+                triggered_by,
+                "INFO",
+            ));
+            return Ok(ContinuationDispatchOutcome { run_id: None, logs });
+        }
+    } else {
+        let preflight = preflight_eligibility_or_bounce(
+            seam,
+            issue_id,
+            Some(creator),
+            pod,
+            triggered_by,
+            matcher,
+            now,
+            jitter_secs,
+        )
+        .await?;
+        if !preflight.proceed {
+            logs.extend(preflight.logs);
+            return Ok(ContinuationDispatchOutcome { run_id: None, logs });
+        }
         logs.extend(preflight.logs);
-        return Ok(ContinuationDispatchOutcome { run_id: None, logs });
     }
-    logs.extend(preflight.logs);
 
     // Django passes `triggered_by` to the builders unstamped and
     // unvalidated (`scheduling.py:1206/1214`, `trigger: str`): the
@@ -1433,6 +1409,7 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
                     parent,
                     creator_id: creator,
                     pod_id: pod,
+                    pod_once,
                     trigger: trigger.clone(),
                     now,
                 },
@@ -1449,6 +1426,7 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
                     parent: None,
                     creator_id: creator,
                     pod_id: pod,
+                    pod_once,
                     fresh_session: true,
                     trigger: trigger.clone(),
                     now,
@@ -1468,11 +1446,43 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
     seam: &mut S,
     issue_id: Uuid,
     actor: Option<Uuid>,
+    pod_once: bool,
     matcher: &dyn PodRunnerMatcher,
     now: DateTime<Utc>,
     jitter_secs: f64,
 ) -> Result<RunAiOutcome, DispatchError> {
     let mut logs = Vec::new();
+    // H-11/H-10 refusal, before reconcile/persistence (Django
+    // `dispatch_run_ai_run_with_reason`, `:1453-1472`, §11/§23.3).
+    let pin = CreationSeam::dedicated_pin(
+        seam,
+        &DedicatedPinArgs {
+            issue_id,
+            parent: None,
+            pod_id: None,
+            fresh_session: false,
+            creator_id: actor,
+            trigger: TRIGGER_RUN_AI,
+            pod_once,
+            actor_id: actor.unwrap_or_else(Uuid::nil),
+            now,
+        },
+    )
+    .await
+    .map_err(DispatchError::Store)?;
+    if let Some(code) = pin.refusal {
+        logs.push(skip_dispatch_log_line(
+            issue_id,
+            code,
+            TRIGGER_RUN_AI,
+            "INFO",
+        ));
+        return Ok(RunAiOutcome {
+            run_id: None,
+            reason: Some(code.to_owned()),
+            logs,
+        });
+    }
     let active = CreationSeam::active_run_for(seam, issue_id)
         .await
         .map_err(DispatchError::Store)?;
@@ -1532,26 +1542,46 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
             logs,
         });
     };
-    let preflight = preflight_eligibility_or_bounce(
-        seam,
-        issue_id,
-        Some(creator),
-        pod,
-        TRIGGER_RUN_AI,
-        matcher,
-        now,
-        jitter_secs,
-    )
-    .await?;
-    if !preflight.proceed {
+    if pod_once {
+        // §23.3: pod-branch preflight, no bounce.
+        let pod_has = matcher
+            .pod_has_runner_for_issue_principal(pod, issue_id, Some(creator), true, true)
+            .await?;
+        if !pod_has {
+            logs.push(skip_dispatch_log_line(
+                issue_id,
+                RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
+                TRIGGER_RUN_AI,
+                "INFO",
+            ));
+            return Ok(RunAiOutcome {
+                run_id: None,
+                reason: Some(RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD.to_owned()),
+                logs,
+            });
+        }
+    } else {
+        let preflight = preflight_eligibility_or_bounce(
+            seam,
+            issue_id,
+            Some(creator),
+            pod,
+            TRIGGER_RUN_AI,
+            matcher,
+            now,
+            jitter_secs,
+        )
+        .await?;
+        if !preflight.proceed {
+            logs.extend(preflight.logs);
+            return Ok(RunAiOutcome {
+                run_id: None,
+                reason: Some(RUN_AI_NO_ELIGIBLE_RUNNER.to_owned()),
+                logs,
+            });
+        }
         logs.extend(preflight.logs);
-        return Ok(RunAiOutcome {
-            run_id: None,
-            reason: Some(RUN_AI_NO_ELIGIBLE_RUNNER.to_owned()),
-            logs,
-        });
     }
-    logs.extend(preflight.logs);
 
     let (parent, fresh_session) = creation::parent_for_next_run(seam, issue_id, None, None)
         .await
@@ -1569,6 +1599,7 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
                     parent,
                     creator_id: creator,
                     pod_id: pod,
+                    pod_once,
                     trigger: TRIGGER_RUN_AI.to_owned(),
                     now,
                 },
@@ -1585,6 +1616,7 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
                     parent: None,
                     creator_id: creator,
                     pod_id: pod,
+                    pod_once,
                     fresh_session,
                     trigger: TRIGGER_RUN_AI.to_owned(),
                     now,
@@ -1614,7 +1646,8 @@ pub async fn dispatch_run_ai_run<S: DispatchSeam>(
     jitter_secs: f64,
 ) -> Result<ThinRunAiOutcome, DispatchError> {
     let outcome =
-        dispatch_run_ai_run_with_reason(seam, issue_id, actor, matcher, now, jitter_secs).await?;
+        dispatch_run_ai_run_with_reason(seam, issue_id, actor, false, matcher, now, jitter_secs)
+            .await?;
     Ok(ThinRunAiOutcome {
         run_id: outcome.run_id,
         logs: outcome.logs,
@@ -1625,6 +1658,7 @@ pub async fn dispatch_run_ai_run<S: DispatchSeam>(
 /// (`run_ai_for_human`, `:1325-1340`): re-time the clock for the free
 /// human run, dispatch, and roll the re-time back when nothing was
 /// created. The jobs driver owns the transaction and reads `rollback`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_ai_for_human<S: DispatchSeam>(
     seam: &mut S,
     issue_id: Uuid,
@@ -1633,6 +1667,7 @@ pub async fn run_ai_for_human<S: DispatchSeam>(
     now: DateTime<Utc>,
     jitter_secs: f64,
     created_by: Option<Uuid>,
+    pod_once: bool,
 ) -> Result<HumanRunAiOutcome, DispatchError> {
     let mut logs = Vec::new();
     let issue = CreationSeam::issue(seam, issue_id)
@@ -1657,7 +1692,8 @@ pub async fn run_ai_for_human<S: DispatchSeam>(
     )
     .await?;
     let outcome =
-        dispatch_run_ai_run_with_reason(seam, issue_id, actor, matcher, now, jitter_secs).await?;
+        dispatch_run_ai_run_with_reason(seam, issue_id, actor, pod_once, matcher, now, jitter_secs)
+            .await?;
     logs.extend(outcome.logs);
     Ok(HumanRunAiOutcome {
         run_id: outcome.run_id,
@@ -1809,7 +1845,9 @@ pub async fn re_tick_ticker<S: DispatchSeam>(
 }
 
 /// Buy back one tick so an agent can yield without spending budget
-/// (`wait_ticker`, `:766-827`, PDASHOSS01-204).
+/// (`wait_ticker`, `:766-827`, PDASHOSS01-204). `created_by` is the
+/// crum user for the activity row (the HTTP caller; `None` where the
+/// caller has no request user).
 #[allow(clippy::too_many_arguments)]
 pub async fn wait_ticker<S: DispatchSeam>(
     seam: &mut S,
@@ -1819,6 +1857,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
     now: DateTime<Utc>,
     jitter_secs: f64,
     epoch_secs: f64,
+    created_by: Option<Uuid>,
 ) -> Result<WaitOutcome, DispatchError> {
     let mut ticker = seam.lock_ticker_for_issue(issue_id).await?;
     let Some(row) = ticker.as_mut() else {
@@ -1893,6 +1932,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
         waited: row.waited,
         run_id,
         actor_id,
+        created_by,
         epoch_secs,
     })
     .await?;
@@ -2054,7 +2094,7 @@ mod tests {
 
     use super::super::creation::{
         AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, LockedIssue,
-        NewAgentRun, PodView, RenderBundle, RunView, RunnerView,
+        NewAgentRun, NewSystemComment, PinOutcome, PodView, RenderBundle, RunView, RunnerView,
     };
 
     static PREFLIGHT: &str =
@@ -2121,6 +2161,7 @@ mod tests {
             parent_id: None,
             created_by_id: Some(uid(0x41)),
             assigned_pod_id: Some(uid(0x50)),
+            assigned_runner_id: None,
             agent_executor: None,
             git_work_branch: None,
             workpad: None,
@@ -2168,6 +2209,7 @@ mod tests {
             pod_id: uid(0x50),
             runner_id: None,
             pinned_runner_id: None,
+            pin_kind: String::new(),
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status,
@@ -2176,8 +2218,7 @@ mod tests {
             phase_kind: "coding-task".to_owned(),
             run_config: json!({}),
             tool_plan: json!({}),
-            error_code: String::new(),
-            error: String::new(),
+            error_details: json!({}),
             prompt: String::new(),
             prompt_manifest: None,
             ended_at: None,
@@ -2248,7 +2289,6 @@ mod tests {
         roles: HashMap<Uuid, RoleVerdict>,
         llm: HashMap<Uuid, bool>,
         llm_calls: RefCell<Vec<Uuid>>,
-        enrolled: HashSet<Uuid>,
         managed_enabled: bool,
         profiles: HashMap<Uuid, LlmProfile>,
         lock_ticker_by_id: Option<Option<IssueAgentTicker>>,
@@ -2256,6 +2296,9 @@ mod tests {
         // Captures.
         issue_states: HashMap<Uuid, Uuid>,
         saved_clocks: Vec<IssueAgentTicker>,
+        assigned_runners: HashMap<Uuid, Option<Uuid>>,
+        system_comments: Vec<NewSystemComment>,
+        cleared_threads: Vec<Uuid>,
         inserted_tickers: Vec<IssueAgentTicker>,
         saved_waits: Vec<(IssueAgentTicker, bool)>,
         comments: Vec<NewIssueComment>,
@@ -2440,6 +2483,64 @@ mod tests {
         fn extra_toolsets_schema_tool(&self) -> String {
             String::new()
         }
+        async fn dedicated_pin(
+            &mut self,
+            args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            let assigned = self
+                .assigned_runners
+                .get(&args.issue_id)
+                .copied()
+                .unwrap_or(None);
+            let (runner_id, pin_kind) = match assigned {
+                Some(runner_id) if !args.pod_once => (Some(runner_id), "dedicated".to_owned()),
+                _ => (
+                    None,
+                    crate::domain::issue_assignment::PIN_LOCALITY.to_owned(),
+                ),
+            };
+            Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id,
+                pin_kind,
+            })
+        }
+
+        async fn insert_system_comment(
+            &mut self,
+            comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            self.system_comments.push(comment.clone());
+            Ok(())
+        }
+
+        async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+            self.cleared_threads.push(run_id);
+            Ok(())
+        }
+
+        async fn pod_once_started_comment(
+            &mut self,
+            issue_id: Uuid,
+            _pod_id: Uuid,
+            actor_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            let issue = self.issue(issue_id).await?;
+            Ok(NewSystemComment {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                now,
+                project_id: issue.project_id.unwrap_or_else(Uuid::nil),
+                workspace_id: issue.workspace_id,
+                issue_id,
+                actor_id,
+                comment_html: "pod_once".to_owned(),
+                comment_stripped: "pod_once".to_owned(),
+            })
+        }
     }
 
     impl FinalizeAgentRunSeam for FakeSeam {
@@ -2622,15 +2723,6 @@ mod tests {
             }))
         }
 
-        async fn enrolled_managed_exists(
-            &mut self,
-            _project_id: Uuid,
-            user_id: Uuid,
-            _workspace_id: Uuid,
-        ) -> Result<bool, DispatchError> {
-            Ok(self.enrolled.contains(&user_id))
-        }
-
         fn managed_runner_enabled(&self) -> bool {
             self.managed_enabled
         }
@@ -2658,6 +2750,8 @@ mod tests {
             _pod_id: Uuid,
             _issue_id: Uuid,
             _creator_id: Option<Uuid>,
+            _human: bool,
+            _pod_once: bool,
         ) -> Pin<Box<dyn Future<Output = Result<bool, DispatchError>> + Send + '_>> {
             let answer = self.answer;
             Box::pin(async move { Ok(answer) })
@@ -2721,7 +2815,7 @@ mod tests {
         assert_eq!(b1.as_str().unwrap(), BOUNCE_BODY_NO_LLM_CONFIG);
         let b2 = &fixture(BOUNCE)["cases"]["B2_body_default"]["comment_html"][0];
         assert_eq!(b2.as_str().unwrap(), BOUNCE_BODY_DEFAULT);
-        assert_eq!(bounce_body("no-llm-config"), BOUNCE_BODY_NO_LLM_CONFIG);
+        assert_eq!(bounce_body("no-llm-config", ""), BOUNCE_BODY_NO_LLM_CONFIG);
         // Every other reason — including the managed ones (B2b) — takes
         // the default body.
         for reason in [
@@ -2730,19 +2824,39 @@ mod tests {
             "managed_runner_disabled",
             "llm_config_missing",
         ] {
-            assert_eq!(bounce_body(reason), BOUNCE_BODY_DEFAULT, "{reason}");
+            assert_eq!(bounce_body(reason, ""), BOUNCE_BODY_DEFAULT, "{reason}");
         }
+        // Dedicated arms (`scheduling.py:1165-1182`): the runner is
+        // named in both.
+        assert_eq!(
+            bounce_body(REASON_DEDICATED_RUNNER_NOT_ELIGIBLE, "gpu-box"),
+            "<p><strong>Agent run skipped — dedicated runner not eligible.</strong></p><p>Runner <strong>gpu-box</strong> cannot serve this run: its usage rule excludes the run's creator or trigger. Reassign the issue to a runner that can serve it, or return it to the pod.</p>",
+        );
+        assert_eq!(
+            bounce_body(REASON_DEDICATED_RUNNER_REVOKED, "gpu-box"),
+            "<p><strong>Dedicated runner lost.</strong></p><p>Runner <strong>gpu-box</strong> was revoked or deleted, so this issue is no longer assigned to a dedicated runner. Choose a new runner or return the issue to the pod.</p>",
+        );
     }
 
     #[test]
-    fn strip_tags_b9_golden() {
+    fn bounce_stripped_ml_golden() {
+        // The bounce comment column is the `save()` MLStripper
+        // recompute (`issue.py:606`, PIDASHCONV-1581 item 4): entities
+        // decode. The B9 body carries none, so the golden bytes equal
+        // the retired Django-strip port's — the entity case pins the
+        // stripper the bounce now rides.
         let row = &fixture(BOUNCE)["cases"]["B9_comment_row"]["row"];
         let html = row["comment_html"].as_str().unwrap();
         assert_eq!(html, BOUNCE_BODY_DEFAULT);
-        assert_eq!(strip_tags(html), row["comment_stripped"].as_str().unwrap());
-        // The Django edge: an unclosed `<` is kept verbatim.
-        assert_eq!(strip_tags("a<b"), "a<b");
-        assert_eq!(strip_tags(""), "");
+        assert_eq!(
+            comment_stripped_for(html),
+            row["comment_stripped"].as_str().unwrap()
+        );
+        assert_eq!(
+            comment_stripped_for("<p>Run R&amp;D failed</p>"),
+            "Run R&D failed"
+        );
+        assert_eq!(comment_stripped_for(""), "");
     }
 
     #[test]
@@ -2790,34 +2904,6 @@ mod tests {
             line.message.ends_with(&format!("run={}", uid(0x71))),
             "{}",
             line.message
-        );
-    }
-
-    #[test]
-    fn managed_profile_reason_falls_back() {
-        let available = LlmProfile {
-            available: true,
-            reason_code: String::new(),
-        };
-        assert_eq!(
-            managed_profile_reason_code(&available),
-            ManagedRunnerReason::LLM_CONFIG_MISSING
-        );
-        let coded = LlmProfile {
-            available: false,
-            reason_code: "byok_not_supported_on_desktop".to_owned(),
-        };
-        assert_eq!(
-            managed_profile_reason_code(&coded),
-            "byok_not_supported_on_desktop"
-        );
-        let empty = LlmProfile {
-            available: false,
-            reason_code: String::new(),
-        };
-        assert_eq!(
-            managed_profile_reason_code(&empty),
-            ManagedRunnerReason::LLM_CONFIG_MISSING
         );
     }
 
@@ -3072,8 +3158,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preflight_f3_managed_chain() {
-        // F3a: no creator at all.
+    async fn preflight_f3_runner_chain() {
+        // A stale `managed_runner` value is the legacy spelling of
+        // the runner branch: the matcher alone decides, and no
+        // creator/kill-switch/profile/enrollment gate remains.
+        // F3a: no creator at all — no managed-specific bounce; the
+        // matcher answers false and the run bounces with the
+        // default body.
         let mut seam = stocked_as("8103");
         as_executor(&mut seam, "managed_runner");
         seam.backlog_target = Some(backlog_hi());
@@ -3092,14 +3183,16 @@ mod tests {
         .await
         .expect("preflight");
         assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3a_managed_no_creator"));
+        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3a_runner_no_creator"));
+        assert_eq!(seam.comments.len(), 1);
+        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_DEFAULT);
 
-        // F3b: the operator kill switch is off.
+        // F3b: a creator exists but the matcher answers false —
+        // same default bounce (no enrollment/profile/switch leg).
         let mut seam = stocked_as("8104");
         as_executor(&mut seam, "managed_runner");
         seam.backlog_target = Some(backlog_hi());
         seam.ticker = None;
-        seam.managed_enabled = false;
         let out = preflight_eligibility_or_bounce(
             &mut seam,
             fxid("8104"),
@@ -3113,77 +3206,15 @@ mod tests {
         .await
         .expect("preflight");
         assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3b_managed_disabled"));
+        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3b_runner_with_creator"));
+        assert_eq!(seam.comments.len(), 1);
+        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_DEFAULT);
 
-        // F3c: no usable desktop profile.
-        let mut seam = stocked_as("8105");
-        as_executor(&mut seam, "managed_runner");
-        seam.backlog_target = Some(backlog_hi());
-        seam.ticker = None;
-        seam.managed_enabled = true;
-        seam.profiles.insert(
-            uid(0x41),
-            LlmProfile {
-                available: false,
-                reason_code: "llm_config_missing".to_owned(),
-            },
-        );
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8105"),
-            Some(uid(0x41)),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3c_managed_no_profile"));
-
-        // F3d: nothing enrolled for this project.
-        let mut seam = stocked_as("8106");
-        as_executor(&mut seam, "managed_runner");
-        seam.backlog_target = Some(backlog_hi());
-        seam.ticker = None;
-        seam.managed_enabled = true;
-        seam.profiles.insert(
-            uid(0x41),
-            LlmProfile {
-                available: true,
-                reason_code: String::new(),
-            },
-        );
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8106"),
-            Some(uid(0x41)),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F3d_managed_not_enrolled"));
-
-        // F3e: every structural gate passes — "your laptop is closed"
-        // is not one of them.
+        // F3c: the matcher answers true — proceeds with no creator
+        // gate and no comment.
         let mut seam = stocked_as("8107");
         as_executor(&mut seam, "managed_runner");
-        seam.managed_enabled = true;
-        seam.profiles.insert(
-            uid(0x41),
-            LlmProfile {
-                available: true,
-                reason_code: String::new(),
-            },
-        );
-        seam.enrolled.insert(uid(0x41));
+        let matcher = FakeMatcher { answer: true };
         let out = preflight_eligibility_or_bounce(
             &mut seam,
             fxid("8107"),
@@ -3266,6 +3297,7 @@ mod tests {
             fxid("8110"),
             "tick",
             REASON_NO_LLM_CONFIG,
+            "",
             now(),
             JITTER,
         )
@@ -3294,6 +3326,7 @@ mod tests {
             fxid("8111"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3303,7 +3336,10 @@ mod tests {
         assert_eq!(out.logs, fx_logs(BOUNCE, "B2_body_default"));
         assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_DEFAULT);
 
-        // B2b: a managed reason still takes the default body.
+        // B2b: a retired managed reason still takes the default body.
+        // #2903 removed the `no-managed-runner` bounce reason; the
+        // Django-captured case pins the renderer's default-body rule
+        // for any non-`no-llm-config` reason.
         let mut seam = bounce_case("8112");
         seam.ticker = None;
         seam.backlog_target = Some(backlog_hi());
@@ -3311,7 +3347,8 @@ mod tests {
             &mut seam,
             fxid("8112"),
             "tick",
-            REASON_NO_MANAGED_RUNNER,
+            "no-managed-runner",
+            "",
             now(),
             JITTER,
         )
@@ -3335,6 +3372,7 @@ mod tests {
                 fxid(suffix),
                 "tick",
                 REASON_NO_ELIGIBLE_RUNNER,
+                "",
                 now(),
                 JITTER,
             )
@@ -3364,6 +3402,7 @@ mod tests {
             fxid("8115"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3388,6 +3427,7 @@ mod tests {
             fxid("8116"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3414,6 +3454,7 @@ mod tests {
             fxid("8117"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3440,6 +3481,7 @@ mod tests {
             fxid("8118"),
             "tick",
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3462,6 +3504,7 @@ mod tests {
             fxid("8119"),
             TRIGGER_RUN_AI,
             REASON_NO_ELIGIBLE_RUNNER,
+            "",
             now(),
             JITTER,
         )
@@ -3655,18 +3698,28 @@ mod tests {
 
     #[tokio::test]
     async fn creator_managed_and_none() {
-        // C5: the managed enrollment leg skips the unenrolled.
+        // C5: a stale `managed_runner` value takes the machine
+        // branch like `local_runner` — no enrollment leg remains,
+        // the first LLM-capable candidate wins.
         let mut seam = FakeSeam::stocked();
         as_executor(&mut seam, "managed_runner");
-        for id in [uid(0x41), uid(0x42), uid(0x43)] {
+        let all = [uid(0x41), uid(0x42), uid(0x43)];
+        for id in all {
             seam.llm.insert(id, true);
             seam.roles.insert(id, member_roles());
         }
-        seam.enrolled.insert(uid(0x43));
+        seam.candidates = all
+            .into_iter()
+            .map(|id| CandidateUser {
+                id,
+                is_active: true,
+                is_bot: false,
+            })
+            .collect();
         let out = resolve_creator_for_trigger(&mut seam, uid(0x01), "run_ai", None)
             .await
             .expect("resolve");
-        assert_eq!(out, Some(uid(0x43)));
+        assert_eq!(out, Some(uid(0x41)));
 
         // C6: nobody qualifies.
         let mut seam = FakeSeam::stocked();
@@ -3770,6 +3823,8 @@ mod tests {
             fxid("8127"),
             "tick",
             None,
+            false,
+            false,
             &matcher,
             now(),
             JITTER,
@@ -3786,6 +3841,8 @@ mod tests {
             fxid("8128"),
             "tick",
             None,
+            false,
+            false,
             &matcher,
             now(),
             JITTER,
@@ -3817,6 +3874,8 @@ mod tests {
             fxid("8132"),
             "tick",
             None,
+            false,
+            false,
             &matcher,
             now(),
             JITTER,
@@ -3844,6 +3903,8 @@ mod tests {
             fxid("8133"),
             "tick",
             None,
+            false,
+            false,
             &matcher,
             now(),
             JITTER,
@@ -3871,6 +3932,8 @@ mod tests {
             fxid("8134"),
             "tick",
             None,
+            false,
+            false,
             &matcher,
             now(),
             JITTER,
@@ -3899,6 +3962,7 @@ mod tests {
             &mut seam,
             fxid("8136"),
             Some(uid(0x41)),
+            false,
             &matcher,
             now(),
             JITTER,
@@ -3917,6 +3981,7 @@ mod tests {
             &mut seam,
             fxid("8137"),
             Some(uid(0x41)),
+            false,
             &matcher,
             now(),
             JITTER,
@@ -3932,10 +3997,17 @@ mod tests {
         seam.issue.as_mut().expect("issue").created_by_id = None;
         seam.project.as_mut().expect("project").project_lead_id = None;
         seam.project.as_mut().expect("project").default_assignee_id = None;
-        let out =
-            dispatch_run_ai_run_with_reason(&mut seam, fxid("8138"), None, &matcher, now(), JITTER)
-                .await
-                .expect("dispatch");
+        let out = dispatch_run_ai_run_with_reason(
+            &mut seam,
+            fxid("8138"),
+            None,
+            false,
+            &matcher,
+            now(),
+            JITTER,
+        )
+        .await
+        .expect("dispatch");
         assert_eq!(out.run_id, None);
         assert_eq!(out.reason.as_deref(), Some(RUN_AI_NO_ELIGIBLE_RUNNER));
         assert_eq!(out.logs, fx_logs(RUN_AI, "H3_no_creator"));
@@ -3959,6 +4031,7 @@ mod tests {
             &mut seam,
             fxid("8139"),
             Some(uid(0x41)),
+            false,
             &matcher,
             now(),
             JITTER,
@@ -4120,6 +4193,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4139,6 +4213,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4157,6 +4232,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4181,6 +4257,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4210,6 +4287,7 @@ mod tests {
             fx["comment"].as_str().unwrap()
         );
         assert_eq!(activity.actor_id, uid(0x41));
+        assert_eq!(activity.created_by, Some(uid(0x41)));
         assert_eq!(activity.epoch_secs, EPOCH);
         assert_eq!(out.logs.len(), 1);
         assert_eq!(out.logs[0].level, "INFO");
@@ -4238,6 +4316,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4262,6 +4341,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4292,6 +4372,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");
@@ -4306,12 +4387,13 @@ mod tests {
         // W9: no actor — the system bot owns the activity; no run —
         // no suffix.
         let mut seam = wait_case();
-        let out = wait_ticker(&mut seam, uid(0x01), None, None, now(), JITTER, EPOCH)
+        let out = wait_ticker(&mut seam, uid(0x01), None, None, now(), JITTER, EPOCH, None)
             .await
             .expect("wait");
         assert!(out.applied);
         let activity = seam.activities.last().expect("activity written");
         assert_eq!(activity.actor_id, uid(0x99));
+        assert_eq!(activity.created_by, None);
         assert_eq!(
             wait_activity_comment(activity.pool, activity.waited, activity.run_id.as_ref()),
             fixture(WAIT)["cases"]["W9_activity_no_run"]["activity"]["comment"]
@@ -4331,6 +4413,7 @@ mod tests {
             now(),
             JITTER,
             EPOCH,
+            Some(uid(0x41)),
         )
         .await
         .expect("wait");

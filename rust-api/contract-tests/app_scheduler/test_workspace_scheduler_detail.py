@@ -143,3 +143,20 @@ def test_delete_soft_deletes_bindings_inline(org):
     # The API view of the world is consistent the moment the response
     # returns: no orphan active bindings survive the delete.
     assert org.request("GET", bindings_url, "admin").json() == []
+
+
+def test_patch_strips_python_whitespace(org):
+    # Same Python str.strip() semantics on PATCH (U+001C-U+001F included).
+    created = _create(org, slug="p1", name="One")
+    r = org.request(
+        "PATCH", sched_detail(org, created["id"]), "admin",
+        json={"name": "\u001fRenamed\u001c"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Renamed"
+    r = org.request(
+        "PATCH", sched_detail(org, created["id"]), "admin",
+        json={"name": "\u001f"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["This field may not be blank."]}

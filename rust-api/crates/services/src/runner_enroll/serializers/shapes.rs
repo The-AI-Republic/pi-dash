@@ -52,7 +52,7 @@
 //! * QUIRK-surrogate: DRF's `ProhibitSurrogateCharactersValidator` reports
 //!   lone surrogates per field, but lone surrogates never survive JSON
 //!   parsing into this layer (`serde_json` rejects them at the envelope,
-//!   like the D-20 `json_cpython` precedent in the api crate). Envelope
+//!   like the D-20 `json` precedent in the api crate). Envelope
 //!   acceptance is the handler layer's concern, not this kernel's.
 //! * QUIRK-coerce-inf: `coerce_token(float('inf'))` raises an uncaught
 //!   `OverflowError` in Python (only `TypeError`/`ValueError` are caught).
@@ -63,6 +63,7 @@
 //! writes, of which this port has none; the enroll request serializer is
 //! the only write shape here.
 
+use pidash_compat::validate::push_error;
 use pidash_types::runner_runs::flat_token_fields;
 use serde::Serialize;
 use serde_json::Value;
@@ -86,9 +87,9 @@ pub const POD_WIRE_FIELDS: [&str; 11] = [
     "updated_at",
 ];
 
-/// `RunnerLiveStateSerializer.Meta.fields` (`serializers.py:86-99`), wire
+/// `RunnerLiveStateSerializer.Meta.fields` (`serializers.py:85-102`), wire
 /// order.
-pub const LIVE_STATE_WIRE_FIELDS: [&str; 14] = [
+pub const LIVE_STATE_WIRE_FIELDS: [&str; 16] = [
     "observed_run_id",
     "last_event_at",
     "last_event_kind",
@@ -102,19 +103,31 @@ pub const LIVE_STATE_WIRE_FIELDS: [&str; 14] = [
     "usage",
     "llm_model",
     "turn_count",
+    "agent_health",
+    "agent_last_activity_at",
     "updated_at",
 ];
 
-/// `DevMachineSerializer.Meta.fields` (`serializers.py:114-127`), wire
-/// order.
-pub const DEV_MACHINE_WIRE_FIELDS: [&str; 12] = [
+/// `DevMachineSerializer.Meta.fields` (`serializers.py:120-148`), wire
+/// order (engine trio #2903 + `provisioning` + #2910 engine state).
+pub const DEV_MACHINE_WIRE_FIELDS: [&str; 22] = [
     "id",
     "host_label",
     "label",
     "visibility",
+    "provisioning",
     "runner_count",
     "online_runner_count",
     "control_online",
+    "engine_paused_by_owner",
+    "engine_auto_pause_reason",
+    "engine_paused",
+    "engine_team_runs",
+    "engine_sign_in_state",
+    "engine_credential_expires_at",
+    "engine_state",
+    "engine_state_reported_at",
+    "merged_into",
     "last_seen_at",
     "last_heartbeat_at",
     "revoked_at",
@@ -126,17 +139,33 @@ pub const DEV_MACHINE_WIRE_FIELDS: [&str; 12] = [
 pub const POD_MINI_WIRE_FIELDS: [&str; 5] =
     ["id", "name", "is_default", "project", "project_identifier"];
 
-/// `DevMachineMiniSerializer.Meta.fields` (`serializers.py:151`), wire
-/// order.
-pub const DEV_MACHINE_MINI_WIRE_FIELDS: [&str; 3] = ["id", "host_label", "label"];
+/// `DevMachineMiniSerializer.Meta.fields` (`serializers.py:174-183`), wire
+/// order (engine trio #2903 + #2910 sign-in/expiry).
+pub const DEV_MACHINE_MINI_WIRE_FIELDS: [&str; 8] = [
+    "id",
+    "host_label",
+    "label",
+    "engine_paused_by_owner",
+    "engine_auto_pause_reason",
+    "engine_team_runs",
+    "engine_sign_in_state",
+    "engine_credential_expires_at",
+];
 
-/// `RunnerSerializer.Meta.fields` (`serializers.py:165-190`), wire order.
-pub const RUNNER_WIRE_FIELDS: [&str; 24] = [
+/// `RunnerSerializer.Meta.fields` (`serializers.py:211-248`), wire
+/// order (#2903 `pod_dispatch` + #2910 engine inserts after
+/// `host_label`).
+pub const RUNNER_WIRE_FIELDS: [&str; 31] = [
     "id",
     "name",
     "status",
     "host_label",
+    "is_engine",
+    "engine_paused",
+    "dispatch_paused",
+    "machine_display_name",
     "provisioning",
+    "pod_dispatch",
     "os",
     "arch",
     "runner_version",
@@ -154,6 +183,8 @@ pub const RUNNER_WIRE_FIELDS: [&str; 24] = [
     "enrolled_at",
     "revoked_at",
     "revoked_reason",
+    "paused_at",
+    "paused_by",
     "created_at",
     "updated_at",
 ];
@@ -263,12 +294,18 @@ pub fn pod_mini_to_representation<'a>(row: &'a PodMiniRow<'a>) -> PodMiniView<'a
 // Dev-machine shapes
 // ---------------------------------------------------------------------------
 
-/// A `DevMachine` row for mini rendering (`serializers.py:145-153`).
+/// A `DevMachine` row for mini rendering (`serializers.py:145-153` plus
+/// the engine trio, #2903).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevMachineMiniRow<'a> {
     pub id: &'a str,
     pub host_label: &'a str,
     pub label: &'a str,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: &'a str,
+    pub engine_credential_expires_at: Option<&'a str>,
 }
 
 /// `DevMachineMiniSerializer.to_representation` output, in wire order.
@@ -277,9 +314,15 @@ pub struct DevMachineMiniView<'a> {
     pub id: &'a str,
     pub host_label: &'a str,
     pub label: &'a str,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: &'a str,
+    pub engine_credential_expires_at: Option<&'a str>,
 }
 
-/// Port of `DevMachineMiniSerializer` (`serializers.py:145-153`).
+/// Port of `DevMachineMiniSerializer` (`serializers.py:145-153` plus
+/// the engine trio, #2903).
 pub fn dev_machine_mini_to_representation<'a>(
     row: &'a DevMachineMiniRow<'a>,
 ) -> DevMachineMiniView<'a> {
@@ -287,6 +330,11 @@ pub fn dev_machine_mini_to_representation<'a>(
         id: row.id,
         host_label: row.host_label,
         label: row.label,
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_team_runs: row.engine_team_runs,
+        engine_sign_in_state: row.engine_sign_in_state,
+        engine_credential_expires_at: row.engine_credential_expires_at,
     }
 }
 
@@ -304,9 +352,18 @@ pub struct DevMachineRow<'a> {
     pub host_label: &'a str,
     pub label: &'a str,
     pub visibility: i64,
+    pub provisioning: &'a str,
     pub runner_count: Option<i64>,
     pub online_runner_count: Option<i64>,
     pub control_online: Option<bool>,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: &'a str,
+    pub engine_credential_expires_at: Option<&'a str>,
+    pub engine_state: &'a Value,
+    pub engine_state_reported_at: Option<&'a str>,
+    pub merged_into: Option<&'a str>,
     pub last_seen_at: Option<&'a str>,
     pub last_heartbeat_at: Option<Option<&'a str>>,
     pub revoked_at: Option<&'a str>,
@@ -321,11 +378,21 @@ pub struct DevMachineView<'a> {
     pub host_label: &'a str,
     pub label: &'a str,
     pub visibility: i64,
+    pub provisioning: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online_runner_count: Option<i64>,
     pub control_online: bool,
+    pub engine_paused_by_owner: bool,
+    pub engine_auto_pause_reason: &'a str,
+    pub engine_paused: bool,
+    pub engine_team_runs: bool,
+    pub engine_sign_in_state: &'a str,
+    pub engine_credential_expires_at: Option<&'a str>,
+    pub engine_state: &'a Value,
+    pub engine_state_reported_at: Option<&'a str>,
+    pub merged_into: Option<&'a str>,
     pub last_seen_at: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_heartbeat_at: Option<Option<&'a str>>,
@@ -341,9 +408,19 @@ pub fn dev_machine_to_representation<'a>(row: &'a DevMachineRow<'a>) -> DevMachi
         host_label: row.host_label,
         label: row.label,
         visibility: row.visibility,
+        provisioning: row.provisioning,
         runner_count: row.runner_count,
         online_runner_count: row.online_runner_count,
         control_online: row.control_online.unwrap_or(false),
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_paused: row.engine_paused_by_owner || !row.engine_auto_pause_reason.is_empty(),
+        engine_team_runs: row.engine_team_runs,
+        engine_sign_in_state: row.engine_sign_in_state,
+        engine_credential_expires_at: row.engine_credential_expires_at,
+        engine_state: row.engine_state,
+        engine_state_reported_at: row.engine_state_reported_at,
+        merged_into: row.merged_into,
         last_seen_at: row.last_seen_at,
         last_heartbeat_at: row.last_heartbeat_at,
         revoked_at: row.revoked_at,
@@ -372,6 +449,8 @@ pub struct LiveStateRow<'a> {
     pub usage: &'a Value,
     pub llm_model: Option<&'a str>,
     pub turn_count: Option<i64>,
+    pub agent_health: Option<&'a str>,
+    pub agent_last_activity_at: Option<&'a str>,
     pub updated_at: &'a str,
 }
 
@@ -391,10 +470,12 @@ pub struct LiveStateView<'a> {
     pub usage: &'a Value,
     pub llm_model: Option<&'a str>,
     pub turn_count: Option<i64>,
+    pub agent_health: Option<&'a str>,
+    pub agent_last_activity_at: Option<&'a str>,
     pub updated_at: &'a str,
 }
 
-/// Port of `RunnerLiveStateSerializer` (`serializers.py:75-101`).
+/// Port of `RunnerLiveStateSerializer` (`serializers.py:75-103`).
 pub fn live_state_to_representation<'a>(row: &'a LiveStateRow<'a>) -> LiveStateView<'a> {
     let flats = flat_token_fields(row.usage);
     LiveStateView {
@@ -411,6 +492,8 @@ pub fn live_state_to_representation<'a>(row: &'a LiveStateRow<'a>) -> LiveStateV
         usage: row.usage,
         llm_model: row.llm_model,
         turn_count: row.turn_count,
+        agent_health: row.agent_health,
+        agent_last_activity_at: row.agent_last_activity_at,
         updated_at: row.updated_at,
     }
 }
@@ -427,7 +510,12 @@ pub struct RunnerRow<'a> {
     pub name: &'a str,
     pub status: &'a str,
     pub host_label: &'a str,
+    pub is_engine: bool,
+    pub engine_paused: bool,
+    pub dispatch_paused: bool,
+    pub machine_display_name: &'a str,
     pub provisioning: &'a str,
+    pub pod_dispatch: &'a str,
     pub os: &'a str,
     pub arch: &'a str,
     pub runner_version: &'a str,
@@ -445,8 +533,18 @@ pub struct RunnerRow<'a> {
     pub enrolled_at: Option<&'a str>,
     pub revoked_at: Option<&'a str>,
     pub revoked_reason: &'a str,
+    /// Operator-pause stamp (`09738d222`): rendered datetime or null.
+    pub paused_at: Option<&'a str>,
+    /// Pausing user id (`09738d222`): uuid string or null.
+    pub paused_by: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
+    /// `?assignable_for=` eligibility read (design §7.4): absent unless
+    /// the list was asked for it, mirroring the context-gated fields.
+    pub assignable: Option<bool>,
+    pub not_assignable_code: Option<&'a str>,
+    pub is_busy: Option<bool>,
+    pub queue_depth: Option<u64>,
 }
 
 /// `RunnerSerializer.to_representation` output, in wire order.
@@ -456,7 +554,12 @@ pub struct RunnerView<'a> {
     pub name: &'a str,
     pub status: &'a str,
     pub host_label: &'a str,
+    pub is_engine: bool,
+    pub engine_paused: bool,
+    pub dispatch_paused: bool,
+    pub machine_display_name: &'a str,
     pub provisioning: &'a str,
+    pub pod_dispatch: &'a str,
     pub os: &'a str,
     pub arch: &'a str,
     pub runner_version: &'a str,
@@ -474,8 +577,20 @@ pub struct RunnerView<'a> {
     pub enrolled_at: Option<&'a str>,
     pub revoked_at: Option<&'a str>,
     pub revoked_reason: &'a str,
+    pub paused_at: Option<&'a str>,
+    pub paused_by: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
+    /// `?assignable_for=` eligibility read (design §7.4): absent unless
+    /// the list was asked for it, mirroring the context-gated fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_assignable_code: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_busy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<u64>,
 }
 
 /// Port of `RunnerSerializer` (`serializers.py:156-220`).
@@ -485,7 +600,12 @@ pub fn runner_to_representation<'a>(row: &'a RunnerRow<'a>) -> RunnerView<'a> {
         name: row.name,
         status: row.status,
         host_label: row.host_label,
+        is_engine: row.is_engine,
+        engine_paused: row.engine_paused,
+        dispatch_paused: row.dispatch_paused,
+        machine_display_name: row.machine_display_name,
         provisioning: row.provisioning,
+        pod_dispatch: row.pod_dispatch,
         os: row.os,
         arch: row.arch,
         runner_version: row.runner_version,
@@ -506,8 +626,14 @@ pub fn runner_to_representation<'a>(row: &'a RunnerRow<'a>) -> RunnerView<'a> {
         enrolled_at: row.enrolled_at,
         revoked_at: row.revoked_at,
         revoked_reason: row.revoked_reason,
+        paused_at: row.paused_at,
+        paused_by: row.paused_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        assignable: row.assignable,
+        not_assignable_code: row.not_assignable_code,
+        is_busy: row.is_busy,
+        queue_depth: row.queue_depth,
     }
 }
 
@@ -897,16 +1023,6 @@ const OS_ARCH_VERSION_SPEC: CharSpec = CharSpec {
     charset: false,
 };
 
-/// Push one message onto a field's error list (DRF collects per field).
-fn push_error(errors: &mut serde_json::Map<String, Value>, field: &str, message: String) {
-    errors
-        .entry(field.to_owned())
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("error list")
-        .push(Value::String(message));
-}
-
 /// Port of DRF 3.15.2 `CharField` validation (`fields.py:749-766`):
 /// missing -> required/default; `None` -> null; whitespace-only (Python
 /// strip set) -> blank unless `allow_blank` (validators skipped either
@@ -1210,6 +1326,11 @@ mod tests {
             id: "44444444-4444-4444-8444-444444444444",
             host_label: "mac-mini",
             label: "Iain's Mac",
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
+            engine_sign_in_state: "never",
+            engine_credential_expires_at: None,
         };
         let body = serde_json::to_value(dev_machine_mini_to_representation(&row)).unwrap();
         assert_eq!(keys(&body), DEV_MACHINE_MINI_WIRE_FIELDS);
@@ -1217,7 +1338,10 @@ mod tests {
             body.to_string(),
             concat!(
                 "{\"id\":\"44444444-4444-4444-8444-444444444444\",",
-                "\"host_label\":\"mac-mini\",\"label\":\"Iain's Mac\"}",
+                "\"host_label\":\"mac-mini\",\"label\":\"Iain's Mac\",",
+                "\"engine_paused_by_owner\":false,\"engine_auto_pause_reason\":\"\",",
+                "\"engine_team_runs\":false,\"engine_sign_in_state\":\"never\",",
+                "\"engine_credential_expires_at\":null}",
             )
         );
     }
@@ -1232,6 +1356,15 @@ mod tests {
             runner_count: Some(2),
             online_runner_count: Some(1),
             control_online: Some(true),
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
+            provisioning: "manual",
+            engine_sign_in_state: "never",
+            engine_credential_expires_at: None,
+            engine_state: &json!({}),
+            engine_state_reported_at: None,
+            merged_into: None,
             last_seen_at: Some("2026-10-02T01:02:03+00:00"),
             last_heartbeat_at: Some(Some("2026-10-02T01:02:04+00:00")),
             revoked_at: None,
@@ -1256,6 +1389,15 @@ mod tests {
             runner_count: None,
             online_runner_count: None,
             control_online: None,
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
+            provisioning: "manual",
+            engine_sign_in_state: "never",
+            engine_credential_expires_at: None,
+            engine_state: &json!({}),
+            engine_state_reported_at: None,
+            merged_into: None,
             last_seen_at: None,
             last_heartbeat_at: None,
             revoked_at: None,
@@ -1270,7 +1412,17 @@ mod tests {
                 "host_label",
                 "label",
                 "visibility",
+                "provisioning",
                 "control_online",
+                "engine_paused_by_owner",
+                "engine_auto_pause_reason",
+                "engine_paused",
+                "engine_team_runs",
+                "engine_sign_in_state",
+                "engine_credential_expires_at",
+                "engine_state",
+                "engine_state_reported_at",
+                "merged_into",
                 "last_seen_at",
                 "revoked_at",
                 "created_at",
@@ -1291,6 +1443,15 @@ mod tests {
             runner_count: Some(0),
             online_runner_count: Some(0),
             control_online: Some(false),
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
+            provisioning: "manual",
+            engine_sign_in_state: "never",
+            engine_credential_expires_at: None,
+            engine_state: &json!({}),
+            engine_state_reported_at: None,
+            merged_into: None,
             last_seen_at: None,
             // Annotated but `Max()` over zero rows: key present, null.
             last_heartbeat_at: Some(None),
@@ -1322,6 +1483,8 @@ mod tests {
             usage: &usage,
             llm_model: Some("claude-opus-4-6"),
             turn_count: Some(7),
+            agent_health: Some("healthy"),
+            agent_last_activity_at: Some("2026-10-02T01:02:04+00:00"),
             updated_at: "2026-10-02T01:02:05+00:00",
         };
         let body = serde_json::to_value(live_state_to_representation(&row)).unwrap();
@@ -1331,6 +1494,11 @@ mod tests {
         assert_eq!(body["total_tokens"], json!(12800));
         assert_eq!(body["usage"], usage);
         assert_eq!(body["last_event_summary"], Value::Null);
+        assert_eq!(body["agent_health"], json!("healthy"));
+        assert_eq!(
+            body["agent_last_activity_at"],
+            json!("2026-10-02T01:02:04+00:00")
+        );
     }
 
     #[test]
@@ -1347,6 +1515,8 @@ mod tests {
             usage: &usage,
             llm_model: None,
             turn_count: None,
+            agent_health: None,
+            agent_last_activity_at: None,
             updated_at: "2026-10-02T01:02:05+00:00",
         };
         let body = serde_json::to_value(live_state_to_representation(&row)).unwrap();
@@ -1357,6 +1527,8 @@ mod tests {
             "output_tokens",
             "total_tokens",
             "llm_model",
+            "agent_health",
+            "agent_last_activity_at",
         ] {
             assert_eq!(body[key], Value::Null, "{key}");
         }
@@ -1373,7 +1545,12 @@ mod tests {
             name: "runner_001",
             status: "online",
             host_label: "mac-mini",
+            is_engine: false,
+            engine_paused: false,
+            dispatch_paused: true,
+            machine_display_name: "mac-mini",
             provisioning: "manual",
+            pod_dispatch: "pod_member",
             os: "darwin",
             arch: "arm64",
             runner_version: "1.2.3",
@@ -1387,6 +1564,11 @@ mod tests {
                 id: "44444444-4444-4444-8444-444444444444",
                 host_label: "mac-mini",
                 label: "",
+                engine_paused_by_owner: false,
+                engine_auto_pause_reason: "",
+                engine_team_runs: false,
+                engine_sign_in_state: "never",
+                engine_credential_expires_at: None,
             }),
             visibility: 0,
             pod: "11111111-1111-4111-8111-111111111111",
@@ -1408,13 +1590,21 @@ mod tests {
                 usage,
                 llm_model: None,
                 turn_count: None,
+                agent_health: None,
+                agent_last_activity_at: None,
                 updated_at: "2026-10-02T01:02:05+00:00",
             }),
             enrolled_at: Some("2026-10-01T00:00:01+00:00"),
             revoked_at: None,
             revoked_reason: "",
+            paused_at: Some("2026-10-02T01:02:04+00:00"),
+            paused_by: Some("88888888-8888-4888-8888-888888888888"),
             created_at: "2026-10-01T00:00:00+00:00",
             updated_at: "2026-10-02T01:02:03+00:00",
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         }
     }
 
@@ -1443,6 +1633,11 @@ mod tests {
         assert_eq!(body["live_state"]["total_tokens"], Value::Null);
         assert_eq!(body["revoked_at"], Value::Null);
         assert_eq!(body["revoked_reason"], json!(""));
+        assert_eq!(body["paused_at"], json!("2026-10-02T01:02:04+00:00"));
+        assert_eq!(
+            body["paused_by"],
+            json!("88888888-8888-4888-8888-888888888888")
+        );
     }
 
     #[test]
@@ -1457,11 +1652,15 @@ mod tests {
         row.live_state = None;
         row.last_heartbeat_at = None;
         row.enrolled_at = None;
+        row.paused_at = None;
+        row.paused_by = None;
         let body = serde_json::to_value(runner_to_representation(&row)).unwrap();
         assert_eq!(keys(&body), RUNNER_WIRE_FIELDS);
         assert_eq!(body["dev_machine"], Value::Null);
         assert_eq!(body["dev_machine_detail"], Value::Null);
         assert_eq!(body["live_state"], Value::Null);
+        assert_eq!(body["paused_at"], Value::Null);
+        assert_eq!(body["paused_by"], Value::Null);
         // `pod_detail` is always present (non-null FK).
         assert_eq!(body["pod_detail"]["name"], json!("default"));
     }

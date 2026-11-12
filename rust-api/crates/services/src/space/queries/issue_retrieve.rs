@@ -155,9 +155,12 @@ fn module_ids_sql() -> String {
 
 /// `cycle_id` subquery annotation (`issue.py:608-612`):
 /// `CycleIssue.objects.filter(issue=OuterRef("id"),
-/// deleted_at__isnull=True).values("cycle_id")[:1]`.
+/// deleted_at__isnull=True).values("cycle_id")[:1]`. The filter does NOT
+/// clear ordering, so `CycleIssue.Meta.ordering = ("-created_at",)`
+/// (`db/models/cycle.py:124`) renders `ORDER BY ... DESC` before the
+/// `LIMIT 1` — the pick among several live cycle links is deterministic.
 fn cycle_id_sql() -> String {
-    "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) LIMIT 1) AS \"cycle_id\"".to_string()
+    "(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\"".to_string()
 }
 
 /// `vote_items` annotation (`issue.py:652-698`): one
@@ -197,7 +200,7 @@ fn reaction_items_sql() -> String {
 /// `$1` = issue id, `$2` = workspace slug, `$3` = project id.
 pub fn issue_retrieve_sql() -> String {
     format!(
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"state_id\", \"issues\".\"sort_order\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", {module_ids}, {label_ids}, {assignee_ids}, \"issues\".\"estimate_point_id\" AS \"estimate_point\", \"issues\".\"priority\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"project_id\", \"issues\".\"parent_id\", {cycle_id}, \"issues\".\"created_by_id\" AS \"created_by\", \"states\".\"group\" AS \"state__group\", {vote_items}, {reaction_items} FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") LEFT OUTER JOIN \"issues\" T_parent ON (\"issues\".\"parent_id\" = T_parent.\"id\") LEFT OUTER JOIN \"issue_labels\" \"label_through\" ON (\"issues\".\"id\" = \"label_through\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"label_through\".\"label_id\" = \"labels\".\"id\") LEFT OUTER JOIN \"issue_assignees\" \"assignee_through\" ON (\"issues\".\"id\" = \"assignee_through\".\"issue_id\") LEFT OUTER JOIN \"users\" \"assignees\" ON (\"assignee_through\".\"assignee_id\" = \"assignees\".\"id\") LEFT OUTER JOIN \"project_members\" ON (\"assignees\".\"id\" = \"project_members\".\"member_id\") LEFT OUTER JOIN \"module_issues\" \"module_through\" ON (\"issues\".\"id\" = \"module_through\".\"issue_id\") LEFT OUTER JOIN \"modules\" ON (\"module_through\".\"module_id\" = \"modules\".\"id\") LEFT OUTER JOIN \"issue_votes\" \"votes\" ON (\"issues\".\"id\" = \"votes\".\"issue_id\") LEFT OUTER JOIN \"users\" \"vote_actor\" ON (\"votes\".\"actor_id\" = \"vote_actor\".\"id\") LEFT OUTER JOIN \"issue_reactions\" ON (\"issues\".\"id\" = \"issue_reactions\".\"issue_id\") LEFT OUTER JOIN \"users\" \"reaction_actor\" ON (\"issue_reactions\".\"actor_id\" = \"reaction_actor\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"states\".\"group\" != 'triage' AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false AND \"issues\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"issues\".\"project_id\" = $3) GROUP BY \"issues\".\"id\", \"states\".\"group\" LIMIT 1",
+        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"state_id\", \"issues\".\"sort_order\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", {module_ids}, {label_ids}, {assignee_ids}, \"issues\".\"estimate_point_id\" AS \"estimate_point\", \"issues\".\"priority\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"project_id\", \"issues\".\"parent_id\", {cycle_id}, \"issues\".\"created_by_id\" AS \"created_by\", \"states\".\"group\" AS \"state__group\", {vote_items}, {reaction_items} FROM \"issues\" INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") LEFT OUTER JOIN \"issues\" T_parent ON (\"issues\".\"parent_id\" = T_parent.\"id\") LEFT OUTER JOIN \"issue_labels\" \"label_through\" ON (\"issues\".\"id\" = \"label_through\".\"issue_id\") LEFT OUTER JOIN \"labels\" ON (\"label_through\".\"label_id\" = \"labels\".\"id\") LEFT OUTER JOIN \"issue_assignees\" \"assignee_through\" ON (\"issues\".\"id\" = \"assignee_through\".\"issue_id\") LEFT OUTER JOIN \"users\" \"assignees\" ON (\"assignee_through\".\"assignee_id\" = \"assignees\".\"id\") LEFT OUTER JOIN \"project_members\" ON (\"assignees\".\"id\" = \"project_members\".\"member_id\") LEFT OUTER JOIN \"module_issues\" \"module_through\" ON (\"issues\".\"id\" = \"module_through\".\"issue_id\") LEFT OUTER JOIN \"modules\" ON (\"module_through\".\"module_id\" = \"modules\".\"id\") LEFT OUTER JOIN \"issue_votes\" \"votes\" ON (\"issues\".\"id\" = \"votes\".\"issue_id\") LEFT OUTER JOIN \"users\" \"vote_actor\" ON (\"votes\".\"actor_id\" = \"vote_actor\".\"id\") LEFT OUTER JOIN \"issue_reactions\" ON (\"issues\".\"id\" = \"issue_reactions\".\"issue_id\") LEFT OUTER JOIN \"users\" \"reaction_actor\" ON (\"issue_reactions\".\"actor_id\" = \"reaction_actor\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"issues\".\"archived_at\" IS NULL AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"is_draft\" = false AND \"issues\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2 AND \"issues\".\"project_id\" = $3) GROUP BY \"issues\".\"id\", \"states\".\"group\" LIMIT 1",
         module_ids = module_ids_sql(),
         label_ids = label_ids_sql(),
         assignee_ids = assignee_ids_sql(),
@@ -445,7 +448,7 @@ mod tests {
         assert_builder_contains(
             &issue_retrieve_sql(),
             &["issue_id", "slug", "project_id"],
-            &fixture_fragment("(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) LIMIT 1) AS \"cycle_id\""),
+            &fixture_fragment("(SELECT U0.\"cycle_id\" FROM \"cycle_issues\" U0 WHERE (U0.\"deleted_at\" IS NULL AND U0.\"issue_id\" = (\"issues\".\"id\")) ORDER BY U0.\"created_at\" DESC LIMIT 1) AS \"cycle_id\""),
         );
     }
 
@@ -562,7 +565,7 @@ mod tests {
         // half the columns layer documents as queries-owned).
         let flat = squashed(&sql);
         for frag in [
-            "\"states\".\"group\" != 'triage'",
+            "NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL)",
             "\"issues\".\"archived_at\" IS NULL",
             "\"projects\".\"archived_at\" IS NULL",
             "\"issues\".\"is_draft\" = false",

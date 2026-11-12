@@ -15,6 +15,7 @@ here.
 
 import base64
 import json
+import uuid
 
 import pytest
 
@@ -330,3 +331,66 @@ def test_activity_timezone_unknown_name_400(api, world, db):
             "UPDATE users SET user_timezone = 'UTC' WHERE id = %s",
             (world["owner"]["id"],),
         )
+
+
+_1385_OLD_TS = "2026-01-01T00:00:00+00:00"
+_1385_NEW_TS = "2026-06-01T00:00:00+00:00"
+
+
+def test_attachment_post_external_duplicate_picks_newest(api, world, seeder, db):
+    """The external-duplicate 409 names the NEWEST duplicate (PIDASHCONV-1385).
+
+    Django answers the dup probe with ``.first()`` over
+    ``Meta.ordering = ("-created_at",)``, so the 409 ``id`` is the newest
+    matching ``ISSUE_ATTACHMENT`` row. The older seed goes in first with
+    the smaller id (the PIDASHCONV-1277 arrangement): an unordered
+    ``LIMIT 1`` returns the older row under every plan (heap order, pkey
+    id order), so the pre-fix Rust backend fails here while Django and
+    the fixed Rust backend pass.
+    """
+    issue_id = world["issue"]["id"]
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    older_id, newer_id = (first, second) if first < second else (second, first)
+    external_id = f"dup-{seeder.tag}"
+    external_source = "probe-1385"
+    insert = (
+        "INSERT INTO file_assets (id, created_at, updated_at, attributes,"
+        " asset, user_id, workspace_id, project_id, issue_id, entity_type,"
+        " is_deleted, is_archived, external_id, external_source, size,"
+        " is_uploaded) VALUES (%s, %s, now(), '{}', %s, %s, %s, %s, %s,"
+        " 'ISSUE_ATTACHMENT', false, false, %s, %s, 10, true)"
+    )
+    for asset_id, stamp, suffix in (
+        (older_id, _1385_OLD_TS, "older"),
+        (newer_id, _1385_NEW_TS, "newer"),
+    ):
+        db.execute(
+            insert,
+            (
+                asset_id,
+                stamp,
+                f"{world['workspace']['id']}/{asset_id}-{suffix}.pdf",
+                world["owner"]["id"],
+                world["workspace"]["id"],
+                world["project"]["id"],
+                issue_id,
+                external_id,
+                external_source,
+            ),
+        )
+        seeder.track.add("file_assets", asset_id)
+    response = api.post(
+        attachment_url(world, issue_id),
+        json={
+            "name": "p.pdf",
+            "type": PDF,
+            "size": 10,
+            "external_id": external_id,
+            "external_source": external_source,
+        },
+    )
+    assert response.status_code == 409, response.text
+    assert response.json() == {
+        "error": "Issue with the same external id and external source already exists",
+        "id": newer_id,
+    }

@@ -60,24 +60,25 @@ pub mod drain;
 pub mod guards;
 pub mod live_drains;
 pub mod offline_recovery;
+pub mod pod_match;
 pub mod pubsub;
 pub mod session_service;
 pub mod usage;
 
 pub use drain::{
-    drain_for_runner_log, drain_pod_log, is_desktop_provisioning, next_for_runner_sql,
-    plan_assignment, AssignmentFacts, AssignmentPlan, DrainEffect, ASSIGN_RUN_UPDATE_SQL,
-    DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL, DRAIN_FOR_RUNNER_LOCK_SQL, DRAIN_POD_BY_ID_LOOKUP_SQL,
-    DRAIN_POD_IDLE_RUNNERS_SQL, NEXT_FOR_RUNNER_RANK_POSITION, NEXT_QUEUED_RUN_FOR_POD_SQL,
-    POD_COLUMNS, SELECT_RUNNER_IN_POD_SQL,
+    drain_for_runner_lock_stmt, drain_for_runner_log, drain_pod_idle_list_stmt, drain_pod_log,
+    next_for_runner_stmt, plan_assignment, select_runner_in_pod_stmt, AssignmentFacts,
+    AssignmentPlan, DispatchFacts, DrainEffect, NEXT_QUEUED_RUN_FOR_POD_SQL, POD_COLUMNS,
 };
 pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
 pub use offline_recovery::{
-    clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, release_pin_lock_select,
+    clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, offline_stamp_patch,
+    paused_runner_pin_ids_select, paused_runner_pin_lock_select, release_pin_lock_select,
     runner_silent_lock_select, silent_runner_ids_select, stuck_queued_run_ids_select,
     sweep_cancel_barrier_stamped_sql, sweep_stale_cancel_ids_sql, sweep_stale_cancel_pods_sql,
     sweep_stale_pairs_sql,
 };
+pub use pod_match::{pod_has_runner_for_issue_principal, SeaOrmPodMatcher};
 pub use pubsub::{
     close_runner_session, send_connection_revoke, send_runner_remove, send_runner_revoke,
     send_to_machine, send_to_runner, PubsubStore, SendOutcome, CLOSE_ACTIVE_SESSIONS_SQL,

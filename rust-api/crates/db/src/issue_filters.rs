@@ -12,7 +12,6 @@
 //!
 //! Ported bugs (also listed in the PR):
 //!
-//! - `filter_updated_at` writes `created_at__date`, never `updated_at__date`.
 //! - `filter_intake_status` on POST reads the `inbox_status` param.
 //! - The `"" not in ...` guard is dead for UUID filters: it runs on parsed
 //!   `Uuid` values, which never equal `""`, so trailing commas do not veto.
@@ -161,13 +160,26 @@ fn string_date_filter(
         "months" => (duration as i128).saturating_mul(30),
         _ => (duration as i128).saturating_mul(7),
     };
-    let delta = chrono::TimeDelta::days(days.clamp(0, i64::MAX as i128) as i64);
+    // `TimeDelta::days` panics above ~1.07e11 days; magnitudes that fit
+    // `u64` can still exceed that (Python `OverflowError` -> 500 there),
+    // so fall through to `DateOverflow` instead of panicking.
+    let days = days.clamp(0, i64::MAX as i128) as i64;
+    let delta = chrono::TimeDelta::try_days(days).ok_or(IssueFilterError::DateOverflow)?;
     let day = if offset == "fromnow" {
         today.checked_add_signed(delta)
     } else {
         today.checked_sub_signed(delta)
     }
     .ok_or(IssueFilterError::DateOverflow)?;
+    // Python `date` spans 0001-01-01..=9999-12-31: `now +/- timedelta`
+    // raises `OverflowError` beyond it (Django's generic 500), while
+    // `NaiveDate` spans years -262143..=262143. Reject the gap so every
+    // caller answers the same 500 it already maps `DateOverflow` to.
+    let python_min = NaiveDate::from_ymd_opt(1, 1, 1).expect("0001-01-01 is a valid date");
+    let python_max = NaiveDate::from_ymd_opt(9999, 12, 31).expect("9999-12-31 is a valid date");
+    if day < python_min || day > python_max {
+        return Err(IssueFilterError::DateOverflow);
+    }
     let key = if subsequent == "after" {
         format!("{date_term}__gte")
     } else {
@@ -568,7 +580,6 @@ pub fn issue_filters_get(
                     filter_name_value(&mut out, prefix, FilterValue::Text(name.clone()));
                 }
             }
-            // Ported bug: updated_at writes created_at__date.
             "created_at" => get_date_param(
                 &mut out,
                 params,
@@ -580,7 +591,7 @@ pub fn issue_filters_get(
                 &mut out,
                 params,
                 "updated_at",
-                &format!("{prefix}created_at__date"),
+                &format!("{prefix}updated_at__date"),
                 today,
             )?,
             "start_date" => get_date_param(
@@ -722,7 +733,6 @@ pub fn issue_filters_post(
                 }
                 _ => {}
             },
-            // Ported bug: updated_at writes created_at__date.
             "created_at" => post_date_param(
                 &mut out,
                 params,
@@ -734,7 +744,7 @@ pub fn issue_filters_post(
                 &mut out,
                 params,
                 "updated_at",
-                &format!("{prefix}created_at__date"),
+                &format!("{prefix}updated_at__date"),
                 today,
             )?,
             // POST stores the value raw (`issue_filter[...] =
@@ -1035,12 +1045,38 @@ mod tests {
     }
 
     #[test]
-    fn updated_at_writes_created_at_date() {
-        let filter =
-            issue_filters_get(&get_map(&[("updated_at", "2024-01-01;after")]), "", today())
-                .unwrap();
-        assert!(filter.get("created_at__date__gte").is_some());
-        assert!(filter.get("updated_at__date__gte").is_none());
+    fn updated_at_writes_updated_at_date() {
+        let range = "2024-01-01;after,2024-01-02;before";
+        let filter = issue_filters_get(&get_map(&[("updated_at", range)]), "", today()).unwrap();
+        assert!(filter.get("created_at__date__gte").is_none());
+        assert!(filter.get("updated_at__date__gte").is_some());
+        assert!(filter.get("updated_at__date__lte").is_some());
+        let intake =
+            issue_filters_get(&get_map(&[("updated_at", range)]), "issue__", today()).unwrap();
+        assert!(intake.get("issue__updated_at__date__gte").is_some());
+        assert!(intake.get("issue__created_at__date__gte").is_none());
+    }
+
+    #[test]
+    fn post_updated_at_writes_updated_at_date() {
+        let range = PostVal::List(vec![
+            "2024-01-01;after".to_owned(),
+            "2024-01-02;before".to_owned(),
+        ]);
+        for prefix in ["", "issue__"] {
+            let filter =
+                issue_filters_post(&post_map(&[("updated_at", range.clone())]), prefix, today())
+                    .unwrap();
+            assert!(filter
+                .get(&format!("{prefix}updated_at__date__gte"))
+                .is_some());
+            assert!(filter
+                .get(&format!("{prefix}updated_at__date__lte"))
+                .is_some());
+            assert!(filter
+                .get(&format!("{prefix}created_at__date__gte"))
+                .is_none());
+        }
     }
 
     #[test]
@@ -1202,6 +1238,73 @@ mod tests {
         )
         .unwrap();
         assert!(filter.is_empty());
+    }
+
+    #[test]
+    fn huge_relative_magnitudes_are_date_overflow_not_panic() {
+        // PIDASHCONV-1318: magnitudes that fit `u64` but exceed
+        // `TimeDelta`'s day bound (~1.07e11) must be `DateOverflow`, not a
+        // `TimeDelta::days` panic. 20000000000000 weeks = 1.4e14 days.
+        for query in [
+            "20000000000000_weeks;after;fromnow",
+            "20000000000000_weeks;before;past",
+            "20000000000000_months;after;fromnow",
+            "20000000000000_months;before;past",
+        ] {
+            let filter = issue_filters_get(&get_map(&[("start_date", query)]), "", today());
+            assert_eq!(filter, Err(IssueFilterError::DateOverflow), "{query}");
+        }
+    }
+
+    #[test]
+    fn mid_range_relative_dates_outside_python_range_are_date_overflow() {
+        // PIDASHCONV-1474: Python `date` spans years 1..=9999, so `now
+        // +/- timedelta` raises `OverflowError` (Django's generic 500)
+        // beyond it, while `NaiveDate` spans years -262143..=262143.
+        // Results in the gap must be `DateOverflow`, not a
+        // far-past/far-future predicate. 1428572 weeks = 10,000,004 days
+        // (~year 29405 from `today()`); 400000 months = 12,000,000 days.
+        for query in [
+            "1428572_weeks;after;fromnow",
+            "1428572_weeks;before;past",
+            "400000_months;after;fromnow",
+            "400000_months;before;past",
+        ] {
+            let filter = issue_filters_get(&get_map(&[("start_date", query)]), "", today());
+            assert_eq!(filter, Err(IssueFilterError::DateOverflow), "{query}");
+        }
+    }
+
+    #[test]
+    fn python_range_edges_pin_last_ok_and_first_overflow() {
+        // PIDASHCONV-1474: the largest whole-week offset staying inside
+        // 0001-01-01..=9999-12-31 succeeds; one more week overflows.
+        let max_day = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
+        let min_day = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
+        let days_to_max = (max_day - today()).num_days();
+        let days_to_min = (today() - min_day).num_days();
+        for (weeks_ok, direction, key, forward) in [
+            (days_to_max / 7, "after;fromnow", "start_date__gte", true),
+            (days_to_min / 7, "before;past", "start_date__lte", false),
+        ] {
+            let ok_query = format!("{weeks_ok}_weeks;{direction}");
+            let filter = issue_filters_get(&get_map(&[("start_date", &ok_query)]), "", today());
+            let filter = filter.unwrap_or_else(|err| panic!("{ok_query}: {err:?}"));
+            let delta = chrono::TimeDelta::try_days(weeks_ok * 7).unwrap();
+            let expected = if forward {
+                today().checked_add_signed(delta).unwrap()
+            } else {
+                today().checked_sub_signed(delta).unwrap()
+            };
+            assert_eq!(
+                filter.get(key),
+                Some(&FilterValue::Day(expected)),
+                "{ok_query}"
+            );
+            let over_query = format!("{}_weeks;{direction}", weeks_ok + 1);
+            let filter = issue_filters_get(&get_map(&[("start_date", &over_query)]), "", today());
+            assert_eq!(filter, Err(IssueFilterError::DateOverflow), "{over_query}");
+        }
     }
 
     #[test]

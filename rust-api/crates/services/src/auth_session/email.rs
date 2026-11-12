@@ -98,7 +98,7 @@ pub fn field_payload_str(field: FormField<'_>) -> String {
 /// `email.strip().lower()` after the presence check (same operation as
 /// the D-01 `normalize_email`; `trim` + `to_lowercase`).
 pub fn normalize_email(raw: &str) -> String {
-    raw.trim().to_lowercase()
+    pidash_compat::http::normalize_email(raw)
 }
 
 // ---------------------------------------------------------------------------

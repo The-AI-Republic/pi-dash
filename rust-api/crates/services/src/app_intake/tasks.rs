@@ -82,8 +82,8 @@
 
 use serde_json::{Map, Value};
 
-/// Celery wire name for `issue_activity` (bare `@shared_task` default).
-pub const ISSUE_ACTIVITY_TASK: &str = "pi_dash.bgtasks.issue_activities_task.issue_activity";
+/// Re-export of the canonical [`crate::domain::activity::ISSUE_ACTIVITY_TASK`].
+pub use crate::domain::activity::ISSUE_ACTIVITY_TASK;
 
 /// Celery wire name for `issue_description_version_task` (bare default;
 ///

@@ -29,6 +29,8 @@
 use std::collections::HashMap;
 
 use pidash_types::assistant::errors::AssistantError;
+use sqlx::PgPool;
+use uuid::Uuid;
 
 /// Connect timeout, seconds (`mcp.py:41`, `DEFAULT_TIMEOUT_S`).
 pub const DEFAULT_TIMEOUT_S: f64 = 10.0;
@@ -185,6 +187,72 @@ pub struct ServerRow {
     pub url_blocked: bool,
 }
 
+/// `AssistantMCPServer.objects.filter(user=user, is_enabled=True)`
+/// (`mcp.py:250`) in the model's default `created_at` order. Moved
+/// verbatim from `pidash_api::turn::live` (OVL-15, PIDASHCONV-1651),
+/// now a SeaORM query over `assistant_mcp_server`; the former
+/// `MCP_SERVERS_SQL` text (`WHERE user_id = $1 AND is_enabled
+/// ORDER BY created_at ASC, id ASC`) is exactly this filter/order.
+/// One enabled `assistant_mcp_server` row as the runtime reads it:
+/// id, name, URL and the encrypted auth header. The overlay's
+/// `provider.rs` `mcp_servers` arm maps this to [`ServerRow`] for
+/// [`plan_servers`] via [`to_server_row`].
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct EnabledMcpServerRow {
+    pub id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub auth_header_encrypted: Option<Vec<u8>>,
+}
+
+/// The enabled MCP server list for the turn runtime and the overlay:
+/// `filter(user=user, is_enabled=True)` in `created_at` order
+/// (`mcp.py:250`); each row projects to [`ServerRow`] through
+/// [`to_server_row`] with the caller's per-row SSRF verdict.
+pub async fn fetch_enabled_mcp_servers(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<EnabledMcpServerRow>, sqlx::Error> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = pidash_db::entity::assistant_mcp_server::Entity::find()
+        .select_only()
+        .columns([
+            pidash_db::entity::assistant_mcp_server::Column::Id,
+            pidash_db::entity::assistant_mcp_server::Column::Name,
+            pidash_db::entity::assistant_mcp_server::Column::Url,
+            pidash_db::entity::assistant_mcp_server::Column::AuthHeaderEncrypted,
+        ])
+        .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(user_id))
+        .filter(pidash_db::entity::assistant_mcp_server::Column::IsEnabled.eq(true))
+        .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::CreatedAt)
+        .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::Id)
+        .into_model::<EnabledMcpServerRow>()
+        .all(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(rows)
+}
+
+/// Project one fetched row to the [`ServerRow`] [`plan_servers`]
+/// reads: `pk` is the row id string, `has_auth_header` is the ported
+/// `bool(auth_header_encrypted)` (`models.py`), and `url_blocked` is
+/// the caller's per-row SSRF verdict. Moved verbatim from the inline
+/// mapping in `live.rs::resolve_toolsets`.
+pub fn to_server_row(row: &EnabledMcpServerRow, url_blocked: bool) -> ServerRow {
+    ServerRow {
+        pk: row.id.to_string(),
+        name: row.name.clone(),
+        url: row.url.clone(),
+        has_auth_header: row
+            .auth_header_encrypted
+            .as_deref()
+            .map(|token| !token.is_empty())
+            .unwrap_or(false),
+        url_blocked,
+    }
+}
+
 /// A row that survived the cap and SSRF gates and is ready to build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerPlan {
@@ -291,10 +359,23 @@ pub struct ToolsetSpec {
 
 /// Build one toolset descriptor (`build_toolset`, `mcp.py:175-209`).
 ///
-/// `include_instructions` forwards the server's `instructions` to the model
-/// (default false in pydantic-ai; on when the server describes a discovery
-/// protocol). Streamable HTTP is the transport for http URLs (the
-/// deprecated `MCPServerStreamableHTTP` is not used).
+/// `include_instructions` forwards the server's `instructions` to the model.
+/// It is left at pydantic-ai's default of false and stays there: the turn
+/// path (`build_toolsets`, `turn/live.rs`) always passes false and there is
+/// no user-facing setting or per-server column that could flip it, so in
+/// production it is always false. That is deliberate. Instructions are
+/// free-form text supplied by a third-party server, and the assistant
+/// already treats tool *results* as untrusted; a server's instructions would
+/// enter the model's context as untrusted content too, so turning them on
+/// globally is a prompt-injection surface we do not accept without a
+/// per-server opt-in that puts the trust decision with the person who added
+/// the server. Until that opt-in exists, servers that rely on instructions to
+/// advertise a discovery protocol are unsupported: the model never sees
+/// those instructions. The parameter is kept for that future opt-in and for
+/// tests. (See PDASHOSS01-124 for the product discussion.)
+///
+/// Streamable HTTP is the transport for http URLs (the deprecated
+/// `MCPServerStreamableHTTP` is not used).
 pub fn build_toolset_spec(
     url: &str,
     auth_header: Option<&str>,
@@ -592,6 +673,32 @@ mod tests {
         }
     }
 
+    fn fetched(token: Option<Vec<u8>>) -> EnabledMcpServerRow {
+        EnabledMcpServerRow {
+            id: Uuid::parse_str("12345678-aaaa-bbbb-cccc-dddddddddddd").unwrap(),
+            name: "Tools".to_owned(),
+            url: "https://tools.example.com/mcp".to_owned(),
+            auth_header_encrypted: token,
+        }
+    }
+
+    #[test]
+    fn to_server_row_projects_pk_and_verdict() {
+        let projected = to_server_row(&fetched(Some(b"Bearer x".to_vec())), true);
+        assert_eq!(projected.pk, "12345678-aaaa-bbbb-cccc-dddddddddddd");
+        assert_eq!(projected.name, "Tools");
+        assert_eq!(projected.url, "https://tools.example.com/mcp");
+        assert!(projected.has_auth_header);
+        assert!(projected.url_blocked);
+    }
+
+    #[test]
+    fn to_server_row_empty_or_missing_token_has_no_header() {
+        // `bool(auth_header_encrypted)`: NULL and empty bytes are both falsy.
+        assert!(!to_server_row(&fetched(None), false).has_auth_header);
+        assert!(!to_server_row(&fetched(Some(Vec::new())), false).has_auth_header);
+    }
+
     #[test]
     fn plan_cap_overflow_reports_stable_order() {
         let rows = vec![
@@ -800,5 +907,60 @@ mod tests {
         assert_eq!(py_repr("both\"and'quotes"), "'both\"and\\'quotes'");
         // Printable non-ASCII passes through verbatim.
         assert_eq!(py_repr("café"), "'café'");
+    }
+
+    #[test]
+    fn enabled_servers_shape_pins_filter_and_order() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
+        let sql = pidash_db::entity::assistant_mcp_server::Entity::find()
+            .select_only()
+            .columns([
+                pidash_db::entity::assistant_mcp_server::Column::Id,
+                pidash_db::entity::assistant_mcp_server::Column::Name,
+                pidash_db::entity::assistant_mcp_server::Column::Url,
+                pidash_db::entity::assistant_mcp_server::Column::AuthHeaderEncrypted,
+            ])
+            .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::assistant_mcp_server::Column::IsEnabled.eq(true))
+            .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::CreatedAt)
+            .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::Id)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("is_enabled"), "enabled filter: {sql}");
+        assert!(sql.contains("ORDER BY"), "ordering: {sql}");
+    }
+
+    #[tokio::test]
+    async fn live_enabled_servers_readback() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let user_id = uuid::Uuid::new_v4();
+        {
+            use sea_orm::{ActiveModelTrait, Set};
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let now = chrono::Utc::now();
+            let row = pidash_db::entity::assistant_mcp_server::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                user_id: Set(user_id),
+                name: Set("live-enabled".to_owned()),
+                url: Set("https://8.8.8.8/live".to_owned()),
+                auth_header_encrypted: Set(None),
+                is_enabled: Set(true),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+            };
+            row.insert(&db).await.expect("insert enabled");
+        }
+        let rows = fetch_enabled_mcp_servers(&pool, user_id)
+            .await
+            .expect("fetch enabled");
+        assert!(rows.iter().any(|r| r.name == "live-enabled"), "readback");
     }
 }

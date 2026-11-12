@@ -296,8 +296,9 @@ pub fn bulk_swallows_integrity_error(branch: BulkBranch) -> bool {
 /// so it also stamps `updated_by` (CRUM request user) and `updated_at`.
 pub const SAVE_PROJECT_COVER_GET_SQL: &str =
     "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"deleted_at\" IS NULL";
-pub const SAVE_PROJECT_COVER_SQL: &str =
-    "UPDATE \"projects\" SET \"cover_image_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"projects\".\"id\" = $1";
+// NOTE: the cover write (`SAVE_PROJECT_COVER_SQL`) moved to
+// `domain::projects::save_project_cover` (PIDASHCONV-1630) —
+// `projects` is a covered table, so the statement lives in domain/.
 
 // ---------------------------------------------------------------------------
 // Check endpoint (`v2.py:691-697`)
@@ -549,10 +550,8 @@ mod tests {
         assert!(!bulk_swallows_integrity_error(BulkBranch::PageDescription));
         assert!(!bulk_swallows_integrity_error(BulkBranch::ProjectCover));
         // Cover loop re-gets the project per row; last row wins (documented).
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"cover_image_asset_id\" = $2"));
-        // Full save(): stamps updated_by (CRUM user) + updated_at (auto_now).
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_at\" = $3"));
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_by_id\" = $4"));
+        // The write itself (`domain::projects::save_project_cover`: the FK
+        // plus the full-save stamps) is pinned in the domain tests.
         // The per-row project re-get uses the default manager.
         assert!(SAVE_PROJECT_COVER_GET_SQL.contains("\"deleted_at\" IS NULL"));
         // Lookup scopes ids + slug + active rows.

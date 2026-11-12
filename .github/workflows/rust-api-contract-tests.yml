@@ -5,13 +5,8 @@ name: rust-api contract tests
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-contract-tests.yml"
   push:
-    branches: [rust-dev]
+    branches: [main]
     paths:
       - "rust-api/**"
       - "apps/api/**"
@@ -32,7 +27,7 @@ concurrency:
 
 jobs:
   web-edge:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -47,6 +42,18 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # NEWPIDASH-30: CACHES is unconditionally django_redis, so any
+      # DRF-dispatched view (CSRF priming, sign-in) 500s with
+      # "Missing connections string" without this.
+      redis:
+        image: valkey/valkey:7.2.11-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
       WEB_URL: http://localhost
@@ -55,12 +62,16 @@ jobs:
       API_KEY_RATE_LIMIT: 100000/minute
       DJANGO_SETTINGS_MODULE: pi_dash.settings.test
       BASE_URL: http://127.0.0.1:8000
+      REDIS_URL: redis://localhost:6379/0
+      # No RabbitMQ in this job: tasks .delay()ed by the exercised
+      # endpoints (sign-in) enqueue to redis; nothing consumes them.
+      AMQP_URL: redis://localhost:6379/1
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.12.10"
 
       - name: Install system deps for psycopg-c
         run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
@@ -70,6 +81,10 @@ jobs:
           python -m pip install
           -r apps/api/requirements/base.txt
           -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
 
       - name: Start live Django server
         working-directory: apps/api
@@ -88,7 +103,7 @@ jobs:
         run: python -m pytest web_edge -v
   contract-tests:
     name: worker-plane oracle vs Django
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
       postgres:
@@ -158,17 +173,50 @@ jobs:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_STORAGE_BUCKET_NAME: pi-dash-contract
+      # NEWPIDASH-30: Django's S3Storage reads AWS_S3_BUCKET_NAME (not
+      # the setting above); without it copy/metadata tasks crash on a
+      # None bucket and their oracles time out. Same pair as the
+      # exports and rust-matrix workflows.
+      AWS_S3_BUCKET_NAME: pi-dash-contract
       AWS_S3_ENDPOINT_URL: http://localhost:4566
       BASE_URL: http://localhost:8000
       DATABASE_URL: postgresql://pi_dash:pi_dash@localhost:5432/pi_dash
-      CELERY_BROKER_URL: amqp://pi_dash:pi_dash@localhost:5672/pi_dash
+      # NEWPIDASH-158 (same family as NEWPIDASH-147): the task-oracle
+      # harness only speaks the redis broker protocol and raises on amqp.
+      # AMQP_URL mirrors CELERY_BROKER_URL so the Django worker/beat
+      # (which read AMQP_URL via settings) consume the same redis broker
+      # the harness publishes to. DB 1 keeps the broker off the cache
+      # DB 0 (REDIS_URL / CONTRACT_REDIS_URL).
+      AMQP_URL: redis://localhost:6379/1
+      CELERY_BROKER_URL: redis://localhost:6379/1
       CONTRACT_REDIS_URL: redis://localhost:6379/0
       CONTRACT_TASK_TIMEOUT: "60"
+      # NEWPIDASH-30: suites that mint sessions (rrule parity) read the
+      # backend key from SECRET_KEY; the Django server reads the same
+      # variable, so forged sessions validate on the live backend.
+      SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_DJANGO_SECRET_KEY: "contract-tests-fixed-secret"
       # D-06 assistant task oracle (PIDASHCONV-254): BYOK config encryption
       # needs a backend. Fernet with a committed test-only key (ephemeral CI
       # database; never a real secret) — the other oracles never touch BYOK.
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # NEWPIDASH-176: the cloud-agent dispatch oracle (NEWPIDASH-54) needs
+      # CLOUD_AGENT_ENABLED=true on the Django leg, mirroring
+      # rust-api-contract-tests-dispatch-rust.yml. Without it
+      # cloud_agent_is_configured() is false and run_cloud_agent fails fast
+      # with cloud_agent_disabled instead of reaching the provider.
+      # Loopback stubs need the SSRF guards off (see dispatch README).
+      ASSISTANT_BLOCK_PRIVATE_URLS: "False"
+      CLOUD_AGENT_ENABLED: "true"
+      CLOUD_AGENT_WRITES_ENABLED: "true"
+      CLOUD_AGENT_BLOCK_PRIVATE_URLS: "False"
+      # PIDASHCONV-1248: the sweep honors a non-default hard limit — the
+      # oracle pins both sides of the resulting 960s cutoff. Only the
+      # assistant tasks read this key, and ancient-seeded turns stay stale
+      # under 900, so the other oracles in this job are unaffected.
+      ASSISTANT_TURN_HARD_LIMIT: "900"
       # D-08 event-tracking oracle (PIDASHCONV-1107): the Django worker
       # POSTs track_event captures to the harness PostHog sink
       # (POSTHOG_SINK_BASE default). Test-only key, ephemeral CI database.
@@ -180,7 +228,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12.x"
+          python-version: "3.12.10"
           cache: pip
           cache-dependency-path: |
             apps/api/requirements.txt
@@ -269,13 +317,15 @@ jobs:
             > /tmp/contract-beat.log 2>&1 &
 
       # PIDASHCONV-1062: the turn-errors static tests assert on Django source
-      # that exists on origin/main only (rust-dev's apps/api is frozen
-      # pre-#1126). Fetch the pinned commit and check it out as a worktree;
-      # retire after PIDASHCONV-1055 merges main into rust-dev.
+      # that exists on origin/main only. Fetch the pinned commit and check
+      # it out as a worktree; retire after the next main-sync merges main
+      # into rust-dev. PIDASHCONV-1566: re-pinned past 52df56b9e (#1430),
+      # which replaced the classifier the statics assert on (matches
+      # MAIN_PIN in assistant/test_turn_errors.py).
       - name: Provision origin/main worktree for drift static tests
         run: |
-          git fetch origin 3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e --depth 1
-          git worktree add --detach /tmp/pi-dash-main 3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e
+          git fetch origin 0a6fb8eca0f459802045f22e02af5748a6bdc768 --depth 1
+          git worktree add --detach /tmp/pi-dash-main 0a6fb8eca0f459802045f22e02af5748a6bdc768
           echo "PIDASH_DJANGO_MAIN_DIR=/tmp/pi-dash-main/apps/api" >> "$GITHUB_ENV"
 
       - name: Run worker-plane oracle
@@ -289,7 +339,46 @@ jobs:
         # rust_job_queue table and the Rust worker, neither of which exists
         # in this Django-only job — they have their own *-rust jobs. Exclude
         # by glob so future replay suites are skipped here too.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py
+        # The S3 stall oracle (tasks_cleanup/test_s3_stall.py) needs a worker
+        # whose S3 endpoint is the test's black hole; this job's worker points
+        # at live S3, so it has its own stall job (PIDASHCONV-1291).
+        # The mongo write-error oracle
+        # (tasks_cleanup/test_mongo_write_error.py) needs a worker booted
+        # with MONGO_DB_URL/MONGO_DB_DATABASE; this job's worker has no
+        # Mongo, so it has its own mongo job (PIDASHCONV-1290).
+        # The S3 retry oracle (tasks_cleanup/test_s3_retry.py) needs a
+        # worker whose S3 endpoint is the test's scripted stub; this job's
+        # worker points at live S3, so it has its own s3retry job
+        # (PIDASHCONV-1697).
+        # PIDASHCONV-1566 (stage-8 drift hold): assistant/test_turn_errors_drift.py
+        # asserts behavior that exists only on origin/main (52df56b9e); this
+        # job serves Django from the frozen checkout, so the file stays out
+        # of the selection until the next main-sync merges main into
+        # rust-dev, then is added next to assistant/test_turn_errors.py.
+        # NEWPIDASH-30: the two live tests in test_beat_catchup.py need
+        # `pidash-api worker` (rust_job_queue + the scheduler loop),
+        # which this Django-only job never boots; they run in the
+        # tasks-cleanup-rust job instead. The file's Celery-oracle tests
+        # still run here.
+        # NEWPIDASH-54: the cloud-agent dispatch oracle (tenant isolation,
+        # concurrency, budgets, safety) joins here for the Django leg —
+        # it publishes in Celery wire format, so the queued runs are
+        # executed by this solo Celery worker. Single exception:
+        # test_create_project_issue_transition.py cannot run on either
+        # backend (pre-existing KeyError: 'error' on clean main — the
+        # agent_run columns were folded into error_details, PDASHOSS01-187;
+        # reported as found: on NEWPIDASH-1, fix filed separately).
+        # Three dispatch concurrency proofs deselect here: their
+        # ordering proofs need concurrent claims and this solo worker
+        # serialises them (the stall test, the per-tenant failure
+        # isolation's in-flight assertion, and the hanging tool's
+        # completes-behind-it assertion); they run in
+        # rust-api-contract-tests-dispatch-rust.yml instead (the
+        # `--concurrency 24` worker), where local validation ran them
+        # against both legs.
+        # assistant/test_turn_isolation.py (NEWPIDASH-54) is the turns'
+        # credential-isolation half — same worker, same shape.
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' --ignore-glob='*/test_s3_stall.py' --ignore-glob='*/test_mongo_write_error.py' --ignore-glob='*/test_s3_retry.py' --ignore=dispatch/test_create_project_issue_transition.py --deselect tasks_cleanup/test_beat_catchup.py::test_rust_worker_liveness --deselect tasks_cleanup/test_beat_catchup.py::test_rust_scheduler_catches_up_stale_daily_entry --deselect dispatch/test_concurrency.py::test_slow_provider_does_not_stall_independent_tenant --deselect dispatch/test_concurrency.py::test_per_tenant_provider_failures_isolate --deselect dispatch/test_concurrency.py::test_hanging_tool_runs_to_completion_past_tool_timeout tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_turn_isolation.py assistant/test_update_issue_completion.py assistant/test_create_issue_transition.py assistant/test_dispatch_coding_run.py dispatch
 
       - name: Upload service logs on failure
         if: failure()

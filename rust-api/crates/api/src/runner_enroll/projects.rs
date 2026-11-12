@@ -70,7 +70,6 @@ use axum::response::Response;
 use axum::Router;
 use serde::Serialize;
 use sqlx::PgPool;
-use sqlx::Row;
 use uuid::Uuid;
 
 use pidash_services::runner_enroll::queries::catalog_reads;
@@ -163,9 +162,6 @@ struct ProjectRow {
     identifier: String,
     name: String,
     description: Option<String>,
-    /// Agent-facing instructions (PDASHOSS01-294); `description` stays for
-    /// runner builds that predate the split.
-    context: Option<String>,
     is_default: bool,
     default_pod_id: Option<String>,
     pod_count: usize,
@@ -205,35 +201,30 @@ async fn serialize_projects(
     pool: &PgPool,
     workspace_id: Uuid,
 ) -> Result<Vec<ProjectRow>, Response> {
-    let pod_rows: Vec<(Uuid, bool, Uuid, String)> =
-        sqlx::query_as(&catalog_reads::workspace_pods_values_sql())
-            .bind(workspace_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|_| server_error())?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let pod_rows = catalog_reads::workspace_pods(&db, workspace_id)
+        .await
+        .map_err(|_| server_error())?;
     let groups = group_pods(pod_rows);
-    // Full-row select in `project` column order; only id, name,
-    // description, context, identifier, and is_default are read (by name).
-    let project_rows = sqlx::query(&catalog_reads::workspace_projects_sql())
-        .bind(workspace_id)
-        .fetch_all(pool)
+    let project_rows = catalog_reads::workspace_projects(&db, workspace_id)
         .await
         .map_err(|_| server_error())?;
     let mut out = Vec::with_capacity(project_rows.len());
-    for row in project_rows {
-        let id: Uuid = row.try_get("id").map_err(|_| server_error())?;
-        let name: String = row.try_get("name").map_err(|_| server_error())?;
-        let description: Option<String> = row.try_get("description").map_err(|_| server_error())?;
-        let context: Option<String> = row.try_get("context").map_err(|_| server_error())?;
-        let identifier: String = row.try_get("identifier").map_err(|_| server_error())?;
-        let is_default: bool = row.try_get("is_default").map_err(|_| server_error())?;
+    for project in project_rows {
+        let catalog_reads::ProjectSummary {
+            id,
+            name,
+            description,
+            identifier,
+            is_default,
+        } = project;
+        let description = Some(description);
         let (pods, default_pod_id) = groups.get(&id).cloned().unwrap_or_default();
         out.push(ProjectRow {
             id: id.to_string(),
             identifier,
             name,
             description,
-            context,
             is_default,
             default_pod_id: default_pod_id.map(|pod| pod.to_string()),
             pod_count: pods.len(),
@@ -335,18 +326,12 @@ async fn get_projects_inner(
             Ok(id) => id,
             Err(failure) => return failure,
         };
-        // `$1` member, `$2` workspace.
-        let member: Option<i32> =
-            match sqlx::query_scalar(&catalog_reads::workspace_membership_probe_sql())
-                .bind(user_id)
-                .bind(workspace_id)
-                .fetch_optional(&pool)
-                .await
-            {
-                Ok(row) => row,
-                Err(_) => return server_error(),
-            };
-        if member.is_none() {
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let member = match catalog_reads::is_workspace_member(&db, user_id, workspace_id).await {
+            Ok(member) => member,
+            Err(_) => return server_error(),
+        };
+        if !member {
             return json_response(StatusCode::FORBIDDEN, FORBIDDEN_BODY.to_owned());
         }
         let rows = match serialize_projects(&pool, workspace_id).await {
@@ -361,15 +346,11 @@ async fn get_projects_inner(
 
     // No filter: serialize EVERY membership workspace and concatenate
     // (`QUIRK-workspace-concat`; no `is_active` filter, id-list order).
-    let workspace_ids: Vec<Uuid> =
-        match sqlx::query_scalar(&catalog_reads::member_workspace_ids_sql())
-            .bind(user_id)
-            .fetch_all(&pool)
-            .await
-        {
-            Ok(ids) => ids,
-            Err(_) => return server_error(),
-        };
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let workspace_ids = match catalog_reads::member_workspace_ids(&db, user_id).await {
+        Ok(ids) => ids,
+        Err(_) => return server_error(),
+    };
     let mut out = Vec::new();
     for workspace_id in workspace_ids {
         match serialize_projects(&pool, workspace_id).await {
@@ -434,7 +415,6 @@ mod tests {
             identifier: "WEB".to_owned(),
             name: "Web".to_owned(),
             description: Some("desc".to_owned()),
-            context: Some("ctx".to_owned()),
             is_default: true,
             default_pod_id: None,
             pod_count: 0,
@@ -442,7 +422,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&row).expect("json"),
-            "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"identifier\":\"WEB\",\"name\":\"Web\",\"description\":\"desc\",\"context\":\"ctx\",\"is_default\":true,\"default_pod_id\":null,\"pod_count\":0,\"pods\":[]}"
+            "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"identifier\":\"WEB\",\"name\":\"Web\",\"description\":\"desc\",\"is_default\":true,\"default_pod_id\":null,\"pod_count\":0,\"pods\":[]}"
         );
         let pod = PodEntry {
             id: "00000000-0000-0000-0000-000000000002".to_owned(),
@@ -464,7 +444,6 @@ mod tests {
             identifier: "W".to_owned(),
             name: "n".to_owned(),
             description: None,
-            context: None,
             is_default: false,
             default_pod_id: Some("p".to_owned()),
             pod_count: 1,

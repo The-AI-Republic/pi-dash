@@ -115,6 +115,7 @@ use serde_json::{Map, Value};
 
 use super::shape_issue::{field_errors_body, BASE_EXPANSION_NAMES, INVALID_HTML_BODY};
 use super::{filter_fields, python_number_str, FieldSpec, FilterError};
+use pidash_compat::py::{py_is_space, py_strip};
 
 /// `IssueAttachmentSerializer` read order (`issue.py:907-927`,
 /// `fields="__all__"`): declared `id`, then plain model fields in model
@@ -239,6 +240,11 @@ pub const MAX_SPEAKER_LABEL_CHARS: usize = 128;
 /// `:566`).
 pub const MAX_LABEL_ITEM_CHARS: usize = 32;
 
+/// `labels` list cap (the `ArrayField(size=8)`, `:566`): DRF maps it via
+/// `ArrayMaxLengthValidator`, probed live on Django main (9 items → 400
+/// `{"labels":["List contains 9 items, it should contain no more than 8."]}`).
+pub const MAX_LABELS: usize = 8;
+
 /// `IntegerField` over-long-string guard (`fields.py`, shared with
 /// `FloatField`): code points, checked before parsing.
 pub const MAX_INTEGER_STRING_CHARS: usize = 1000;
@@ -276,18 +282,6 @@ fn max_length_message(max_chars: usize) -> String {
 /// raw input (see [`py_str`]).
 fn invalid_choice_message(py_input: &str) -> String {
     format!("\"{py_input}\" is not a valid choice.")
-}
-
-/// Python `str.strip()` membership (live-probed): Rust `is_whitespace` plus
-/// `\x1c`-`\x1f` (which Python strips but `White_Space` omits). The `re`
-/// `\s` class used by `re_decimal` matches the same set.
-fn py_is_space(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
-}
-
-/// Python `str.strip()` (no-arg): strip [`py_is_space`] from both ends.
-fn py_strip(text: &str) -> &str {
-    text.trim_matches(py_is_space)
 }
 
 /// Render a parsed-JSON value the way Python `str(data)` would, for the
@@ -870,8 +864,9 @@ enum LabelsOutcome {
 }
 
 /// Every failure `labels` (`ListField`, the `ArrayField` mapping) validation
-/// can produce, in check order. The `ArrayField(size=8)` cap is NOT mapped —
-/// DRF ignores it.
+/// can produce, in check order. The `ArrayField(size=8)` cap IS mapped —
+/// DRF copies the model field's validators onto the `ListField`
+/// (`ArrayMaxLengthValidator`), which runs after child validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LabelsError {
     /// Explicit JSON null.
@@ -880,14 +875,16 @@ enum LabelsError {
     NotAList(&'static str),
     /// Per-index child failures, in enumeration order.
     Items(Vec<(usize, Vec<String>)>),
+    /// List-level cap breach; carries the item count for the message.
+    TooMany(usize),
 }
 
 /// Port of DRF `ListField` validation for `labels` (the `ArrayField` mapping,
 /// `serializers.py:939,1303` + `fields.py:ListField` + child `CharField` with
 /// the base field's `max_length=32`, no blank, no null): absent → skip, null
 /// → null failure, non-list → `not_a_list`, else per-item child validation
-/// collecting `{index: [messages]}` (`run_child_validation`). `value=None` is
-/// the absent key.
+/// collecting `{index: [messages]}` (`run_child_validation`), then the
+/// `ArrayField(size=8)` max-length validator. `value=None` is the absent key.
 fn validate_labels(value: Option<&Value>) -> Result<LabelsOutcome, LabelsError> {
     let Some(value) = value else {
         // Never required (`blank=True, default=list`).
@@ -912,6 +909,11 @@ fn validate_labels(value: Option<&Value>) -> Result<LabelsOutcome, LabelsError> 
     }
     if !failures.is_empty() {
         return Err(LabelsError::Items(failures));
+    }
+    // DRF runs field validators only after `to_internal_value` succeeds, so
+    // per-item errors take precedence over the list cap.
+    if items.len() > MAX_LABELS {
+        return Err(LabelsError::TooMany(items.len()));
     }
     Ok(LabelsOutcome::List(validated))
 }
@@ -1190,6 +1192,17 @@ pub fn validate_comment_create(
                 indexed.insert(idx.to_string(), Value::Array(details));
             }
             errors.push(("labels", Value::Object(indexed)));
+            None
+        }
+        Err(LabelsError::TooMany(count)) => {
+            // `ArrayMaxLengthValidator` `ngettext` wording; `count > 8`
+            // always, so only the plural form is reachable.
+            errors.push(field_entry(
+                "labels",
+                format!(
+                    "List contains {count} items, it should contain no more than {MAX_LABELS}."
+                ),
+            ));
             None
         }
     };
@@ -1784,6 +1797,60 @@ pub fn render_activity(
     )?;
 
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// `render_comment_value`: moved from
+// `pidash_api::v1_work_items::handlers_social` by OVL-14
+// (PIDASHCONV-1649).
+// ---------------------------------------------------------------------------
+
+pub fn render_comment_value(
+    decoded: &crate::read::DecodedComment,
+    url: Option<String>,
+    field_specs: Option<&[FieldSpec]>,
+    expand_refs: &[&str],
+    expansions: &[(&str, Option<Value>)],
+) -> Result<Value, SocialRenderError> {
+    let attachments: Vec<Option<&str>> = decoded
+        .attachments
+        .iter()
+        .map(|item| item.as_deref())
+        .collect();
+    let labels: Vec<Option<&str>> = decoded.labels.iter().map(|item| item.as_deref()).collect();
+    let row = CommentRow {
+        id: &decoded.id,
+        is_member: decoded.is_member,
+        url,
+        created_at: &decoded.created_at,
+        updated_at: &decoded.updated_at,
+        deleted_at: decoded.deleted_at.as_deref(),
+        comment_html: &decoded.comment_html,
+        attachments: &attachments,
+        labels: &labels,
+        access: &decoded.access,
+        external_source: decoded.external_source.as_deref(),
+        external_id: decoded.external_id.as_deref(),
+        speaker_type: &decoded.speaker_type,
+        speaker_label: &decoded.speaker_label,
+        speaker_agent_run_id: decoded.speaker_agent_run_id.as_deref(),
+        edited_at: decoded.edited_at.as_deref(),
+        created_by: decoded.created_by.as_deref(),
+        updated_by: decoded.updated_by.as_deref(),
+        project: &decoded.project,
+        workspace: &decoded.workspace,
+        description: decoded.description.as_deref(),
+        issue: &decoded.issue,
+        actor: decoded.actor.as_deref(),
+        parent: decoded.parent.as_deref(),
+    };
+    let out = render_comment(&CommentRepresentationInput {
+        row: &row,
+        fields: field_specs,
+        expand: expand_refs,
+        expansions,
+    })?;
+    Ok(Value::Object(out))
 }
 
 #[cfg(test)]
@@ -2739,6 +2806,29 @@ mod tests {
             create(&body, false).expect_err("null labels fails").body(),
             r#"{"labels":["This field may not be null."]}"#
         );
+        // The `ArrayField(size=8)` cap: 8 pass, 9 fail with the
+        // `ArrayMaxLengthValidator` body (probed live on Django main).
+        let eight: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h"];
+        let body = serde_json::json!({"labels": eight});
+        assert_eq!(
+            create(&body, false).expect("8 labels pass").labels,
+            Some(eight.iter().map(ToString::to_string).collect())
+        );
+        let nine: Vec<&str> = vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+        let body = serde_json::json!({"labels": nine});
+        assert_eq!(
+            create(&body, false).expect_err("9 labels fail").body(),
+            r#"{"labels":["List contains 9 items, it should contain no more than 8."]}"#
+        );
+        // Per-item errors take precedence: 9 items with a blank child fail
+        // as child errors, never as the list cap.
+        let body = serde_json::json!({"labels": ["", "b", "c", "d", "e", "f", "g", "h", "i"]});
+        assert_eq!(
+            create(&body, false)
+                .expect_err("blank child fails first")
+                .body(),
+            r#"{"labels":{"0":["This field may not be blank."]}}"#
+        );
     }
 
     #[test]
@@ -3351,5 +3441,59 @@ mod tests {
         assert_eq!(py_str(&float), "1e+100");
         assert_eq!(py_str(&tiny), "1e-05");
         assert_eq!(py_str(&neg), "1e-07");
+    }
+
+    #[test]
+    fn comment_value_unannotated_drops_is_member() {
+        // OVL-10 (PIDASHCONV-1656): the MCP `list_comments` combination —
+        // an un-annotated row (`is_member: None`) with no url, no
+        // `fields=`, no `expand`: DRF `SkipField` drops `is_member` and
+        // the null `url` is omitted (`issue.py:1001-1007`).
+        use crate::read::DecodedComment;
+
+        let decoded = DecodedComment {
+            id: "44444444-4444-4444-4444-444444444444".to_owned(),
+            is_member: None,
+            created_at: "2026-10-01T00:00:00Z".to_owned(),
+            updated_at: "2026-10-01T00:00:00Z".to_owned(),
+            deleted_at: None,
+            comment_json: serde_json::json!({}),
+            comment_html: "<p>hi</p>".to_owned(),
+            attachments: vec![],
+            labels: vec![],
+            access: "external".to_owned(),
+            external_source: None,
+            external_id: None,
+            speaker_type: "user".to_owned(),
+            speaker_label: "Ct User".to_owned(),
+            speaker_agent_run_id: None,
+            edited_at: None,
+            created_by: None,
+            updated_by: None,
+            project: "22222222-2222-2222-2222-222222222222".to_owned(),
+            workspace: "33333333-3333-3333-3333-333333333333".to_owned(),
+            description: None,
+            issue: "55555555-5555-5555-5555-555555555555".to_owned(),
+            actor: None,
+            parent: None,
+        };
+        let value = render_comment_value(&decoded, None, None, &[], &[]).expect("renders");
+        let obj = value.as_object().expect("object");
+        assert!(!obj.contains_key("is_member"));
+        assert!(!obj.contains_key("url"));
+        assert_eq!(
+            obj["id"],
+            Value::String("44444444-4444-4444-4444-444444444444".to_owned())
+        );
+        assert_eq!(obj["comment_html"], Value::String("<p>hi</p>".to_owned()));
+        assert_eq!(
+            obj["project"],
+            Value::String("22222222-2222-2222-2222-222222222222".to_owned())
+        );
+        assert_eq!(
+            obj["issue"],
+            Value::String("55555555-5555-5555-5555-555555555555".to_owned())
+        );
+        assert_eq!(obj["attachments"], Value::Array(vec![]));
     }
 }

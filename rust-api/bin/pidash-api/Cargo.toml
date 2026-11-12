@@ -39,7 +39,7 @@ jsonwebtoken = "9"
 # and the sync `OriginRedis` adapter's blocking client (same locked
 # redis 1.x as pidash-db, no lock churn beyond the edge; features are
 # the union the groups need).
-redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
 # Model runtime (PIDASHCONV-866): genai-prices provider URL patterns.
 # Same locked regex 1.x as pidash-jobs/pidash-services (no lock churn).
 regex = "1"
@@ -51,6 +51,12 @@ jsonschema = { version = "0.59", default-features = false }
 # (PIDASHCONV-1112 adds "stream": incremental SSE reads for MCP responses;
 # same feature pidash-api already enables, so no lock churn.)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
+# TLS provider select (PIDASHCONV-1269): both `ring` (via reqwest) and
+# `aws-lc-rs` (via mongodb) are enabled in this binary, so rustls cannot
+# pick a process-level CryptoProvider by itself and `ClientConfig::builder`
+# (which redis uses for `rediss://`) panics. `main` installs ring
+# explicitly. Same locked rustls 0.23.x as the workspace, no lock churn.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Model runtime (PIDASHCONV-866): JWT claims struct.
 # Same locked serde 1.x as the workspace (no lock churn).
 serde = "1"

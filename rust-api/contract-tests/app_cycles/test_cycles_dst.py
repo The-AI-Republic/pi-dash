@@ -1,6 +1,6 @@
 """`POST cycles/date-check/` across DST transitions (PIDASHCONV-1191).
 
-Django `convert_to_utc` (`utils/timezone_converter.py:40-94`, pytz 2024.1)
+Django `convert_to_utc` (`utils/timezone_converter.py:40-94`, pytz 2025.2)
 localizes local *midnight* with `local_tz.localize(...)` — the default
 `is_dst=False`, which never raises: an ambiguous time resolves to standard
 time, a gap to the pre-gap standard offset — and only then adds `+1s`

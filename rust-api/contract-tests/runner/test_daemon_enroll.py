@@ -53,6 +53,17 @@ def test_daemon_enroll_shape(settings, seeder, daemon_world):
     assert body["protocol_version"] == 4
     assert body["machine_token_minted"] is True
     assert body["machine_token"].startswith("mt_")
+    # Legacy enroll 201 carries no create trio (enrollment.py:334-350).
+    assert list(body) == [
+        "runner_id", "runner_name", "refresh_token", "access_token",
+        "access_token_expires_at", "refresh_token_generation",
+        "workspace_slug", "pod_slug", "project_identifier",
+        "long_poll_interval_secs", "protocol_version",
+        "machine_token_minted", "machine_token",
+    ]
+    assert "provisioning" not in body
+    assert "pod_dispatch" not in body
+    assert "created" not in body
     # Teardown rows the endpoint minted (dev machine + machine token).
     seeder.db.execute(
         "DELETE FROM machine_token WHERE user_id = %s AND host_label = %s",
@@ -145,6 +156,9 @@ def test_daemon_runner_create_shape(settings, daemon_world, seeder):
     # APIToken callers rotate into an mt_ token (machine_token_minted=True).
     assert body["machine_token_minted"] is True
     assert body["machine_token"].startswith("mt_")
+    assert body["provisioning"] == "manual"
+    assert body["pod_dispatch"] == "pod_member"
+    assert body["created"] is True
     # Teardown rows the endpoint created (the seeder never saw them).
     seeder.db.execute(
         "DELETE FROM machine_token WHERE user_id = %s AND host_label = %s",

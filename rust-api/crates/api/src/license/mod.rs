@@ -47,48 +47,36 @@
 //! Sibling handler issues (120-123) extend this module with their own
 //! routes; merges keep both sides.
 
-use std::collections::HashMap;
-
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono_tz::Tz;
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
+pub use pidash_compat::response::{json_ok_value as json_response, SERVER_ERROR_BODY};
+use pidash_db::entity::{instance_admins, instances, users};
+use pidash_db::pool::sea_orm_connection;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 /// `BACKEND_SESSION_KEY` value Django accepts here: `AUTHENTICATION_BACKENDS`
 /// is exactly `(ModelBackend,)` (`settings/common.py:125`).
 pub const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
-/// Salt for `user.get_session_auth_hash()`
-/// (`django.contrib.auth` `HASH_SESSION_KEY` verification).
-pub const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+pub(crate) use pidash_compat::http::verify_session_hash;
+/// Salt for `user.get_session_auth_hash()`, re-exported from its
+/// canonical home (`pidash_compat::http`, OVL-04 part 6) so this public
+/// path — and `pidash-sdk::compat`, which re-exports it until part 8
+/// repoints at the canonical home — keeps resolving.
+pub use pidash_compat::http::SESSION_AUTH_HASH_SALT;
+pub use pidash_compat::http::{query_last, OneOrMany, QueryMap};
 
 /// Exact bytes of the DRF `NotAuthenticated` denial: anonymous on a guarded
 /// endpoint (`request.successful_authenticator` is `None`, so
 /// `permission_denied` raises `NotAuthenticated`, not `PermissionDenied`).
 pub const UNAUTHENTICATED_BODY: &str =
     r#"{"detail":"Authentication credentials were not provided."}"#;
-/// `views/base.py:92-95` generic branch (also the app base, same bytes).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `views/base.py:79-82` (`ObjectDoesNotExist` branch).
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
-
-/// One query value, repeated or not. Mirrors the D-26 `app_issues` shape:
-/// `serde_html_form` does not coerce a lone `?key=value` into a sequence,
-/// so callers read first/last like Django's `QueryDict`.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every license handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
 
 /// All values for `key`, in order; `None` when absent.
 pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
@@ -96,11 +84,6 @@ pub fn query_values(query: &QueryMap, key: &str) -> Option<Vec<String>> {
         OneOrMany::One(one) => vec![one.clone()],
         OneOrMany::Many(many) => many.clone(),
     })
-}
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query_values(query, key).and_then(|values| values.into_iter().last())
 }
 
 /// Handler failure with its exact status + body.
@@ -247,18 +230,6 @@ fn none_str(value: &Option<String>) -> String {
     value.clone().unwrap_or_else(|| "None".to_owned())
 }
 
-/// One `users` row for session resolution:
-/// `(id, email, first_name, last_name, password, is_active, user_timezone)`.
-type UserLookupRow = (
-    uuid::Uuid,
-    Option<String>,
-    String,
-    String,
-    String,
-    bool,
-    String,
-);
-
 /// The authenticated actor: the `users` row behind a verified session.
 #[derive(Debug, Clone)]
 pub struct Actor {
@@ -312,70 +283,30 @@ pub async fn resolve_actor(
         Ok(id) => id,
         Err(_) => return Ok(None),
     };
-    let row: Option<UserLookupRow> = sqlx::query_as(
-        r#"SELECT id, email, first_name, last_name, password, is_active, user_timezone
-           FROM users WHERE id = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some((id, email, first_name, last_name, password, is_active, user_timezone)) = row else {
+    let db = sea_orm_connection(pool);
+    let user = users::Entity::find_by_id(user_id)
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(u) = user else {
         // `ModelBackend.get_user` catches `DoesNotExist` and returns `None`.
         return Ok(None);
     };
-    if !is_active {
+    if !u.is_active {
         // DRF `SessionAuthentication.authenticate`: inactive users are `None`.
         return Ok(None);
     }
-    if session_hash.is_empty() || !verify_session_hash(&session_hash, &password, secret_key) {
+    if session_hash.is_empty() || !verify_session_hash(&session_hash, &u.password, secret_key) {
         return Ok(None);
     }
-    let timezone: Tz = user_timezone.parse().map_err(|_| Denial::ServerError)?;
+    let timezone: Tz = u.user_timezone.parse().map_err(|_| Denial::ServerError)?;
     Ok(Some(Actor {
-        id,
-        email,
-        first_name,
-        last_name,
+        id: u.id,
+        email: u.email,
+        first_name: u.first_name,
+        last_name: u.last_name,
         timezone,
     }))
-}
-
-/// `user.get_session_auth_hash()`: `salted_hmac(...get_session_auth_hash,
-/// password).hexdigest()`, compared constant-time. Shared by the sibling
-/// instance/admin preambles, which verify the same three session facts as
-/// [`resolve_actor`] (PIDASHCONV-1097).
-pub(crate) fn verify_session_hash(
-    session_hash: &str,
-    password_field: &str,
-    secret_key: &[u8],
-) -> bool {
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let expected = hex_encode(&mac.finalize().into_bytes());
-    constant_time_eq(expected.as_bytes(), session_hash.as_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
 }
 
 /// `InstanceAdminPermission` for one request: anonymous denies 401 before
@@ -397,24 +328,32 @@ pub async fn require_admin(
     // `Instance.objects.first()`: the exact fixture SQL; only the id is
     // needed, but the row parses through the queries-layer mapper so the
     // emitted SQL stays identical.
-    let instance = sqlx::query(pidash_db::license::queries::INSTANCE_FIRST_SQL)
-        .fetch_optional(pool)
+    let db = sea_orm_connection(pool);
+    let instance = instances::Entity::find()
+        .filter(instances::Column::DeletedAt.is_null())
+        .order_by_desc(instances::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     let Some(instance_row) = instance else {
         // `filter(instance=None, ...)` matches nothing (non-nullable FK).
         return Err(Denial::Forbidden);
     };
-    let instance_id = pidash_db::license::queries::map_instance_row(&instance_row)
-        .map_err(|_| Denial::ServerError)?
-        .id;
+    let instance_id = instance_row.id;
     // `InstanceAdmin.objects.filter(role__gte=15, instance, user).exists()`:
     // the exact permission-check SQL; presence is the decision.
-    let admin = sqlx::query(&pidash_db::license::queries::admin_permission_check_sql())
-        .bind(instance_id)
-        .bind(pidash_db::license::queries::ADMIN_PERMISSION_ROLE_GTE)
-        .bind(actor.id)
-        .fetch_optional(pool)
+    let admin = instance_admins::Entity::find()
+        .filter(instance_admins::Column::DeletedAt.is_null())
+        .filter(instance_admins::Column::InstanceId.eq(instance_id))
+        .filter(
+            instance_admins::Column::Role
+                .gte(pidash_db::license::queries::ADMIN_PERMISSION_ROLE_GTE),
+        )
+        .filter(instance_admins::Column::UserId.eq(actor.id))
+        .order_by_desc(instance_admins::Column::CreatedAt)
+        .limit(1)
+        .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     let allows = pidash_auth::license::permissions::instance_admin_allows(
@@ -457,17 +396,6 @@ pub fn owned(
         };
     }
     router
-}
-
-/// Render a value body as compact JSON (`JSONRenderer`, `COMPACT_JSON`):
-/// no spaces, struct field order preserved.
-pub fn json_response<T: serde::Serialize>(value: &T) -> Response {
-    let body = serde_json::to_string(value).expect("serializable response");
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("json response")
 }
 
 /// DRF `DateTimeField(allow_null=True)` over one JSON value: the shared

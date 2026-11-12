@@ -103,6 +103,7 @@ use pidash_types::orchestration::{
 };
 
 use crate::prompting::recipes::{kind_for, WORK_KIND_CODING};
+use pidash_compat::py::py_bool;
 
 // ---------------------------------------------------------------------------
 // Clock field list + handler-executed SQL
@@ -866,15 +867,6 @@ pub fn reconcile_log_line(issue_id: &Uuid, event_kind: &str, decision: &TickerDe
         py_bool(decision.parked),
         decision.reason,
     )
-}
-
-/// Python `str(bool)`.
-fn py_bool(value: bool) -> &'static str {
-    if value {
-        "True"
-    } else {
-        "False"
-    }
 }
 
 // ---------------------------------------------------------------------------

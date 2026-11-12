@@ -1,0 +1,226 @@
+// @vitest-environment jsdom
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+import { act, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const harness = vi.hoisted(() => ({
+  me: { data: { id: "u1", email: "u1@test.dev" } as { id: string; email: string } | undefined },
+  desktop: true,
+  hello: null as { machine_id: string } | null,
+  focusListeners: [] as Array<(focused: boolean) => void>,
+  unsubscribe: vi.fn(),
+  resume: vi.fn(),
+  refresh: vi.fn(),
+  migrate: vi.fn(),
+  offerReplace: vi.fn(),
+}));
+
+vi.mock("../../../core/platform/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../core/platform/index.js")>();
+  const desktopPlatform = {
+    kind: "desktop",
+    apiOrigin: "https://cloud.test",
+    agentRuntime: {},
+    onFocusChange: (callback: (focused: boolean) => void) => {
+      harness.focusListeners.push(callback);
+      return harness.unsubscribe;
+    },
+  };
+  return {
+    ...original,
+    get platform() {
+      return harness.desktop ? desktopPlatform : original.platform;
+    },
+  };
+});
+
+vi.mock("../../../core/session/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../core/session/index.js")>();
+  return { ...original, useMe: () => harness.me };
+});
+
+vi.mock("./service.js", () => ({
+  resumeRuntime: (...args: Array<unknown>) => harness.resume(...args),
+  refreshRuntime: (...args: Array<unknown>) => harness.refresh(...args),
+  compatibleHello: () => harness.hello,
+  currentDiscovery: () => (harness.hello ? { kind: "compatible", hello: harness.hello } : null),
+  signInWorkspace: vi.fn(),
+}));
+
+vi.mock("./desktop-migration.js", () => ({
+  migrateLegacyTrees: (...args: Array<unknown>) => harness.migrate(...args),
+}));
+
+vi.mock("./desktop-replace.js", () => ({
+  offerReplace: (...args: Array<unknown>) => harness.offerReplace(...args),
+}));
+
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { RUNTIME_REFRESH_INTERVAL_MS, RuntimeSupervisor } from "./Supervisor.js";
+
+function SetupStub(): React.ReactElement {
+  return <div data-testid="setup-host" />;
+}
+
+function NoticesStub(): React.ReactElement {
+  return <div data-testid="notices-host" />;
+}
+
+function ReplaceStub(): React.ReactElement {
+  return <div data-testid="replace-host" />;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  harness.me = { data: { id: "u1", email: "u1@test.dev" } };
+  harness.desktop = true;
+  harness.hello = null;
+  harness.focusListeners = [];
+  harness.refresh.mockResolvedValue(undefined);
+  harness.migrate.mockResolvedValue({ status: "nothing_to_do" });
+  harness.offerReplace.mockResolvedValue(false);
+  createAppClient("https://api.test");
+});
+
+afterEach(() => {
+  resetAppClient();
+  vi.useRealTimers();
+});
+
+function renderSupervisor(props: { registerChatTransport?: () => void } = {}) {
+  return render(
+    <RuntimeSupervisor
+      registerChatTransport={props.registerChatTransport ?? vi.fn()}
+      setupDialog={SetupStub}
+      noticesDialog={NoticesStub}
+      replaceDialog={ReplaceStub}
+    />
+  );
+}
+
+function focusApp(focused: boolean): void {
+  for (const listener of harness.focusListeners) listener(focused);
+}
+
+describe("RuntimeSupervisor", () => {
+  it("renders nothing on web and runs no step", () => {
+    harness.desktop = false;
+    const { container } = renderSupervisor();
+    expect(container).toBeEmptyDOMElement();
+    expect(harness.resume).not.toHaveBeenCalled();
+    expect(harness.refresh).not.toHaveBeenCalled();
+  });
+
+  it("resumes for the signed account against the app's cloud and hosts the set-up dialog", async () => {
+    const register = vi.fn();
+    renderSupervisor({ registerChatTransport: register });
+    expect(await screen.findByTestId("setup-host")).toBeInTheDocument();
+    expect(harness.resume).toHaveBeenCalledWith(
+      { id: "u1", email: "u1@test.dev", cloudUrl: "https://cloud.test" },
+      expect.objectContaining({ runtime: expect.anything() })
+    );
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(harness.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no project notice: opening a project enrols nothing", async () => {
+    renderSupervisor();
+    await screen.findByTestId("setup-host");
+    expect(screen.queryByTestId("runtime-notice")).toBeNull();
+  });
+
+  it("re-checks on the minute cadence and on focus, not on blur", async () => {
+    vi.useFakeTimers();
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.refresh).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+    });
+    expect(harness.refresh).toHaveBeenCalledTimes(2);
+    act(() => focusApp(false));
+    expect(harness.refresh).toHaveBeenCalledTimes(2);
+    act(() => focusApp(true));
+    expect(harness.refresh).toHaveBeenCalledTimes(3);
+  });
+
+  it("swallows a failed re-check", async () => {
+    harness.refresh.mockRejectedValue(new Error("boom"));
+    renderSupervisor();
+    await screen.findByTestId("setup-host");
+    await act(async () => undefined);
+  });
+
+  it("cleans up timers and focus listeners on unmount", async () => {
+    vi.useFakeTimers();
+    const view = renderSupervisor();
+    await act(async () => undefined);
+    view.unmount();
+    expect(harness.unsubscribe).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS * 2);
+    });
+    expect(harness.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays quiet while signed out", () => {
+    harness.me = { data: undefined };
+    const { container } = renderSupervisor();
+    expect(container).toBeEmptyDOMElement();
+    expect(harness.resume).not.toHaveBeenCalled();
+  });
+
+  it("runs the legacy migration on launch and retries next refresh when blocked", async () => {
+    vi.useFakeTimers();
+    harness.migrate.mockResolvedValueOnce({ status: "blocked", reason: "no_daemon" });
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.migrate).toHaveBeenCalledTimes(1);
+    expect(harness.migrate).toHaveBeenCalledWith("u1", expect.anything());
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+    });
+    expect(harness.migrate).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS * 2);
+    });
+    expect(harness.migrate).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers the replace prompt after the migration, once per machine", async () => {
+    vi.useFakeTimers();
+    harness.hello = { machine_id: "machine-1" };
+    harness.migrate.mockResolvedValueOnce({ status: "blocked", reason: "no_daemon" });
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.offerReplace).not.toHaveBeenCalled();
+    for (let i = 0; i < 3; i++) {
+      // eslint-disable-next-line no-await-in-loop -- one check per minute
+      await act(async () => {
+        vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+      });
+    }
+    expect(harness.offerReplace).toHaveBeenCalledTimes(1);
+    expect(harness.offerReplace).toHaveBeenCalledWith("u1", expect.anything());
+    harness.hello = { machine_id: "machine-2" };
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+    });
+    expect(harness.offerReplace).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks again next refresh when the replace lookup fails", async () => {
+    vi.useFakeTimers();
+    harness.hello = { machine_id: "machine-1" };
+    harness.offerReplace.mockRejectedValueOnce(new Error("offline"));
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.offerReplace).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(RUNTIME_REFRESH_INTERVAL_MS);
+    });
+    expect(harness.offerReplace).toHaveBeenCalledTimes(2);
+  });
+});

@@ -15,8 +15,9 @@
 //!   columns field-for-field against `rust-api/fixtures/auth_oauth/`
 //!   `F1_social_login_connection.columns.json` (PIDASHCONV-324,
 //!   AUTHOAUTH-F1) and `F2_cli_device_code.columns.json` (AUTHOAUTH-F2).
-//! * [`queries`] — account upsert, `deactivate_api_token`, device-machine
-//!   touch / get-or-create / rotate (PIDASHCONV-327, AUTHOAUTH-F6/F7/F8).
+//! * [`queries`] — account upsert, device-machine touch / get-or-create
+//!   (PIDASHCONV-327, AUTHOAUTH-F6/F7/F8; the F7/F8 token statements
+//!   moved to `pidash_services::domain::tokens`, PIDASHCONV-1520).
 //!
 //! # Wiring note
 //!

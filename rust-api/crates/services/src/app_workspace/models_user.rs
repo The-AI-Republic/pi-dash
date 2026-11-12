@@ -42,9 +42,10 @@
 //! the display-name fill and the superuser `is_staff` forcing are ported as
 //! [`user`] helpers; the flush itself is handler SQL owned by the write
 //! layer. `UserFavorite.save` (`favorite.py:52-65`) likewise splits into the
-//! pure halves ported here ([`user_favorite::next_sequence`],
-//! [`user_favorite::resolve_workspace`]) and the `MAX(sequence)` probe,
-//! which is queries-layer SQL. `BaseModel.save` (`base.py:23-44`) resolves
+//! pure half ported here ([`user_favorite::resolve_workspace`], plus the
+//! `SEQUENCE_DEFAULT`/`SEQUENCE_STEP` consts) and the `MAX(sequence)`
+//! probe, which is queries-layer SQL. `BaseModel.save` (`base.py:23-44`)
+//! resolves
 //! `created_by`/`updated_by` from the request user (`crum.get_current_user`)
 //! and `SoftDeleteModel.delete` (`mixins.py:72-82`) stamps `deleted_at` and
 //! enqueues `soft_delete_related_objects` — both are write-path
@@ -803,20 +804,6 @@ pub mod user_favorite {
     /// `save()` sequence step (`:63`): `largest + 10000`.
     pub const SEQUENCE_STEP: f64 = 10000.0;
 
-    /// `UserFavorite.save` sequence rule (`favorite.py:52-65`): on create
-    /// only (`_state.adding`), `sequence` becomes the workspace `MAX` plus
-    /// [`SEQUENCE_STEP`]; when no rows exist (`largest is None`) the
-    /// `default=65535` survives. The `MAX` probe is queries-layer SQL over
-    /// the whole workspace — NOT per-user (ported quirk) — resolved via
-    /// `project.workspace` when `project` is set, else `self.workspace`;
-    /// concurrent adds can collide (no lock — ported quirk).
-    pub fn next_sequence(largest: Option<f64>) -> f64 {
-        match largest {
-            None => SEQUENCE_DEFAULT,
-            Some(value) => value + SEQUENCE_STEP,
-        }
-    }
-
     /// `WorkspaceBaseModel.save` workspace rule (`workspace.py:192-195`):
     /// `if self.project: self.workspace = self.project.workspace` — the
     /// backfill runs on EVERY save and overwrites an explicitly assigned
@@ -1535,12 +1522,11 @@ mod tests {
 
     #[test]
     fn favorite_save_rules() {
-        // Sequence: None keeps the 65535 default; else largest + 10000.
-        assert_eq!(user_favorite::next_sequence(None), 65535.0);
+        // Sequence: None keeps the 65535 default; else largest + 10000
+        // (the `next_sequence` kernel folded away with zero callers —
+        // ORM-03 C6 — the default/step pins stay with the consts).
         assert_eq!(user_favorite::SEQUENCE_DEFAULT, 65535.0);
         assert_eq!(user_favorite::SEQUENCE_STEP, 10000.0);
-        assert_eq!(user_favorite::next_sequence(Some(65535.0)), 75535.0);
-        assert_eq!(user_favorite::next_sequence(Some(0.0)), 10000.0);
         let text = bugs(&prefs(), "UserFavorite");
         assert!(
             text.contains("NOT per-user"),

@@ -34,7 +34,7 @@
 //! * Ticket `SET EX` is skipped when Redis is `None`, but the endpoint
 //!   still 201s an unredeemable ticket (`:832-850`).
 //! * Rotate drops `user` from the dev-machine filter while bootstrap
-//!   keeps it (`:181-190`; the `rotate_revoke_sql` machine branch).
+//!   keeps it (`:181-190`; the domain `revoke_tokens_for_machine_in_workspace`).
 //! * An unknown `?pod=` name falls through to the project default pod
 //!   instead of 404ing (`:671-675`).
 //! * The managed-cap 409 returns from inside the attempt `atomic()`
@@ -53,18 +53,18 @@ use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use http_body_util::BodyExt as _;
+use pidash_db::orm_tx::{is_integrity_violation, TxConn};
+use sea_orm::DbErr;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
-use sqlx::postgres::{PgRow, Postgres};
-use sqlx::{Row, Transaction};
+use sqlx::postgres::Postgres;
+use sqlx::{Connection as _, Transaction};
 use uuid::Uuid;
 
-use pidash_db::auth_oauth::queries::cli_token::deactivate_api_token;
-use pidash_db::runner_enroll::columns::{
-    dev_machine as dm_cols, enums, machine_token as mt_cols, pod as pod_cols, runner as r_cols,
-};
+use pidash_db::runner_enroll::columns::enums;
+use pidash_services::domain::engine_credential as engine_cred;
+use pidash_services::domain::tokens::cli_token::deactivate_api_token;
+use pidash_services::runner_enroll::engine_naming;
 use pidash_services::runner_enroll::queries::enroll_reads as enroll_sql;
 use pidash_services::runner_enroll::serializers::shapes as enroll_shapes;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
@@ -73,6 +73,10 @@ use super::auth as enroll_auth;
 use super::throttle as enroll_throttle;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
+pub use pidash_compat::datetime::render_isoformat;
+use pidash_compat::db::is_integrity_error;
+use pidash_compat::py::py_strip;
+pub use pidash_compat::response::{error_body, json_response, server_error, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // Wire consts (`enrollment.py`, `register.py`)
@@ -102,28 +106,11 @@ pub const TICKET_KEY_PREFIX: &str = "machine_token_ticket:";
 /// exactly `(ModelBackend,)` (`settings/common.py:125`).
 const MODEL_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 
-/// Salt for `user.get_session_auth_hash()`
-/// (`django.contrib.auth` `HASH_SESSION_KEY` verification).
-const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
+use pidash_compat::http::verify_session_hash;
 
 // ---------------------------------------------------------------------------
 // Shared responses (the `runner_runs` shape, restated: no cross-domain dep)
 // ---------------------------------------------------------------------------
-
-/// Unhandled-failure body (500). Runner views have no custom
-/// `handle_exception`, so Django renders its HTML error page here; only
-/// the status is contract-pinned.
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
-
-/// Render a JSON body with the DRF content type.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("runner-enroll response builds")
-}
 
 /// The request pool, or the 500 when the server runs pool-less
 /// (unreachable in `serve`, which fail-fasts at boot).
@@ -135,14 +122,6 @@ pub fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Response> {
             SERVER_ERROR_BODY.to_owned(),
         )),
     }
-}
-
-/// The 500 shortcut for fallible handler paths.
-pub fn server_error() -> Response {
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        SERVER_ERROR_BODY.to_owned(),
-    )
 }
 
 /// DRF `Allow` for the GET-only health probe
@@ -175,11 +154,6 @@ fn view_response(mut response: Response, allow: &'static str) -> Response {
         .headers_mut()
         .insert(header::ALLOW, HeaderValue::from_static(allow));
     response
-}
-
-/// `{"error": name}` (view-inline 4xx bodies).
-pub fn error_body(name: &str) -> String {
-    serde_json::json!({ "error": name }).to_string()
 }
 
 /// `{"error": name, "error_description": desc}`.
@@ -221,16 +195,6 @@ pub fn not_authenticated() -> Response {
         serde_json::json!({ "detail": "Authentication credentials were not provided." })
             .to_string(),
     )
-}
-
-/// Integrity errors (`IntegrityError`, Postgres class 23): unique / FK /
-/// not-null violations. Django catches these around the D2/B2 savepoint
-/// inserts and the create attempt body; anything else escapes to 500.
-fn is_integrity_error(err: &sqlx::Error) -> bool {
-    match err {
-        sqlx::Error::Database(db) => db.code().is_some_and(|code| code.starts_with("23")),
-        _ => false,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,14 +288,6 @@ pub fn py_truthy(value: &Value) -> bool {
     }
 }
 
-/// Python `str.strip()`: `str.isspace()` is Unicode `White_Space` plus
-/// U+001C-U+001F and U+0085; Rust `trim()` strips `White_Space` only.
-pub fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| {
-        c.is_whitespace() || c == '\u{85}' || ('\u{1c}'..='\u{1f}').contains(&c)
-    })
-}
-
 /// First `max` Unicode code points (`text[:max]`).
 pub fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -366,17 +322,6 @@ pub fn frame_text(body: &Value, key: &str, max: usize) -> Result<String, Respons
 /// `(request.data.get(key) or "").strip()` (no truncation).
 pub fn frame_stripped(body: &Value, key: &str) -> Result<String, Response> {
     Ok(py_strip(&frame_raw(body, key)?).to_owned())
-}
-
-/// Python `datetime.isoformat()` for an aware UTC timestamp: `+00:00`
-/// offset, six-digit microseconds only when nonzero (the `prompting`
-/// `render_isoformat` precedent, restated).
-pub fn render_isoformat(dt: DateTime<Utc>) -> String {
-    if dt.timestamp_subsec_micros() == 0 {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
-    } else {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
-    }
 }
 
 /// `json.dumps(..., ensure_ascii=True)` over compact `serde_json` output
@@ -428,39 +373,6 @@ pub fn next_auto_runner_name(pod_runner_count: i64) -> String {
 // Session resolve (`BaseSessionAuthentication` + `IsAuthenticated`)
 // ---------------------------------------------------------------------------
 
-/// `user.get_session_auth_hash()`: `salted_hmac(<salt>, password)` with
-/// SHA256, compared constant-time (the `license::resolve_actor`
-/// precedent, restated without the timezone arm: runner views render no
-/// datetimes, so a bad `user_timezone` must not 500 here).
-fn verify_session_hash(session_hash: &str, password_field: &str, secret_key: &[u8]) -> bool {
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let expected = hex_encode(&mac.finalize().into_bytes());
-    constant_time_eq(expected.as_bytes(), session_hash.as_bytes())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
-
 /// `request.user` from the Django session, or `None` for anonymous.
 /// Mirrors `django.contrib.auth.get_user` + DRF `SessionAuthentication`
 /// (CSRF is disabled on `BaseSessionAuthentication`): the session must
@@ -496,12 +408,9 @@ pub async fn session_user_id(
     let Ok(user_id) = user_id_raw.parse::<Uuid>() else {
         return Ok(None);
     };
-    let row: Option<(Uuid, String, bool)> =
-        sqlx::query_as(r#"SELECT "id", "password", "is_active" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
+    let row = enroll_sql::session_user(&pidash_db::pool::sea_orm_connection(pool), user_id)
+        .await
+        .map_err(|_| server_error())?;
     let Some((id, password, is_active)) = row else {
         return Ok(None);
     };
@@ -545,8 +454,8 @@ pub async fn check_anon_throttle(
     let xff = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok());
-    let remote = remote.map(|addr| addr.ip().to_string()).unwrap_or_default();
-    let ident = enroll_throttle::get_ident(xff, &remote);
+    let remote = remote.map(|addr| addr.ip().to_string());
+    let ident = enroll_throttle::get_ident(xff, remote.as_deref());
     let key = enroll_throttle::anon_cache_key(false, &ident).expect("anon key");
     let history: Vec<f64> = match redis.get_string(&key).await {
         Ok(Some(raw)) => decode_throttle_history(&raw),
@@ -592,7 +501,7 @@ pub fn ticket_redis_client(state: &AppState) -> Option<redis::Client> {
         .url
         .as_deref()
         .filter(|url| !url.is_empty())
-        .and_then(|url| redis::Client::open(url).ok())
+        .and_then(|url| pidash_db::redis::open_client(url).ok())
 }
 
 /// Consume a ticket blob (`:876-884`): atomic `GETDEL`, falling back to
@@ -640,90 +549,25 @@ pub async fn workspace_member_exists(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> Result<bool, Response> {
-    let role: Option<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "workspace_members"
-           WHERE "workspace_id" = $1 AND "member_id" = $2
-             AND "is_active" AND "deleted_at" IS NULL
-           LIMIT 1"#,
+    enroll_sql::is_active_member(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
-    .map_err(|_| server_error())?;
-    Ok(role.is_some())
+    .map_err(|_| server_error())
 }
 
 // ---------------------------------------------------------------------------
-// Row decodes (positional over the `enroll_reads` full-row selects)
+// Row shapes (decoded by name, `enroll_reads` SeaORM reads)
 // ---------------------------------------------------------------------------
-
-/// Positional index of `name` inside a `COLUMNS` order.
-fn col_index(columns: &[&str], name: &str) -> usize {
-    columns
-        .iter()
-        .position(|col| *col == name)
-        .expect("fixture column exists")
-}
 
 /// The E1 locked row (`:284-290`): runner + workspace slug + pod name +
-/// project identifier, decoded positionally.
-pub struct EnrollRow {
-    pub runner_id: Uuid,
-    pub owner_id: Uuid,
-    pub workspace_id: Uuid,
-    pub pod_id: Uuid,
-    pub name: String,
-    pub host_label: String,
-    pub enrolled_at: Option<DateTime<Utc>>,
-    pub revoked_at: Option<DateTime<Utc>>,
-    pub workspace_slug: String,
-    pub pod_name: String,
-    pub project_identifier: String,
-}
+/// project identifier.
+pub use enroll_sql::EnrollRunnerRow as EnrollRow;
 
-fn decode_enroll_row(row: &PgRow) -> Result<EnrollRow, Response> {
-    let ws_base = r_cols::COLUMNS.len();
-    let pod_base = ws_base + enroll_sql::WORKSPACES_SELECT_COLUMNS.len();
-    let proj_base = pod_base + pod_cols::COLUMNS.len();
-    let get = |idx: usize| row.try_get::<String, _>(idx).map_err(|_| server_error());
-    Ok(EnrollRow {
-        runner_id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        workspace_id: row.try_get(2).map_err(|_| server_error())?,
-        pod_id: row.try_get(4).map_err(|_| server_error())?,
-        name: get(5)?,
-        host_label: get(6)?,
-        enrolled_at: row.try_get(16).map_err(|_| server_error())?,
-        revoked_at: row.try_get(28).map_err(|_| server_error())?,
-        workspace_slug: get(ws_base + col_index(enroll_sql::WORKSPACES_SELECT_COLUMNS, "slug"))?,
-        pod_name: get(pod_base + col_index(pod_cols::COLUMNS, "name"))?,
-        project_identifier: get(proj_base
-            + col_index(
-                pidash_db::app_project::models::project::COLUMNS,
-                "identifier",
-            ))?,
-    })
-}
-
-/// A locked dev-machine row (D1/D3): thetouch inputs plus provisioning.
-pub struct LockedDevMachine {
-    pub id: Uuid,
-    pub owner_id: Uuid,
-    pub host_label: String,
-    pub label: String,
-    pub provisioning: String,
-}
-
-fn decode_dev_machine(row: &PgRow) -> Result<LockedDevMachine, Response> {
-    Ok(LockedDevMachine {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        owner_id: row.try_get(1).map_err(|_| server_error())?,
-        host_label: row.try_get::<String, _>(2).map_err(|_| server_error())?,
-        label: row.try_get::<String, _>(3).map_err(|_| server_error())?,
-        provisioning: row.try_get::<String, _>(5).map_err(|_| server_error())?,
-    })
-}
+/// A locked dev-machine row (D1/D3): the touch inputs plus provisioning.
+pub use enroll_sql::LockedDevMachineRow as LockedDevMachine;
 
 /// A workspace hit (E6a/E6b): id + slug.
 pub struct WorkspaceHit {
@@ -731,16 +575,10 @@ pub struct WorkspaceHit {
     pub slug: String,
 }
 
-fn decode_workspace_at(row: &PgRow, base: usize) -> Result<WorkspaceHit, Response> {
-    let cols = enroll_sql::WORKSPACES_SELECT_COLUMNS;
-    Ok(WorkspaceHit {
-        id: row
-            .try_get(base + col_index(cols, "id"))
-            .map_err(|_| server_error())?,
-        slug: row
-            .try_get::<String, _>(base + col_index(cols, "slug"))
-            .map_err(|_| server_error())?,
-    })
+impl From<(Uuid, String)> for WorkspaceHit {
+    fn from((id, slug): (Uuid, String)) -> Self {
+        Self { id, slug }
+    }
 }
 
 /// A pod hit (E6d): id + name + project.
@@ -750,12 +588,14 @@ pub struct PodHit {
     pub project_id: Uuid,
 }
 
-fn decode_pod(row: &PgRow) -> Result<PodHit, Response> {
-    Ok(PodHit {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        name: row.try_get::<String, _>(3).map_err(|_| server_error())?,
-        project_id: row.try_get(2).map_err(|_| server_error())?,
-    })
+impl From<enroll_sql::PodHitRow> for PodHit {
+    fn from((id, name, project_id): enroll_sql::PodHitRow) -> Self {
+        Self {
+            id,
+            name,
+            project_id,
+        }
+    }
 }
 
 /// A project hit (E6c): id + identifier.
@@ -764,31 +604,17 @@ pub struct ProjectHit {
     pub identifier: String,
 }
 
-fn decode_project(row: &PgRow) -> Result<ProjectHit, Response> {
-    let cols = pidash_db::app_project::models::project::COLUMNS;
-    Ok(ProjectHit {
-        id: row
-            .try_get(col_index(cols, "id"))
-            .map_err(|_| server_error())?,
-        identifier: row
-            .try_get::<String, _>(col_index(cols, "identifier"))
-            .map_err(|_| server_error())?,
-    })
-}
-
-/// A reused desktop runner row (E7 probe): id + name + generation.
+/// A reused desktop runner row (E7 probe): id + name + generation + pod dispatch.
 pub struct ReuseHit {
     pub id: Uuid,
     pub name: String,
     pub refresh_token_generation: i32,
+    pub pod_dispatch: String,
 }
 
-fn decode_reuse(row: &PgRow) -> Result<ReuseHit, Response> {
-    Ok(ReuseHit {
-        id: row.try_get(0).map_err(|_| server_error())?,
-        name: row.try_get::<String, _>(5).map_err(|_| server_error())?,
-        refresh_token_generation: row.try_get(11).map_err(|_| server_error())?,
-    })
+/// The transaction's connection as a SeaORM connection.
+fn orm<'t>(tx: &'t mut Transaction<'_, Postgres>) -> TxConn<'t> {
+    TxConn::new(tx)
 }
 
 // ---------------------------------------------------------------------------
@@ -801,18 +627,13 @@ pub async fn fetch_enroll_runner(
     tx: &mut Transaction<'_, Postgres>,
     token_hash: &str,
 ) -> Result<Option<EnrollRow>, Response> {
-    let rows: Vec<PgRow> = sqlx::query(&enroll_sql::enroll_locked_read_sql())
-        .bind(token_hash)
-        .fetch_all(&mut **tx)
+    let rows = enroll_sql::enroll_locked_runners(&orm(tx), token_hash)
         .await
         .map_err(|_| server_error())?;
     if rows.len() > 1 {
         return Err(server_error());
     }
-    rows.into_iter()
-        .next()
-        .map(|row| decode_enroll_row(&row))
-        .transpose()
+    Ok(rows.into_iter().next())
 }
 
 /// E2 (`:325-348`): mark enrolled + rotate to refresh generation 1.
@@ -828,25 +649,18 @@ pub async fn mark_runner_enrolled(
     body_name: &str,
     enrolled_at: DateTime<Utc>,
 ) -> Result<(), Response> {
-    let with_name = !body_name.is_empty();
-    let sql = enroll_sql::enroll_mark_enrolled_sql(with_name);
-    let mut query = sqlx::query(&sql).bind(dev_machine_id);
-    if with_name {
-        query = query.bind(body_name);
-    }
-    query
-        .bind(host_label)
-        .bind(refresh_hash)
-        .bind(refresh_fingerprint)
-        .bind(1i32)
-        .bind("")
-        .bind("")
-        .bind("")
-        .bind(enrolled_at)
-        .bind(runner_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
+    enroll_sql::mark_runner_enrolled(
+        &orm(tx),
+        runner_id,
+        dev_machine_id,
+        (!body_name.is_empty()).then_some(body_name),
+        host_label,
+        refresh_hash,
+        refresh_fingerprint,
+        enrolled_at,
+    )
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -862,23 +676,16 @@ async fn touch_dev_machine(
 ) -> Result<(), Response> {
     let selection = enroll_sql::touch_selection(request_label, &machine.host_label, &machine.label);
     let normalized = enroll_sql::normalize_host_label(request_label);
-    let sql =
-        enroll_sql::touch_dev_machine_sql(selection.update_host_label, selection.update_label);
-    let mut query = sqlx::query(&sql);
-    if selection.update_host_label {
-        query = query.bind(&normalized);
-    }
-    if selection.update_label {
-        query = query.bind(enroll_sql::dev_machine_label(&normalized));
-    }
-    let now = Utc::now();
-    query
-        .bind(now)
-        .bind(now)
-        .bind(machine.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
+    let label = enroll_sql::dev_machine_label(&normalized);
+    enroll_sql::touch_dev_machine(
+        &orm(tx),
+        machine.id,
+        selection.update_host_label.then_some(normalized.as_str()),
+        selection.update_label.then_some(label.as_str()),
+        Utc::now(),
+    )
+    .await
+    .map_err(|_| server_error())?;
     Ok(())
 }
 
@@ -886,26 +693,20 @@ async fn touch_dev_machine(
 /// visibility 0, provisioning manual, last_seen now, revoked NULL,
 /// created/updated now.
 async fn insert_dev_machine(
-    tx: &mut Transaction<'_, Postgres>,
+    conn: &mut sqlx::PgConnection,
     id: Uuid,
     owner_id: Uuid,
     host_label: &str,
-) -> Result<(), sqlx::Error> {
-    let now = Utc::now();
-    sqlx::query(&enroll_sql::dev_machine_insert_sql())
-        .bind(id)
-        .bind(owner_id)
-        .bind(host_label)
-        .bind(enroll_sql::dev_machine_label(host_label))
-        .bind(0i16)
-        .bind(enums::RUNNER_PROVISIONING_MANUAL)
-        .bind(now)
-        .bind(None::<DateTime<Utc>>)
-        .bind(now)
-        .bind(now)
-        .execute(&mut **tx)
-        .await
-        .map(|_| ())
+) -> Result<(), DbErr> {
+    pidash_services::runner_enroll::queries::catalog_reads::insert_dev_machine(
+        &TxConn::new(conn),
+        id,
+        owner_id,
+        host_label,
+        enums::RUNNER_PROVISIONING_MANUAL,
+        Utc::now(),
+    )
+    .await
 }
 
 /// D1 re-lock by id.
@@ -913,12 +714,9 @@ async fn lock_dev_machine_by_id(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
 ) -> Result<Option<LockedDevMachine>, Response> {
-    let row: Option<PgRow> = sqlx::query(&enroll_sql::dev_machine_by_id_sql())
-        .bind(id)
-        .fetch_optional(&mut **tx)
+    enroll_sql::lock_dev_machine_by_id(&orm(tx), id)
         .await
-        .map_err(|_| server_error())?;
-    row.map(|row| decode_dev_machine(&row)).transpose()
+        .map_err(|_| server_error())
 }
 
 /// How `_get_or_create_dev_machine` failed: an ownership 404 or a 500.
@@ -957,28 +755,13 @@ pub async fn get_or_create_dev_machine(
                 provisioning: locked.provisioning,
             }));
         }
-        sqlx::query("SAVEPOINT enroll_dev_machine_create")
-            .execute(&mut **tx)
-            .await
-            .map_err(|_| DevMachineFail::Server)?;
-        match insert_dev_machine(tx, id, user_id, &host_label).await {
-            Ok(()) => {
-                sqlx::query("RELEASE SAVEPOINT enroll_dev_machine_create")
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|_| DevMachineFail::Server)?;
-                return Ok(Some(DevMachineTouch {
-                    id,
-                    provisioning: enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
-                }));
-            }
-            Err(error) if is_integrity_error(&error) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT enroll_dev_machine_create")
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|_| DevMachineFail::Server)?;
-            }
-            Err(_) => return Err(DevMachineFail::Server),
+        // `transaction.atomic()` savepoint around the create (`:88-94`): an
+        // IntegrityError (a concurrent create of this id) rolls back to it.
+        if insert_in_savepoint(tx, id, user_id, &host_label).await? {
+            return Ok(Some(DevMachineTouch {
+                id,
+                provisioning: enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
+            }));
         }
         let relocked = lock_dev_machine_by_id(tx, id).await.map_err(err)?;
         match relocked {
@@ -994,18 +777,13 @@ pub async fn get_or_create_dev_machine(
             _ => return Err(DevMachineFail::Ownership),
         }
     }
-
     if host_label.is_empty() {
         return Ok(None);
     }
-    let row: Option<PgRow> = sqlx::query(&enroll_sql::dev_machine_by_owner_host_sql())
-        .bind(&host_label)
-        .bind(user_id)
-        .fetch_optional(&mut **tx)
+    let found = enroll_sql::lock_dev_machine_by_owner_host(&orm(tx), &host_label, user_id)
         .await
         .map_err(|_| DevMachineFail::Server)?;
-    if let Some(row) = row {
-        let locked = decode_dev_machine(&row).map_err(err)?;
+    if let Some(locked) = found {
         touch_dev_machine(tx, &locked, &host_label)
             .await
             .map_err(err)?;
@@ -1014,47 +792,49 @@ pub async fn get_or_create_dev_machine(
             provisioning: locked.provisioning,
         }));
     }
-    sqlx::query("SAVEPOINT enroll_dev_machine_legacy")
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| DevMachineFail::Server)?;
     let fresh = Uuid::new_v4();
-    match insert_dev_machine(tx, fresh, user_id, &host_label).await {
-        Ok(()) => {
-            sqlx::query("RELEASE SAVEPOINT enroll_dev_machine_legacy")
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| DevMachineFail::Server)?;
-            return Ok(Some(DevMachineTouch {
-                id: fresh,
-                provisioning: enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
-            }));
-        }
-        Err(error) if is_integrity_error(&error) => {
-            sqlx::query("ROLLBACK TO SAVEPOINT enroll_dev_machine_legacy")
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| DevMachineFail::Server)?;
-        }
-        Err(_) => return Err(DevMachineFail::Server),
+    if insert_in_savepoint(tx, fresh, user_id, &host_label).await? {
+        return Ok(Some(DevMachineTouch {
+            id: fresh,
+            provisioning: enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
+        }));
     }
     // Legacy race path (`:119-127`): return whatever won, even `None`,
     // with NO touch.
-    let row: Option<PgRow> = sqlx::query(&enroll_sql::dev_machine_by_owner_host_sql())
-        .bind(&host_label)
-        .bind(user_id)
-        .fetch_optional(&mut **tx)
+    let winner = enroll_sql::lock_dev_machine_by_owner_host(&orm(tx), &host_label, user_id)
         .await
         .map_err(|_| DevMachineFail::Server)?;
-    match row {
-        Some(row) => {
-            let winner = decode_dev_machine(&row).map_err(err)?;
-            Ok(Some(DevMachineTouch {
-                id: winner.id,
-                provisioning: winner.provisioning,
-            }))
+    Ok(winner.map(|winner| DevMachineTouch {
+        id: winner.id,
+        provisioning: winner.provisioning,
+    }))
+}
+
+/// The dev-machine create inside a savepoint (sqlx nested transaction):
+/// `true` when inserted, `false` when an IntegrityError rolled it back.
+async fn insert_in_savepoint(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    owner_id: Uuid,
+    host_label: &str,
+) -> Result<bool, DevMachineFail> {
+    let mut savepoint = (**tx).begin().await.map_err(|_| DevMachineFail::Server)?;
+    match insert_dev_machine(&mut savepoint, id, owner_id, host_label).await {
+        Ok(()) => {
+            savepoint
+                .commit()
+                .await
+                .map_err(|_| DevMachineFail::Server)?;
+            Ok(true)
         }
-        None => Ok(None),
+        Err(error) if is_integrity_violation(&error) => {
+            savepoint
+                .rollback()
+                .await
+                .map_err(|_| DevMachineFail::Server)?;
+            Ok(false)
+        }
+        Err(_) => Err(DevMachineFail::Server),
     }
 }
 
@@ -1066,29 +846,29 @@ pub async fn get_or_create_dev_machine(
 /// workspace, host, hash, fingerprint, label, is_service TRUE, created
 /// now, last_used/revoked NULL.
 async fn insert_machine_token(
-    tx: &mut Transaction<'_, Postgres>,
+    conn: &mut sqlx::PgConnection,
     user_id: Uuid,
     dev_machine_id: Option<Uuid>,
     workspace_id: Uuid,
     host_label: &str,
     minted: &enroll_tokens::MintedToken,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(&enroll_sql::machine_token_insert_sql())
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(dev_machine_id)
-        .bind(workspace_id)
-        .bind(host_label)
-        .bind(&minted.hashed)
-        .bind(&minted.fingerprint)
-        .bind(enroll_sql::machine_token_label(host_label))
-        .bind(true)
-        .bind(Utc::now())
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<DateTime<Utc>>)
-        .execute(&mut **tx)
-        .await
-        .map(|_| ())
+    pidash_services::domain::tokens::insert_machine_token(
+        &pidash_db::orm_tx::TxConn::new(conn),
+        &pidash_services::domain::tokens::NewMachineToken {
+            id: Uuid::new_v4(),
+            user_id,
+            dev_machine_id,
+            workspace_id,
+            host_label: host_label.to_owned(),
+            token_hash: minted.hashed.clone(),
+            token_fingerprint: minted.fingerprint.clone(),
+            label: enroll_sql::machine_token_label(host_label),
+            is_service: true,
+            created_at: Utc::now(),
+        },
+    )
+    .await
 }
 
 /// `_maybe_mint_machine_token` (`:130-171`): locked-exists probe, mint,
@@ -1101,28 +881,23 @@ pub async fn maybe_mint_machine_token(
     host_label: &str,
     secret_key: &str,
 ) -> Result<Option<enroll_tokens::MintedToken>, Response> {
-    let with_machine = dev_machine_id.is_some();
-    let sql = enroll_sql::bootstrap_probe_sql(with_machine);
-    let mut probe = sqlx::query(&sql);
-    if with_machine {
-        probe = probe.bind(dev_machine_id).bind(user_id).bind(workspace_id);
-    } else {
-        probe = probe.bind(host_label).bind(user_id).bind(workspace_id);
-    }
-    let locked: Option<PgRow> = probe
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    if locked.is_some() {
+    let locked = enroll_sql::bootstrap_token_exists(
+        &orm(tx),
+        dev_machine_id,
+        host_label,
+        user_id,
+        workspace_id,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    if locked {
         return Ok(None);
     }
     let minted = enroll_tokens::mint_machine_token(secret_key);
-    sqlx::query("SAVEPOINT enroll_machine_token_mint")
-        .execute(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
+    // `transaction.atomic()` savepoint (`:159-171`): IntegrityError → None.
+    let mut savepoint = (**tx).begin().await.map_err(|_| server_error())?;
     match insert_machine_token(
-        tx,
+        &mut savepoint,
         user_id,
         dev_machine_id,
         workspace_id,
@@ -1132,17 +907,11 @@ pub async fn maybe_mint_machine_token(
     .await
     {
         Ok(()) => {
-            sqlx::query("RELEASE SAVEPOINT enroll_machine_token_mint")
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
+            savepoint.commit().await.map_err(|_| server_error())?;
             Ok(Some(minted))
         }
         Err(error) if is_integrity_error(&error) => {
-            sqlx::query("ROLLBACK TO SAVEPOINT enroll_machine_token_mint")
-                .execute(&mut **tx)
-                .await
-                .map_err(|_| server_error())?;
+            savepoint.rollback().await.map_err(|_| server_error())?;
             Ok(None)
         }
         Err(_) => Err(server_error()),
@@ -1169,17 +938,26 @@ pub async fn rotate_machine_token(
     secret_key: &str,
 ) -> Result<enroll_tokens::MintedToken, RotateOutcome> {
     let with_machine = dev_machine_id.is_some();
-    let sql = enroll_sql::rotate_revoke_sql(with_machine);
-    let mut revoke = sqlx::query(&sql).bind(Utc::now());
     if with_machine {
-        revoke = revoke.bind(dev_machine_id).bind(workspace_id);
-    } else {
-        revoke = revoke.bind(host_label).bind(user_id).bind(workspace_id);
-    }
-    revoke
-        .execute(&mut **tx)
+        pidash_services::domain::tokens::revoke_tokens_for_machine_in_workspace(
+            &pidash_db::orm_tx::TxConn::new(tx),
+            dev_machine_id.expect("checked is_some"),
+            workspace_id,
+            Utc::now(),
+        )
         .await
         .map_err(|_| RotateOutcome::Server)?;
+    } else {
+        pidash_services::domain::tokens::revoke_tokens_legacy_host(
+            &pidash_db::orm_tx::TxConn::new(tx),
+            host_label,
+            user_id,
+            workspace_id,
+            Utc::now(),
+        )
+        .await
+        .map_err(|_| RotateOutcome::Server)?;
+    }
     let minted = enroll_tokens::mint_machine_token(secret_key);
     match insert_machine_token(
         tx,
@@ -1206,12 +984,10 @@ pub async fn workspace_by_slug(
     pool: &sqlx::PgPool,
     slug: &str,
 ) -> Result<Option<WorkspaceHit>, Response> {
-    let row: Option<PgRow> = sqlx::query(&enroll_sql::workspace_by_slug_sql())
-        .bind(slug)
-        .fetch_optional(pool)
+    let row = enroll_sql::workspace_by_slug(&pidash_db::pool::sea_orm_connection(pool), slug)
         .await
         .map_err(|_| server_error())?;
-    row.map(|row| decode_workspace_at(&row, 0)).transpose()
+    Ok(row.map(WorkspaceHit::from))
 }
 
 /// E6b (`:639-643`): the caller's active memberships, oldest first,
@@ -1220,15 +996,11 @@ pub async fn memberships_for_inference(
     pool: &sqlx::PgPool,
     user_id: Uuid,
 ) -> Result<Vec<WorkspaceHit>, Response> {
-    let rows: Vec<PgRow> = sqlx::query(&enroll_sql::memberships_for_inference_sql())
-        .bind(user_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|_| server_error())?;
-    let base = enroll_sql::WORKSPACE_MEMBERS_SELECT_COLUMNS.len();
-    rows.iter()
-        .map(|row| decode_workspace_at(row, base))
-        .collect::<Result<Vec<_>, _>>()
+    let rows =
+        enroll_sql::memberships_for_inference(&pidash_db::pool::sea_orm_connection(pool), user_id)
+            .await
+            .map_err(|_| server_error())?;
+    Ok(rows.into_iter().map(WorkspaceHit::from).collect())
 }
 
 /// E6c (`:664-669`): project by workspace + identifier.
@@ -1237,13 +1009,14 @@ pub async fn project_by_workspace_identifier(
     workspace_id: Uuid,
     identifier: &str,
 ) -> Result<Option<ProjectHit>, Response> {
-    let row: Option<PgRow> = sqlx::query(&enroll_sql::project_by_workspace_identifier_sql())
-        .bind(identifier)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| server_error())?;
-    row.map(|row| decode_project(&row)).transpose()
+    let row = enroll_sql::project_by_workspace_identifier(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        identifier,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    Ok(row.map(|(id, identifier)| ProjectHit { id, identifier }))
 }
 
 /// E6d-explicit (`:672-673`): pod by name (miss falls through to the
@@ -1253,13 +1026,10 @@ pub async fn pod_by_name(
     project_id: Uuid,
     name: &str,
 ) -> Result<Option<PodHit>, Response> {
-    let row: Option<PgRow> = sqlx::query(&enroll_sql::pod_by_name_sql())
-        .bind(name)
-        .bind(project_id)
-        .fetch_optional(pool)
+    let row = enroll_sql::pod_by_name(&pidash_db::pool::sea_orm_connection(pool), project_id, name)
         .await
         .map_err(|_| server_error())?;
-    row.map(|row| decode_pod(&row)).transpose()
+    Ok(row.map(PodHit::from))
 }
 
 /// E6d-default (`Pod.default_for_project_id`, `models.py:173-176`).
@@ -1267,29 +1037,25 @@ pub async fn default_pod_for_project(
     pool: &sqlx::PgPool,
     project_id: Uuid,
 ) -> Result<Option<PodHit>, Response> {
-    let row: Option<PgRow> =
-        sqlx::query(pidash_db::runner_enroll::columns::pod::DEFAULT_FOR_PROJECT_ID_SQL)
-            .bind(project_id)
-            .fetch_optional(pool)
+    let row =
+        enroll_sql::default_pod_for_project(&pidash_db::pool::sea_orm_connection(pool), project_id)
             .await
             .map_err(|_| server_error())?;
-    row.map(|row| decode_pod(&row)).transpose()
+    Ok(row.map(PodHit::from))
 }
 
 /// `_next_auto_runner_name` count (`:790-796`): ALL runners in the pod,
 /// revoked included. Django `.count()` rendering.
 pub async fn count_pod_runners(pool: &sqlx::PgPool, pod_id: Uuid) -> Result<i64, Response> {
-    sqlx::query_scalar::<_, i64>(
-        r#"SELECT COUNT(*) AS "__count" FROM "runner" WHERE "runner"."pod_id" = $1"#,
-    )
-    .bind(pod_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| server_error())
+    let count = enroll_sql::count_pod_runners(&pidash_db::pool::sea_orm_connection(pool), pod_id)
+        .await
+        .map_err(|_| server_error())?;
+    i64::try_from(count).map_err(|_| server_error())
 }
 
-/// E7 reuse probe (`:709-720`): a live desktop-bundled runner for this
-/// owner/workspace/machine/pod.
+#[allow(dead_code)]
+/// E7 reuse probe (`:709-720`): kept for back-compat; create now uses
+/// `live_engine_runner_for` (#2910).
 pub async fn desktop_reuse_probe(
     tx: &mut Transaction<'_, Postgres>,
     dev_machine_id: Uuid,
@@ -1297,35 +1063,45 @@ pub async fn desktop_reuse_probe(
     pod_id: Uuid,
     workspace_id: Uuid,
 ) -> Result<Option<ReuseHit>, Response> {
-    let row: Option<PgRow> = sqlx::query(&enroll_sql::desktop_reuse_probe_sql())
-        .bind(dev_machine_id)
-        .bind(owner_id)
-        .bind(pod_id)
-        .bind(enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED)
-        .bind(workspace_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|_| server_error())?;
-    row.map(|row| decode_reuse(&row)).transpose()
+    let row = enroll_sql::desktop_reuse_probe(
+        &orm(tx),
+        dev_machine_id,
+        owner_id,
+        pod_id,
+        enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
+        workspace_id,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    Ok(row.map(
+        |(id, name, refresh_token_generation, pod_dispatch)| ReuseHit {
+            id,
+            name,
+            refresh_token_generation,
+            pod_dispatch,
+        },
+    ))
 }
 
-/// E7 cap count (`_managed_cap_error`, `:237-246`): non-revoked bundled
-/// runners for this owner/pod/workspace.
+#[allow(dead_code)]
+/// E7 cap count: removed with the cap (#2910); kept dead for back-compat.
 pub async fn managed_cap_count(
     tx: &mut Transaction<'_, Postgres>,
     owner_id: Uuid,
     pod_id: Uuid,
     workspace_id: Uuid,
 ) -> Result<i64, Response> {
-    sqlx::query_scalar::<_, i64>(&enroll_sql::managed_cap_count_sql())
-        .bind(owner_id)
-        .bind(pod_id)
-        .bind(enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED)
-        .bind(workspace_id)
-        .bind(enums::RUNNER_STATUS_REVOKED)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|_| server_error())
+    let count = enroll_sql::managed_cap_count(
+        &orm(tx),
+        owner_id,
+        pod_id,
+        enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED,
+        workspace_id,
+        enums::RUNNER_STATUS_REVOKED,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    i64::try_from(count).map_err(|_| server_error())
 }
 
 /// What the E7 runner insert returned: the new row id, a unique
@@ -1335,7 +1111,7 @@ pub enum RunnerInsertOutcome {
     Server,
 }
 
-/// E7 runner insert (`:726-735`): the 30-column `INSERT` in
+/// E7 runner insert (`:726-735`): the 32-column `INSERT` in
 /// `COLUMNS` order (`Runner.save()`'s auto-resolve is a no-op — `pod`
 /// is always set).
 #[allow(clippy::too_many_arguments)]
@@ -1350,60 +1126,27 @@ pub async fn insert_runner(
     provisioning: &str,
 ) -> Result<Uuid, RunnerInsertOutcome> {
     let id = Uuid::new_v4();
-    let now = Utc::now();
-    let inserted = sqlx::query(&enroll_sql::runner_insert_sql())
-        .bind(id)
-        .bind(owner_id)
-        .bind(workspace_id)
-        .bind(dev_machine_id)
-        .bind(pod_id)
-        .bind(name)
-        .bind(host_label)
-        .bind(provisioning)
-        .bind(0i16)
-        .bind("")
-        .bind("")
-        .bind(0i32)
-        .bind("")
-        .bind(1i32)
-        .bind("")
-        .bind("")
-        .bind(now)
-        .bind(serde_json::json!([]))
-        .bind(enums::RUNNER_STATUS_OFFLINE)
-        .bind("")
-        .bind("")
-        .bind("")
-        .bind(serde_json::json!({}))
-        .bind(1i32)
-        .bind(None::<DateTime<Utc>>)
-        .bind(None::<i32>)
-        .bind(now)
-        .bind(now)
-        .bind(None::<DateTime<Utc>>)
-        .bind("")
-        .execute(&mut **tx)
-        .await;
+    let inserted = enroll_sql::insert_runner(
+        &orm(tx),
+        &enroll_sql::NewRunner {
+            id,
+            owner_id,
+            workspace_id,
+            dev_machine_id,
+            pod_id,
+            name,
+            host_label,
+            provisioning,
+            status: enums::RUNNER_STATUS_OFFLINE,
+            now: Utc::now(),
+        },
+    )
+    .await;
     match inserted {
-        Ok(_) => Ok(id),
-        Err(error) if is_integrity_error(&error) => Err(RunnerInsertOutcome::Collision),
+        Ok(()) => Ok(id),
+        Err(error) if is_integrity_violation(&error) => Err(RunnerInsertOutcome::Collision),
         Err(_) => Err(RunnerInsertOutcome::Server),
     }
-}
-
-/// Silence dead-column warnings: every `COLUMNS` order this module
-/// decodes positionally is referenced, so a schema drift breaks the
-/// build instead of shifting indices silently.
-#[allow(dead_code)]
-fn column_orders_pin() {
-    let _ = (
-        r_cols::COLUMNS.len(),
-        dm_cols::COLUMNS.len(),
-        mt_cols::COLUMNS.len(),
-        pod_cols::COLUMNS.len(),
-        enroll_sql::WORKSPACES_SELECT_COLUMNS.len(),
-        enroll_sql::WORKSPACE_MEMBERS_SELECT_COLUMNS.len(),
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,7 +1162,9 @@ pub const INVITE_GONE_BODY: &str = r#"{"error":"legacy_enrollment_disabled","err
 /// `POST /api/runners/<rid>/revive/` 410 (`:491-500`).
 pub const REVIVE_GONE_BODY: &str = r#"{"error":"legacy_enrollment_disabled","error_description":"Delete this runner and run `pidash runner add` from the authenticated target machine."}"#;
 
-/// Enroll/create 201 shared envelope fields (`:361-374,771-784`).
+/// Enroll/create 201 shared envelope fields (`:361-374,771-787`).
+/// The create 201 adds `provisioning` / `pod_dispatch` / `created`
+/// (NEWPIDASH-58 Drift from PIDESKAPP-206); enroll carries none of them.
 pub struct EnrollmentBody<'a> {
     pub runner_id: &'a str,
     pub runner_name: &'a str,
@@ -1431,12 +1176,17 @@ pub struct EnrollmentBody<'a> {
     pub pod_slug: &'a str,
     pub project_identifier: &'a str,
     pub machine_token: Option<&'a str>,
+    pub provisioning: Option<&'a str>,
+    pub pod_dispatch: Option<&'a str>,
+    pub created: Option<bool>,
 }
 
-/// The enroll 201 (`:361-377`) and create 201 (`:771-787`): identical
-/// key order; `machine_token` present ONLY when minted (appended last).
+/// The enroll 201 (`:361-377`) and create 201 (`:771-787`): shared key
+/// order; the create 201 inserts `provisioning` / `pod_dispatch` /
+/// `created` after `machine_token_minted`; `machine_token` is present
+/// ONLY when minted (appended last).
 pub fn enrollment_body(fields: &EnrollmentBody<'_>) -> String {
-    let mut body = Map::with_capacity(13);
+    let mut body = Map::with_capacity(16);
     body.insert(
         "runner_id".to_owned(),
         Value::String(fields.runner_id.to_owned()),
@@ -1485,6 +1235,20 @@ pub fn enrollment_body(fields: &EnrollmentBody<'_>) -> String {
         "machine_token_minted".to_owned(),
         Value::Bool(fields.machine_token.is_some()),
     );
+    if let Some(provisioning) = fields.provisioning {
+        body.insert(
+            "provisioning".to_owned(),
+            Value::String(provisioning.to_owned()),
+        );
+        body.insert(
+            "pod_dispatch".to_owned(),
+            Value::String(fields.pod_dispatch.unwrap_or("pod_member").to_owned()),
+        );
+        body.insert(
+            "created".to_owned(),
+            Value::Bool(fields.created.unwrap_or(true)),
+        );
+    }
     if let Some(token) = fields.machine_token {
         body.insert("machine_token".to_owned(), Value::String(token.to_owned()));
     }
@@ -1709,7 +1473,11 @@ async fn enroll_runner_inner(
             workspace_slug: &runner.workspace_slug,
             pod_slug: &runner.pod_name,
             project_identifier: &runner.project_identifier,
+            // Enroll 201 (`enrollment.py:334-350`): no create trio.
             machine_token: machine_minted.as_ref().map(|minted| minted.raw.as_str()),
+            provisioning: None,
+            pod_dispatch: None,
+            created: None,
         }),
     )
 }
@@ -1722,40 +1490,86 @@ async fn enroll_runner_inner(
 struct CreateAttempt<'a> {
     user_id: Uuid,
     workspace_id: Uuid,
+    workspace_slug: &'a str,
     pod_id: Uuid,
+    project_id: Uuid,
+    project_identifier: &'a str,
     dev_machine_id: Option<Uuid>,
     host_label: &'a str,
-    name: &'a str,
+    body_name: &'a str,
+    agent_kind: &'a str,
     secret_key: &'a str,
     has_machine_token: bool,
     auth_token: &'a str,
-    managed_max: i64,
 }
 
 /// One create-attempt result: done (commit), a name collision (roll
-/// back + retry/`runner_name_taken`), the managed cap (COMMIT +
-/// 409 — the return-inside-`atomic()` quirk), an ownership 404, or a
-/// 500.
+/// back + retry/`runner_name_taken`), a refusal (direct response, no
+/// retry), an ownership 404, or a 500.
 enum Attempt {
     Done(AttemptDone),
-    Collision,
-    Cap,
+    Collision(bool),
+    Refusal(Response),
     Ownership,
     Server,
 }
 
 /// A finished attempt: the row identity + an optional rotated token.
+/// `provisioning` / `pod_dispatch` / `created` are the create-201
+/// envelope additions (NEWPIDASH-58): `created` is false on the
+/// desktop-reuse return.
 struct AttemptDone {
     runner_id: Uuid,
     runner_name: String,
     generation: i32,
     minted: Option<enroll_tokens::MintedToken>,
+    provisioning: String,
+    pod_dispatch: String,
+    created: bool,
+}
+
+/// `_engine_refusal` (`enrollment.py:813-843`): `None` when the engine may
+/// be created, else the 409 response. OSS CE has no gateway lane, so the
+/// profile is always unavailable (mirrors N51); the pause reason follows
+/// the managed-runner kill switch.
+async fn engine_refusal(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    _dev_machine: &pidash_db::entity::dev_machine::Model,
+    settings: &pidash_db::config::Settings,
+) -> Option<Response> {
+    let (_available, pause_reason) = engine_cred::engine_profile_for_user_available(settings);
+    // `profile.reason_code` follows the caller's BYOK key
+    // (`agent_model_profile_for_user`, `model_provider.py:110-113`).
+    let conn = TxConn::new(&mut *tx);
+    let profile_reason_code =
+        match engine_cred::engine_profile_reason_code_for_user(&conn, user_id).await {
+            Ok(code) => code,
+            Err(err) => {
+                tracing::warn!("engine_refusal byok lookup failed: {err}");
+                return Some(server_error());
+            }
+        };
+    Some(json_response(
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": "engine_unavailable",
+            "reason_code": pause_reason,
+            "profile_reason_code": profile_reason_code,
+            "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
+        })
+        .to_string(),
+    ))
 }
 
 /// One attempt of the create retry loop (`:691-744`): dev-machine
-/// attach, desktop-bundled recover-or-cap, runner insert, APIToken-path
-/// rotate + `deactivate_api_token`.
-async fn create_attempt(tx: &mut Transaction<'_, Postgres>, params: &CreateAttempt<'_>) -> Attempt {
+/// attach, engine/manual branch, live-engine dedupe, runner insert,
+/// APIToken-path rotate + `deactivate_api_token`.
+async fn create_attempt(
+    tx: &mut Transaction<'_, Postgres>,
+    params: &CreateAttempt<'_>,
+    settings: &pidash_db::config::Settings,
+) -> Attempt {
     let dev_machine = match get_or_create_dev_machine(
         tx,
         params.user_id,
@@ -1769,57 +1583,200 @@ async fn create_attempt(tx: &mut Transaction<'_, Postgres>, params: &CreateAttem
         Err(DevMachineFail::Server) => return Attempt::Server,
     };
     let dev_machine_id = dev_machine.as_ref().map(|dev| dev.id);
-    let provisioning = dev_machine
+    let legacy_machine = dev_machine
         .as_ref()
-        .map(|dev| dev.provisioning.clone())
-        .unwrap_or_else(|| enums::RUNNER_PROVISIONING_MANUAL.to_owned());
-    if provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED {
-        if let Some(machine_id) = dev_machine_id {
-            match desktop_reuse_probe(
-                tx,
+        .is_some_and(|dev| dev.provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED);
+    let wants_engine =
+        params.agent_kind == "engine" || (params.agent_kind.is_empty() && legacy_machine);
+    let (provisioning, name, engine_named) = if !wants_engine {
+        (
+            enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
+            None::<String>,
+            false,
+        )
+    } else {
+        if dev_machine_id.is_none() {
+            return Attempt::Refusal(json_response(
+                StatusCode::BAD_REQUEST,
+                error_body("dev_machine_required"),
+            ));
+        }
+        let machine_id = dev_machine_id.unwrap();
+        if !legacy_machine {
+            let Some(machine_full) = fetch_dev_machine_full(tx, machine_id).await else {
+                return Attempt::Server;
+            };
+            if let Some(refusal) = engine_refusal(tx, params.user_id, &machine_full, settings).await
+            {
+                return Attempt::Refusal(refusal);
+            }
+            // Credential check (live now, not stored).
+            if !has_live_credential(tx, machine_id, settings).await {
+                let Some(stored) = fetch_dev_machine_full(tx, machine_id).await else {
+                    return Attempt::Server;
+                };
+                let state = engine_cred::current_engine_sign_in_state(
+                    &stored.engine_sign_in_state,
+                    stored
+                        .engine_credential_expires_at
+                        .map(|t| t.with_timezone(&chrono::Utc)),
+                    Utc::now(),
+                );
+                return Attempt::Refusal(json_response(
+                    StatusCode::CONFLICT,
+                    serde_json::json!({
+                        "error": "engine_unavailable",
+                        "reason_code": "engine_sign_in_required",
+                        "engine_sign_in_state": state,
+                        "error_description": "Sign the built-in engine in on this computer first (`pidash login --engine`).",
+                    })
+                    .to_string(),
+                ));
+            }
+        }
+        // At most one live engine runner per (machine, project).
+        match enroll_sql::live_engine_runner_for(
+            &pidash_db::orm_tx::TxConn::new(&mut *tx),
+            machine_id,
+            params.project_id,
+        )
+        .await
+        {
+            Ok(Some(hit)) => {
+                let mut runner_name = hit.name.clone();
+                if !legacy_machine && !runner_name.starts_with("builtin-") {
+                    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                    let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
+                        return Attempt::Server;
+                    };
+                    let taken = match enroll_sql::taken_names(
+                        &pidash_db::orm_tx::TxConn::new(&mut *tx),
+                        machine_id,
+                        hit.pod_id,
+                        Some(hit.id),
+                    )
+                    .await
+                    {
+                        Ok(taken) => taken,
+                        Err(_) => return Attempt::Server,
+                    };
+                    let base = engine_naming::engine_runner_base_name(
+                        machine_id,
+                        &machine.host_label,
+                        &machine.label,
+                        params.workspace_slug,
+                        params.project_id,
+                        params.project_identifier,
+                    );
+                    runner_name = enroll_sql::engine_runner_name_from_base(&base, &taken);
+                    if runner_name != hit.name
+                        && pidash_db::entity::runner::Entity::update_many()
+                            .col_expr(
+                                pidash_db::entity::runner::Column::Name,
+                                sea_orm::sea_query::Expr::value(runner_name.clone()),
+                            )
+                            .col_expr(
+                                pidash_db::entity::runner::Column::UpdatedAt,
+                                sea_orm::sea_query::Expr::value(Utc::now()),
+                            )
+                            .filter(pidash_db::entity::runner::Column::Id.eq(hit.id))
+                            .exec(&pidash_db::orm_tx::TxConn::new(&mut *tx))
+                            .await
+                            .is_err()
+                    {
+                        return Attempt::Server;
+                    }
+                }
+                // `runner.pod_dispatch` verbatim (`:797`): pre-#2910 rows
+                // may carry `pod_member`; never force `pinned_only`.
+                let pod_dispatch = match fetch_runner_pod_dispatch(tx, hit.id).await {
+                    Some(d) => d,
+                    None => return Attempt::Server,
+                };
+                return Attempt::Done(AttemptDone {
+                    runner_id: hit.id,
+                    runner_name,
+                    generation: hit.generation,
+                    minted: None,
+                    provisioning: enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned(),
+                    pod_dispatch,
+                    created: false,
+                });
+            }
+            Ok(None) => {}
+            Err(_) => return Attempt::Server,
+        }
+        if legacy_machine {
+            (
+                enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned(),
+                None::<String>,
+                false,
+            )
+        } else {
+            let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
+                return Attempt::Server;
+            };
+            let base = engine_naming::engine_runner_base_name(
                 machine_id,
-                params.user_id,
+                &machine.host_label,
+                &machine.label,
+                params.workspace_slug,
+                params.project_id,
+                params.project_identifier,
+            );
+            let taken = match enroll_sql::taken_names(
+                &pidash_db::orm_tx::TxConn::new(&mut *tx),
+                machine_id,
                 params.pod_id,
-                params.workspace_id,
+                None,
             )
             .await
             {
-                Ok(Some(hit)) => {
-                    return Attempt::Done(AttemptDone {
-                        runner_id: hit.id,
-                        runner_name: hit.name,
-                        generation: hit.refresh_token_generation,
-                        minted: None,
-                    });
-                }
-                Ok(None) => {}
+                Ok(taken) => taken,
                 Err(_) => return Attempt::Server,
-            }
-            match managed_cap_count(tx, params.user_id, params.pod_id, params.workspace_id).await {
-                Ok(count) => {
-                    if count >= params.managed_max {
-                        return Attempt::Cap;
-                    }
-                }
-                Err(_) => return Attempt::Server,
-            }
+            };
+            (
+                enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED.to_owned(),
+                Some(enroll_sql::engine_runner_name_from_base(&base, &taken)),
+                true,
+            )
         }
-    }
+    };
+    let name = if let Some(engine_name) = name {
+        engine_name
+    } else if !params.body_name.is_empty() {
+        params.body_name.to_owned()
+    } else {
+        match enroll_sql::count_pod_runners(
+            &pidash_db::orm_tx::TxConn::new(&mut *tx),
+            params.pod_id,
+        )
+        .await
+        {
+            Ok(count) => next_auto_runner_name(count as i64),
+            Err(_) => return Attempt::Server,
+        }
+    };
     let runner_id = match insert_runner(
         tx,
         params.user_id,
         params.workspace_id,
         dev_machine_id,
         params.pod_id,
-        params.name,
+        &name,
         params.host_label,
         &provisioning,
     )
     .await
     {
         Ok(id) => id,
-        Err(RunnerInsertOutcome::Collision) => return Attempt::Collision,
+        Err(RunnerInsertOutcome::Collision) => return Attempt::Collision(engine_named),
         Err(RunnerInsertOutcome::Server) => return Attempt::Server,
+    };
+    let pod_dispatch = if provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED {
+        "pinned_only".to_owned()
+    } else {
+        "pod_member".to_owned()
     };
     let mut minted = None;
     if !params.has_machine_token && !params.host_label.is_empty() {
@@ -1834,22 +1791,74 @@ async fn create_attempt(tx: &mut Transaction<'_, Postgres>, params: &CreateAttem
         .await
         {
             Ok(rotated) => minted = Some(rotated),
-            Err(RotateOutcome::Collision) => return Attempt::Collision,
+            Err(RotateOutcome::Collision) => return Attempt::Collision(engine_named),
             Err(RotateOutcome::Server) => return Attempt::Server,
         }
-        if deactivate_api_token(&mut **tx, Some(params.auth_token), true, Utc::now())
-            .await
-            .is_err()
+        if deactivate_api_token(
+            &pidash_db::orm_tx::TxConn::new(tx),
+            Some(params.auth_token),
+            true,
+            Utc::now(),
+        )
+        .await
+        .is_err()
         {
             return Attempt::Server;
         }
     }
     Attempt::Done(AttemptDone {
         runner_id,
-        runner_name: params.name.to_owned(),
+        runner_name: name,
         generation: 0,
         minted,
+        provisioning,
+        pod_dispatch,
+        created: true,
     })
+}
+
+// Small helpers for create_attempt (keep the engine surface in one place).
+async fn fetch_dev_machine_full(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Option<pidash_db::entity::dev_machine::Model> {
+    use sea_orm::EntityTrait;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+    pidash_db::entity::dev_machine::Entity::find_by_id(id)
+        .one(&conn)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn fetch_runner_pod_dispatch(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Option<String> {
+    use sea_orm::{EntityTrait, QuerySelect};
+    let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+    pidash_db::entity::runner::Entity::find_by_id(id)
+        .select_only()
+        .column(pidash_db::entity::runner::Column::PodDispatch)
+        .into_tuple::<String>()
+        .one(&conn)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn has_live_credential(
+    tx: &mut Transaction<'_, Postgres>,
+    machine_id: Uuid,
+    _settings: &pidash_db::config::Settings,
+) -> bool {
+    let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
+        return false;
+    };
+    engine_cred::has_live_engine_credential(
+        &machine.engine_sign_in_state,
+        machine
+            .engine_credential_expires_at
+            .map(|t| t.with_timezone(&chrono::Utc)),
+        Utc::now(),
+    )
 }
 
 /// `RunnerCreateEndpoint.post` (`:571-787`): `X-Api-Key` auth, workspace
@@ -1914,6 +1923,18 @@ async fn create_runner_inner(
     let pod_name = match frame_stripped(&data, "pod") {
         Ok(value) => value,
         Err(response) => return response,
+    };
+    // `agent_kind` (CLI field; `agent` alias): `engine` asks for the
+    // built-in engine runner. Never read from the body as provisioning.
+    // Python `or` chain: the first *truthy* leg wins, then `str()`
+    // coercion (`enrollment.py:575`): `agent_kind=""` falls through to
+    // `agent`, while a truthy non-string renders via `py_str`.
+    let agent_kind = {
+        let picked = ["agent_kind", "agent"]
+            .into_iter()
+            .find_map(|key| data.get(key).filter(|v| py_truthy(v)));
+        let rendered = picked.map(pidash_compat::py::py_str).unwrap_or_default();
+        py_strip(&rendered).to_lowercase()
     };
 
     if project_identifier.is_empty() {
@@ -2035,18 +2056,11 @@ async fn create_runner_inner(
         );
     };
 
+    let settings = state.settings().clone();
     let mut attempts = 0u32;
     let mut finished: Option<AttemptDone> = None;
     while attempts < MAX_AUTO_NAME_RETRIES {
         attempts += 1;
-        let name = if !body_name.is_empty() {
-            body_name.clone()
-        } else {
-            match count_pod_runners(pool, pod.id).await {
-                Ok(count) => next_auto_runner_name(count),
-                Err(response) => return response,
-            }
-        };
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(_) => return server_error(),
@@ -2056,15 +2070,19 @@ async fn create_runner_inner(
             &CreateAttempt {
                 user_id,
                 workspace_id: workspace.id,
+                workspace_slug: &workspace.slug,
                 pod_id: pod.id,
+                project_id: project.id,
+                project_identifier: &project.identifier,
                 dev_machine_id,
                 host_label: &host_label,
-                name: &name,
+                body_name: &body_name,
+                agent_kind: &agent_kind,
                 secret_key: &secret,
                 has_machine_token: auth.machine_token.is_some(),
                 auth_token: &auth.auth_token,
-                managed_max: state.settings().managed_runner.max_per_user_project,
             },
+            &settings,
         )
         .await;
         match attempt {
@@ -2075,25 +2093,20 @@ async fn create_runner_inner(
                 finished = Some(done);
                 break;
             }
-            Attempt::Collision => {
+            Attempt::Collision(engine_named) => {
                 let _ = tx.rollback().await;
-                if !body_name.is_empty() {
+                if !body_name.is_empty() && !engine_named {
                     return json_response(StatusCode::CONFLICT, error_body("runner_name_taken"));
                 }
             }
-            Attempt::Cap => {
-                // The 409 returns from inside the attempt `atomic()`
-                // block: the dev-machine side effects COMMIT.
+            Attempt::Refusal(response) => {
+                // Django returns from inside `atomic()` (`:713-715`), so the
+                // dev-machine touch/create commits; only a commit failure
+                // 500s here. Commit (not rollback) to keep the touch.
                 if tx.commit().await.is_err() {
                     return server_error();
                 }
-                return json_response(
-                    StatusCode::CONFLICT,
-                    error_desc_body(
-                        "managed_runner_limit",
-                        "This project already has a Pi Dash Agent registered for you on a machine.",
-                    ),
-                );
+                return response;
             }
             Attempt::Ownership => {
                 return json_response(StatusCode::NOT_FOUND, error_body("dev_machine_not_found"));
@@ -2126,6 +2139,9 @@ async fn create_runner_inner(
             pod_slug: &pod.name,
             project_identifier: &project.identifier,
             machine_token: done.minted.as_ref().map(|minted| minted.raw.as_str()),
+            provisioning: Some(&done.provisioning),
+            pod_dispatch: Some(&done.pod_dispatch),
+            created: Some(done.created),
         }),
     )
 }
@@ -2333,26 +2349,16 @@ async fn machine_token_redeem_inner(
         Ok(workspace_id) => workspace_id,
         Err(response) => return response,
     };
-    let user_exists: Option<Uuid> =
-        match sqlx::query_scalar(r#"SELECT "id" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return server_error(),
-        };
-    let workspace: Option<(Uuid, String)> = match sqlx::query_as(
-        r#"SELECT "id", "slug" FROM "workspaces" WHERE "id" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(row) => row,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let user_exists = match enroll_sql::user_exists(&db, user_id).await {
+        Ok(found) => found,
         Err(_) => return server_error(),
     };
-    let (Some(_), Some((_, workspace_slug))) = (user_exists, workspace) else {
+    let workspace_slug = match enroll_sql::live_workspace_slug(&db, workspace_id).await {
+        Ok(slug) => slug,
+        Err(_) => return server_error(),
+    };
+    let (true, Some(workspace_slug)) = (user_exists, workspace_slug) else {
         return json_response(StatusCode::GONE, error_body("stale_ticket"));
     };
     // `(payload.get("host_label") or "")[:255]` — no strip. A truthy
@@ -2496,6 +2502,7 @@ pub fn daemon_routes() -> Router<AppState> {
     use axum::routing::{get, post};
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     const GET_ONLY: &[&str] = &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    const GET_PATCH_ONLY: &[&str] = &["POST", "PUT", "DELETE", "HEAD", "OPTIONS"];
     Router::new()
         .route("/api/v1/runner/health/", owned(get(health), GET_ONLY))
         .route(
@@ -2509,6 +2516,25 @@ pub fn daemon_routes() -> Router<AppState> {
         .route(
             "/api/v1/runner/machine-tokens/",
             owned(post(machine_token_redeem), POST_ONLY),
+        )
+        .route(
+            "/api/v1/runner/dev-machines/{dev_machine_id}/",
+            owned(
+                get(super::machine_identity::daemon_machine_get)
+                    .patch(super::machine_identity::daemon_machine_patch),
+                GET_PATCH_ONLY,
+            ),
+        )
+        .route(
+            "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",
+            owned(
+                get(super::machine_identity::replace_candidates_get),
+                GET_ONLY,
+            ),
+        )
+        .route(
+            "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",
+            owned(post(super::machine_identity::merge_into_post), POST_ONLY),
         )
 }
 
@@ -2572,7 +2598,7 @@ mod tests {
 
     #[test]
     fn enrollment_body_key_order_pins_f7() {
-        let without_token = enrollment_body(&EnrollmentBody {
+        let base = EnrollmentBody {
             runner_id: "r",
             runner_name: "n",
             refresh_token: "rt_x",
@@ -2583,28 +2609,55 @@ mod tests {
             pod_slug: "pod",
             project_identifier: "PRJ",
             machine_token: None,
-        });
+            provisioning: Some("manual"),
+            pod_dispatch: Some("pod_member"),
+            created: Some(true),
+        };
+        let without_token = enrollment_body(&base);
         assert_eq!(
             without_token,
-            r#"{"runner_id":"r","runner_name":"n","refresh_token":"rt_x","access_token":"jwt","access_token_expires_at":"2026-01-01T00:00:00+00:00","refresh_token_generation":1,"workspace_slug":"ws","pod_slug":"pod","project_identifier":"PRJ","long_poll_interval_secs":25,"protocol_version":4,"machine_token_minted":false}"#
+            r#"{"runner_id":"r","runner_name":"n","refresh_token":"rt_x","access_token":"jwt","access_token_expires_at":"2026-01-01T00:00:00+00:00","refresh_token_generation":1,"workspace_slug":"ws","pod_slug":"pod","project_identifier":"PRJ","long_poll_interval_secs":25,"protocol_version":4,"machine_token_minted":false,"provisioning":"manual","pod_dispatch":"pod_member","created":true}"#
         );
         let with_token = enrollment_body(&EnrollmentBody {
+            runner_id: "r",
+            runner_name: "n",
+            refresh_token: "rt_x",
+            access_token: "jwt",
+            access_token_expires_at: "2026-01-01T00:00:00+00:00".to_owned(),
+            refresh_token_generation: 1,
+            workspace_slug: "ws",
+            pod_slug: "pod",
+            project_identifier: "PRJ",
             machine_token: Some("mt_x"),
-            ..EnrollmentBody {
-                runner_id: "r",
-                runner_name: "n",
-                refresh_token: "rt_x",
-                access_token: "jwt",
-                access_token_expires_at: "2026-01-01T00:00:00+00:00".to_owned(),
-                refresh_token_generation: 1,
-                workspace_slug: "ws",
-                pod_slug: "pod",
-                project_identifier: "PRJ",
-                machine_token: None,
-            }
+            provisioning: Some("manual"),
+            pod_dispatch: Some("pod_member"),
+            created: Some(true),
         });
         assert!(with_token.ends_with(r#","machine_token":"mt_x"}"#));
         assert!(with_token.contains(r#""machine_token_minted":true"#));
+        // Legacy enroll (`:334-350`): no create trio at all.
+        let enroll = enrollment_body(&EnrollmentBody {
+            runner_id: "r",
+            runner_name: "n",
+            refresh_token: "rt_x",
+            access_token: "jwt",
+            access_token_expires_at: "2026-01-01T00:00:00+00:00".to_owned(),
+            refresh_token_generation: 1,
+            workspace_slug: "ws",
+            pod_slug: "pod",
+            project_identifier: "PRJ",
+            machine_token: None,
+            provisioning: None,
+            pod_dispatch: None,
+            created: None,
+        });
+        assert_eq!(
+            enroll,
+            r#"{"runner_id":"r","runner_name":"n","refresh_token":"rt_x","access_token":"jwt","access_token_expires_at":"2026-01-01T00:00:00+00:00","refresh_token_generation":1,"workspace_slug":"ws","pod_slug":"pod","project_identifier":"PRJ","long_poll_interval_secs":25,"protocol_version":4,"machine_token_minted":false}"#
+        );
+        assert!(!enroll.contains("provisioning"));
+        assert!(!enroll.contains("pod_dispatch"));
+        assert!(!enroll.contains(r#""created""#));
     }
 
     #[test]
@@ -2813,17 +2866,6 @@ mod tests {
     }
 
     #[test]
-    fn isoformat_matches_django() {
-        let whole = DateTime::from_timestamp(1_700_000_000, 0).expect("ts");
-        assert_eq!(render_isoformat(whole), "2023-11-14T22:13:20+00:00");
-        let micros = DateTime::from_timestamp(1_700_000_000, 123_456_000).expect("ts");
-        assert_eq!(render_isoformat(micros), "2023-11-14T22:13:20.123456+00:00");
-        // Millis-exact micros keep six digits (the PIDASHCONV-716 trap).
-        let millis = DateTime::from_timestamp(1_700_000_000, 123_000_000).expect("ts");
-        assert_eq!(render_isoformat(millis), "2023-11-14T22:13:20.123000+00:00");
-    }
-
-    #[test]
     fn ticket_payload_matches_python_dumps() {
         let user: Uuid = "22222222-2222-2222-2222-222222222222"
             .parse()
@@ -2944,43 +2986,6 @@ mod tests {
         }
     }
 
-    // -- Positional decode pins ------------------------------------------
-
-    #[test]
-    fn decode_indices_match_column_orders() {
-        for (idx, name) in [
-            (0, "id"),
-            (1, "owner_id"),
-            (2, "workspace_id"),
-            (4, "pod_id"),
-            (5, "name"),
-            (6, "host_label"),
-            (11, "refresh_token_generation"),
-            (16, "enrolled_at"),
-            (28, "revoked_at"),
-        ] {
-            assert_eq!(r_cols::COLUMNS[idx], name);
-        }
-        for (idx, name) in [
-            (0, "id"),
-            (1, "owner_id"),
-            (2, "host_label"),
-            (3, "label"),
-            (5, "provisioning"),
-        ] {
-            assert_eq!(dm_cols::COLUMNS[idx], name);
-        }
-        for (idx, name) in [(0, "id"), (2, "project_id"), (3, "name")] {
-            assert_eq!(pod_cols::COLUMNS[idx], name);
-        }
-        assert_eq!(col_index(enroll_sql::WORKSPACES_SELECT_COLUMNS, "id"), 5);
-        assert_eq!(col_index(enroll_sql::WORKSPACES_SELECT_COLUMNS, "slug"), 10);
-        let project_cols = pidash_db::app_project::models::project::COLUMNS;
-        assert_eq!(col_index(project_cols, "id"), 5);
-        assert_eq!(col_index(project_cols, "identifier"), 13);
-        assert_eq!(mt_cols::COLUMNS.len(), 12);
-    }
-
     // -- Routes ----------------------------------------------------------
 
     fn test_app() -> axum::Router {
@@ -3034,5 +3039,49 @@ mod tests {
             .await
             .expect("serve");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// A duplicate dev-machine create rolls back to its savepoint (sqlx
+    /// nested transaction) and the enroll transaction stays usable.
+    #[tokio::test]
+    async fn live_dev_machine_create_race_uses_a_savepoint() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "CREATE TEMP TABLE dev_machine ON COMMIT DROP AS \
+             SELECT * FROM public.dev_machine WITH NO DATA",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp table");
+        sqlx::query("ALTER TABLE dev_machine ADD PRIMARY KEY (id)")
+            .execute(&mut *tx)
+            .await
+            .expect("pk");
+        let (id, owner) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(matches!(
+            insert_in_savepoint(&mut tx, id, owner, "box").await,
+            Ok(true)
+        ));
+        // The same id again: IntegrityError, rolled back to the savepoint.
+        assert!(matches!(
+            insert_in_savepoint(&mut tx, id, owner, "box").await,
+            Ok(false)
+        ));
+        // The outer transaction still works, and the first row survived.
+        let locked = lock_dev_machine_by_id(&mut tx, id)
+            .await
+            .ok()
+            .flatten()
+            .expect("first insert kept");
+        assert_eq!(
+            (locked.owner_id, locked.provisioning.as_str()),
+            (owner, "manual")
+        );
+        tx.rollback().await.expect("rollback");
     }
 }

@@ -70,13 +70,17 @@
 //!   [`run_expiry`] keeps both via `plan_expiry_deletes`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use pidash_db::config::{Settings, StorageSettings};
+use pidash_db::entity::exporters;
+use pidash_db::orm_tx::into_sqlx;
 use pidash_services::tasks_cleanup::exports as logic;
 use pidash_types::tasks_cleanup::exports_dto::DELETE_OLD_S3_LINK_TASK_NAME;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::worker::{Handler, Registry, Verdict};
 
@@ -102,9 +106,36 @@ pub const CLEAR_EXPIRED_URL_SQL: &str =
 /// %H:%M:%S[.ffffff]+00:00`), never caller input, so interpolation is
 /// safe. The unit test below pins the composed statement to the
 /// fixture shape (cutoff quoted for execution).
+///
+/// TASK-CLEANUP-1: kept as the Django-spec pin. Production execution
+/// runs [`expired_exporters_stmt`] over the `exporters` entity.
 pub fn scan_sql_for(now: DateTime<Utc>) -> String {
     let cutoff = super::format_expiry_cutoff(now);
     logic::delete_old_s3_link_sql(&format!("'{cutoff}'"))
+}
+
+/// SeaORM form of the expiry scan (`exporter_expired_task.py:25-27`):
+/// live rows with a non-null `url` whose `created_at` is at or before the
+/// 8-day cutoff, newest first — exactly
+/// [`logic::delete_old_s3_link_sql`]'s predicate and
+/// `ORDER BY "exporters"."created_at" DESC` (no tiebreaker, as Django
+/// emits none). Projects `(key, id)` in scan order.
+pub fn expired_exporters_stmt(now: DateTime<Utc>) -> sea_orm::Select<exporters::Entity> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let cutoff = super::format_expiry_cutoff(now);
+    // `format_expiry_cutoff` returns the Django-literal `...+00:00` text;
+    // parse it back so the bound binds as a typed timestamp, never as
+    // interpolated text.
+    let parsed = DateTime::parse_from_rfc3339(&cutoff)
+        .expect("expiry cutoff renders RFC 3339")
+        .with_timezone(&chrono::FixedOffset::east_opt(0).expect("UTC offset"));
+    exporters::Entity::find()
+        .filter(exporters::Column::DeletedAt.is_null())
+        .filter(exporters::Column::Url.is_not_null())
+        .filter(exporters::Column::CreatedAt.lte(parsed))
+        .order_by_desc(exporters::Column::CreatedAt)
+        .select_only()
+        .columns([exporters::Column::Key, exporters::Column::Id])
 }
 
 /// The database surface the task needs, mirroring the Django calls.
@@ -166,6 +197,19 @@ pub fn minio_signing_region(
     }
 }
 
+/// Build the bounded S3 HTTP client: botocore's defaults apply (the
+/// Python task passes no timeout `Config`), 60s to connect and 60s to
+/// read, so a wedged object store fails the task instead of hanging
+/// the worker slot forever (PIDASHCONV-1291; the PIDASHCONV-1156
+/// precedent for the app_assets copy).
+fn build_s3_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(60))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("s3 misconfigured: cannot build s3 client: {error}"))
+}
+
 /// Live S3 deleter over [`pidash_storage`] SigV4 + reqwest (the one
 /// shared signer — no AWS SDK): one signed `DELETE` per key, executed
 /// for real. Construction does no I/O (the client connects lazily),
@@ -174,7 +218,7 @@ pub fn minio_signing_region(
 /// task, exactly like the boto3 client built inside the Python task.
 #[derive(Debug, Clone)]
 pub struct LiveS3Deleter {
-    client: reqwest::Client,
+    client: Result<reqwest::Client, String>,
     storage: StorageSettings,
     minio_region: String,
     region_raw: String,
@@ -187,14 +231,14 @@ impl LiveS3Deleter {
     /// env-tier keys, and the worker resolves `Settings` from the same
     /// environment first — a garbage `USE_MINIO` already failed boot
     /// there, like Django's import-time `int()`). Construction never
-    /// fails: the eager client check runs per task run
-    /// ([`ObjectDeleter::check_client`]), like the `boto3.client(...)`
-    /// build inside the Python task.
+    /// fails: the client build outcome is stored and the eager client
+    /// check runs per task run ([`ObjectDeleter::check_client`]), like
+    /// the `boto3.client(...)` build inside the Python task.
     pub fn from_settings(settings: &Settings) -> Self {
         let aws_region = std::env::var("AWS_REGION").ok();
         let aws_default_region = std::env::var("AWS_DEFAULT_REGION").ok();
         Self {
-            client: reqwest::Client::new(),
+            client: build_s3_client(),
             storage: settings.storage.clone(),
             minio_region: minio_signing_region(
                 aws_region.as_deref(),
@@ -257,6 +301,13 @@ impl LiveS3Deleter {
 
 impl ObjectDeleter for LiveS3Deleter {
     fn check_client(&self) -> Result<(), String> {
+        // Pure (no I/O): the stored client build outcome first — a
+        // build failure fails the run here, like the `boto3.client(...)`
+        // build inside the Python task, never a silent unbounded client.
+        self.client
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| error.clone())?;
         // Pure (no I/O): botocore validates the region at client
         // construction, before the loop. The regional arm fails on an
         // invalid name (`InvalidRegionError`) and on `""` (`ValueError:
@@ -285,8 +336,14 @@ impl ObjectDeleter for LiveS3Deleter {
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
         let signed = self.signed_request_for(key, &amz_date, &date_stamp)?;
-        let response = self
+        // Unreachable in production: [`run_expiry`] runs `check_client`
+        // before the loop, so a stored build error already failed the
+        // run; direct callers get the same failure text per call.
+        let client = self
             .client
+            .as_ref()
+            .map_err(|error| format!("s3 delete {key}: {error}"))?;
+        let response = client
             .delete(signed.url)
             .header("Authorization", signed.authorization)
             .header("x-amz-date", signed.amz_date)
@@ -375,19 +432,30 @@ impl ExpiryStore for PgExpiryStore {
         &self,
         now: DateTime<Utc>,
     ) -> Result<Vec<(Option<String>, Uuid)>, String> {
-        sqlx::query_as::<_, (Option<String>, Uuid)>(&scan_sql_for(now))
-            .fetch_all(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        // Keep the original `(Option<String>, Uuid)` decode shape: the
+        // `key` column is non-null in the schema, but the old reader
+        // tolerated NULL and the plan's truthiness rule consumes it.
+        expired_exporters_stmt(now)
+            .into_tuple::<(Option<String>, Uuid)>()
+            .all(&conn)
             .await
-            .map_err(|error| db_error("expired_exporters", error))
+            .map_err(|e| db_error("expired_exporters", into_sqlx(e)))
     }
 
     async fn clear_url(&self, id: Uuid) -> Result<(), String> {
-        sqlx::query(CLEAR_EXPIRED_URL_SQL)
-            .bind(id)
-            .execute(&self.pool)
+        let conn = pidash_db::pool::sea_orm_connection(&self.pool);
+        exporters::Entity::update_many()
+            .col_expr(
+                exporters::Column::Url,
+                sea_orm::sea_query::Expr::value(None::<String>),
+            )
+            .filter(exporters::Column::Id.eq(id))
+            .filter(exporters::Column::DeletedAt.is_null())
+            .exec(&conn)
             .await
             .map(|_| ())
-            .map_err(|error| db_error("clear_url", error))
+            .map_err(|e| db_error("clear_url", into_sqlx(e)))
     }
 }
 
@@ -467,6 +535,67 @@ mod tests {
     }
 
     #[test]
+    fn expired_exporters_stmt_matches_scan_shape() {
+        // TASK-CLEANUP-1: SeaORM form of the scan. Pins the live scope,
+        // the non-null url guard, the created_at bound, the DESC order
+        // (no tiebreaker — Django emits none) and the (key, id)
+        // projection — the same statement `scan_sql_for` spells out.
+        use sea_orm::{DbBackend, QueryTrait};
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 28, 6, 0, 0).unwrap();
+        let sql = expired_exporters_stmt(now)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("\"exporters\""), "scan reads exporters: {sql}");
+        assert!(
+            sql.contains("\"deleted_at\" IS NULL") && sql.contains("\"url\" IS NOT NULL"),
+            "scan keeps the live scope and url guard: {sql}"
+        );
+        assert!(
+            sql.contains("\"created_at\" <="),
+            "scan keeps the created_at bound: {sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY \"exporters\".\"created_at\" DESC"),
+            "scan keeps DESC order with no tiebreaker: {sql}"
+        );
+        assert!(
+            sql.contains("\"key\"") && sql.contains("\"id\""),
+            "scan projects key and id: {sql}"
+        );
+        // The cutoff binds as a typed value (a query parameter), not
+        // interpolated text: the built statement carries a placeholder.
+        let stmt = expired_exporters_stmt(now).build(DbBackend::Postgres);
+        assert!(
+            stmt.sql.contains("$1"),
+            "cutoff binds as one value: {}",
+            stmt.sql
+        );
+    }
+
+    #[test]
+    fn clear_url_orm_shape_matches_clear_sql() {
+        // TASK-CLEANUP-1: the `update_many` in `PgExpiryStore::clear_url`
+        // keeps the `filter(id).update(url=None)` shape: url NULLed by
+        // id with the `deleted_at IS NULL` guard, no `updated_at` bump.
+        use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+        let id = Uuid::now_v7();
+        let stmt = exporters::Entity::update_many()
+            .col_expr(
+                exporters::Column::Url,
+                sea_orm::sea_query::Expr::value(None::<String>),
+            )
+            .filter(exporters::Column::Id.eq(id))
+            .filter(exporters::Column::DeletedAt.is_null())
+            .build(DbBackend::Postgres);
+        let sql = stmt.to_string();
+        assert!(sql.starts_with("UPDATE \"exporters\" SET"), "{sql}");
+        assert!(sql.contains("\"url\" = NULL"), "{sql}");
+        assert!(sql.contains("\"id\" ="), "{sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(!sql.contains("\"updated_at\""), "{sql}");
+    }
+
+    #[test]
     fn minio_region_follows_probed_chain() {
         // AWS_REGION unset: the resolved chain (tail included) is reused.
         assert_eq!(minio_signing_region(None, None, "us-east-1"), "us-east-1");
@@ -512,7 +641,7 @@ mod tests {
         region_raw: &str,
     ) -> LiveS3Deleter {
         LiveS3Deleter {
-            client: reqwest::Client::new(),
+            client: build_s3_client(),
             storage: test_storage(use_minio, endpoint_url, chained_region),
             minio_region: minio_region.to_owned(),
             region_raw: region_raw.to_owned(),
@@ -693,6 +822,73 @@ mod tests {
         assert!(deleter_with(true, None, "us-east-1", "us-east-1", "")
             .check_client()
             .is_ok());
+    }
+
+    #[test]
+    fn client_build_error_fails_like_boto3_construction() {
+        // A stored client build failure fails the run in `check_client`
+        // (zero rows touched), like the `boto3.client(...)` build inside
+        // the Python task — never a silent unbounded client.
+        let mut deleter = deleter_with(false, None, "us-east-1", "us-east-1", "eu-west-1");
+        deleter.client = Err("s3 misconfigured: cannot build s3 client: probe".to_owned());
+        let error = deleter
+            .check_client()
+            .expect_err("build error fails the run");
+        assert!(error.contains("cannot build s3 client"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn delete_object_surfaces_client_build_error() {
+        // Direct callers (no `check_client`) get the same failure text
+        // per call instead of a panic.
+        let mut deleter = deleter_with(false, None, "us-east-1", "us-east-1", "eu-west-1");
+        deleter.client = Err("s3 misconfigured: cannot build s3 client: probe".to_owned());
+        let error = deleter
+            .delete_object("k.zip")
+            .await
+            .expect_err("build error fails the call");
+        assert!(
+            error.contains("s3 delete k.zip: s3 misconfigured"),
+            "{error}"
+        );
+    }
+
+    /// A wedged object store must not hang the expiry delete forever
+    /// (PIDASHCONV-1291). The deleter client is bounded like botocore's
+    /// defaults (60s connect / 60s read), so a black-hole peer — one that
+    /// accepts the connection and never answers — fails the delete
+    /// instead of holding the worker slot. Before the fix this never
+    /// returns (the test would time out at 90s).
+    #[tokio::test]
+    async fn delete_object_is_bounded_against_a_black_hole() {
+        use std::time::Duration;
+        // Accept every connection and hold it open without ever replying.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind black hole");
+        let addr = listener.local_addr().expect("black-hole addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        // MinIO arm against the black hole (path-style
+        // `DELETE /{bucket}/{key}`).
+        let endpoint = format!("http://{addr}");
+        let deleter = deleter_with(true, Some(&endpoint), "us-east-1", "us-east-1", "");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(90),
+            deleter.delete_object("contract-expiry.zip"),
+        )
+        .await;
+        let result = outcome.expect("delete_object never returned: deleter is unbounded");
+        let error = result.expect_err("black hole must fail the delete");
+        // The request reached the wire and the read bound fired — not a
+        // signing fast-fail. (No elapsed-time assert: wall-clock bounds
+        // flake when the shared runner starves this runtime's timers; the
+        // 90s cap plus this error text pin the ~60s bound.)
+        assert!(error.contains("transport failure"), "{error}");
     }
 
     #[tokio::test]

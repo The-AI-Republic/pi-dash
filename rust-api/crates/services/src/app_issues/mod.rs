@@ -30,6 +30,7 @@
 //!   "state__group"]` is always true on that branch, so the `[::-1]`
 //!   alternative is dead. [`order_sql`] copies the dead branch.
 
+pub mod agent_runs;
 /// Work-item move (`utils/issue_move.py`, PIDASHCONV-650). `move` is a
 /// Rust keyword, so the module lives at `move.rs` via an explicit path
 /// (the `loop_scan` precedent).
@@ -52,19 +53,16 @@ pub mod shape;
 pub use issue_move::{
     cancel_frame, failed_cancel_line, handoff_run_config, is_executing_run, issue_activity_kwargs,
     move_model_activity_kwargs, move_work_item_to_project, offline_cancel_line, py_dumps,
-    repoint_sql, send_project_move_cancel, target_ref_text, AgentRunTrigger, CancelOutcome,
-    HandoffRunRow, IssueMoveError, MoveError, MoveOutcome, MovePostCommit, MoveResult, MoveStore,
-    MovedIssueFields, MovedIssueRow, PodRow, ProjectRow, RepointTarget, SourceIssueRow, StateRow,
-    AGENT_RUN_COLUMNS, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL,
+    repoint_sql, send_project_move_cancel, target_ref_text, CancelOutcome, HandoffRunRow,
+    IssueMoveError, MoveError, MoveGuards, MoveOptions, MoveOutcome, MovePostCommit, MoveResult,
+    MoveStore, MovedIssueFields, MovedIssueRow, PodRow, ProjectRow, RepointTarget, SourceIssueRow,
+    StateRow, AGENT_RUN_COLUMNS, ASSIGNEE_IDS_SQL, ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL,
     CHILDREN_DETACH_SQL, COMMENT_IDS_SQL, CYCLE_DELETE_SQL, DESCRIPTION_IDS_SQL,
-    HANDOFF_PARENT_UPDATE_SQL, HANDOFF_RUNS_LOCK_SQL, IMMEDIATE_HANDOFF_STATUSES,
-    INERT_RUN_UPDATE_SQL, ISSUE_COLUMNS, ISSUE_MOVE_UPDATE_SQL, LABEL_DELETE_SQL, LABEL_IDS_SQL,
-    MEMBER_EXISTS_SQL, MODULE_DELETE_SQL, MOVED_ISSUE_REFETCH_SQL, MULTIPLE_ACTIVE_RUNS_MESSAGE,
-    NO_DEFAULT_POD_MESSAGE, NO_PERMISSION_MESSAGE, NO_WORKFLOW_STATE_MESSAGE,
-    PROJECT_IDENTIFIER_SQL, PROJECT_MOVE_HANDOFF_STATUSES, PROJECT_REQUIRED_MESSAGE,
-    PROJECT_RESOLVE_BY_IDENTIFIER_SQL, PROJECT_RESOLVE_BY_PK_SQL, RELATION_DELETE_SQL,
-    REPOINT_ORDER, SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL, SOURCE_ISSUE_LOCK_SQL,
-    SOURCE_ISSUE_SQL, WORKSPACE_SLUG_SQL,
+    IMMEDIATE_HANDOFF_STATUSES, ISSUE_COLUMNS, LABEL_DELETE_SQL, LABEL_IDS_SQL, MEMBER_EXISTS_SQL,
+    MODULE_DELETE_SQL, MULTIPLE_ACTIVE_RUNS_MESSAGE, NO_DEFAULT_POD_MESSAGE, NO_PERMISSION_MESSAGE,
+    NO_WORKFLOW_STATE_MESSAGE, PROJECT_IDENTIFIER_SQL, PROJECT_MOVE_HANDOFF_STATUSES,
+    PROJECT_REQUIRED_MESSAGE, RELATION_DELETE_SQL, REPOINT_ORDER, SEQUENCE_CREATE_SQL,
+    SEQUENCE_DETACH_SQL, SOURCE_ISSUE_LOCK_SQL, WORKSPACE_SLUG_SQL,
 };
 pub use ordering::{order_sql, priority_case_sql, state_case_sql, OrderSpec};
 pub use params::{parse_per_page, raw_group_mismatch, ListParams, ParamError, ParseOptions};
@@ -82,18 +80,16 @@ pub use relation_mapper::{get_actual_relation, get_inverse_relation};
 pub use serializers_create::{
     assignee_member_filter_sql, create_default_assignee_fallback, echo_initial_ids,
     issue_create_to_representation, issue_create_validate, label_filter_null_project_sql,
-    label_filter_sql, m2m_batches, m2m_insert_sql, managed_unavailable_detail,
-    validate_complexity_score, CreateValidateError, ExecutorPolicy, IssueCreateRow,
-    IssueCreateView, LockedIssueAttrs, LockedIssueValues, PodRef, ResolvedProject, ValidateAttrs,
-    ValidateContext, ValidateInstance, ValidateProbes, ValidatedAttrs, ASSIGNEE_CLEAR_SQL,
-    COMPLEXITY_SCORE_MESSAGE, CREATE_CONTRACT, DATES_MESSAGE, DEFAULT_ASSIGNEE_EXISTS_SQL,
-    ESTIMATE_EXISTS_SQL, ESTIMATE_INVALID_MESSAGE, EXECUTOR_CLOUD_UNAVAILABLE_MESSAGE,
-    EXECUTOR_MID_FLIGHT_MESSAGE, EXECUTOR_PROJECT_REQUIRED_MESSAGE, EXECUTOR_UNKNOWN_MESSAGE,
-    HAS_ACTIVE_RUN_SQL, ISSUE_CREATE_FIELDS, LABEL_CLEAR_SQL, LOCKED_ISSUE_FIELDS, M2M_BATCH_SIZE,
-    M2M_INSERT_COLUMNS, PARENT_EXISTS_SQL, PARENT_INVALID_MESSAGE, POD_DELETED_MESSAGE,
-    POD_DIFFERENT_PROJECT_MESSAGE, POD_FETCH_SQL, POD_REASSIGN_MESSAGE, PROJECT_FETCH_SQL,
-    REQUIRED_CREATE_CONTEXT_KEYS, STATE_EXISTS_SQL, STATE_INVALID_MESSAGE, STATE_TRIAGE_EXISTS_SQL,
-    SYNC_LOCKED_MESSAGE, UPDATE_CONTRACT,
+    label_filter_sql, m2m_batches, m2m_insert_sql, validate_complexity_score, CreateValidateError,
+    ExecutorPolicy, IssueCreateRow, IssueCreateView, LockedIssueAttrs, LockedIssueValues, PodRef,
+    ResolvedProject, ValidateAttrs, ValidateContext, ValidateInstance, ValidateProbes,
+    ValidatedAttrs, COMPLEXITY_SCORE_MESSAGE, CREATE_CONTRACT, DATES_MESSAGE,
+    DEFAULT_ASSIGNEE_EXISTS_SQL, ESTIMATE_EXISTS_SQL, ESTIMATE_INVALID_MESSAGE,
+    EXECUTOR_MID_FLIGHT_MESSAGE, EXECUTOR_UNKNOWN_MESSAGE, HAS_ACTIVE_RUN_SQL, ISSUE_CREATE_FIELDS,
+    LOCKED_ISSUE_FIELDS, M2M_BATCH_SIZE, M2M_INSERT_COLUMNS, PARENT_EXISTS_SQL,
+    PARENT_INVALID_MESSAGE, POD_DELETED_MESSAGE, POD_DIFFERENT_PROJECT_MESSAGE, POD_FETCH_SQL,
+    POD_REASSIGN_MESSAGE, PROJECT_FETCH_SQL, REQUIRED_CREATE_CONTEXT_KEYS, STATE_EXISTS_SQL,
+    STATE_INVALID_MESSAGE, STATE_TRIAGE_EXISTS_SQL, SYNC_LOCKED_MESSAGE, UPDATE_CONTRACT,
 };
 pub use serializers_detail::{
     agent_live_state_to_representation, agent_run_to_representation,
@@ -105,20 +101,20 @@ pub use serializers_detail::{
     AgentRunDetailRow, AgentRunView, AgentStatusView, AgentTickerInput, AgentTickerView,
     AppIssueReactionRow, AppIssueReactionView, AppIssueVoteRow, AppIssueVoteView,
     IssueDetailBaseRow, IssueDetailBaseView, IssueDetailRow, IssueDetailView, IssueLiteRow,
-    IssueLiteView, IssuePublicRow, IssuePublicView, ACTIVE_AGENT_RUN_SQL, ACTIVE_RUN_STATUSES,
-    AGENT_LIVE_STATE_FIELDS, AGENT_RUN_COUNT_SQL, AGENT_RUN_FIELDS, AGENT_STATUS_FIELDS,
-    AGENT_TICKER_FIELDS, APP_ISSUE_REACTION_FIELDS, APP_ISSUE_VOTE_FIELDS, ERROR_DIAGNOSTIC_FIELDS,
-    ISSUE_DETAIL_ARCHIVE_FIELDS, ISSUE_DETAIL_BASE_FIELDS, ISSUE_DETAIL_FIELDS,
-    ISSUE_DETAIL_RETRIEVE_FIELDS, ISSUE_LITE_FIELDS, ISSUE_PUBLIC_FIELDS, LATEST_AGENT_RUN_SQL,
+    IssueLiteView, IssuePublicRow, IssuePublicView, ACTIVE_RUN_STATUSES, AGENT_LIVE_STATE_FIELDS,
+    AGENT_RUN_FIELDS, AGENT_STATUS_FIELDS, AGENT_TICKER_FIELDS, APP_ISSUE_REACTION_FIELDS,
+    APP_ISSUE_VOTE_FIELDS, ERROR_DIAGNOSTIC_FIELDS, ISSUE_DETAIL_ARCHIVE_FIELDS,
+    ISSUE_DETAIL_BASE_FIELDS, ISSUE_DETAIL_FIELDS, ISSUE_DETAIL_RETRIEVE_FIELDS, ISSUE_LITE_FIELDS,
+    ISSUE_PUBLIC_FIELDS,
 };
 pub use serializers_engage::{
     app_issue_flat_to_representation, comment_is_actively_synced, issue_activity_to_representation,
     issue_is_actively_synced, issue_reaction_lite_to_representation,
     issue_subscriber_to_representation, ActivitySourceData, AppIssueFlatRow, AppIssueFlatView,
     IssueActivityRow, IssueActivityView, IssueReactionLiteRow, IssueReactionLiteView,
-    IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_COMMENT_SYNC_PROBE_SQL,
-    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
-    ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS, ISSUE_SUBSCRIBER_ALL_FIELDS,
+    IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_ISSUE_SYNC_PROBE_SQL,
+    GIT_ISSUE_SYNC_PROBE_SQL, ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS,
+    ISSUE_SUBSCRIBER_ALL_FIELDS,
 };
 pub use serializers_expand::{
     intake_issue_lite_to_representation, issue_relation_expand_to_representation,
@@ -127,10 +123,9 @@ pub use serializers_expand::{
     INTAKE_ISSUE_LITE_FIELDS, ISSUE_RELATION_FIELDS, RELATED_ISSUE_FIELDS,
 };
 pub use serializers_label::{
-    app_label_to_representation, validate_label_name, AppLabelRow, AppLabelView, APP_LABEL_FIELDS,
-    APP_LABEL_READONLY_INPUT_FIELDS, APP_LABEL_WRITABLE_FIELDS, LABEL_NAME_ALREADY_EXISTS,
-    LABEL_NAME_CONFLICT_BODY, LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL,
-    LABEL_NAME_CONFLICT_PROBE_SQL,
+    app_label_to_representation, label_name_conflict, validate_label_name, AppLabelRow,
+    AppLabelView, APP_LABEL_FIELDS, APP_LABEL_READONLY_INPUT_FIELDS, APP_LABEL_WRITABLE_FIELDS,
+    LABEL_NAME_ALREADY_EXISTS, LABEL_NAME_CONFLICT_BODY,
 };
 pub use serializers_links::{
     git_code_review_link_to_representation, github_pull_request_link_to_representation,

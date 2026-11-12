@@ -36,8 +36,8 @@ use crate::runner_runs::sweeps_runs::{
     InlineTerminalEffects, SendOfflineError, SweepsError, SweepsRunsOutbox,
 };
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings, Settings};
-use pidash_db::orchestration::workpad::get_agent_system_user;
 use pidash_db::runner_sessions::outbox::{self as session_outbox, OutboxError};
+use pidash_services::domain::identity::get_agent_system_user;
 use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
 use pidash_services::runner_sessions::live_drains::{
     drain_for_runner_by_id, drain_pod_by_id, PoolPubsubStore,
@@ -160,6 +160,8 @@ impl RunnerRunsSeams for RunnerSeams {
                 &self.pool,
                 &self.cloud,
                 &self.managed,
+                self.redis.as_ref(),
+                &self.runner,
                 run_id,
                 self.toolsets.clone(),
                 self.assistant_seam.clone(),

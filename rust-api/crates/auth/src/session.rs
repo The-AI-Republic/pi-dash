@@ -55,9 +55,11 @@ pub struct SessionData {
     /// `request.user` id, from `_auth_user_id`. `None` means anonymous:
     /// Django's `login()` writes the key, so its absence is "not logged in".
     pub user_id: Option<String>,
-    /// Backend path from `_auth_user_backend` (informational only).
+    /// Backend path from `_auth_user_backend`. The request layer verifies
+    /// it against `AUTHENTICATION_BACKENDS` before any handler runs.
     pub backend: Option<String>,
-    /// Session-auth hash from `_auth_user_hash` (informational only).
+    /// Session-auth hash from `_auth_user_hash`. The request layer compares
+    /// it with the user's current password field, like Django `get_user`.
     pub session_hash: Option<String>,
     /// `device_info` dict written by `user_login()`. Django stores `None`
     /// unless the value is a dict; anything else decodes to `None` here too.
@@ -246,22 +248,27 @@ pub fn generate_session_key() -> String {
 
 /// Read one cookie value from a `Cookie` header, mirroring
 /// `request.COOKIES.get(name)`: `;`-separated pairs, surrounding whitespace
-/// stripped, surrounding double quotes stripped.
+/// stripped, surrounding double quotes stripped. Like Django's
+/// `parse_cookie`, a later duplicate overwrites an earlier one: the last
+/// value wins.
 pub fn cookie_value(cookie_header: &str, name: &str) -> Option<String> {
-    cookie_header.split(';').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        if key.trim() != name {
-            return None;
-        }
-        let value = value.trim();
-        Some(
-            value
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .unwrap_or(value)
-                .to_string(),
-        )
-    })
+    cookie_header
+        .split(';')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            if key.trim() != name {
+                return None;
+            }
+            let value = value.trim();
+            Some(
+                value
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(value)
+                    .to_string(),
+            )
+        })
+        .next_back()
 }
 
 #[cfg(test)]
@@ -439,6 +446,18 @@ mod tests {
         );
         assert_eq!(cookie_value("other=1", "session-id"), None);
         assert_eq!(cookie_value("", "session-id"), None);
+        // Duplicates: the last value wins, like Django's `parse_cookie`
+        // (`django/http/cookie.py`), which overwrites earlier pairs in a
+        // loop. Browsers send oldest first when a host-only cookie and a
+        // `Domain=` cookie share a name (PIDASHCONV-1310).
+        assert_eq!(
+            cookie_value("session-id=old; session-id=new", "session-id"),
+            Some("new".to_string())
+        );
+        assert_eq!(
+            cookie_value("csrftoken=secret1; csrftoken=secret2", "csrftoken"),
+            Some("secret2".to_string())
+        );
     }
 
     #[test]

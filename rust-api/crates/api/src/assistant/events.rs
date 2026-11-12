@@ -36,7 +36,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use pidash_db::assistant::event_queries::{serialize_event_json, EventParts};
 use uuid::Uuid;
 
@@ -75,7 +75,18 @@ pub fn py_dumps(value: &serde_json::Value) -> String {
         serde_json::Value::Null => "null".to_owned(),
         serde_json::Value::Bool(true) => "true".to_owned(),
         serde_json::Value::Bool(false) => "false".to_owned(),
-        serde_json::Value::Number(number) => py_float(number),
+        serde_json::Value::Number(number) => {
+            // Integers render verbatim like `json.dumps`; only real floats
+            // go through `py_float` (PIDASHCONV-1241: 0 became "0.0" and
+            // >= 1e16 became scientific). `is_f64` is the discriminator:
+            // with `arbitrary_precision` it is true exactly for float
+            // spellings, so beyond-u64 integers stay verbatim too.
+            if number.is_f64() {
+                py_float(number)
+            } else {
+                number.to_string()
+            }
+        }
         serde_json::Value::String(text) => dumps_string(text),
         serde_json::Value::Array(items) => {
             let parts: Vec<String> = items.iter().map(py_dumps).collect();
@@ -105,6 +116,20 @@ fn py_float(number: &serde_json::Number) -> String {
     let rendered = number.to_string();
     if rendered.contains('e') || rendered.contains('E') {
         return py_exponent(&rendered);
+    }
+    if !rendered.contains('.') {
+        // Integer literal: Python ints are unbounded, so `json.dumps`
+        // echoes the exact digits at any magnitude — never scientific
+        // notation (PIDASHCONV-1332). The i64/u64 arms normalize
+        // spellings like `-0` to `0`; past them the literal (exact under
+        // `arbitrary_precision`) echoes verbatim.
+        if let Some(int) = number.as_i64() {
+            return int.to_string();
+        }
+        if let Some(uint) = number.as_u64() {
+            return uint.to_string();
+        }
+        return rendered;
     }
     let (negative, digits) = match rendered.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -283,10 +308,11 @@ async fn assistant_event_stream(
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
     // `_resolve` (`events.py:28-38`) as the ported pure decision: the actor
-    // lookup doubles as the `is_authenticated` check (unknown/inactive
-    // session users resolve to nobody, like DRF's session auth), and the
-    // thread scope doubles as the thread fetch.
-    let actor = request_actor(pool, extension).await?;
+    // lookup doubles as the `is_authenticated` check (an unknown/inactive
+    // user, a mismatching session hash, or a non-ModelBackend session all
+    // resolve to nobody, like Django's `get_user`), and the thread scope
+    // doubles as the thread fetch.
+    let actor = request_actor(&state, pool, extension).await?;
     let authenticated = actor.is_some();
     let user_id = actor.as_ref().map(|actor| actor.id);
     let role = match user_id {
@@ -321,35 +347,34 @@ async fn assistant_event_stream(
     // order-preserving and re-rendered spaced (see `py_dumps`).
     // `message` is the event's nullable `message_id` UUIDField
     // (`events.py:44`), not the turn.
-    let rows = sqlx::query_as::<_, (i64, Uuid, Option<Uuid>, i64, String, String, DateTime<Utc>)>(
-        "SELECT \"id\", \"thread_id\", \"message_id\", \"seq\", \"kind\", \
-         \"payload\"::text, \"created_at\" \
-         FROM \"assistant_event\" \
-         WHERE (\"thread_id\" = $1 AND \"seq\" > $2) \
-         ORDER BY \"seq\" ASC LIMIT 1000",
-    )
-    .bind(thread_id)
-    .bind(after)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let mut frames = Vec::with_capacity(rows.len());
-    for (id, row_thread_id, message_id, seq, kind, payload_text, created_at) in &rows {
-        let payload: serde_json::Value =
-            serde_json::from_str(payload_text).unwrap_or(serde_json::Value::Null);
-        let thread_str = row_thread_id.to_string();
-        let message_str = message_id.map(|id| id.to_string());
-        let created = py_iso(created_at);
-        frames.push(sse_frame(&serialize_event_json(&EventParts {
-            id: *id,
-            thread_id: &thread_str,
-            message_id: message_str.as_deref(),
-            seq: *seq,
-            kind,
-            payload_json: &py_dumps(&payload),
-            created_at: &created,
-        })));
-    }
+    let frames = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let rows = pidash_db::entity::assistant_event::Entity::find()
+            .filter(pidash_db::entity::assistant_event::Column::ThreadId.eq(thread_id))
+            .filter(pidash_db::entity::assistant_event::Column::Seq.gt(after))
+            .order_by_asc(pidash_db::entity::assistant_event::Column::Seq)
+            .limit(1000)
+            .all(&db)
+            .await
+            .map_err(|_| server_error())?;
+        let mut frames = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let thread_str = row.thread_id.to_string();
+            let message_str = row.message_id.map(|id| id.to_string());
+            let created = py_iso(&row.created_at.with_timezone(&Utc));
+            frames.push(sse_frame(&serialize_event_json(&EventParts {
+                id: row.id,
+                thread_id: &thread_str,
+                message_id: message_str.as_deref(),
+                seq: row.seq,
+                kind: &row.kind,
+                payload_json: &py_dumps(&row.payload),
+                created_at: &created,
+            })));
+        }
+        frames
+    };
 
     // Live tail (`events.py:77-103`): subscribe to `assistant:thread:<id>`
     // ([`live_tail_channel`]) after the replay prefix, then relay each
@@ -445,6 +470,35 @@ mod tests {
     }
 
     #[test]
+    fn py_dumps_renders_integers_verbatim() {
+        // PIDASHCONV-1241: integers never take the float path (0.0,
+        // scientific), whatever their width.
+        assert_eq!(py_dumps(&serde_json::json!(0)), "0");
+        assert_eq!(py_dumps(&serde_json::json!(-0)), "0");
+        assert_eq!(py_dumps(&serde_json::json!(7)), "7");
+        assert_eq!(py_dumps(&serde_json::json!(-42)), "-42");
+        assert_eq!(
+            py_dumps(&serde_json::json!(12345678901234567i64)),
+            "12345678901234567"
+        );
+        assert_eq!(
+            py_dumps(&serde_json::json!(18446744073709551615u64)),
+            "18446744073709551615"
+        );
+        // Beyond u64: arbitrary_precision keeps every digit.
+        let beyond: serde_json::Value =
+            serde_json::from_str("12345678901234567890123").expect("parses");
+        assert_eq!(py_dumps(&beyond), "12345678901234567890123");
+        // Real floats still go through py_float.
+        assert_eq!(py_dumps(&serde_json::json!(0.0)), "0.0");
+        assert_eq!(py_dumps(&serde_json::json!(1e16)), "1e+16");
+        assert_eq!(
+            py_dumps(&serde_json::json!({"index": 0})),
+            r#"{"index": 0}"#
+        );
+    }
+
+    #[test]
     fn py_float_uses_python_exponent_form() {
         // Notation boundaries, oracle-verified against CPython `repr`.
         let cases: &[(f64, &str)] = &[
@@ -464,6 +518,25 @@ mod tests {
             assert_eq!(py_float(&number), *expected, "value {value}");
         }
         assert_eq!(py_float(&serde_json::Number::from(7)), "7");
+    }
+
+    #[test]
+    fn py_float_echoes_big_integers_verbatim() {
+        // Python ints are unbounded: `json.dumps` echoes exact digits at
+        // any magnitude, never scientific notation (PIDASHCONV-1332 —
+        // the runner outbox enqueue path renders through here).
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"big": 18446744073709551616, "neg": -9223372036854775809}"#)
+                .expect("valid JSON");
+        assert_eq!(
+            py_dumps(&value),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809}"#
+        );
+        let neg_zero: serde_json::Value = serde_json::from_str("-0").expect("int");
+        assert_eq!(py_dumps(&neg_zero), "0");
+        // Float-syntax literals still take the `repr` path.
+        let float: serde_json::Value = serde_json::from_str("1e19").expect("float");
+        assert_eq!(py_dumps(&float), "1e+19");
     }
 
     #[test]
