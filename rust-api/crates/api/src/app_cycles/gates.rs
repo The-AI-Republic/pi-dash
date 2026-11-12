@@ -284,7 +284,7 @@ pub static GATES: &[RouteGate] = &[
         method: "GET",
         path: "workspaces/<slug>/projects/<id>/cycles/<uuid>/archive/",
         gate: Gate::Project {
-            roles: ADMIN_MEMBER,
+            roles: ADMIN_MEMBER_GUEST,
         },
         source: "archive.py:271 (CycleArchiveUnarchiveEndpoint.get; pk=None list branch)",
     },
@@ -308,7 +308,7 @@ pub static GATES: &[RouteGate] = &[
         method: "GET",
         path: "workspaces/<slug>/projects/<id>/archived-cycles/",
         gate: Gate::Project {
-            roles: ADMIN_MEMBER,
+            roles: ADMIN_MEMBER_GUEST,
         },
         source: "archive.py:271 (CycleArchiveUnarchiveEndpoint.get; list branch)",
     },
@@ -316,7 +316,7 @@ pub static GATES: &[RouteGate] = &[
         method: "GET",
         path: "workspaces/<slug>/projects/<id>/archived-cycles/<uuid>/",
         gate: Gate::Project {
-            roles: ADMIN_MEMBER,
+            roles: ADMIN_MEMBER_GUEST,
         },
         source: "archive.py:271 (CycleArchiveUnarchiveEndpoint.get; pk detail branch)",
     },
@@ -519,11 +519,11 @@ mod tests {
         ("GET", USERPROPS, true, true, true),
         ("GET", PROGRESS, true, true, true),
         ("GET", ANALYTICS, true, true, true),
-        ("GET", ARCHIVE, true, true, false),
+        ("GET", ARCHIVE, true, true, true),
         ("POST", ARCHIVE, true, true, false),
         ("DELETE", ARCHIVE, true, true, false),
-        ("GET", ARCHIVED, true, true, false),
-        ("GET", ARCHIVED_ONE, true, true, false),
+        ("GET", ARCHIVED, true, true, true),
+        ("GET", ARCHIVED_ONE, true, true, true),
     ];
 
     #[test]

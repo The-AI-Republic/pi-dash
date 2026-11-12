@@ -510,8 +510,8 @@ pub fn issue_set(
 }
 
 /// The archived set (`archive.py:98-116`): non-epic types, archived rows,
-/// this project and workspace, optional top-level filter, then the same
-/// rich + legacy stacks and relation joins. The state join carries no
+/// this project and workspace, optional top-level filter, the guest
+/// `created_by` scope (PDASHOSS01-323), then the same rich + legacy stacks and relation joins. The state join carries no
 /// soft-delete guard and there is no projects join.
 pub fn archive_issue_set(
     gate: &Gate,
@@ -554,6 +554,11 @@ pub fn archive_issue_set(
         .add(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug));
     if !show_sub_issues {
         cond = cond.add(issue(issues::Column::ParentId).is_null());
+    }
+    // Guests without `guest_view_all_features` read only their own
+    // archived issues (PDASHOSS01-323).
+    if gate.guest_scoped {
+        cond = cond.add(issue(issues::Column::CreatedById).eq(gate.user_id));
     }
     finish_set(
         stmt,
