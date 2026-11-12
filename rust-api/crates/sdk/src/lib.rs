@@ -485,6 +485,7 @@ pub mod operations {
     pub use pidash_services::operations::comments;
     pub use pidash_services::operations::issues;
     pub use pidash_services::operations::pull_requests;
+    pub use pidash_services::operations::read;
     pub use pidash_services::operations::relations;
     pub use pidash_services::operations::requested_data_text;
     pub use pidash_services::operations::requested_data_value;
