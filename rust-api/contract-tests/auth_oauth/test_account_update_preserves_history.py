@@ -290,9 +290,11 @@ def _upsert_call_block(path: Path, anchor: str) -> tuple[str, str]:
     "source,anchor",
     [
         (GITHUB_RS, "account_queries::create_update_account"),
+        # ORM-07 moved the account kernel to domain::identity; the gitea
+        # call site references it by full path (github via its alias).
         (
             GITEA_RS,
-            "pidash_db::auth_oauth::queries::account::create_update_account",
+            "pidash_services::domain::identity::account::create_update_account",
         ),
     ],
     ids=["github", "gitea"],
@@ -301,8 +303,11 @@ def test_upsert_passes_prior_account(source: Path, anchor: str):
     """The account upsert must carry the loaded row, not ``None`` (both files).
 
     Fails pre-fix (the call ends in ``None`` with no ``ExistingAccount``
-    above it); passes once the caller SELECTs the prior
-    ``(created_at, metadata)`` like ``oauth_google.rs``.
+    above it); passes once the caller loads the prior
+    ``(created_at, metadata)`` like ``oauth_google.rs``. Both call sites
+    load that row through the SeaORM ``accounts`` entity (the raw-SQL
+    ``SELECT "created_at", "metadata"`` this pin used to match predates
+    the SeaORM refactor; the load is the same row).
     """
     block, head = _upsert_call_block(source, anchor)
     call = block[: block.index(".await")]
@@ -313,8 +318,8 @@ def test_upsert_passes_prior_account(source: Path, anchor: str):
         f" {last!r}) — None resets created_at to now and metadata to {{}}"
     )
     assert "ExistingAccount" in head, f"{source.name}: no ExistingAccount above the call"
-    assert 'SELECT \\"created_at\\", \\"metadata\\"' in head, (
-        f"{source.name}: no prior-row SELECT above the call"
+    assert "accounts::Entity::find()" in head, (
+        f"{source.name}: no prior-row load above the call"
     )
 
 

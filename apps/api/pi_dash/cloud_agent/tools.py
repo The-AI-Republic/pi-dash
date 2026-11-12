@@ -165,9 +165,20 @@ def _issue_data(issue, *, detail=False):
         "state": issue.state.name if issue.state_id else None,
         "state_group": issue.state.group if issue.state_id else None,
         "priority": issue.priority,
+        "assigned_pod_id": str(issue.assigned_pod_id) if issue.assigned_pod_id else None,
+        "assigned_runner_id": str(issue.assigned_runner_id) if issue.assigned_runner_id else None,
     }
     if detail:
-        data.update(description=(issue.description_stripped or "")[:20_000], workpad=(issue.workpad or "")[:32_000])
+        from pi_dash.runner.models import AgentRun
+        from pi_dash.runner.services.issue_assignment import assigned_runner_detail, build_dispatch_wait
+
+        latest_run = AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
+        data.update(
+            description=(issue.description_stripped or "")[:20_000],
+            workpad=(issue.workpad or "")[:32_000],
+            assigned_runner_detail=assigned_runner_detail(getattr(issue, "assigned_runner", None)),
+            dispatch_wait=build_dispatch_wait(latest_run),
+        )
     return data
 
 
@@ -342,8 +353,11 @@ def build_tools(run_id, allowed_names, *, source="internal", server_key=""):
 
         return audit("pidash_transition_current_issue", "write", {"state_id": state_id}, op)
 
-    def pidash_create_project_issue(title: str, description: str = ""):
-        """Create one backlog/default-state issue in the scheduler's project."""
+    def pidash_create_project_issue(
+        title: str, description: str = "", assigned_runner: str | None = None, assigned_pod: str | None = None
+    ):
+        """Create one backlog/default-state issue in the scheduler's project.
+        assigned_runner/assigned_pod are UUIDs or names in the project."""
         if not title.strip() or len(title) > 255 or len(description) > 20_000:
             raise ValueError("invalid issue title or description length")
 
@@ -354,6 +368,39 @@ def build_tools(run_id, allowed_names, *, source="internal", server_key=""):
                 or State.objects.filter(project=project, group="backlog").order_by("sequence").first()
             )
             seq = (Issue.objects.filter(project=project).aggregate(value=Max("sequence_id"))["value"] or 0) + 1
+            # Resolve the execution target through the shared service
+            # (design §14.6): the acting user is the run's creator, so
+            # E1/E7 apply to them. E-codes surface as tool errors.
+            from pydantic_ai import ModelRetry
+
+            from pi_dash.assistant.tools.issues import (
+                _resolve_pod_ref,
+                _resolve_runner_ref,
+                _validate_execution_target_or_retry,
+            )
+
+            try:
+                target_pod = _resolve_pod_ref(project, assigned_pod) if assigned_pod else None
+                target_runner = (
+                    _resolve_runner_ref(None, project, run.created_by, assigned_runner)
+                    if assigned_runner
+                    else None
+                )
+                if target_runner is not None:
+                    _validate_execution_target_or_retry(
+                        {
+                            "assigned_runner": target_runner,
+                            "assigned_pod": target_pod or target_runner.pod,
+                        },
+                        issue=None,
+                        project_id=str(project.id),
+                        user=run.created_by,
+                    )
+            except ModelRetry as exc:
+                # This tool's error channel is ValueError (see the
+                # relation tools above); keep the message — and with it
+                # the API's E-code — unchanged.
+                raise ValueError(str(exc)) from exc
             with impersonate(run.created_by):
                 issue = Issue.objects.create(
                     workspace=run.workspace,
@@ -365,10 +412,33 @@ def build_tools(run_id, allowed_names, *, source="internal", server_key=""):
                     sequence_id=seq,
                     created_by=run.created_by,
                     created_via="cloud_agent",
+                    assigned_pod=target_pod or (target_runner.pod if target_runner else None),
+                    assigned_runner=target_runner,
+                )
+            if target_runner is not None:
+                from django.utils import timezone as dj_timezone
+
+                from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+                apply_execution_target(
+                    issue,
+                    new_runner=target_runner,
+                    actor=run.created_by,
+                    decided_by=dj_timezone.now(),
                 )
             return {"created": True, **_issue_data(issue)}
 
-        return audit("pidash_create_project_issue", "write", {"title": title, "description": description}, op)
+        return audit(
+            "pidash_create_project_issue",
+            "write",
+            {
+                "title": title,
+                "description": description,
+                "assigned_runner": assigned_runner,
+                "assigned_pod": assigned_pod,
+            },
+            op,
+        )
 
     # Relations (PDASHOSS01-199): same names, arguments and output shape as
     # ``pidash issue relate|unrelate|relations`` and the MCP connector. The

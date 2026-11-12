@@ -8,10 +8,18 @@ import os
 # Third party imports
 from rest_framework.throttling import SimpleRateThrottle
 
+# Per-token limit for normal (non-service) API tokens: 2 requests per second.
+DEFAULT_API_KEY_RATE_LIMIT = "120/minute"
+
+
+def get_api_key_rate_limit():
+    """Return the API-key rate limit, honouring the API_KEY_RATE_LIMIT override."""
+    return os.environ.get("API_KEY_RATE_LIMIT", DEFAULT_API_KEY_RATE_LIMIT)
+
 
 class ApiKeyRateThrottle(SimpleRateThrottle):
     scope = "api_key"
-    rate = os.environ.get("API_KEY_RATE_LIMIT", "60/minute")
+    rate = get_api_key_rate_limit()
 
     def get_cache_key(self, request, view):
         # Retrieve the API key from the request header

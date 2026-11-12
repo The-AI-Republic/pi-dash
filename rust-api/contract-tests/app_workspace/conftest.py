@@ -35,10 +35,43 @@ def clean_db(db):
     # projects: both carry a project FK that reset() deletes later.
     with db.connect() as conn:
         with conn.cursor() as cur:
+            # Asset rows are referenced by logo/avatar FKs and carry
+            # workspace/user FKs of their own, so neither reset() nor a
+            # bare delete can clear them: null the links first, then wipe
+            # (PIDASHCONV-1374 seeds soft-deleted logo/avatar assets).
+            cur.execute("UPDATE workspaces SET logo_asset_id = NULL")
+            cur.execute("UPDATE users SET avatar_asset_id = NULL")
+            cur.execute("DELETE FROM file_assets")
+            # Runner rows seeded directly by the engine-credential
+            # deactivate test (dev_machine/machine_token/
+            # engine_credential/machine_session reference users and
+            # workspaces): wipe them before the reset's own user/
+            # workspace deletes, which raw SQL cannot cascade.
+            for runner_table in (
+                "engine_credential",
+                "machine_session",
+                "machine_token",
+                "dev_machine",
+            ):
+                cur.execute(f"DELETE FROM {runner_table}")
             for table in (
                 "issue_sequences",
                 "issue_assignees",
                 "issue_labels",
+                # Activities carry FKs into projects (and issues); the graph
+                # timezone suite (PIDASHCONV-1371) seeds them directly.
+                "issue_activities",
+                # Labels carry a project FK; the duplicate-rows suite
+                # (PIDASHCONV-1372) seeds them directly.
+                "labels",
+                # Modules carry workspace/project FKs and module_issues
+                # references issues; the grouped-m2m None-bucket suite
+                # (NEWPIDASH-152) seeds them directly.
+                "module_issues",
+                "module_members",
+                "module_links",
+                "module_user_properties",
+                "modules",
                 "user_favorites",
                 "issues",
                 "draft_issue_assignees",

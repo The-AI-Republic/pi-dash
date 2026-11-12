@@ -30,6 +30,18 @@
 //! observed by the assign path) plus a read of `state.rx_in_flight` (set while
 //! a managed run holds the working copy). [`try_begin_local_turn`] claims the
 //! working copy for a chat turn or refuses when a run holds it.
+//!
+//! ## Two hosts (design §12.1, PO-8)
+//!
+//! A request is served by a [`ChatHost`]:
+//!
+//! - **A project runner** — the request names one (`runner`), or carries no
+//!   absolute `cwd`: the runner's agent, its folder and the AC6 guard above.
+//! - **The daemon's engine profile** ([`super::engine_chat::EngineChatProfile`])
+//!   — no `runner` selector and an absolute `cwd`: the machine-level built-in
+//!   engine, with no project runner and no shared busy flag, so it works with
+//!   zero or many runners and is never blocked by a run. Its folder must not
+//!   be inside any runner's working dir.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,21 +50,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
+use super::engine_chat::EngineChatProfile;
 use super::protocol::Response;
-use crate::agent::{AgentBridge, BridgeEvent, RunPayload};
+use crate::agent::{AgentBridge, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, ApprovalMode};
 use crate::config::schema::RunnerConfig;
 use crate::daemon::runner_instance::RunnerInstance;
+use crate::util::fs::create_dir_all_private;
 
 /// How long a resolved approval / cancel wait is allowed to hold a turn.
 const APPROVAL_TTL_MINUTES: i64 = 10;
+
+/// Upper bound on live local chat sessions per registry. Each live session
+/// holds a long-lived engine process, so the set is capped: viewing more
+/// sessions than this evicts the least-recently-used ones (their bridges
+/// torn down) and the next warm/send respawns them.
+const MAX_LIVE_CHAT_SESSIONS: usize = 8;
+
+/// How long a local chat session may sit without a warm/turn before its
+/// engine process is shut down and the session dropped.
+const CHAT_IDLE_TTL_MINUTES: i64 = 10;
 
 // ---------------------------------------------------------------------------
 // Sink abstraction — lets the turn driver stream to the live IPC socket in
@@ -85,9 +109,9 @@ where
 
 // ---------------------------------------------------------------------------
 // Per-runner session registry. Sessions persist across requests (and across
-// connections) so a Codex thread survives between turns — the concrete Codex
-// bridge has no resume-by-id, so continuity depends on keeping the same live
-// bridge process for the session's lifetime.
+// connections) so a Codex thread survives between turns. When the in-memory
+// bridge is gone (restart, Close, failed turn), a fresh bridge resumes the
+// saved thread via `thread/resume`; unknown threads fall back to `thread/start`.
 // ---------------------------------------------------------------------------
 
 /// A single live chat session: its engine bridge plus an out-of-band cancel
@@ -110,6 +134,10 @@ struct SessionRuntime {
     /// life of the thread so a mode change mid-session cannot retune a turn
     /// already in flight — it takes effect on the next thread instead.
     approval_mode: ApprovalMode,
+    /// When this session was last warmed or sent a turn. Stamped on
+    /// creation and on every completed warm/turn; read by the registry
+    /// reaper to evict idle sessions.
+    last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Per-`RunnerInstance` registry of live chat sessions, keyed by
@@ -126,15 +154,93 @@ impl ChatRegistry {
     }
 
     async fn get_or_create(&self, id: Uuid) -> Arc<ChatSession> {
+        if let Some(existing) = self.get(id).await {
+            if let Ok(mut rt) = existing.rt.try_lock() {
+                rt.last_used_at = Some(Utc::now());
+            }
+            self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS).await;
+            return existing;
+        }
+        // Leave room for the session about to be inserted.
+        self.reap_idle(id, MAX_LIVE_CHAT_SESSIONS - 1).await;
         let mut map = self.sessions.lock().await;
         map.entry(id)
             .or_insert_with(|| {
                 Arc::new(ChatSession {
-                    rt: Mutex::new(SessionRuntime::default()),
+                    rt: Mutex::new(SessionRuntime {
+                        last_used_at: Some(Utc::now()),
+                        ..SessionRuntime::default()
+                    }),
                     cancel: Notify::new(),
                 })
             })
             .clone()
+    }
+
+    /// Evict idle sessions: those past their idle TTL first, then the
+    /// least-recently-used ones while the registry exceeds `target`. The
+    /// session being requested (`except`) and any session with a turn in
+    /// flight (its runtime is locked) are never touched. Evicted bridges
+    /// are shut down, tearing down their engine processes; the next
+    /// warm/send for a dropped session respawns it.
+    async fn reap_idle(&self, except: Uuid, target: usize) {
+        let now = Utc::now();
+        let idle_limit = chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES);
+        // Snapshot the eviction candidates under the map lock. `try_lock`
+        // only — a locked runtime means a warm/turn is in flight and the
+        // session must survive.
+        let candidates: Vec<(Uuid, Arc<ChatSession>)> = {
+            let map = self.sessions.lock().await;
+            let mut candidates = Vec::new();
+            let mut by_age: Vec<(Option<DateTime<Utc>>, Uuid, Arc<ChatSession>)> = Vec::new();
+            for (id, session) in map.iter() {
+                if *id == except {
+                    continue;
+                }
+                let Ok(rt) = session.rt.try_lock() else {
+                    continue;
+                };
+                if rt.last_used_at.is_none_or(|t| now - t > idle_limit) {
+                    candidates.push((*id, session.clone()));
+                } else {
+                    by_age.push((rt.last_used_at, *id, session.clone()));
+                }
+            }
+            let excess = map.len().saturating_sub(target);
+            if excess > 0 {
+                by_age.sort_by_key(|(at, _, _)| *at);
+                by_age.truncate(excess);
+                candidates.extend(by_age.into_iter().map(|(_, id, s)| (id, s)));
+            }
+            candidates
+        };
+        for (id, expected) in candidates {
+            // Re-check under the map lock: only evict the exact session
+            // snapshotted. If a concurrent `get_or_create` for the same id
+            // already created a fresh entry, `expected` is stale and must be
+            // left alone — removing/replacing the new entry would orphan the
+            // caller's Arc (two live runtimes for one chat_session_id). A
+            // busy runtime at this point means a turn started after the
+            // snapshot: leave the session entirely untouched, no reinsert.
+            let bridge = {
+                let mut map = self.sessions.lock().await;
+                let Some(current) = map.get(&id) else {
+                    continue;
+                };
+                if !Arc::ptr_eq(current, &expected) {
+                    continue;
+                }
+                let Ok(mut rt) = expected.rt.try_lock() else {
+                    continue;
+                };
+                let session = map.remove(&id).expect("entry checked present");
+                let _ = session;
+                rt.bridge.take()
+            };
+            if let Some(bridge) = bridge {
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
+            }
+        }
     }
 
     async fn get(&self, id: Uuid) -> Option<Arc<ChatSession>> {
@@ -143,6 +249,108 @@ impl ChatRegistry {
 
     async fn remove(&self, id: Uuid) -> Option<Arc<ChatSession>> {
         self.sessions.lock().await.remove(&id)
+    }
+
+    /// Whether `id` is a live session of this registry.
+    pub(crate) async fn contains(&self, id: Uuid) -> bool {
+        self.sessions.lock().await.contains_key(&id)
+    }
+}
+
+// (reap_one removed: eviction is now atomic under the map lock in
+// `reap_idle`, eliminating the blind-reinsert race where a busy session
+// was re-inserted over a concurrently created entry for the same id.)
+
+// ---------------------------------------------------------------------------
+// Chat hosts.
+// ---------------------------------------------------------------------------
+
+/// What serves a local chat request: a project runner or the daemon's own
+/// engine profile. See the module docs.
+pub(crate) struct ChatHost<'a> {
+    sessions: &'a ChatRegistry,
+    approvals: &'a ApprovalRouter,
+    lane: Lane<'a>,
+}
+
+enum Lane<'a> {
+    Runner(&'a RunnerInstance),
+    Engine {
+        profile: &'a EngineChatProfile,
+        /// `(runner name, working dir)` of every configured runner: a chat
+        /// folder may not be inside one.
+        runner_dirs: Vec<(String, PathBuf)>,
+    },
+}
+
+impl<'a> ChatHost<'a> {
+    pub(crate) fn runner(inst: &'a RunnerInstance) -> Self {
+        Self {
+            sessions: &inst.chat_sessions,
+            approvals: &inst.approvals,
+            lane: Lane::Runner(inst),
+        }
+    }
+
+    pub(crate) fn engine(
+        profile: &'a EngineChatProfile,
+        runner_dirs: Vec<(String, PathBuf)>,
+    ) -> Self {
+        Self {
+            sessions: &profile.sessions,
+            approvals: &profile.approvals,
+            lane: Lane::Engine {
+                profile,
+                runner_dirs,
+            },
+        }
+    }
+
+    fn config(&self) -> &RunnerConfig {
+        match &self.lane {
+            Lane::Runner(inst) => &inst.config,
+            Lane::Engine { profile, .. } => profile.config(),
+        }
+    }
+
+    /// Claim the working copy for one turn. Only a project runner has one
+    /// to share with its runs; the engine profile has no busy flag.
+    fn begin_turn(&self) -> std::result::Result<Option<LocalTurnGuard>, String> {
+        match &self.lane {
+            Lane::Runner(inst) => try_begin_local_turn(inst).map(Some),
+            Lane::Engine { .. } => Ok(None),
+        }
+    }
+
+    fn resolve_workspace(&self, cwd: Option<&str>) -> Result<PathBuf> {
+        match &self.lane {
+            Lane::Runner(inst) => resolve_chat_workspace(&inst.config, cwd),
+            Lane::Engine { runner_dirs, .. } => {
+                super::engine_chat::resolve_engine_chat_folder(cwd, runner_dirs)
+            }
+        }
+    }
+
+    async fn spawn(
+        &self,
+        workspace: &Path,
+        model: Option<String>,
+        resume_id: Option<&str>,
+        mode: ApprovalMode,
+    ) -> Result<AgentBridge> {
+        match &self.lane {
+            Lane::Runner(inst) => {
+                AgentBridge::spawn_from_config_with_resume(
+                    &inst.config,
+                    workspace,
+                    model,
+                    resume_id,
+                    Some(mode),
+                )
+                .await
+            }
+            Lane::Engine { profile, .. } => profile.spawn(workspace, mode, resume_id).await,
+        }
     }
 }
 
@@ -170,7 +378,9 @@ impl Drop for LocalTurnGuard {
 /// assign lane's mirror check of `chat_active` (supervisor.rs) closes the
 /// other direction. This is best-effort advisory exclusion, consistent with
 /// the cloud loop's own `current_chat`/`current_run` checks.
-pub(crate) fn try_begin_local_turn(inst: &RunnerInstance) -> std::result::Result<LocalTurnGuard, String> {
+pub(crate) fn try_begin_local_turn(
+    inst: &RunnerInstance,
+) -> std::result::Result<LocalTurnGuard, String> {
     if inst.state.rx_in_flight.borrow().is_some() {
         return Err("a managed issue run is using this runner's working copy".to_string());
     }
@@ -218,11 +428,11 @@ pub(crate) struct SendArgs {
 /// `ChatWarm`: spawn/reuse+warm the engine without submitting a turn. Streams
 /// a `ChatEvent{kind:"chat_warmed"}` (or `"chat_warm_failed"`), then `Ack`.
 pub(crate) async fn handle_warm<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     args: WarmArgs,
     sink: &mut S,
 ) -> Result<Response> {
-    let session = inst.chat_sessions.get_or_create(args.chat_session_id).await;
+    let session = host.sessions.get_or_create(args.chat_session_id).await;
     let mut rt = session.rt.lock().await;
     let chat_session_id = args.chat_session_id;
 
@@ -231,7 +441,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         args.local_thread_id.as_deref(),
     );
     let workspace = match ensure_bridge(
-        inst,
+        host,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -257,7 +467,32 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         .bridge
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("chat bridge missing after spawn"))?;
-    let warmed_thread_id = bridge.warm(&workspace).await?;
+    // Race the warm against ChatCancel/ChatClose so a hung engine does not
+    // hold the session's runtime lock for the whole startup budget.
+    let cancelled = session.cancel.notified();
+    let warmed = tokio::select! {
+        biased;
+        _ = cancelled => Err(anyhow::anyhow!("chat warm cancelled")),
+        r = within_startup_deadline(bridge.warm(&workspace)) => r,
+    };
+    let warmed_thread_id = match warmed {
+        Ok(id) => id,
+        Err(e) => {
+            // Mid-handshake bridge: discard it so the next warm/send respawns.
+            if let Some(bridge) = rt.bridge.take() {
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
+            }
+            rt.started_sent = false;
+            sink.emit(Response::ChatEvent {
+                chat_session_id,
+                bridge_seq: rt.bridge_seq,
+                kind: "chat_warm_failed".into(),
+                payload: serde_json::json!({ "detail": format!("{e:#}") }),
+            })
+            .await?;
+            return Ok(Response::Ack);
+        }
+    };
     if let Some(thread_id) = warmed_thread_id.clone()
         && !rt.started_sent
     {
@@ -278,6 +513,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         payload: serde_json::json!({ "local_session_id": warmed_thread_id }),
     })
     .await?;
+    rt.last_used_at = Some(Utc::now());
     Ok(Response::Ack)
 }
 
@@ -285,14 +521,15 @@ pub(crate) async fn handle_warm<S: ChatSink>(
 /// turn's `ChatEvent`/`ChatApprovalRequest` frames, and returns the terminal
 /// `ChatMessageCompleted` (or `ChatFailed`) as the connection's final frame.
 pub(crate) async fn handle_send<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     args: SendArgs,
     sink: &mut S,
 ) -> Result<Response> {
     let chat_session_id = args.chat_session_id;
 
-    // AC6: claim the working copy, or refuse cleanly.
-    let _guard = match try_begin_local_turn(inst) {
+    // AC6: claim a project runner's working copy, or refuse cleanly. The
+    // engine profile shares no folder with a run, so it claims nothing.
+    let _guard = match host.begin_turn() {
         Ok(g) => g,
         Err(detail) => {
             return Ok(Response::ChatFailed {
@@ -304,7 +541,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         }
     };
 
-    let session = inst.chat_sessions.get_or_create(chat_session_id).await;
+    let session = host.sessions.get_or_create(chat_session_id).await;
     let mut rt = session.rt.lock().await;
 
     let resume_id = chat_resume_id(
@@ -312,7 +549,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
         args.local_thread_id.as_deref(),
     );
     let workspace = match ensure_bridge(
-        inst,
+        host,
         &mut rt,
         args.cwd.as_deref(),
         args.model.clone(),
@@ -350,9 +587,9 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 content: args.content,
                 model: args.model,
                 mode: approval_mode,
-                runner_id: inst.config.runner_id,
-                config: &inst.config,
-                approvals: &inst.approvals,
+                runner_id: host.config().runner_id,
+                config: host.config(),
+                approvals: host.approvals,
                 workspace: &workspace,
                 cancel: &session.cancel,
             },
@@ -365,6 +602,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
     };
     rt.bridge_seq = bridge_seq;
     rt.started_sent = started_sent;
+    rt.last_used_at = Some(Utc::now());
 
     // A failed turn tears the bridge down so the next send respawns cleanly.
     let terminal = match outcome {
@@ -374,11 +612,22 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 bridge.shutdown(Duration::from_secs(5)).await.ok();
             }
             rt.started_sent = false;
-            Response::ChatFailed {
-                chat_session_id,
-                code: "internal".into(),
-                detail: Some(format!("{e:#}")),
-                failed_at: Utc::now(),
+            if e.is::<StartupCancelled>() {
+                Response::ChatMessageCompleted {
+                    chat_session_id,
+                    message_id: args.message_id,
+                    turn_id: None,
+                    assistant_message: None,
+                    status: "cancelled".into(),
+                    completed_at: Utc::now(),
+                }
+            } else {
+                Response::ChatFailed {
+                    chat_session_id,
+                    code: "internal".into(),
+                    detail: Some(format!("{e:#}")),
+                    failed_at: Utc::now(),
+                }
             }
         }
     };
@@ -387,8 +636,8 @@ pub(crate) async fn handle_send<S: ChatSink>(
 
 /// `ChatCancel`: interrupt the in-flight turn (if any). Best-effort — trips
 /// the session's cancel signal, which the active turn observes.
-pub(crate) async fn handle_cancel(inst: &RunnerInstance, chat_session_id: Uuid) -> Result<Response> {
-    if let Some(session) = inst.chat_sessions.get(chat_session_id).await {
+pub(crate) async fn handle_cancel(host: &ChatHost<'_>, chat_session_id: Uuid) -> Result<Response> {
+    if let Some(session) = host.sessions.get(chat_session_id).await {
         session.cancel.notify_waiters();
     }
     Ok(Response::Ack)
@@ -397,11 +646,11 @@ pub(crate) async fn handle_cancel(inst: &RunnerInstance, chat_session_id: Uuid) 
 /// `ChatClose`: interrupt any in-flight turn, tear the engine down, drop the
 /// session, and emit a terminal `ChatClosed`.
 pub(crate) async fn handle_close<S: ChatSink>(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     chat_session_id: Uuid,
     sink: &mut S,
 ) -> Result<Response> {
-    if let Some(session) = inst.chat_sessions.get(chat_session_id).await {
+    if let Some(session) = host.sessions.get(chat_session_id).await {
         // Interrupt a streaming turn so it releases the runtime lock, then
         // acquire it to tear the bridge down.
         session.cancel.notify_waiters();
@@ -411,7 +660,7 @@ pub(crate) async fn handle_close<S: ChatSink>(
         }
         rt.started_sent = false;
     }
-    inst.chat_sessions.remove(chat_session_id).await;
+    host.sessions.remove(chat_session_id).await;
     sink.emit(Response::ChatClosed {
         chat_session_id,
         closed_at: Utc::now(),
@@ -424,11 +673,11 @@ pub(crate) async fn handle_close<S: ChatSink>(
 /// shared approval router as `DecisionSource::Local`, unblocking the turn that
 /// is parked on `approvals.subscribe()`.
 pub(crate) async fn handle_decide(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     local_approval_id: &str,
     decision: ApprovalDecision,
 ) -> Result<Response> {
-    let resolved = inst
+    let resolved = host
         .approvals
         .decide(local_approval_id, decision, DecisionSource::Local)
         .await;
@@ -447,7 +696,7 @@ pub(crate) async fn handle_decide(
 /// once and respawning if a prior bridge process exited. Returns the resolved
 /// workspace path.
 async fn ensure_bridge(
-    inst: &RunnerInstance,
+    host: &ChatHost<'_>,
     rt: &mut SessionRuntime,
     cwd: Option<&str>,
     model: Option<String>,
@@ -455,7 +704,7 @@ async fn ensure_bridge(
     mode: Option<ApprovalMode>,
 ) -> Result<PathBuf> {
     if rt.workspace.is_none() {
-        rt.workspace = Some(resolve_chat_workspace(&inst.config, cwd)?);
+        rt.workspace = Some(host.resolve_workspace(cwd)?);
     }
     let workspace = rt
         .workspace
@@ -475,18 +724,26 @@ async fn ensure_bridge(
         // fresh session spawns its own bridge.
         rt.approval_mode = mode.unwrap_or_default();
         rt.bridge = Some(
-            AgentBridge::spawn_from_config_with_resume(
-                &inst.config,
-                &workspace,
-                model,
-                resume_id,
-                Some(rt.approval_mode),
-            )
-            .await?,
+            host.spawn(&workspace, model, resume_id, rt.approval_mode)
+                .await?,
         );
     }
     Ok(workspace)
 }
+
+/// `drive_turn` was cancelled before the engine finished starting. The bridge
+/// is left mid-handshake, so the caller discards it like any failed turn but
+/// reports the turn as cancelled rather than failed.
+#[derive(Debug)]
+struct StartupCancelled;
+
+impl std::fmt::Display for StartupCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("chat turn cancelled during engine startup")
+    }
+}
+
+impl std::error::Error for StartupCancelled {}
 
 struct DriveCtx<'a> {
     chat_session_id: Uuid,
@@ -530,7 +787,17 @@ async fn drive_turn<S: ChatSink>(
         prompt: content,
         model: model.clone(),
     };
-    let mut cursor = bridge.run(&payload, workspace).await?;
+    // A single pinned cancel future, created before startup: `notify_waiters()`
+    // stores no permit, so a cancel that lands while the engine is still
+    // starting (or mid-poll later) must already have a registered waiter.
+    let cancelled = cancel.notified();
+    tokio::pin!(cancelled);
+
+    let mut cursor = tokio::select! {
+        biased;
+        _ = cancelled.as_mut() => return Err(StartupCancelled.into()),
+        r = within_startup_deadline(bridge.run(&payload, workspace)) => r?,
+    };
     let turn_id = cursor.thread_id().to_string();
     if !*started_sent {
         sink.emit(Response::ChatStarted {
@@ -552,11 +819,6 @@ async fn drive_turn<S: ChatSink>(
 
     let mut final_status = "completed".to_string();
     let mut assistant_message: Option<String> = None;
-
-    // A single pinned cancel future: `notify_waiters()` stores no permit, so a
-    // fresh future per iteration would miss a cancel that landed mid-poll.
-    let cancelled = cancel.notified();
-    tokio::pin!(cancelled);
 
     'turn: loop {
         tokio::select! {
@@ -580,6 +842,22 @@ async fn drive_turn<S: ChatSink>(
                     *bridge_seq = bridge_seq.saturating_add(1);
                     match ev {
                         BridgeEvent::Raw { method, params, .. } => {
+                            if let Some((code, detail)) = gateway_refusal(&method, &params) {
+                                // The engine files a 402/401 under "stream
+                                // disconnected" and is about to re-send the
+                                // whole request, five times over. Its first
+                                // retry is ~200ms out, so the turn is stopped
+                                // here rather than by a round trip through the
+                                // client, and the retry notice is not
+                                // forwarded.
+                                bridge.interrupt().await.ok();
+                                return Ok(Response::ChatFailed {
+                                    chat_session_id,
+                                    code: code.into(),
+                                    detail: Some(detail),
+                                    failed_at: Utc::now(),
+                                });
+                            }
                             let kind = if is_assistant_text_delta(&method, &params) {
                                 "assistant_delta"
                             } else {
@@ -630,9 +908,20 @@ async fn drive_turn<S: ChatSink>(
                             break;
                         }
                         BridgeEvent::Failed { detail, .. } => {
+                            // An engine that gave up on its own (no retries
+                            // left, or none configured) reports the same
+                            // refusal as a bare string.
+                            let refusal = detail
+                                .as_deref()
+                                .and_then(gateway_status_text)
+                                .and_then(|(status, text)| Some((gateway_refusal_code(status)?, text)));
+                            let (code, detail) = match refusal {
+                                Some((code, text)) => (code, Some(text)),
+                                None => (CHAT_AGENT_FAILED, detail),
+                            };
                             return Ok(Response::ChatFailed {
                                 chat_session_id,
-                                code: "agent_failed".into(),
+                                code: code.into(),
                                 detail,
                                 failed_at: Utc::now(),
                             });
@@ -847,14 +1136,14 @@ fn resolve_chat_workspace(config: &RunnerConfig, cwd: Option<&str>) -> Result<Pa
             }
             return Ok(requested_rel);
         }
-        std::fs::create_dir_all(&workspace_path)?;
+        create_dir_all_private(&workspace_path)?;
         let requested = workspace_path.join(requested_rel);
         if !requested.starts_with(&workspace_path) {
             anyhow::bail!("chat cwd is outside runner workspace");
         }
         return Ok(requested);
     }
-    std::fs::create_dir_all(&workspace_path)?;
+    create_dir_all_private(&workspace_path)?;
     Ok(workspace_path)
 }
 
@@ -896,6 +1185,44 @@ fn is_assistant_text_delta(method: &str, params: &serde_json::Value) -> bool {
             .and_then(|delta| delta.get("text"))
             .and_then(|value| value.as_str())
             .is_some()
+}
+
+const CHAT_AGENT_FAILED: &str = "agent_failed";
+/// `ChatFailed.code` for a model gateway that answered 402: the account has
+/// no credit left. The detail is the gateway's own sentence.
+const CHAT_MODEL_CREDIT_EXHAUSTED: &str = "model_credit_exhausted";
+/// `ChatFailed.code` for a model gateway that answered 401: the credential
+/// the engine holds is not accepted.
+const CHAT_MODEL_AUTH_FAILED: &str = "model_auth_failed";
+
+/// The `ChatFailed.code` for a gateway status that repeating the request
+/// cannot change, or `None` for one worth retrying.
+fn gateway_refusal_code(status: u64) -> Option<&'static str> {
+    match status {
+        401 => Some(CHAT_MODEL_AUTH_FAILED),
+        402 => Some(CHAT_MODEL_CREDIT_EXHAUSTED),
+        _ => None,
+    }
+}
+
+/// Split the engine's `unexpected status 402 Payment Required: <text>, url:
+/// <endpoint>, request id: <id>` into the status and the gateway's text.
+/// Delegates to the shared `codex::gateway` helper so both lanes parse the
+/// same wire shape.
+fn gateway_status_text(raw: &str) -> Option<(u64, String)> {
+    crate::codex::gateway::gateway_status_text(raw)
+}
+
+/// Recognise the engine's "I will retry" notice for a gateway answer that no
+/// retry can change, as `(ChatFailed code, gateway text)`.
+///
+/// The engine reports the HTTP status under `codexErrorInfo` (for example
+/// `{"responseStreamDisconnected": {"httpStatusCode": 402}}`) and the body in
+/// `additionalDetails`; `message` is only `Reconnecting... 1/5`.
+fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(&'static str, String)> {
+    let (status, text) = crate::codex::gateway::gateway_refusal(method, params)?;
+    let code = gateway_refusal_code(status)?;
+    Some((code, text))
 }
 
 fn assistant_text_from_done_payload(payload: &serde_json::Value) -> Option<String> {
@@ -982,6 +1309,49 @@ mod tests {
             printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
             sleep 0.3
         "#
+    }
+
+    #[tokio::test]
+    async fn drive_turn_cancel_during_engine_startup_is_not_lost() {
+        // An engine that never answers its handshake. Before the startup race
+        // the cancel fired with no registered waiter and was dropped, so the
+        // turn sat out the whole startup budget.
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Notify::new();
+        let mut bridge = fake_bridge("while read _; do :; done").await;
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, false);
+        let begin = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: "hi".into(),
+                    model: None,
+                    mode: ApprovalMode::Ask,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                &mut bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                cancel.notify_waiters();
+            },
+        );
+        let err = result.expect_err("cancelled startup must not produce a turn");
+        assert!(err.is::<StartupCancelled>(), "unexpected error: {err:#}");
+        assert!(begin.elapsed() < Duration::from_secs(5));
+        assert!(!started, "no ChatStarted before the engine came up");
+        bridge.shutdown(Duration::from_secs(1)).await.ok();
     }
 
     #[tokio::test]
@@ -1207,6 +1577,243 @@ mod tests {
         assert_eq!(deltas, ["NEW"], "frames: {:?}", sink.frames);
     }
 
+    /// A fake app-server whose gateway answers `status` to the first turn: it
+    /// announces a retry the way the bundled engine does and, unless it is
+    /// interrupted first, goes on to announce a second one (`2/5`).
+    fn gateway_refusal_script(status: u16, body: &str) -> String {
+        let retry = |attempt: u8| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "error",
+                "params": {
+                    "error": {
+                        "message": format!("Reconnecting... {attempt}/5"),
+                        "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": status}},
+                        "additionalDetails": format!(
+                            "unexpected status {status} {body}, url: https://gateway.test/v1/responses, request id: req_1"
+                        ),
+                    },
+                    "willRetry": true,
+                    "threadId": "th_refused",
+                    "turnId": "turn_1",
+                },
+            })
+        };
+        format!(
+            r#"
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_refused"}}}}'
+            read -r _
+            printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+            printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_refused","turn":{{"id":"turn_1"}}}}}}'
+            printf '%s\n' '{first}'
+            read -r interrupt
+            case "$interrupt" in
+                *'"method":"turn/interrupt"'*'"turnId":"turn_1"'*)
+                    printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_refused","turn":{{"id":"turn_1","status":"interrupted"}}}}}}'
+                    read -r _
+                    printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"NEW"}}}}'
+                    printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_refused","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+                    ;;
+                *)
+                    printf '%s\n' '{second}'
+                    ;;
+            esac
+            sleep 0.3
+        "#,
+            first = retry(1),
+            second = retry(2),
+        )
+    }
+
+    /// Drive one turn against `bridge` and return its terminal frame plus
+    /// everything streamed before it.
+    async fn run_turn(bridge: &mut AgentBridge, content: &str) -> (Response, Vec<Response>) {
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Notify::new();
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, true);
+        let terminal = tokio::time::timeout(
+            Duration::from_secs(3),
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: content.into(),
+                    model: None,
+                    mode: ApprovalMode::Ask,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("turn should not hang")
+        .expect("drive turn");
+        (terminal, sink.frames)
+    }
+
+    fn raw_methods(frames: &[Response]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|f| match f {
+                Response::ChatEvent { payload, .. } => {
+                    payload["method"].as_str().map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn out_of_credit_stops_the_turn_before_the_engine_retries() {
+        let cfg = config();
+        let body = "Payment Required: Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan.";
+        let mut bridge = fake_bridge(&gateway_refusal_script(402, body)).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let (terminal, frames) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED);
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Daily free quota used and LLM credit balance is insufficient; add credit or upgrade your plan."
+                    ),
+                );
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+        // Neither the retry notice nor its URL / request id reaches the client.
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+
+        // The engine was interrupted (the fake only answers a second turn if
+        // it was), and the stopped turn does not leak into the next one.
+        let (terminal, frames) = run_turn(&mut bridge, "again").await;
+        assert!(
+            matches!(&terminal, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "second turn: {terminal:?} frames: {frames:?}"
+        );
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_credential_stops_the_turn_as_an_auth_failure() {
+        let cfg = config();
+        let mut bridge =
+            fake_bridge(&gateway_refusal_script(401, "Unauthorized: Invalid JWT")).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let (terminal, frames) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_AUTH_FAILED);
+                assert_eq!(detail.as_deref(), Some("Invalid JWT"));
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+        assert!(
+            !raw_methods(&frames).contains(&"error".to_string()),
+            "frames: {frames:?}"
+        );
+    }
+
+    #[test]
+    fn only_refusals_the_engine_would_retry_in_vain_are_recognised() {
+        let notice = |status: u64, will_retry: bool| {
+            serde_json::json!({
+                "error": {
+                    "message": "Reconnecting... 1/5",
+                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": status}},
+                    "additionalDetails": format!("unexpected status {status} Whatever: body text, url: http://x/v1/responses"),
+                },
+                "willRetry": will_retry,
+            })
+        };
+        assert_eq!(
+            gateway_refusal("error", &notice(402, true)),
+            Some((CHAT_MODEL_CREDIT_EXHAUSTED, "body text".to_string()))
+        );
+        assert_eq!(
+            gateway_refusal("error", &notice(401, true)),
+            Some((CHAT_MODEL_AUTH_FAILED, "body text".to_string()))
+        );
+        // A server error or a rate limit may well succeed on retry.
+        assert_eq!(gateway_refusal("error", &notice(503, true)), None);
+        assert_eq!(gateway_refusal("error", &notice(429, true)), None);
+        // The terminal notice is the bridge's to turn into a failure.
+        assert_eq!(gateway_refusal("error", &notice(402, false)), None);
+        // A dropped stream carries no HTTP status at all.
+        let dropped = serde_json::json!({
+            "error": {
+                "message": "Reconnecting... 1/5",
+                "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": null}},
+                "additionalDetails": "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+            },
+            "willRetry": true,
+        });
+        assert_eq!(gateway_refusal("error", &dropped), None);
+        assert_eq!(gateway_refusal("warning", &notice(402, true)), None);
+
+        assert_eq!(
+            gateway_status_text(
+                "unexpected status 402 Payment Required: add credit, url: https://g/v1/responses, request id: r1"
+            ),
+            Some((402, "add credit".to_string()))
+        );
+        assert_eq!(
+            gateway_status_text("stream disconnected before completion"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_the_engine_gave_up_on_keeps_its_code() {
+        // No retry notice at all: the engine fails the turn itself, as it does
+        // once its retries are spent.
+        let script = r#"
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read -r _
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_final"}}'
+            read -r _
+            printf '%s\n' '{"jsonrpc":"2.0","method":"error","params":{"error":{"message":"unexpected status 402 Payment Required: add credit, url: https://g/v1/responses","codexErrorInfo":"other"},"willRetry":false}}'
+            sleep 0.3
+        "#;
+        let cfg = config();
+        let mut bridge = fake_bridge(script).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+        let (terminal, _) = run_turn(&mut bridge, "hello").await;
+        match terminal {
+            Response::ChatFailed { code, detail, .. } => {
+                assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED);
+                assert_eq!(detail.as_deref(), Some("add credit"));
+            }
+            other => panic!("expected ChatFailed, got {other:?}"),
+        }
+    }
+
     /// A fake app-server that warms, starts a turn, then requests a command
     /// approval and hangs — the turn can only end via the approval wait's
     /// cancel arm or its TTL backstop, never on its own.
@@ -1291,6 +1898,7 @@ mod tests {
             config_dir: base.join("config"),
             data_dir: base.join("data"),
             runtime_dir: base.join("runtime"),
+            machine_context_dir: base.join("config"),
         };
         RunnerInstance::new_offline(config(), &paths, DaemonConfig::default())
     }
@@ -1366,5 +1974,162 @@ mod tests {
         // otherwise accept `<workspace>/../escape`, which resolves outside.
         assert!(resolve_chat_workspace(&cfg, Some("../escape")).is_err());
         assert!(resolve_chat_workspace(&cfg, Some("sub/../../escape")).is_err());
+    }
+
+    #[tokio::test]
+    async fn warmed_chat_sessions_are_reaped_once_the_registry_grows() {
+        // PIDESKAPP-75: every local chat the user views calls `chat_warm`,
+        // which spawns a long-lived engine process keyed by `chat_session_id`
+        // and nothing ever reaped the entries. N distinct warms must not
+        // leave N live sessions: the least-recently-used ones are evicted
+        // (their bridges torn down) once the registry passes its cap, and
+        // the next warm/send respawns them.
+        let registry = ChatRegistry::new();
+        let first = Uuid::new_v4();
+        registry.get_or_create(first).await;
+        // View more chats than the live cap allows.
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        assert!(
+            !registry.contains(first).await,
+            "the least-recently-warmed chat session must be evicted once the registry exceeds its cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_with_a_turn_in_flight_is_never_reaped() {
+        // A warm/turn holds the session's runtime lock; the reaper must
+        // leave that session alone no matter how far past the cap the
+        // registry grows.
+        let registry = ChatRegistry::new();
+        let busy = Uuid::new_v4();
+        let busy_session = registry.get_or_create(busy).await;
+        // Simulate an in-flight warm/turn holding the runtime lock.
+        let _in_flight = busy_session.rt.lock().await;
+        for _ in 0..12 {
+            let id = Uuid::new_v4();
+            registry.get_or_create(id).await;
+        }
+        drop(_in_flight);
+        assert!(
+            registry.contains(busy).await,
+            "a session with a turn in flight must never be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_is_reaped_on_the_next_warm() {
+        // A session left untouched past the idle TTL must go on the next
+        // registry access, even before the cap is reached.
+        let registry = ChatRegistry::new();
+        let stale = Uuid::new_v4();
+        let stale_session = registry.get_or_create(stale).await;
+        {
+            let mut rt = stale_session.rt.lock().await;
+            rt.last_used_at =
+                Some(Utc::now() - chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES + 1));
+        }
+        registry.get_or_create(Uuid::new_v4()).await;
+        assert!(
+            !registry.contains(stale).await,
+            "a session idle past its TTL must be reaped"
+        );
+    }
+
+    /// After the reaper drops a session, the next warm/send respawns a
+    /// fresh bridge that resumes the saved Codex thread (PIDESKAPP-74 path),
+    /// so the conversation continues on the same thread id. This is the
+    /// thread-continuity half of PIDESKAPP-75's acceptance: without
+    /// `thread/resume` the respawned bridge minted a new id and the engine
+    /// lost all prior turns.
+    #[tokio::test]
+    async fn reaped_session_respawn_resumes_saved_thread() {
+        // Fake app-server: expects thread/resume with the saved id, not
+        // thread/start.
+        let script = r#"
+            set -e
+            read _
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read _
+            read resume
+            case "$resume" in *'"method":"thread/resume"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected thread/resume"}}'; exit 0;; esac
+            case "$resume" in *'"threadId":"th_saved"'*) ;; *) printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"expected th_saved"}}'; exit 0;; esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"th_saved"}}}'
+            sleep 0.1
+        "#;
+        // Simulate a reaped session: the registry entry is gone, the next
+        // warm for the same chat_session_id spawns a fresh bridge carrying
+        // the saved thread id from the desktop. The bridge must resume it.
+        let registry = ChatRegistry::new();
+        let chat_id = Uuid::new_v4();
+        let old = registry.get_or_create(chat_id).await;
+        {
+            let mut rt = old.rt.lock().await;
+            rt.last_used_at =
+                Some(Utc::now() - chrono::Duration::minutes(CHAT_IDLE_TTL_MINUTES + 1));
+        }
+        // Trigger reap on a different id so `chat_id` is dropped.
+        registry.get_or_create(Uuid::new_v4()).await;
+        assert!(
+            !registry.contains(chat_id).await,
+            "stale session must be reaped before respawn"
+        );
+        // Respawn: fresh registry entry with a new Arc (old was dropped).
+        let fresh = registry.get_or_create(chat_id).await;
+        assert!(
+            registry.contains(chat_id).await,
+            "respawned session must be live"
+        );
+        assert!(
+            !Arc::ptr_eq(&old, &fresh),
+            "respawn must allocate a fresh runtime, not resurrect the reaped one"
+        );
+        // Fresh bridge carrying the saved thread must resume it.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        let server = AppServer::spawn_command(cmd)
+            .await
+            .expect("spawn fake codex");
+        let mut bridge = Bridge::from_server(server, None);
+        bridge.set_resume_thread_id(Some("th_saved"));
+        let cwd = std::env::temp_dir();
+        let thread_id = bridge.warm(&cwd).await.expect("respawn must resume");
+        assert_eq!(
+            thread_id, "th_saved",
+            "post-reap warm must resume, not restart"
+        );
+    }
+
+    /// Concurrent `get_or_create` for the same `chat_session_id` must share
+    /// a single `ChatSession` Arc — the reaper's blind-reinsert race
+    /// produced two live runtimes for one chat when a reap overlapped a
+    /// warm. The atomic ptr_eq removal keeps the registry single-sourced.
+    #[tokio::test]
+    async fn concurrent_get_or_create_shares_single_runtime() {
+        let registry = ChatRegistry::new();
+        let id = Uuid::new_v4();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let r = registry.clone();
+            handles.push(tokio::spawn(async move { r.get_or_create(id).await }));
+        }
+        let mut arcs = Vec::new();
+        for h in handles {
+            arcs.push(h.await.expect("spawned get_or_create"));
+        }
+        for a in arcs.iter().skip(1) {
+            assert!(
+                Arc::ptr_eq(&arcs[0], a),
+                "concurrent get_or_create must share one runtime"
+            );
+        }
+        // And the concurrently obtained Arc must match a fresh lookup.
+        let c = registry.get(id).await.expect("concurrent session present");
+        assert!(
+            Arc::ptr_eq(&arcs[0], &c),
+            "concurrent get_or_create must not duplicate the runtime"
+        );
     }
 }

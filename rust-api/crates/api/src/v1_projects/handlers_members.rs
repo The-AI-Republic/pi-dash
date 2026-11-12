@@ -38,7 +38,7 @@
 //! * Reads reuse `pidash_db::v1_projects::queries_projmem` wherever its
 //!   columns suffice. Three shapes need columns that layer doesn't carry,
 //!   so they are fetched here with the same JOIN/WHERE semantics (no fork —
-//!   the predicates are quoted per statement): invite `created_at` /
+//!   the predicates are spelled out per statement): invite `created_at` /
 //!   `updated_at` (the layer pins the 5-column serialize shape only),
 //!   `users.avatar_asset_id` for `avatar_url`, and all writes.
 //! * Writes mirror the model `save()` side effects: member POST sets
@@ -85,17 +85,27 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono_tz::Tz;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use serde_json::Value;
-use sqlx::Row;
 
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::{project, workspace};
 use pidash_auth::scope::TenantScope as AuthScope;
 use pidash_auth::token as auth_token;
+use pidash_db::entity::{
+    api_tokens, dev_machine, file_assets, machine_token, project_members, project_user_properties,
+    projects, users, workspace_member_invites, workspace_members, workspaces,
+};
 use pidash_db::v1_projects::queries_projmem::{self, TenantScope as QueryScope};
 use pidash_types::{ProjectId, WorkspaceId};
 
 use super::perms::{self, V1Route, CLASS_DENIAL_BODY};
+use pidash_compat::py::py_strip;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -208,8 +218,6 @@ pub const INVITE_NOT_FOUND_BODY: &str = r#"{"error":"The required object does no
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// `handle_exception` `IntegrityError` (both bases, same text).
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
-/// The `handle_exception` generic 500 (both bases, same text).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// The workspace-missing 400 (`views/member.py:77-80,128-132,182-186`).
 pub const NO_WORKSPACE_BODY: &str = r#"{"error":"Provided workspace does not exist"}"#;
 
@@ -236,6 +244,8 @@ pub enum Denial {
     BadError(String),
     BadJson(Value),
     BadPayload,
+    UnsupportedMediaType(String),
+    ParseDetail(String),
     ServerError,
 }
 
@@ -258,6 +268,14 @@ impl Denial {
                 Some(serde_json::to_string(value).expect("json body")),
             ),
             Denial::BadPayload => (StatusCode::BAD_REQUEST, Some(INVALID_PAYLOAD_BODY.into())),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Some(format!("{{\"detail\":{}}}", json_string(message))),
+            ),
+            Denial::ParseDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                Some(format!("{{\"detail\":{}}}", json_string(message))),
+            ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Some(SERVER_ERROR_BODY.into()),
@@ -313,6 +331,137 @@ pub struct Actor {
     pub timezone: Option<String>,
 }
 
+/// SeaORM over the request pool (a wrapper, no I/O).
+fn orm(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    is_active: bool,
+    expired_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_id: uuid::Uuid,
+}
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS NULL`,
+/// the `SoftDeletionManager` scope, `db/mixins.py:56-66`: a soft-deleted
+/// token 403s instead of authenticating).
+async fn live_api_token(
+    pool: &sqlx::PgPool,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, Denial> {
+    let db = orm(pool);
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+            api_tokens::Column::UserId,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// A `machine_token` row by hash plus the revocation bit of its device.
+#[derive(Debug, FromQueryResult)]
+struct MachineTokenLookup {
+    id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (#2910); `None` never expires.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    dev_machine_id: Option<uuid::Uuid>,
+    /// `dev_machine.revoked_at IS NOT NULL` over the LEFT JOIN: `false`
+    /// when the token has no device.
+    dev_revoked: Option<bool>,
+}
+
+/// `machine_token` by hash, LEFT JOIN `dev_machine` for its revocation
+/// (`api_authentication.py:47-70`). No liveness scope: the table has no
+/// soft delete.
+async fn machine_token_with_device(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, Denial> {
+    let db = orm(pool);
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
+            machine_token::Column::DevMachineId,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
+            "dev_revoked",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`):
+/// an active, live `workspace_members` row.
+async fn is_active_workspace_member(
+    pool: &sqlx::PgPool,
+    workspace_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<bool, Denial> {
+    let db = orm(pool);
+    let hit: Option<uuid::Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
+}
+
+/// Live workspace id for a slug (`deleted_at IS NULL`, the gate scope).
+/// Unlike the V1CM-2 copy, this keeps the liveness predicate — the gates
+/// and `inv_create` ran the live-workspace read.
+async fn workspace_id_by_slug(
+    pool: &sqlx::PgPool,
+    slug: &str,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let db = orm(pool);
+    let id: Option<uuid::Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(id)
+}
+
 /// Authenticate one request from its `X-Api-Key` header.
 ///
 /// * Missing/empty → `None` from `authenticate()` → 401 (every route here
@@ -353,13 +502,13 @@ async fn authenticate_api_token(
     // `deleted_at IS NULL` is the `SoftDeletionManager` scope
     // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
     // rows, so a soft-deleted token 403s instead of authenticating.
-    let row: Option<(uuid::Uuid, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL")
-            .bind(presented)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((user_id, is_active, expired_at)) = row else {
+    let row = live_api_token(pool, presented).await?;
+    let Some(ApiTokenLookup {
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now = chrono::Utc::now();
@@ -374,11 +523,12 @@ async fn authenticate_api_token(
     auth_token::validate_api_token(Some(&row), presented, now.timestamp())
         .map_err(|_| Denial::InvalidToken)?;
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    sqlx::query("UPDATE api_tokens SET last_used = now() WHERE token = $1")
-        .bind(presented)
-        .execute(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+        &pidash_db::pool::sea_orm_connection(pool),
+        presented,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(user_id)
 }
 
@@ -388,65 +538,43 @@ async fn authenticate_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let token_hash = auth_token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at AS dev_revoked_at
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = machine_token_with_device(pool, &token_hash).await?;
     let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
     let kernel_row = auth_token::MachineTokenRow {
         token_hash: token_hash.clone(),
         revoked_at_unix: row.revoked_at.map(|dt| dt.timestamp()),
-        dev_machine_revoked: row.dev_machine_id.is_some() && row.dev_revoked_at.is_some(),
+        dev_machine_revoked: row.dev_machine_id.is_some() && row.dev_revoked.unwrap_or(false),
+        expires_at_unix: row.expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match, token unrevoked, dev-machine unrevoked
     // (`dev_machine_id is not None and revoked_at is not None`).
-    auth_token::validate_machine_token_static(Some(&kernel_row), &token_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    auth_token::validate_machine_token_static(
+        Some(&kernel_row),
+        &token_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: active row, any role.
     // A non-member is revoked first, then denied — exactly like Python.
-    let member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members
-          WHERE workspace_id = $1 AND member_id = $2 AND is_active
-          AND deleted_at IS NULL)",
-    )
-    .bind(row.workspace_id)
-    .bind(row.user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let member = is_active_workspace_member(pool, row.workspace_id, row.user_id).await?;
     if !member {
-        sqlx::query("UPDATE machine_token SET revoked_at = now() WHERE id = $1")
-            .bind(row.id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        return Err(Denial::InvalidToken);
-    }
-    sqlx::query("UPDATE machine_token SET last_used_at = now() WHERE id = $1")
-        .bind(row.id)
-        .execute(pool)
+        pidash_services::domain::tokens::revoke_machine_token_by_id_now(
+            &pidash_db::pool::sea_orm_connection(pool),
+            row.id,
+        )
         .await
         .map_err(|_| Denial::ServerError)?;
+        return Err(Denial::InvalidToken);
+    }
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(row.user_id)
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct MachineTokenLookup {
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    workspace_id: uuid::Uuid,
-    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
-    dev_machine_id: Option<uuid::Uuid>,
-    dev_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `request.user.user_timezone` (`TimezoneMixin`): the stored zone name,
@@ -456,13 +584,15 @@ async fn load_timezone_name(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<Option<String>, Denial> {
-    let zone: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(zone.and_then(|row| row.0))
+    let db = orm(pool);
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -505,67 +635,100 @@ async fn load_facts(
     actor: &Actor,
     project_id: Option<uuid::Uuid>,
 ) -> Result<Facts, Denial> {
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let workspace_id = workspace_id.map(|row| row.0);
+    let db = orm(pool);
+    let workspace_id = workspace_id_by_slug(pool, slug).await?;
 
     // BUG-7: `ProjectMemberPermission` SAFE has no `project_id` filter.
-    let project_member_any_ws: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.is_active
-           AND pm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let project_member_any_ws: bool = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Entity::belongs_to(workspaces::Entity)
+                .from(project_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::MemberId.eq(actor.id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .is_some();
 
     let project_admin: bool = match project_id {
         None => false,
-        Some(pid) => sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM project_members pm
-               JOIN workspaces w ON w.id = pm.workspace_id
-               WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-               AND pm.role = 20 AND pm.is_active AND pm.deleted_at IS NULL)",
-        )
-        .bind(slug)
-        .bind(actor.id)
-        .bind(pid)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?,
+        Some(pid) => project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                project_members::Entity::belongs_to(workspaces::Entity)
+                    .from(project_members::Column::WorkspaceId)
+                    .to(workspaces::Column::Id)
+                    .into(),
+            )
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(project_members::Column::MemberId.eq(actor.id))
+            .filter(project_members::Column::ProjectId.eq(pid))
+            .filter(project_members::Column::Role.eq(ROLE_ADMIN as i16))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .is_some(),
     };
 
-    let ws_admin_or_member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role IN (20, 15)
-           AND wm.is_active AND wm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let ws_admin_or_member: bool = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(actor.id))
+        .filter(workspace_members::Column::Role.is_in([ROLE_ADMIN as i16, ROLE_MEMBER as i16]))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .is_some();
 
     // BUG-6: `WorkspaceOwnerPermission` has no `is_active` filter.
-    let ws_owner_unfiltered: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-           AND wm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let ws_owner_unfiltered: bool = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(actor.id))
+        .filter(workspace_members::Column::Role.eq(ROLE_ADMIN as i16))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .is_some();
 
     Ok(Facts {
         workspace_id,
@@ -647,8 +810,8 @@ fn pool(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 }
 
 /// The owned request parts a gated handler hands back to Django when the
-/// body turns out to be empty or unparseable (bundled so the four body
-/// handlers stay under the argument-count lint).
+/// JSON body turns out to be unparseable (bundled so the four body handlers
+/// stay under the argument-count lint).
 struct ProxyRequest {
     method: Method,
     uri: Uri,
@@ -656,17 +819,73 @@ struct ProxyRequest {
     body: Bytes,
 }
 
-/// Parse a collected body (`None` = empty or unparseable).
+/// Decode negotiated JSON source text (`None` = unparseable).
 ///
-/// DRF parses the body inside the handler — after authN, the rewrite and the
-/// permission gate — so an empty body is `JSONParser`'s `ParseError` 400
-/// (`JSON parse error - Expecting value: line 1 column 1 (char 0)`), a
-/// malformed body is the same 400 family with the serde/json message
-/// swapped in, and an unauthenticated caller with a bad body still sees
-/// 401/403 first (`parsers.py:56-68`). Callers hand `None` back to Django
-/// via [`proxy_through`] for those exact bytes.
-fn parse_body_json(body: &Bytes) -> Option<Value> {
+/// Callers hand `None` back to Django via [`proxy_through`] for the exact
+/// `ParseError` bytes (an unauthenticated caller with a bad body still sees
+/// 401/403 first — parsing runs after the gate — `parsers.py:56-68`). Empty
+/// bodies never reach here: negotiation maps them to `{}` (verified live —
+/// the earlier `ParseError`-for-empty reading was wrong).
+fn parse_body_json(body: &[u8]) -> Option<Value> {
     serde_json::from_slice(body).ok()
+}
+
+/// Member write-path body spec: no list fields; a blank form `role` behaves
+/// as absent (the `ChoiceField` blank-input rule — not required, no
+/// `allow_blank` — verified live). A blank form `member` stays in the map so
+/// the `RelatedField` null rule fires downstream.
+const MEMBER_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &["role"],
+    };
+
+/// Invitation write-path body spec: same shape as the member spec (`role`
+/// is the same optional choice; `email` keeps `''` so the `CharField` blank
+/// rule fires — verified live).
+const INVITE_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: &[],
+        skip_blank_fields: &["role"],
+    };
+
+/// Content-negotiated member/invitation write body (PIDASHCONV-1391): empty
+/// bodies are `{}`, form/multipart arrives as the HTML-input map (last value
+/// wins, blank `role` skipped per `spec`), JSON keeps the existing decode
+/// (`None` still proxies for Django's exact `ParseError` bytes), and a media
+/// type no DRF parser accepts (or a missing `Content-Type` with a body) is
+/// the 415. The flag reports HTML (form/multipart) input so member call sites
+/// can apply the `RelatedField` blank rule.
+///
+/// Multipart *file* parts are dropped: no member/invitation field is a file
+/// field, so a text-only multipart request is the whole named surface (same
+/// convention as PIDASHCONV-1149).
+fn parse_write_body(
+    headers: &HeaderMap,
+    body: &[u8],
+    spec: &crate::v1_cycles_modules::body::BodySpec,
+) -> Result<(Option<Value>, bool), Denial> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, spec) {
+        Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::UnsupportedMediaType(detail)),
+        Err(BodyError::ParseDetail(detail)) => Err(Denial::ParseDetail(detail)),
+        Err(BodyError::ServerError) => Err(Denial::ServerError),
+        Ok(NegotiatedBody::Empty) => Ok((Some(Value::Object(serde_json::Map::new())), false)),
+        Ok(NegotiatedBody::JsonText { text, .. }) => Ok((parse_body_json(text.as_bytes()), false)),
+        Ok(NegotiatedBody::Form { map, .. }) => Ok((Some(Value::Object(map)), true)),
+    }
+}
+
+/// DRF `RelatedField.run_validation` forces a present-but-empty HTML value to
+/// `None` before the null check (`relations.py:150-154`, probed POST +
+/// PATCH), so form `member=` fails `may not be null` instead of the UUID
+/// message. Applied to the form arm only: the JSON arm keeps the existing
+/// path (which answers the UUID message — a pre-existing deviation, see PR
+/// notes).
+fn member_blank_to_null(data: &mut serde_json::Map<String, Value>) {
+    if matches!(data.get("member"), Some(Value::String(s)) if s.is_empty()) {
+        data.insert("member".to_owned(), Value::Null);
+    }
 }
 
 /// `type(data).__name__` for the serializer non-dict message
@@ -756,7 +975,8 @@ async fn rewrite_project_id(
         workspace_slug: slug,
         actor_id,
     };
-    queries_projmem::fetch_project_id(pool, &scope, raw)
+    let db = orm(pool);
+    queries_projmem::fetch_project_id(&db, &scope, raw)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::ProjectNotFound)
@@ -770,7 +990,8 @@ async fn require_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<(), Denial
         workspace_slug: slug,
         actor_id: uuid::Uuid::nil(),
     };
-    let known = queries_projmem::fetch_workspace_exists(pool, &scope)
+    let db = orm(pool);
+    let known = queries_projmem::fetch_workspace_exists(&db, &scope)
         .await
         .map_err(|_| Denial::ServerError)?;
     if known {
@@ -871,6 +1092,17 @@ pub fn render_asset_url(asset: &AssetRef) -> Option<String> {
     }
 }
 
+/// The `file_assets` columns `asset_url` resolves on, plus the joined
+/// workspace slug (`LEFT JOIN workspaces`).
+#[derive(Debug, FromQueryResult)]
+struct AssetRow {
+    id: uuid::Uuid,
+    entity_type: Option<String>,
+    workspace_slug: Option<String>,
+    project_id: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
+}
+
 /// Fetch `asset_url` values for a set of asset ids (one statement).
 pub async fn fetch_asset_urls(
     pool: &sqlx::PgPool,
@@ -880,32 +1112,36 @@ pub async fn fetch_asset_urls(
     if asset_ids.is_empty() {
         return Ok(out);
     }
-    let placeholders: Vec<String> = (1..=asset_ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "SELECT a.id, a.entity_type, w.slug AS workspace_slug, a.project_id, a.issue_id
-         FROM file_assets a LEFT JOIN workspaces w ON w.id = a.workspace_id
-         WHERE a.id IN ({}) AND a.deleted_at IS NULL",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query(&sql);
-    for id in asset_ids {
-        query = query.bind(*id);
-    }
-    let rows = query
-        .fetch_all(pool)
+    let db = orm(pool);
+    let rows = file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::Id,
+            file_assets::Column::EntityType,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .join(
+            JoinType::LeftJoin,
+            file_assets::Entity::belongs_to(workspaces::Entity)
+                .from(file_assets::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(file_assets::Column::Id.is_in(asset_ids.iter().copied()))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .into_model::<AssetRow>()
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     for row in rows {
         let asset = AssetRef {
-            id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-            entity_type: row
-                .try_get("entity_type")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_slug: row
-                .try_get("workspace_slug")
-                .map_err(|_| Denial::ServerError)?,
-            project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-            issue_id: row.try_get("issue_id").map_err(|_| Denial::ServerError)?,
+            id: row.id,
+            entity_type: row.entity_type,
+            workspace_slug: row.workspace_slug,
+            project_id: row.project_id,
+            issue_id: row.issue_id,
         };
         if let Some(url) = render_asset_url(&asset) {
             out.insert(asset.id, url);
@@ -953,41 +1189,68 @@ pub fn render_invite(inv: &InviteFull, tz: &Tz) -> Value {
     })
 }
 
-fn map_invite_full(row: &sqlx::postgres::PgRow) -> Result<InviteFull, Denial> {
-    Ok(InviteFull {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        email: row.try_get("email").map_err(|_| Denial::ServerError)?,
-        role: row
-            .try_get::<i16, _>("role")
-            .map(i32::from)
-            .map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-        responded_at: row
-            .try_get("responded_at")
-            .map_err(|_| Denial::ServerError)?,
-        accepted: row.try_get("accepted").map_err(|_| Denial::ServerError)?,
-    })
+/// The invite columns the serialize shape carries (`role` is `smallint`).
+#[derive(Debug, FromQueryResult)]
+struct InviteRow {
+    id: uuid::Uuid,
+    email: String,
+    role: i16,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    responded_at: Option<chrono::DateTime<chrono::Utc>>,
+    accepted: bool,
 }
 
-const INVITE_FULL_SELECT: &str =
-    "SELECT i.id, i.email, i.role, i.created_at, i.updated_at, i.responded_at, i.accepted
-FROM workspace_member_invites i
-JOIN workspaces w ON w.id = i.workspace_id";
+fn map_invite_row(row: InviteRow) -> InviteFull {
+    InviteFull {
+        id: row.id,
+        email: row.email,
+        role: i32::from(row.role),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        responded_at: row.responded_at,
+        accepted: row.accepted,
+    }
+}
+
+/// Invite rows for a workspace slug, joined to `workspaces` for the slug
+/// filter (the Q6 JOIN/WHERE, `views/invite.py:36-37`).
+fn invite_rows_by_slug(slug: &str) -> sea_orm::Select<workspace_member_invites::Entity> {
+    workspace_member_invites::Entity::find()
+        .select_only()
+        .columns([
+            workspace_member_invites::Column::Id,
+            workspace_member_invites::Column::Email,
+            workspace_member_invites::Column::Role,
+            workspace_member_invites::Column::CreatedAt,
+            workspace_member_invites::Column::UpdatedAt,
+            workspace_member_invites::Column::RespondedAt,
+            workspace_member_invites::Column::Accepted,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            workspace_member_invites::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_member_invites::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+}
 
 async fn fetch_invites_full(pool: &sqlx::PgPool, slug: &str) -> Result<Vec<InviteFull>, Denial> {
     // `WorkspaceMemberInvite.Meta.ordering = ("-created_at",)`
     // (`db/models/workspace.py:255`) — the fixture Q6 text omits it
     // (same defect family as its `deleted_at` predicate; flagged on
     // PIDASHCONV-373), but the live queryset carries it.
-    let rows = sqlx::query(&format!(
-        "{INVITE_FULL_SELECT}\nWHERE w.slug = $1 AND i.deleted_at IS NULL\nORDER BY i.created_at DESC"
-    ))
-    .bind(slug)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(map_invite_full).collect()
+    let db = orm(pool);
+    let rows = invite_rows_by_slug(slug)
+        .order_by_desc(workspace_member_invites::Column::CreatedAt)
+        .into_model::<InviteRow>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows.into_iter().map(map_invite_row).collect())
 }
 
 async fn fetch_invite_full(
@@ -995,15 +1258,14 @@ async fn fetch_invite_full(
     slug: &str,
     pk: uuid::Uuid,
 ) -> Result<Option<InviteFull>, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
-        "{INVITE_FULL_SELECT}\nWHERE w.slug = $1 AND i.deleted_at IS NULL AND i.id = $2"
-    ))
-    .bind(slug)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| map_invite_full(&row)).transpose()
+    let db = orm(pool);
+    let row = invite_rows_by_slug(slug)
+        .filter(workspace_member_invites::Column::Id.eq(pk))
+        .into_model::<InviteRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(map_invite_row))
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,10 +1353,16 @@ async fn validate_member_value(
             return None;
         }
     };
-    let known: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(id)
-        .fetch_one(pool)
+    let db = orm(pool);
+    let known: bool = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(id))
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
+        .map(|hit| hit.is_some())
         .unwrap_or(false);
     if !known {
         errors
@@ -1102,16 +1370,25 @@ async fn validate_member_value(
             .push(format!("Invalid pk \"{id}\" - object does not exist."));
         return None;
     }
-    let in_workspace: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
+    let in_workspace: bool = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(id))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map(|hit| hit.is_some())
+        .unwrap_or(false);
     if !in_workspace {
         errors.member.push("Member not found in workspace".into());
         return None;
@@ -1166,13 +1443,6 @@ fn validate_role_value(value: &Value, errors: &mut FieldErrors) -> Option<i32> {
             None
         }
     }
-}
-
-/// Python `str.strip()` with no arguments: Unicode whitespace plus
-/// `\x1c`-`\x1f`, which Rust's `char::is_whitespace` does not cover
-/// (verified against CPython: `'\x1c'.isspace()` is true).
-fn py_strip(value: &str) -> &str {
-    value.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c))
 }
 
 /// Validate `email` through DRF's `CharField(max_length=255)` pipeline
@@ -1364,32 +1634,41 @@ fn email_domain_byte(byte: u8) -> bool {
 // User fetching (full `UserLite` columns)
 // ---------------------------------------------------------------------------
 
-const USER_LITE_SELECT: &str =
-    "SELECT u.id, u.first_name, u.last_name, u.email, u.avatar, u.avatar_asset_id, u.display_name
-FROM users u";
+/// The `UserLite` columns (`email` is nullable, `db/models/user.py:61`).
+#[derive(Debug, FromQueryResult)]
+struct UserLiteRow {
+    id: uuid::Uuid,
+    first_name: String,
+    last_name: String,
+    email: Option<String>,
+    avatar: String,
+    avatar_asset_id: Option<uuid::Uuid>,
+    display_name: String,
+}
 
-fn map_user_lite(row: &sqlx::postgres::PgRow) -> Result<UserLite, Denial> {
-    Ok(UserLite {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        first_name: row.try_get("first_name").map_err(|_| Denial::ServerError)?,
-        last_name: row.try_get("last_name").map_err(|_| Denial::ServerError)?,
-        // `email` is nullable (`db/models/user.py:61`); a non-opt decode
-        // 500s the whole list on one NULL row.
-        email: row
-            .try_get::<Option<String>, _>("email")
-            .map_err(|_| Denial::ServerError)?,
-        avatar: row
-            .try_get::<Option<String>, _>("avatar")
-            .map_err(|_| Denial::ServerError)?
-            .unwrap_or_default(),
-        avatar_asset_id: row
-            .try_get("avatar_asset_id")
-            .map_err(|_| Denial::ServerError)?,
-        display_name: row
-            .try_get::<Option<String>, _>("display_name")
-            .map_err(|_| Denial::ServerError)?
-            .unwrap_or_default(),
-    })
+fn map_user_row(row: UserLiteRow) -> UserLite {
+    UserLite {
+        id: row.id,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        email: row.email,
+        avatar: row.avatar,
+        avatar_asset_id: row.avatar_asset_id,
+        display_name: row.display_name,
+    }
+}
+
+/// The `UserLite` columns, for the by-id / by-list reads below.
+fn user_lite_rows() -> sea_orm::Select<users::Entity> {
+    users::Entity::find().select_only().columns([
+        users::Column::Id,
+        users::Column::FirstName,
+        users::Column::LastName,
+        users::Column::Email,
+        users::Column::Avatar,
+        users::Column::AvatarAssetId,
+        users::Column::DisplayName,
+    ])
 }
 
 /// Full `UserLite` rows for an id list (the member views embed the user
@@ -1412,20 +1691,15 @@ async fn fetch_users_lite(
         // Django's `id__in=[]` empty-result short-circuit: no statement.
         return Ok(Vec::new());
     }
-    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "{USER_LITE_SELECT} WHERE u.id IN ({}) ORDER BY u.created_at DESC",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query(&sql);
-    for id in ids {
-        query = query.bind(*id);
-    }
-    let rows = query
-        .fetch_all(pool)
+    let db = orm(pool);
+    let rows = user_lite_rows()
+        .filter(users::Column::Id.is_in(ids.iter().copied()))
+        .order_by_desc(users::Column::CreatedAt)
+        .into_model::<UserLiteRow>()
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(map_user_lite).collect()
+    Ok(rows.into_iter().map(map_user_row).collect())
 }
 
 /// Key user rows by id (for callers walking another queryset's order).
@@ -1436,18 +1710,26 @@ fn users_by_id(users: Vec<UserLite>) -> HashMap<uuid::Uuid, UserLite> {
 /// One user by id (`User.objects.get`, `member.py:190`) — the plain
 /// manager, no soft-delete scope (see [`fetch_users_lite`]).
 async fn fetch_user_lite(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<Option<UserLite>, Denial> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&format!("{USER_LITE_SELECT} WHERE u.id = $1"))
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| map_user_lite(&row)).transpose()
+    let db = orm(pool);
+    let row = user_lite_rows()
+        .filter(users::Column::Id.eq(id))
+        .into_model::<UserLiteRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(map_user_row))
 }
 
 // ---------------------------------------------------------------------------
 // Handlers: workspace members
 // ---------------------------------------------------------------------------
+
+/// One workspace membership (id + role) for the workspace-members list.
+#[derive(Debug, FromQueryResult)]
+struct MembershipRow {
+    member_id: uuid::Uuid,
+    role: i16,
+}
 
 /// `GET workspaces/<slug>/members/` (`member.py:69-91`): `UserLite` + the
 /// workspace `role` per entry, in queryset order.
@@ -1481,15 +1763,23 @@ async fn ws_members_inner(
     // ids+roles ride this statement and users are fetched separately.
     // `WorkspaceMember.Meta.ordering = ("-created_at",)`
     // (`db/models/workspace.py:227`) — the Python loop walks this order.
-    let memberships: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
-        "SELECT wm.member_id, wm.role FROM workspace_members wm
-         WHERE wm.workspace_id = $1 AND wm.deleted_at IS NULL
-         ORDER BY wm.created_at DESC",
-    )
-    .bind(workspace_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = orm(&pool);
+    let memberships: Vec<(uuid::Uuid, i16)> = workspace_members::Entity::find()
+        .select_only()
+        .columns([
+            workspace_members::Column::MemberId,
+            workspace_members::Column::Role,
+        ])
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .into_model::<MembershipRow>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .into_iter()
+        .map(|row| (row.member_id, row.role))
+        .collect();
     let ids: Vec<uuid::Uuid> = memberships.iter().map(|row| row.0).collect();
     let users = users_by_id(fetch_users_lite(&pool, &ids).await?);
     let asset_ids: Vec<uuid::Uuid> = users
@@ -1547,7 +1837,8 @@ async fn pm_list_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let ids = queries_projmem::fetch_project_member_ids(&pool, &scope, project_id)
+    let db = orm(&pool);
+    let ids = queries_projmem::fetch_project_member_ids(&db, &scope, project_id)
         .await
         .map_err(|_| Denial::ServerError)?;
     // The rendered order is the *users* queryset order (`-created_at`),
@@ -1606,9 +1897,11 @@ async fn pm_create_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(actor.timezone.as_deref())?;
     // The body parses after the gate (`post()`: the serializer is built
-    // from `request.data`); empty/unparseable bodies proxy for the exact
-    // `ParseError` bytes.
-    let Some(json) = parse_body_json(&req.body) else {
+    // from `request.data`); unparseable JSON proxies for Django's exact
+    // `ParseError` bytes, while empty bodies are `{}` and a media type no
+    // DRF parser accepts is the 415 (PIDASHCONV-1391).
+    let (maybe_json, from_form) = parse_write_body(&req.headers, &req.body, &MEMBER_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -1618,10 +1911,13 @@ async fn pm_create_inner(
         return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
     };
 
-    let data = match json {
+    let mut data = match json {
         Value::Object(map) => map,
         ref other => return Err(non_dict_denial(other)),
     };
+    if from_form {
+        member_blank_to_null(&mut data);
+    }
     let mut errors = FieldErrors::default();
     let member_id = match data.get("member") {
         None => {
@@ -1642,40 +1938,49 @@ async fn pm_create_inner(
     let (member_id, role) = (member_id.expect("validated"), role.expect("validated"));
 
     // `ProjectBaseModel.save`: `workspace = project.workspace`.
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace_id else {
+    let db = orm(&pool);
+    let workspace_id: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(workspace_id) = workspace_id else {
         return Err(Denial::ServerError);
     };
 
-    let membership_id = uuid::Uuid::new_v4();
     let mut tx = pool.begin().await.map_err(|_| Denial::ServerError)?;
-    let insert = sqlx::query(
-        "INSERT INTO project_members (id, workspace_id, project_id, member_id, role,
-            comment, view_props, default_props, preferences, sort_order,
-            is_active, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5,
-            NULL, $6::jsonb, $6::jsonb, $7::jsonb, 65535,
-            true, $8, NULL, now(), now(), NULL)",
+    let props: Value =
+        serde_json::from_str(&default_props_json()).map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let membership_id = match pidash_services::domain::projects::members::add(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        &pidash_services::domain::projects::members::NewProjectMember {
+            workspace_id,
+            project_id: Some(project_id),
+            user_id: Some(member_id),
+            role: role as i16,
+            created_by: Some(actor.id),
+            view_props: &props,
+            default_props: &props,
+            preferences: &prefs,
+            now: chrono::Utc::now(),
+            ignore_conflicts: false,
+            db_now: true,
+        },
     )
-    .bind(membership_id)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    .bind(role)
-    .bind(default_props_json())
-    .bind(default_preferences_json())
-    .bind(actor.id)
-    .execute(&mut *tx)
-    .await;
-    if let Err(err) = insert {
-        let _ = tx.rollback().await;
-        return Err(integrity_denial(&err));
-    }
+    .await
+    {
+        Ok(id) => id,
+        Err(err) => {
+            let _ = tx.rollback().await;
+            return Err(integrity_denial(&err));
+        }
+    };
     // `ProjectMember.save` side effect: one `ProjectUserProperty` row with
     // the member's minimum workspace sort order minus 10000.
     if let Err(err) =
@@ -1725,35 +2030,48 @@ async fn create_project_user_property(
     member_id: uuid::Uuid,
     actor_id: uuid::Uuid,
 ) -> Result<(), Denial> {
-    let min_sort: Option<f64> = sqlx::query_scalar(
-        "SELECT MIN(sort_order) FROM project_user_properties
-         WHERE workspace_id = $1 AND user_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .bind(member_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `MIN(sort_order)`: the smallest live sort order minus 10000, or
+    // 65535.0 when none (`sort_order` is NOT NULL, so the first row in
+    // ascending order is the minimum). On the caller's transaction
+    // through `TxConn`; the `add_property_db_now` kernel below stays sqlx.
+    let conn = pidash_db::orm_tx::TxConn::new(tx);
+    let min_sort: Option<f64> = project_user_properties::Entity::find()
+        .select_only()
+        .column(project_user_properties::Column::SortOrder)
+        .filter(project_user_properties::Column::WorkspaceId.eq(workspace_id))
+        .filter(project_user_properties::Column::UserId.eq(member_id))
+        .filter(project_user_properties::Column::DeletedAt.is_null())
+        .order_by_asc(project_user_properties::Column::SortOrder)
+        .limit(1)
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let sort_order = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
-    let insert = sqlx::query(
-        "INSERT INTO project_user_properties (id, workspace_id, project_id, user_id,
-            filters, display_filters, display_properties, rich_filters, preferences,
-            sort_order, created_by_id, updated_by_id, created_at, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4,
-            $5::jsonb, $6::jsonb, $7::jsonb, '{}', $8::jsonb,
-            $9, $10, NULL, now(), now(), NULL)",
+    let filters: Value =
+        serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
+    let display_filters: Value = serde_json::from_str(&default_issue_display_filters_json())
+        .map_err(|_| Denial::ServerError)?;
+    let display_properties: Value = serde_json::from_str(&default_issue_display_properties_json())
+        .map_err(|_| Denial::ServerError)?;
+    let prefs: Value =
+        serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
+    let insert = pidash_services::domain::projects::members::add_property_db_now(
+        &pidash_db::orm_tx::TxConn::new(tx),
+        &pidash_services::domain::projects::members::NewMemberProperty {
+            workspace_id,
+            project_id,
+            user_id: member_id,
+            filters: &filters,
+            display_filters: &display_filters,
+            display_properties: &display_properties,
+            rich_filters: &serde_json::json!({}),
+            preferences: &prefs,
+            sort_order,
+            created_by: Some(actor_id),
+            now: chrono::Utc::now(),
+        },
     )
-    .bind(uuid::Uuid::new_v4())
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(member_id)
-    .bind(default_issue_filters_json())
-    .bind(default_issue_display_filters_json())
-    .bind(default_issue_display_properties_json())
-    .bind(default_preferences_json())
-    .bind(sort_order)
-    .bind(actor_id)
-    .execute(&mut **tx)
     .await;
     if let Err(err) = insert {
         return Err(integrity_denial(&err));
@@ -1801,8 +2119,9 @@ fn integrity_denial(err: &sqlx::Error) -> Denial {
 }
 
 /// `GET .../members/<pk>/` (`member.py:175-192`): the *user* profile, not
-/// the membership row. A non-UUID `pk` never reaches the view in Django
-/// (the `<uuid:pk>` converter rejects it), so proxy for the exact 404.
+/// the membership row. Only the canonical spelling reaches the view in
+/// Django (the `<uuid:pk>` converter rejects the rest), so proxy every
+/// other spelling for the exact resolver 404.
 async fn pm_detail_get(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -1811,8 +2130,18 @@ async fn pm_detail_get(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(pk) = pk_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Django routes this segment through the `<uuid:pk>` converter
+    // (`api/urls/member.py:21,31`), whose regex is lowercase-hyphenated
+    // canonical form only, matched case-sensitively — every other spelling
+    // resolver-404s before auth. `Uuid::parse_str` also accepts uppercase,
+    // simple, braced and `urn:uuid:` spellings, so gate on the raw segment
+    // and proxy the rest for Django's own resolver 404 (PIDASHCONV-1095 /
+    // -1132 / -1162 / -1193 / -1205 precedent, PIDASHCONV-1393).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
     };
     into_result_response(pm_detail_get_inner(&state, &slug, &project_raw, pk, &headers).await)
 }
@@ -1842,7 +2171,8 @@ async fn pm_detail_get_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let membership = queries_projmem::fetch_project_member(&pool, &scope, project_id, pk)
+    let db = orm(&pool);
+    let membership = queries_projmem::fetch_project_member(&db, &scope, project_id, pk)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
@@ -1872,8 +2202,14 @@ async fn pm_detail_patch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(pk) = pk_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Same canonical-spelling gate as the GET handler: only a
+    // lowercase-hyphenated segment matches Django's `<uuid:pk>` route;
+    // everything else proxies for the resolver 404 (PIDASHCONV-1393).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
     };
     into_result_response(
         pm_detail_patch_inner(
@@ -1916,15 +2252,18 @@ async fn pm_detail_patch_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let membership = queries_projmem::fetch_project_member(&pool, &scope, project_id, pk)
+    let db = orm(&pool);
+    let membership = queries_projmem::fetch_project_member(&db, &scope, project_id, pk)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
     // The body parses after the row fetch (`patch()`: `objects.get` runs
-    // before the serializer reads `request.data`); empty/unparseable bodies
-    // proxy for the exact `ParseError` bytes, non-dict bodies 400 with no
-    // write.
-    let Some(json) = parse_body_json(&req.body) else {
+    // before the serializer reads `request.data`); unparseable JSON proxies
+    // for Django's exact `ParseError` bytes, while empty bodies are `{}` and
+    // a media type no DRF parser accepts is the 415 (PIDASHCONV-1391).
+    // Non-dict bodies 400 with no write.
+    let (maybe_json, from_form) = parse_write_body(&req.headers, &req.body, &MEMBER_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -1934,10 +2273,13 @@ async fn pm_detail_patch_inner(
         return Ok(proxy_through(state.clone(), method, uri, headers, body).await);
     };
 
-    let data = match json {
+    let mut data = match json {
         Value::Object(map) => map,
         ref other => return Err(non_dict_denial(other)),
     };
+    if from_form {
+        member_blank_to_null(&mut data);
+    }
     let mut errors = FieldErrors::default();
     // Partial: absent keys keep their rows; present keys validate. A failed
     // present key leaves the old value in place, but the errors below stop
@@ -1957,16 +2299,13 @@ async fn pm_detail_patch_inner(
     if !errors.is_empty() {
         return Err(Denial::BadJson(errors.body()));
     }
-    sqlx::query(
-        "UPDATE project_members SET member_id = $1, role = $2,
-            updated_by_id = $3, updated_at = now()
-         WHERE id = $4",
+    pidash_services::domain::projects::members::update_member_identity(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        membership.id,
+        member_id,
+        role,
+        actor.id,
     )
-    .bind(member_id)
-    .bind(role)
-    .bind(actor.id)
-    .bind(membership.id)
-    .execute(&pool)
     .await
     .map_err(|err| integrity_denial(&err))?;
     // `role` is non-nullable in the model; `member` may be null and renders
@@ -1977,13 +2316,16 @@ async fn pm_detail_patch_inner(
 
 /// Current role of a membership row (the PATCH base when `role` is absent).
 async fn membership_role(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<Option<i32>, Denial> {
-    let row: Option<(Option<i16>,)> =
-        sqlx::query_as("SELECT role FROM project_members WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0).map(i32::from))
+    let db = orm(pool);
+    let role: Option<i16> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .filter(project_members::Column::Id.eq(*id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 /// `DELETE .../members/<pk>/` (`member.py:218-222`): flip `is_active`, keep
@@ -1996,8 +2338,14 @@ async fn pm_detail_delete(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(pk) = pk_raw.parse::<uuid::Uuid>() else {
-        return proxy_through(state, method, uri, headers, body).await;
+    // Same canonical-spelling gate as the GET handler: only a
+    // lowercase-hyphenated segment matches Django's `<uuid:pk>` route;
+    // everything else proxies for the resolver 404 (PIDASHCONV-1393).
+    let pk = match classify_uuid_segment(&pk_raw) {
+        UuidSegment::Canonical(pk) => pk,
+        UuidSegment::NonCanonical | UuidSegment::Garbage => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
     };
     into_result_response(pm_detail_delete_inner(&state, &slug, &project_raw, pk, &headers).await)
 }
@@ -2026,18 +2374,16 @@ async fn pm_detail_delete_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let membership = queries_projmem::fetch_project_member(&pool, &scope, project_id, pk)
+    let db = orm(&pool);
+    let membership = queries_projmem::fetch_project_member(&db, &scope, project_id, pk)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
-    sqlx::query(
-        "UPDATE project_members SET is_active = false,
-            updated_by_id = $1, updated_at = now()
-         WHERE id = $2",
+    pidash_services::domain::projects::members::deactivate_actor_first(
+        &pidash_db::pool::sea_orm_connection(&pool),
+        membership.id,
+        actor.id,
     )
-    .bind(actor.id)
-    .bind(membership.id)
-    .execute(&pool)
     .await
     .map_err(|_| Denial::ServerError)?;
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -2123,19 +2469,15 @@ async fn inv_create_inner(
 
     // `Workspace.objects.get(slug=slug)` — miss 404s through the viewset
     // exception handler (unreachable behind the gate, ported in place).
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace_id else {
+    let Some(workspace_id) = workspace_id_by_slug(&pool, slug).await? else {
         return Err(Denial::InviteNotFound);
     };
     // The body parses after the workspace fetch (`create()`: `objects.get`
-    // runs before the serializer reads `request.data`); empty/unparseable
-    // bodies proxy for the exact `ParseError` bytes.
-    let Some(json) = parse_body_json(&req.body) else {
+    // runs before the serializer reads `request.data`); unparseable JSON
+    // proxies for Django's exact `ParseError` bytes, while empty bodies are
+    // `{}` and a media type no DRF parser accepts is the 415 (PIDASHCONV-1391).
+    let (maybe_json, _) = parse_write_body(&req.headers, &req.body, &INVITE_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -2164,19 +2506,33 @@ async fn inv_create_inner(
         Some(value) => validate_role_value(value, &mut errors),
     };
     // `validate()`: duplicate email in the workspace (`invite.py:53-60`).
-    if let Some(email) = email.as_deref() {
-        let duplicate: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM workspace_member_invites i
-               JOIN workspaces w ON w.id = i.workspace_id
-               WHERE i.email = $1 AND w.slug = $2 AND i.deleted_at IS NULL)",
-        )
-        .bind(email)
-        .bind(slug)
-        .fetch_one(&pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        if duplicate {
-            errors.non_field.push("Email already invited".into());
+    // DRF runs `to_internal_value` before `validate()`, so any field-level
+    // failure means this check never runs — skip it when errors exist.
+    if errors.is_empty() {
+        if let Some(email) = email.as_deref() {
+            let db = orm(&pool);
+            let duplicate: bool = workspace_member_invites::Entity::find()
+                .select_only()
+                .column(workspace_member_invites::Column::Id)
+                .join(
+                    JoinType::InnerJoin,
+                    workspace_member_invites::Entity::belongs_to(workspaces::Entity)
+                        .from(workspace_member_invites::Column::WorkspaceId)
+                        .to(workspaces::Column::Id)
+                        .into(),
+                )
+                .filter(workspace_member_invites::Column::Email.eq(email))
+                .filter(workspaces::Column::Slug.eq(slug))
+                .filter(workspace_member_invites::Column::DeletedAt.is_null())
+                .limit(1)
+                .into_tuple::<uuid::Uuid>()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?
+                .is_some();
+            if duplicate {
+                errors.non_field.push("Email already invited".into());
+            }
         }
     }
     if !errors.is_empty() {
@@ -2185,24 +2541,33 @@ async fn inv_create_inner(
     let (email, role) = (email.expect("validated"), role.expect("validated"));
 
     let invite_id = uuid::Uuid::new_v4();
-    let insert = sqlx::query(
-        "INSERT INTO workspace_member_invites (id, email, accepted, token, message,
-            responded_at, role, workspace_id, created_by_id, updated_by_id,
-            created_at, updated_at, deleted_at)
-         VALUES ($1, $2, false, '', NULL,
-            NULL, $3, $4, $5, NULL,
-            now(), now(), NULL)",
-    )
-    .bind(invite_id)
-    .bind(&email)
-    .bind(role)
-    .bind(workspace_id)
-    .bind(actor.id)
-    .execute(&pool)
-    .await;
-    if let Err(err) = insert {
-        return Err(integrity_denial(&err));
-    }
+    let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+    let invite = workspace_member_invites::ActiveModel {
+        id: Set(invite_id),
+        email: Set(email.clone()),
+        accepted: Set(false),
+        token: Set(String::new()),
+        message: Set(None),
+        responded_at: Set(None),
+        role: Set(role as i16),
+        workspace_id: Set(workspace_id),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        deleted_at: Set(None),
+    };
+    let db = orm(&pool);
+    workspace_member_invites::Entity::insert(invite)
+        .exec_without_returning(&db)
+        .await
+        .map_err(|error| {
+            if pidash_db::orm_tx::is_integrity_violation(&error) {
+                Denial::BadPayload
+            } else {
+                Denial::ServerError
+            }
+        })?;
     let invite = fetch_invite_full(&pool, slug, invite_id)
         .await?
         .ok_or(Denial::ServerError)?;
@@ -2315,9 +2680,12 @@ async fn inv_detail_patch_inner(
         .await?
         .ok_or(Denial::InviteNotFound)?;
     // The body parses after the row fetch (`partial_update()`: `get_object`
-    // runs before `request.data`); empty/unparseable bodies proxy for the
-    // exact `ParseError` bytes, non-dict bodies 400 with no write.
-    let Some(json) = parse_body_json(&req.body) else {
+    // runs before `request.data`); unparseable JSON proxies for Django's
+    // exact `ParseError` bytes, while empty bodies are `{}` and a media type
+    // no DRF parser accepts is the 415 (PIDASHCONV-1391). Non-dict bodies
+    // 500 with no write (the email guard reads `.get` before validation).
+    let (maybe_json, _) = parse_write_body(&req.headers, &req.body, &INVITE_BODY_SPEC)?;
+    let Some(json) = maybe_json else {
         let ProxyRequest {
             method,
             uri,
@@ -2357,17 +2725,25 @@ async fn inv_detail_patch_inner(
     if !errors.is_empty() {
         return Err(Denial::BadJson(errors.body()));
     }
-    sqlx::query(
-        "UPDATE workspace_member_invites SET role = $1,
-            updated_by_id = $2, updated_at = now()
-         WHERE id = $3",
-    )
-    .bind(role)
-    .bind(actor.id)
-    .bind(invite.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+    let db = orm(&pool);
+    workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::Role,
+            Expr::value(role as i16),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedById,
+            Expr::value(actor.id),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedAt,
+            Expr::value(now),
+        )
+        .filter(workspace_member_invites::Column::Id.eq(invite.id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
         .ok_or(Denial::ServerError)?;
@@ -2424,16 +2800,25 @@ async fn inv_detail_delete_inner(
     // Instance `delete()` → `save()`: `deleted_at` + `updated_*`
     // (`mixins.py:72-77`, `base.py:23-44`), then the unconditional
     // `soft_delete_related_objects.delay(...)` enqueue (`:78`).
-    let now = chrono::Utc::now();
-    sqlx::query(
-        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(invite.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+    let db = orm(&pool);
+    workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::DeletedAt,
+            Expr::value(now),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedAt,
+            Expr::value(now),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedById,
+            Expr::value(actor.id),
+        )
+        .filter(workspace_member_invites::Column::Id.eq(invite.id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     super::handlers_project::enqueue_soft_delete(&pool, "workspacememberinvite", &invite.id).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -2458,16 +2843,9 @@ async fn users_me_inner(state: &AppState, headers: &HeaderMap) -> Result<Respons
     // `request.user` straight from authentication — no manager scope, so a
     // soft-deleted row still renders (a missing row entirely 500s, as the
     // FK fetch would in Python).
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&format!("{USER_LITE_SELECT} WHERE u.id = $1"))
-            .bind(actor.id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Err(Denial::ServerError);
-    };
-    let user = map_user_lite(&row)?;
+    let user = fetch_user_lite(&pool, actor.id)
+        .await?
+        .ok_or(Denial::ServerError)?;
     let assets =
         fetch_asset_urls(&pool, &user.avatar_asset_id.into_iter().collect::<Vec<_>>()).await?;
     Ok(ok_json(render_user_lite(
@@ -3010,6 +3388,57 @@ mod tests {
         assert!(parse_invite_pk("11111111-1111-1111-1111-111111111111").is_ok());
         assert!(matches!(parse_invite_pk("abc"), Err(Denial::BadDetail)));
     }
+
+    #[test]
+    fn write_body_negotiates() {
+        let headers_for = |content_type: &str, len: usize| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", content_type.parse().unwrap());
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            headers
+        };
+        // Form input: last value wins, blank `role` behaves as absent.
+        let body = b"member=ae5c9c1e-7b6e-4c7e-bf2c-9d1e5f6a7b8c&role=";
+        let headers = headers_for("application/x-www-form-urlencoded", body.len());
+        let (json, from_form) = parse_write_body(&headers, body, &MEMBER_BODY_SPEC).expect("form");
+        assert!(from_form);
+        let map = json.expect("map").as_object().cloned().expect("object");
+        assert_eq!(
+            map.get("member"),
+            Some(&Value::String(
+                "ae5c9c1e-7b6e-4c7e-bf2c-9d1e5f6a7b8c".to_owned()
+            ))
+        );
+        assert!(!map.contains_key("role"));
+        // A blank form `member` fails like null downstream.
+        let mut blank = serde_json::Map::new();
+        blank.insert("member".to_owned(), Value::String(String::new()));
+        member_blank_to_null(&mut blank);
+        assert_eq!(blank.get("member"), Some(&Value::Null));
+        // The JSON arm keeps the existing decode.
+        let json_body = br#"{"role": 5}"#;
+        let headers = headers_for("application/json", json_body.len());
+        let (json, from_form) =
+            parse_write_body(&headers, json_body, &MEMBER_BODY_SPEC).expect("json");
+        assert!(!from_form);
+        assert_eq!(json, Some(serde_json::json!({"role": 5})));
+        // Unknown media types 415 with the DRF detail.
+        let text_body = br#"{"role": 5}"#;
+        let headers = headers_for("text/plain", text_body.len());
+        let err = parse_write_body(&headers, text_body, &MEMBER_BODY_SPEC).expect_err("415");
+        let (status, body) = err.status_and_body();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            body.as_deref(),
+            Some(r#"{"detail":"Unsupported media type \"text/plain\" in request."}"#)
+        );
+        assert!(matches!(err, Denial::UnsupportedMediaType(_)));
+        // Empty bodies are `{}`.
+        let (json, from_form) =
+            parse_write_body(&HeaderMap::new(), b"", &MEMBER_BODY_SPEC).expect("empty");
+        assert!(!from_form);
+        assert_eq!(json, Some(Value::Object(serde_json::Map::new())));
+    }
 }
 
 /// Live scratch-DB round trips (env-gated, the `queries_projmem` precedent):
@@ -3079,6 +3508,9 @@ mod live_tests {
         }
         if !body.is_empty() {
             builder = builder.header("content-type", "application/json");
+            // Hyper sets this on the wire; negotiation keys emptiness off it
+            // exactly like Django keys off CONTENT_LENGTH.
+            builder = builder.header("content-length", body.len().to_string());
         }
         let req = builder.body(axum::body::Body::from(body)).expect("request");
         let response = app.oneshot(req).await.expect("serve");
@@ -3476,6 +3908,54 @@ mod live_tests {
         let pups: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_user_properties WHERE project_id = $1::uuid AND user_id = $2::uuid AND deleted_at IS NULL")
             .bind(&seed.project_id).bind(&fresh).fetch_one(&pool).await.expect("pup");
         assert_eq!(pups, 1);
+    }
+
+    #[tokio::test]
+    async fn live_member_create_after_app_accept_insert() {
+        // The app-project invite-accept INSERT is byte-identical to this
+        // handler's, so on one connection the v1 add reuses the statement
+        // the app path prepared; both must bind role as i16 (PIDASHCONV-1509).
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let seed = seed_collab(&pool).await;
+        crate::app_project::handlers_invites::create_project_member(
+            &pool,
+            &uid(&seed.project_id),
+            Some(uid(&seed.outsider_id)),
+            15_i16,
+            Some(uid(&seed.owner_id)),
+        )
+        .await
+        .expect("app accept insert");
+        let state = AppState::new("test").with_pools(pidash_db::Pools::primary_only(pool.clone()));
+        let app = Router::new().merge(routes()).with_state(state);
+        let (status, bytes) = call(
+            app,
+            "POST",
+            &format!(
+                "/api/v1/workspaces/{}/projects/{}/members/",
+                seed.slug, seed.project_id
+            ),
+            Some(&seed.owner_key),
+            Some(serde_json::json!({"member": seed.guest_id, "role": MEMBER})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
 
     #[tokio::test]

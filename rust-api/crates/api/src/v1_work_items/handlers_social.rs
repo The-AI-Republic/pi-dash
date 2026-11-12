@@ -33,7 +33,7 @@
 //! representative SQL in `queries_sub`, POST validation in the shapes,
 //! task kwargs in `tasks`, gates in [`super::perms`] over the F-06 kernel
 //! (`pidash_auth::permissions`), request bodies through
-//! `crate::v1_cycles_modules::{body, json_cpython}`, pagination through
+//! `crate::v1_cycles_modules::{body, json}`, pagination through
 //! `crate::paginator`, task fan-out through `pidash_jobs::queue`. This
 //! module owns the HTTP shell: API-key auth, the slug→UUID rewrite,
 //! permission wiring, the write statements, the read-shape rendering and
@@ -92,34 +92,53 @@
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
-use std::collections::HashMap;
-
 use axum::extract::{OriginalUri, Path, Query, Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
+use sea_orm::sea_query::{
+    Alias, Cond, Expr, Func, JoinType, Query as SeaQuery, SelectStatement, SimpleExpr,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult,
+    QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use serde_json::{Map, Value};
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+use pidash_db::entity::{
+    file_assets, issue_assignees, issue_comments, issue_labels, issue_links, issue_relations,
+    issues, project_members, projects, states, users, workspaces,
+};
+use pidash_db::orm_tx::into_sqlx;
+use std::sync::Arc;
+
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::comments as comment_domain;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
+use pidash_services::operations;
+use pidash_services::read;
 use pidash_services::v1_work_items::shape_issue::BASE_EXPANSION_NAMES;
 use pidash_services::v1_work_items::shape_links::{
     render_link, validate_link_create, LinkRow, LinkShowInput, LinkWriteError,
 };
 use pidash_services::v1_work_items::shape_social::{
-    render_comment, render_comment_create, validate_comment_create,
-    CommentCreateRepresentationInput, CommentCreateRow, CommentRepresentationInput, CommentRow,
-    CommentWriteInput,
+    render_comment, CommentRepresentationInput, CommentRow,
 };
 use pidash_services::v1_work_items::tasks as work_tasks;
 use pidash_services::v1_work_items::{filter_fields, python_number_str, FieldSpec};
 
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 
 use super::perms::{decide, gate_for, V1WorkItemsRoute};
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -128,8 +147,6 @@ use super::perms::{decide, gate_for, V1WorkItemsRoute};
 /// `handle_exception`'s `ObjectDoesNotExist` branch
 /// (`api/views/base.py:154-158`): every `.get()` miss on these endpoints.
 pub const RESOURCE_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
-/// `handle_exception`'s generic branch (`api/views/base.py:166-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 /// `handle_exception`'s `IntegrityError` branch
 /// (`api/views/base.py:142-147`): FK violations on the `created_by`
 /// override saves.
@@ -138,9 +155,6 @@ pub const PAYLOAD_NOT_VALID_BODY: &str = r#"{"error":"The payload is not valid"}
 /// (`api/views/base.py:149-153`): unparseable `created_by`/`created_at`
 /// overrides and `deleted_at` input.
 pub const VALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
-/// Comment external-duplicate 409 message (`views/issue.py:1910,2057`).
-pub const COMMENT_DUP_MESSAGE: &str =
-    "Work item comment with the same external id and external source already exists";
 /// Link create duplicate 400 (`serializers/issue.py:617-620`): the guard
 /// raises `ValidationError({"error": ...})` out of `save()`, and DRF
 /// renders the dict as-is — a STRING value, not the list form that
@@ -240,19 +254,50 @@ fn json_string(value: &str) -> String {
 /// post-pass escapes U+2028/U+2029 (`rest_framework/renderers.py`); the
 /// `app_project` `escape_u2028` precedent, applied to every JSON body here.
 fn json_response(status: StatusCode, body: String) -> Response {
-    let body = body
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
+    pidash_compat::response::json_response(status, pidash_compat::response::escape_u2028(&body))
 }
 
 /// Render a 201 JSON response with exact bytes.
 fn json_created(body: String) -> Response {
     json_response(StatusCode::CREATED, body)
+}
+
+/// Map an operation failure onto the `Denial` arms the moved handlers
+/// used (OVL-14, PIDASHCONV-1649). The comment operations never return
+/// the issues-missing/move-only variants (`NotFound`, `NotFoundBody`,
+/// `ProjectNotFound`, `Rejection`), so those arms 500 instead of
+/// rendering a body this module cannot spell.
+impl From<operations::Error> for Denial {
+    fn from(error: operations::Error) -> Self {
+        match error {
+            operations::Error::BadError(message) => Denial::BadError(message),
+            operations::Error::FieldErrors(body) => Denial::FieldErrors(body),
+            operations::Error::Conflict(body) => Denial::Conflict(body),
+            operations::Error::ServerError => Denial::ServerError,
+            operations::Error::NotFound
+            | operations::Error::NotFoundBody(_)
+            | operations::Error::ProjectNotFound
+            | operations::Error::Rejection { .. } => Denial::ServerError,
+        }
+    }
+}
+
+/// Wrap an operation outcome in the v1 response.
+fn op_response(outcome: operations::Outcome) -> Result<Response, Denial> {
+    let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
+    Ok(json_response(status, outcome.body))
+}
+
+/// The actor/scope context the comment operations run with.
+fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
+    WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    })
+    .with_scope(WriteScope {
+        workspace_id: pre.workspace_id,
+        project_id: Some(*project_id),
+    })
 }
 
 /// Map a database/driver failure to the generic 500 while logging the site
@@ -371,64 +416,11 @@ pub fn owned_comment_detail(
 // Query params
 // ---------------------------------------------------------------------------
 
-/// One query value, repeated or not (the `v1_projects` shape: axum's
-/// `Query` backend does not coerce a lone `?key=value` into a sequence, so
-/// callers read last like Django's `QueryDict`).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum OneOrMany {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// The multi-value query map every handler extracts.
-pub type QueryMap = HashMap<String, OneOrMany>;
-
-/// Django `QueryDict.get`: the last value, or `None`.
-pub fn query_last(query: &QueryMap, key: &str) -> Option<String> {
-    query.get(key).map(|value| match value {
-        OneOrMany::One(one) => one.clone(),
-        OneOrMany::Many(many) => many.last().cloned().unwrap_or_default(),
-    })
-}
-
-/// `self.fields` / `self.expand` (`api/views/base.py:212-220`): comma
-/// split, empties dropped, `None` when empty.
-pub fn fields_param(query: &QueryMap, key: &str) -> Option<Vec<String>> {
-    let raw = query_last(query, key).unwrap_or_default();
-    let fields: Vec<String> = raw
-        .split(',')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+pub use pidash_compat::http::{fields_param, query_last, OneOrMany, QueryMap};
 
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
-
-/// Decoded `api_tokens` row for [`resolve_api_token`].
-type ApiTokenLookup = (
-    String,
-    bool,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-);
-
-/// Decoded `machine_token` row for [`resolve_machine_token`].
-type MachineTokenLookup = (
-    String,
-    uuid::Uuid,
-    Option<uuid::Uuid>,
-    uuid::Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<bool>,
-);
 
 /// The authenticated actor: user id plus the stored time zone name, loaded
 /// but NOT parsed — parsing happens after the gate in
@@ -462,10 +454,11 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
     // (`api_authentication.py:41-44`); machine tokens stamp `last_used_at`.
     // Best-effort: a failed stamp must not fail the request.
     if !raw.starts_with(pidash_auth::token::MACHINE_TOKEN_PREFIX) {
-        let _ = sqlx::query(r#"UPDATE "api_tokens" SET "last_used" = now() WHERE "token" = $1"#)
-            .bind(raw)
-            .execute(pool)
-            .await;
+        let _ = pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+            &pidash_db::pool::sea_orm_connection(pool),
+            raw,
+        )
+        .await;
     }
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
@@ -481,14 +474,17 @@ pub async fn actor(pool: &PgPool, headers: &HeaderMap, secret_key: &[u8]) -> Res
 /// (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
 /// rows, so a soft-deleted token 403s instead of authenticating.
 async fn resolve_api_token(pool: &PgPool, presented: &str) -> Result<uuid::Uuid, Denial> {
-    let row: Option<ApiTokenLookup> = sqlx::query_as(
-        r#"SELECT "token", "is_active", "expired_at", "user_id" FROM "api_tokens" WHERE "token" = $1 AND "deleted_at" IS NULL"#,
-    )
-    .bind(presented)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "api-token-lookup"))?;
-    let Some((token, is_active, expired_at, user_id)) = row else {
+    let row =
+        super::auth_reads::live_api_token(&pidash_db::pool::sea_orm_connection(pool), presented)
+            .await
+            .map_err(|error| db_error(error, "api-token-lookup"))?;
+    let Some(super::auth_reads::ApiTokenLookup {
+        token,
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now_unix = chrono::Utc::now().timestamp();
@@ -515,17 +511,21 @@ async fn resolve_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let presented_hash = pidash_auth::token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt."token_hash", mt."user_id", mt."dev_machine_id", mt."workspace_id", mt."revoked_at",
-                  dm."revoked_at" IS NOT NULL AS "dev_revoked"
-           FROM "machine_token" mt LEFT OUTER JOIN "dev_machine" dm ON dm."id" = mt."dev_machine_id"
-           WHERE mt."token_hash" = $1"#,
+    let row = super::auth_reads::machine_token_with_device(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
     )
-    .bind(&presented_hash)
-    .fetch_optional(pool)
     .await
     .map_err(|error| db_error(error, "machine-token-lookup"))?;
-    let Some((token_hash, user_id, _dev_machine_id, workspace_id, revoked_at, dev_revoked)) = row
+    let Some(super::auth_reads::MachineTokenLookup {
+        token_hash,
+        user_id,
+        workspace_id,
+        revoked_at,
+        dev_revoked,
+        expires_at,
+        ..
+    }) = row
     else {
         return Err(Denial::InvalidToken);
     };
@@ -533,38 +533,40 @@ async fn resolve_machine_token(
         token_hash,
         revoked_at_unix: revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: dev_revoked.unwrap_or(false),
+        expires_at_unix: expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel still checks the
-    // revocation arms.
-    pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    // revocation and expiry arms.
+    pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`);
     // a `false` revokes the token, then denies.
-    let member: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "workspace_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "is_active" AND "deleted_at" IS NULL)"#,
+    let member = super::auth_reads::is_active_workspace_member(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(pool)
     .await
-    .map_err(|error| db_error(error, "machine-token-member"))?
-    .unwrap_or(false);
+    .map_err(|error| db_error(error, "machine-token-member"))?;
     if !member {
         // `revoke()` stamps `revoked_at` only (`runner/models.py:865-869`);
         // `last_used_at` is stamped on success only.
-        let _ = sqlx::query(
-            r#"UPDATE "machine_token" SET "revoked_at" = now() WHERE "token_hash" = $1"#,
+        let _ = pidash_services::domain::tokens::revoke_machine_token_by_hash(
+            &pidash_db::pool::sea_orm_connection(pool),
+            &presented_hash,
         )
-        .bind(&presented_hash)
-        .execute(pool)
         .await;
         return Err(Denial::InvalidToken);
     }
-    let _ =
-        sqlx::query(r#"UPDATE "machine_token" SET "last_used_at" = now() WHERE "token_hash" = $1"#)
-            .bind(&presented_hash)
-            .execute(pool)
-            .await;
+    let _ = pidash_services::domain::tokens::touch_machine_token_last_used_by_hash(
+        &pidash_db::pool::sea_orm_connection(pool),
+        &presented_hash,
+    )
+    .await;
     Ok(user_id)
 }
 
@@ -572,13 +574,9 @@ async fn resolve_machine_token(
 /// name, loaded but NOT parsed — parsing happens after the gate in
 /// [`activate_timezone`].
 async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Option<String>, Denial> {
-    let name: Option<Option<String>> =
-        sqlx::query_scalar(r#"SELECT "user_timezone" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "request-timezone"))?;
-    Ok(name.unwrap_or(None))
+    super::auth_reads::user_timezone(&pidash_db::pool::sea_orm_connection(pool), *user_id)
+        .await
+        .map_err(|error| db_error(error, "request-timezone"))
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -628,13 +626,10 @@ pub async fn preamble(
     }
     let pool = pool_of(state)?;
     let actor = actor(&pool, headers, state.settings().secret_key.as_bytes()).await?;
-    let workspace_id: Option<uuid::Uuid> =
-        sqlx::query_scalar(r#"SELECT "id" FROM "workspaces" WHERE "slug" = $1"#)
-            .bind(slug)
-            .fetch_optional(&pool)
+    let workspace_id =
+        super::auth_reads::workspace_id_by_slug(&pidash_db::pool::sea_orm_connection(&pool), slug)
             .await
-            .map_err(|error| db_error(error, "preamble-workspace"))?
-            .flatten();
+            .map_err(|error| db_error(error, "preamble-workspace"))?;
     Ok(Preamble {
         pool,
         actor,
@@ -662,10 +657,12 @@ pub async fn rewrite_project_id(
     };
     match classify_lookup(raw) {
         ProjectLookup::Pk(id) => Ok(id),
-        ProjectLookup::Identifier(_) => q::fetch_project_id(pool, &scope, raw)
-            .await
-            .map_err(|error| db_error(error, "rewrite-project"))?
-            .ok_or(Denial::ProjectNotFound),
+        ProjectLookup::Identifier(_) => {
+            q::fetch_project_id(&pidash_db::pool::sea_orm_connection(pool), &scope, raw)
+                .await
+                .map_err(|error| db_error(error, "rewrite-project"))?
+                .ok_or(Denial::ProjectNotFound)
+        }
     }
 }
 
@@ -683,13 +680,12 @@ async fn entity_facts(
     // `role` is `smallint`: sqlx does not widen `INT2` into `i32` on
     // decode, so read `i16` and compare as integers. `deleted_at IS NULL`
     // is the `SoftDeletionManager` scope (`db/mixins.py:56-58`).
-    let roles: Vec<i16> = sqlx::query_scalar(
-        r#"SELECT "role" FROM "project_members" WHERE "workspace_id" = $1 AND "member_id" = $2 AND "project_id" = $3 AND "is_active" AND "deleted_at" IS NULL"#,
+    let roles = super::auth_reads::project_member_roles(
+        &pidash_db::pool::sea_orm_connection(pool),
+        *workspace_id,
+        *user_id,
+        *project_id,
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_all(pool)
     .await
     .map_err(|error| db_error(error, "entity-roles"))?;
     Ok(project::ProjectFacts {
@@ -733,31 +729,57 @@ async fn require_gate(
 // Lookups
 // ---------------------------------------------------------------------------
 
-fn row_uuid(row: &sqlx::postgres::PgRow, column: &str) -> Result<Uuid, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
+/// A SeaORM connection over the request pool (no I/O).
+fn orm(pool: &PgPool) -> DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
 }
 
-fn row_uuid_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<Uuid>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
+/// `(SELECT "id" FROM "workspaces" WHERE "slug" = $slug)`: the scalar
+/// workspace lookup the social reads scope on (no liveness predicate, as
+/// before).
+fn workspace_id_subquery(slug: &str) -> SimpleExpr {
+    SimpleExpr::SubQuery(
+        None,
+        Box::new(
+            SeaQuery::select()
+                .column(workspaces::Column::Id)
+                .from(workspaces::Entity)
+                .and_where(workspaces::Column::Slug.eq(slug))
+                .take()
+                .into_sub_query_statement(),
+        ),
+    )
 }
 
-fn row_string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
+/// `EXISTS (SELECT 1 FROM "project_members" pm WHERE pm."project_id" =
+/// <project_col> AND pm."member_id" = $user AND pm."is_active")`: the
+/// caller's active membership on the row's project, no `deleted_at` scope
+/// on the join span (fixture-verbatim).
+fn member_exists(project_col: (impl EntityTrait, impl ColumnTrait), user_id: &Uuid) -> SimpleExpr {
+    let pm = || Alias::new("pm");
+    Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from_as(project_members::Entity, pm())
+            .and_where(Expr::col((pm(), project_members::Column::ProjectId)).equals(project_col))
+            .and_where(Expr::col((pm(), project_members::Column::MemberId)).eq(*user_id))
+            .and_where(Expr::col((pm(), project_members::Column::IsActive)).eq(true))
+            .take(),
+    )
 }
 
-fn row_string_opt(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<String>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_datetime(row: &sqlx::postgres::PgRow, column: &str) -> Result<DateTime<Utc>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
-}
-
-fn row_datetime_opt(
-    row: &sqlx::postgres::PgRow,
-    column: &str,
-) -> Result<Option<DateTime<Utc>>, Denial> {
-    row.try_get(column).map_err(|_| Denial::ServerError)
+/// `EXISTS (SELECT 1 FROM "projects" p WHERE p."id" = <project_col> AND
+/// p."archived_at" IS NULL)`: a live (unarchived) project.
+fn project_unarchived_exists(project_col: (impl EntityTrait, impl ColumnTrait)) -> SimpleExpr {
+    let p = || Alias::new("p");
+    Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from_as(projects::Entity, p())
+            .and_where(Expr::col((p(), projects::Column::Id)).equals(project_col))
+            .and_where(Expr::col((p(), projects::Column::ArchivedAt)).is_null())
+            .take(),
+    )
 }
 
 /// Link list/detail rows (`:1557-1569`, `:1662-1675`): the recorded F18-07
@@ -766,31 +788,44 @@ fn row_datetime_opt(
 /// join span — fixture-verbatim), a live project. Order is always
 /// `-created_at`: `.order_by()` reads `self.kwargs`, which never carries
 /// `order_by`, so `?order_by=` is ignored (BUG-4).
+fn link_scope(
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+) -> sea_orm::Select<issue_links::Entity> {
+    issue_links::Entity::find()
+        .distinct()
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((issue_links::Entity, issue_links::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(issue_links::Column::ProjectId.eq(*project_id))
+        .filter(issue_links::Column::IssueId.eq(*issue_id))
+        .filter(member_exists(
+            (issue_links::Entity, issue_links::Column::ProjectId),
+            user_id,
+        ))
+        .filter(project_unarchived_exists((
+            issue_links::Entity,
+            issue_links::Column::ProjectId,
+        )))
+        .order_by_desc(issue_links::Column::CreatedAt)
+}
+
+/// Link list rows: the whole [`link_scope`] chain.
 async fn fetch_link_rows(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     issue_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT DISTINCT l.* FROM "issue_links" l
-           WHERE l."deleted_at" IS NULL
-             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND l."project_id" = $2 AND l."issue_id" = $3
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = l."project_id" AND pm."member_id" = $4 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = l."project_id" AND p."archived_at" IS NULL)
-           ORDER BY l."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "link-list"))
+) -> Result<Vec<issue_links::Model>, Denial> {
+    link_scope(slug, project_id, issue_id, user_id)
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "link-list"))
 }
 
 /// Link detail row (`:1712`): the list chain plus `id=pk`.
@@ -801,27 +836,12 @@ async fn fetch_link_detail(
     issue_id: &Uuid,
     user_id: &Uuid,
     pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT DISTINCT l.* FROM "issue_links" l
-           WHERE l."deleted_at" IS NULL
-             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND l."project_id" = $2 AND l."issue_id" = $3
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = l."project_id" AND pm."member_id" = $4 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = l."project_id" AND p."archived_at" IS NULL)
-             AND l."id" = $5
-           ORDER BY l."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(user_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "link-detail"))
+) -> Result<Option<issue_links::Model>, Denial> {
+    link_scope(slug, project_id, issue_id, user_id)
+        .filter(issue_links::Column::Id.eq(*pk))
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "link-detail"))
 }
 
 /// Link patch/delete direct lookup (`:1743`, `:1781`): live + slug +
@@ -832,70 +852,147 @@ async fn fetch_link_direct(
     project_id: &Uuid,
     issue_id: &Uuid,
     pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT l.* FROM "issue_links" l
-           WHERE l."deleted_at" IS NULL
-             AND l."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND l."project_id" = $2 AND l."issue_id" = $3 AND l."id" = $4"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "link-direct"))
+) -> Result<Option<issue_links::Model>, Denial> {
+    issue_links::Entity::find()
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((issue_links::Entity, issue_links::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(issue_links::Column::ProjectId.eq(*project_id))
+        .filter(issue_links::Column::IssueId.eq(*issue_id))
+        .filter(issue_links::Column::Id.eq(*pk))
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "link-direct"))
 }
 
 /// Link create duplicate guard (`serializers/issue.py:618`): a live row
 /// with this URL on this issue. The manager scope applies, so soft-deleted
 /// rows do not block re-adding.
 async fn link_url_exists(pool: &PgPool, url: &str, issue_id: &Uuid) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "issue_links" WHERE "deleted_at" IS NULL AND "url" = $1 AND "issue_id" = $2)"#,
-    )
-    .bind(url)
-    .bind(issue_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| db_error(error, "link-dup"))
+    let hit: Option<Uuid> = issue_links::Entity::find()
+        .select_only()
+        .column(issue_links::Column::Id)
+        .filter(issue_links::Column::DeletedAt.is_null())
+        .filter(issue_links::Column::Url.eq(url))
+        .filter(issue_links::Column::IssueId.eq(*issue_id))
+        .limit(1)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "link-dup"))?;
+    Ok(hit.is_some())
 }
 
-/// Comment list rows (`:1805-1828`): the link predicates plus the
-/// `is_member=Exists(...)` annotation (explicit `ProjectMember.objects`
-/// filter — WITH the manager's `deleted_at IS NULL`, unlike the guard).
+/// Comment list rows (`:1805-1828`) via the public read service.
 async fn fetch_comment_rows(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
     issue_id: &Uuid,
     user_id: &Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT DISTINCT c.*, EXISTS (
-             SELECT 1 FROM "project_members" pm
-             WHERE pm."deleted_at" IS NULL AND pm."is_active"
-               AND pm."member_id" = $4 AND pm."project_id" = $2
-               AND pm."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-           ) AS "is_member"
-           FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND c."project_id" = $2 AND c."issue_id" = $3
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = c."project_id" AND pm."member_id" = $4 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = c."project_id" AND p."archived_at" IS NULL)
-           ORDER BY c."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-list"))
+) -> Result<Vec<read::CommentDbRow>, Denial> {
+    read::fetch_comment_list_rows(pool, slug, project_id, issue_id, user_id)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })
+}
+
+/// The `issue_comments` columns of `issue_comments`, in entity order:
+/// every non-array column the shared [`read::CommentDbRow`] reads.
+const COMMENT_COLUMNS: [issue_comments::Column; 22] = [
+    issue_comments::Column::Id,
+    issue_comments::Column::CreatedAt,
+    issue_comments::Column::UpdatedAt,
+    issue_comments::Column::DeletedAt,
+    issue_comments::Column::CommentStripped,
+    issue_comments::Column::CreatedById,
+    issue_comments::Column::IssueId,
+    issue_comments::Column::ProjectId,
+    issue_comments::Column::UpdatedById,
+    issue_comments::Column::WorkspaceId,
+    issue_comments::Column::ActorId,
+    issue_comments::Column::CommentHtml,
+    issue_comments::Column::CommentJson,
+    issue_comments::Column::Access,
+    issue_comments::Column::ExternalId,
+    issue_comments::Column::ExternalSource,
+    issue_comments::Column::EditedAt,
+    issue_comments::Column::DescriptionId,
+    issue_comments::Column::ParentId,
+    issue_comments::Column::SpeakerType,
+    issue_comments::Column::SpeakerLabel,
+    issue_comments::Column::SpeakerAgentRunId,
+];
+
+/// The comment detail statement (`:2008`): the list chain (DISTINCT,
+/// `is_member` annotation included) plus `id=pk`, `-created_at`.
+fn comment_detail_select(
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    user_id: &Uuid,
+    pk: &Uuid,
+) -> sea_orm::Select<issue_comments::Entity> {
+    let pm = || Alias::new("pm");
+    let is_member = Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from_as(project_members::Entity, pm())
+            .and_where(Expr::col((pm(), project_members::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((pm(), project_members::Column::IsActive)).eq(true))
+            .and_where(Expr::col((pm(), project_members::Column::MemberId)).eq(*user_id))
+            .and_where(Expr::col((pm(), project_members::Column::ProjectId)).eq(*project_id))
+            .and_where(
+                Expr::col((pm(), project_members::Column::WorkspaceId))
+                    .eq(workspace_id_subquery(slug)),
+            )
+            .take(),
+    );
+    issue_comments::Entity::find()
+        .select_only()
+        .columns(COMMENT_COLUMNS)
+        .column_as(
+            SimpleExpr::from(Func::cust("array_to_json").arg(Expr::col((
+                issue_comments::Entity,
+                issue_comments::Column::Attachments,
+            ))))
+            .cast_as(Alias::new("jsonb")),
+            "attachments",
+        )
+        .column_as(
+            SimpleExpr::from(Func::cust("array_to_json").arg(Expr::col((
+                issue_comments::Entity,
+                issue_comments::Column::Labels,
+            ))))
+            .cast_as(Alias::new("jsonb")),
+            "labels",
+        )
+        .column_as(is_member, "is_member")
+        .distinct()
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .filter(
+            Expr::col((issue_comments::Entity, issue_comments::Column::WorkspaceId))
+                .eq(workspace_id_subquery(slug)),
+        )
+        .filter(issue_comments::Column::ProjectId.eq(*project_id))
+        .filter(issue_comments::Column::IssueId.eq(*issue_id))
+        .filter(member_exists(
+            (issue_comments::Entity, issue_comments::Column::ProjectId),
+            user_id,
+        ))
+        .filter(project_unarchived_exists((
+            issue_comments::Entity,
+            issue_comments::Column::ProjectId,
+        )))
+        .filter(issue_comments::Column::Id.eq(*pk))
+        .order_by_desc(issue_comments::Column::CreatedAt)
 }
 
 /// Comment detail row (`:2008`): the list chain (annotation included) plus
@@ -907,109 +1004,12 @@ async fn fetch_comment_detail(
     issue_id: &Uuid,
     user_id: &Uuid,
     pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT DISTINCT c.*, EXISTS (
-             SELECT 1 FROM "project_members" pm
-             WHERE pm."deleted_at" IS NULL AND pm."is_active"
-               AND pm."member_id" = $4 AND pm."project_id" = $2
-               AND pm."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-           ) AS "is_member"
-           FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND c."project_id" = $2 AND c."issue_id" = $3
-             AND EXISTS (SELECT 1 FROM "project_members" pm
-                         WHERE pm."project_id" = c."project_id" AND pm."member_id" = $4 AND pm."is_active")
-             AND EXISTS (SELECT 1 FROM "projects" p
-                         WHERE p."id" = c."project_id" AND p."archived_at" IS NULL)
-             AND c."id" = $5
-           ORDER BY c."created_at" DESC"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(user_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-detail"))
-}
-
-/// Comment patch/delete direct lookup (`:2040`, `:2109`): live + slug +
-/// project + issue + pk — BUG-1 bypasses the guards and the annotation.
-async fn fetch_comment_direct(
-    pool: &PgPool,
-    slug: &str,
-    project_id: &Uuid,
-    issue_id: &Uuid,
-    pk: &Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, Denial> {
-    sqlx::query(
-        r#"SELECT c.* FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $1)
-             AND c."project_id" = $2 AND c."issue_id" = $3 AND c."id" = $4"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(issue_id)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-direct"))
-}
-
-/// Comment external-dedupe `exists()` (`:1895-1900`, `:2048-2053`): live +
-/// project + slug + source + id. No pk exclusion — the patch caller
-/// compares `external_id` in Python first (`:2047`, ported asymmetry 8).
-/// A `None` source filters `IS NULL` (the patch's stored-source default
-/// may be NULL — Django renders `None` as `IS NULL`).
-async fn comment_external_exists(
-    pool: &PgPool,
-    project_id: &Uuid,
-    slug: &str,
-    source: Option<&str>,
-    external_id: &str,
-) -> Result<bool, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT EXISTS(SELECT 1 FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL AND c."project_id" = $1
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $2)
-             AND c."external_source" IS NOT DISTINCT FROM $3 AND c."external_id" = $4)"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-dedupe"))
-}
-
-/// The create-409 `"id"`: the duplicate row's id
-/// (`:1902-1907`, `.first()` over the `-created_at` default ordering).
-async fn comment_external_first_id(
-    pool: &PgPool,
-    project_id: &Uuid,
-    slug: &str,
-    source: &str,
-    external_id: &str,
-) -> Result<Option<Uuid>, Denial> {
-    sqlx::query_scalar(
-        r#"SELECT c."id" FROM "issue_comments" c
-           WHERE c."deleted_at" IS NULL AND c."project_id" = $1
-             AND c."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "slug" = $2)
-             AND c."external_source" = $3 AND c."external_id" = $4
-           ORDER BY c."created_at" DESC LIMIT 1"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .bind(source)
-    .bind(external_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "comment-dup-first"))
+) -> Result<Option<read::CommentDbRow>, Denial> {
+    comment_detail_select(slug, project_id, issue_id, user_id, pk)
+        .into_model::<read::CommentDbRow>()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "comment-detail"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,23 +1032,27 @@ struct DecodedLink {
     issue: String,
 }
 
-fn decode_link(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedLink, Denial> {
-    let metadata: Value = row.try_get("metadata").map_err(|_| Denial::ServerError)?;
-    Ok(DecodedLink {
-        id: row_uuid(row, "id")?.to_string(),
-        created_at: crate::serializer::render_datetime_in(&row_datetime(row, "created_at")?, tz),
-        updated_at: crate::serializer::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
-        deleted_at: row_datetime_opt(row, "deleted_at")?
-            .map(|dt| crate::serializer::render_datetime_in(&dt, tz)),
-        title: row_string_opt(row, "title")?,
-        url: row_string(row, "url")?,
-        metadata,
-        created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
-        updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
-        project: row_uuid(row, "project_id")?.to_string(),
-        workspace: row_uuid(row, "workspace_id")?.to_string(),
-        issue: row_uuid(row, "issue_id")?.to_string(),
-    })
+/// Render an aware instant in the request zone (SeaORM hands back
+/// `DateTime<FixedOffset>`; the renderer is zone-generic).
+fn render_dt<Z: TimeZone>(dt: &DateTime<Z>, tz: &Tz) -> String {
+    crate::serializer::render_datetime_in(dt, tz)
+}
+
+fn decode_link(row: &issue_links::Model, tz: &Tz) -> DecodedLink {
+    DecodedLink {
+        id: row.id.to_string(),
+        created_at: render_dt(&row.created_at, tz),
+        updated_at: render_dt(&row.updated_at, tz),
+        deleted_at: row.deleted_at.as_ref().map(|dt| render_dt(dt, tz)),
+        title: row.title.clone(),
+        url: row.url.clone(),
+        metadata: row.metadata.clone(),
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        project: row.project_id.to_string(),
+        workspace: row.workspace_id.to_string(),
+        issue: row.issue_id.to_string(),
+    }
 }
 
 fn render_link_value(
@@ -1104,7 +1108,6 @@ struct DecodedComment {
     created_at: String,
     updated_at: String,
     deleted_at: Option<String>,
-    comment_json: Value,
     comment_html: String,
     attachments: Vec<Option<String>>,
     labels: Vec<Option<String>>,
@@ -1125,42 +1128,46 @@ struct DecodedComment {
     parent: Option<String>,
 }
 
-fn decode_comment(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedComment, Denial> {
-    let attachments: Vec<Option<String>> = row
-        .try_get("attachments")
-        .map_err(|_| Denial::ServerError)?;
-    let labels: Vec<Option<String>> = row.try_get("labels").map_err(|_| Denial::ServerError)?;
-    let comment_json: Value = row
-        .try_get("comment_json")
-        .map_err(|_| Denial::ServerError)?;
-    let is_member: Option<bool> = row.try_get("is_member").unwrap_or(None);
+/// A `array_to_json` output into the old `Vec<Option<String>>`
+/// decode: `null` elements stay `None`; anything else than a string
+/// fails like the old by-name read did.
+fn comment_strings(value: &Value) -> Result<Vec<Option<String>>, Denial> {
+    let items = value.as_array().ok_or(Denial::ServerError)?;
+    items
+        .iter()
+        .map(|item| match item {
+            Value::Null => Ok(None),
+            Value::String(text) => Ok(Some(text.clone())),
+            _ => Err(Denial::ServerError),
+        })
+        .collect()
+}
+
+fn decode_comment(row: &read::CommentDbRow, tz: &Tz) -> Result<DecodedComment, Denial> {
     Ok(DecodedComment {
-        id: row_uuid(row, "id")?.to_string(),
-        is_member,
-        created_at: crate::serializer::render_datetime_in(&row_datetime(row, "created_at")?, tz),
-        updated_at: crate::serializer::render_datetime_in(&row_datetime(row, "updated_at")?, tz),
-        deleted_at: row_datetime_opt(row, "deleted_at")?
-            .map(|dt| crate::serializer::render_datetime_in(&dt, tz)),
-        comment_json,
-        comment_html: row_string(row, "comment_html")?,
-        attachments,
-        labels,
-        access: row_string(row, "access")?,
-        external_source: row_string_opt(row, "external_source")?,
-        external_id: row_string_opt(row, "external_id")?,
-        speaker_type: row_string(row, "speaker_type")?,
-        speaker_label: row_string(row, "speaker_label")?,
-        speaker_agent_run_id: row_uuid_opt(row, "speaker_agent_run_id")?.map(|id| id.to_string()),
-        edited_at: row_datetime_opt(row, "edited_at")?
-            .map(|dt| crate::serializer::render_datetime_in(&dt, tz)),
-        created_by: row_uuid_opt(row, "created_by_id")?.map(|id| id.to_string()),
-        updated_by: row_uuid_opt(row, "updated_by_id")?.map(|id| id.to_string()),
-        project: row_uuid(row, "project_id")?.to_string(),
-        workspace: row_uuid(row, "workspace_id")?.to_string(),
-        description: row_uuid_opt(row, "description_id")?.map(|id| id.to_string()),
-        issue: row_uuid(row, "issue_id")?.to_string(),
-        actor: row_uuid_opt(row, "actor_id")?.map(|id| id.to_string()),
-        parent: row_uuid_opt(row, "parent_id")?.map(|id| id.to_string()),
+        id: row.id.to_string(),
+        is_member: row.is_member,
+        created_at: render_dt(&row.created_at, tz),
+        updated_at: render_dt(&row.updated_at, tz),
+        deleted_at: row.deleted_at.as_ref().map(|dt| render_dt(dt, tz)),
+        comment_html: row.comment_html.clone(),
+        attachments: comment_strings(&row.attachments)?,
+        labels: comment_strings(&row.labels)?,
+        access: row.access.clone(),
+        external_source: row.external_source.clone(),
+        external_id: row.external_id.clone(),
+        speaker_type: row.speaker_type.clone(),
+        speaker_label: row.speaker_label.clone(),
+        speaker_agent_run_id: row.speaker_agent_run_id.map(|id| id.to_string()),
+        edited_at: row.edited_at.as_ref().map(|dt| render_dt(dt, tz)),
+        created_by: row.created_by_id.map(|id| id.to_string()),
+        updated_by: row.updated_by_id.map(|id| id.to_string()),
+        project: row.project_id.to_string(),
+        workspace: row.workspace_id.to_string(),
+        description: row.description_id.map(|id| id.to_string()),
+        issue: row.issue_id.to_string(),
+        actor: row.actor_id.map(|id| id.to_string()),
+        parent: row.parent_id.map(|id| id.to_string()),
     })
 }
 
@@ -1213,35 +1220,8 @@ fn render_comment_value(
     Ok(Value::Object(out))
 }
 
-/// The comment-create activity `requested_data`
-/// (`json.dumps(serializer.data)` at `:1928`): the 9-field create read
-/// shape over the saved row.
-fn render_comment_create_value(decoded: &DecodedComment) -> Result<Value, Denial> {
-    let labels: Vec<Option<&str>> = decoded.labels.iter().map(|item| item.as_deref()).collect();
-    let row = CommentCreateRow {
-        comment_json: &decoded.comment_json,
-        comment_html: &decoded.comment_html,
-        access: &decoded.access,
-        external_source: decoded.external_source.as_deref(),
-        external_id: decoded.external_id.as_deref(),
-        labels: &labels,
-        speaker_type: &decoded.speaker_type,
-        speaker_label: &decoded.speaker_label,
-        speaker_agent_run_id: decoded.speaker_agent_run_id.as_deref(),
-    };
-    let out = render_comment_create(&CommentCreateRepresentationInput {
-        row: &row,
-        fields: None,
-        expand: &[],
-        expansions: &[],
-    })
-    .map_err(|_| Denial::ServerError)?;
-    Ok(Value::Object(out))
-}
-
-/// `IssueCommentSerializer.get_url` (`serializers/issue.py:994-999`):
-/// `issue_web_url(workspace.slug, project.identifier, issue.sequence_id)`
-/// over the ROW's FKs (fetched, never the path params).
+/// `IssueCommentSerializer.get_url` via the public read service
+/// (`serializers/issue.py:994-999`).
 async fn comment_url(
     pool: &PgPool,
     workspace_id: &Uuid,
@@ -1249,33 +1229,16 @@ async fn comment_url(
     issue_id: &Uuid,
     web_base: Option<&str>,
 ) -> Result<Option<String>, Denial> {
-    let slug: Option<String> =
-        sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "comment-url-slug"))?
-            .flatten();
-    let identifier: Option<String> =
-        sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "comment-url-ident"))?
-            .flatten();
-    let sequence: Option<i32> =
-        sqlx::query_scalar(r#"SELECT "sequence_id" FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "comment-url-seq"))?
-            .flatten();
-    Ok(pidash_services::v1_work_items::shape_issue::issue_url(
-        web_base,
-        slug.as_deref(),
-        identifier.as_deref(),
-        sequence.map(i64::from),
-    ))
+    read::comment_url(pool, workspace_id, project_id, issue_id, web_base)
+        .await
+        .map_err(|error| match error {
+            // Unreachable: this read never 404s or fails mid-row.
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1291,12 +1254,16 @@ type AssetUrlLookup = (Option<String>, Option<Uuid>, Option<Uuid>, Option<Uuid>)
 /// renders null like `getattr` on a dead FK (the `v1_projects`
 /// `file_asset_url` precedent).
 async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>, Denial> {
-    let row: Option<AssetUrlLookup> =
-        sqlx::query_as(
-            r#"SELECT fa."entity_type", fa."workspace_id", fa."project_id", fa."issue_id" FROM "file_assets" fa WHERE fa."id" = $1"#,
-        )
-        .bind(asset_id)
-        .fetch_optional(pool)
+    let row: Option<AssetUrlLookup> = file_assets::Entity::find_by_id(*asset_id)
+        .select_only()
+        .columns([
+            file_assets::Column::EntityType,
+            file_assets::Column::WorkspaceId,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .into_tuple()
+        .one(&orm(pool))
         .await
         .map_err(|error| db_error(error, "file-asset-url"))?;
     let Some((entity_type, workspace_id, project_id, issue_id)) = row else {
@@ -1306,15 +1273,16 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
         pool: &PgPool,
         workspace_id: Option<Uuid>,
     ) -> Result<Option<String>, Denial> {
-        match workspace_id {
-            Some(id) => sqlx::query_scalar(r#"SELECT "slug" FROM "workspaces" WHERE "id" = $1"#)
-                .bind(id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|error| db_error(error, "file-asset-slug"))
-                .map(|slug: Option<Option<String>>| slug.flatten()),
-            None => Ok(None),
-        }
+        read::workspace_slug(pool, workspace_id)
+            .await
+            .map_err(|error| match error {
+                // Unreachable: this read never 404s or fails mid-row.
+                read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+                read::Error::Db(err) => {
+                    let (site, source) = err.split();
+                    db_error(source, site)
+                }
+            })
     }
     match entity_type.as_deref() {
         Some("WORKSPACE_LOGO")
@@ -1351,12 +1319,13 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
 /// `{"name", "slug", "id"}` in field order. A missing row renders null
 /// (the `v1_projects` `expand_workspace` precedent).
 async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Value, Denial> {
-    let row: Option<(String, String)> =
-        sqlx::query_as(r#"SELECT "name", "slug" FROM "workspaces" WHERE "id" = $1"#)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-workspace"))?;
+    let row: Option<(String, String)> = workspaces::Entity::find_by_id(*workspace_id)
+        .select_only()
+        .columns([workspaces::Column::Name, workspaces::Column::Slug])
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-workspace"))?;
     Ok(match row {
         Some((name, slug)) => {
             let mut map = Map::with_capacity(3);
@@ -1369,23 +1338,30 @@ async fn expand_workspace(pool: &PgPool, workspace_id: &Uuid) -> Result<Value, D
     })
 }
 
-/// Decoded user row for [`expand_actor`]: names, nullable `email`,
-/// `COALESCE`d avatar, optional avatar asset.
-type ExpandUserLookup = (String, String, Option<String>, String, Option<Uuid>);
+/// Decoded user row for [`expand_actor`]: names, nullable `email`, the
+/// avatar text (`COALESCE`d to `''` below), optional avatar asset.
+type ExpandUserLookup = (String, String, Option<String>, Option<String>, Option<Uuid>);
 
 /// `expand=actor`: `UserLiteSerializer` (`user.py:13-38`) via the D-19
 /// `user_lite_to_representation` kernel. A missing row renders null.
 async fn expand_actor(pool: &PgPool, user_id: &Uuid) -> Result<Value, Denial> {
-    let row: Option<ExpandUserLookup> = sqlx::query_as(
-        r#"SELECT "first_name", "last_name", "email", COALESCE("avatar", ''), "avatar_asset_id" FROM "users" WHERE "id" = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-actor"))?;
+    let row: Option<ExpandUserLookup> = users::Entity::find_by_id(*user_id)
+        .select_only()
+        .columns([
+            users::Column::FirstName,
+            users::Column::LastName,
+            users::Column::Email,
+            users::Column::Avatar,
+            users::Column::AvatarAssetId,
+        ])
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-actor"))?;
     let Some((first_name, last_name, email, avatar, avatar_asset)) = row else {
         return Ok(Value::Null);
     };
+    let avatar = avatar.unwrap_or_default();
     let avatar_url = match avatar_asset {
         Some(id) => file_asset_url(pool, &id).await?,
         None => None,
@@ -1395,13 +1371,13 @@ async fn expand_actor(pool: &PgPool, user_id: &Uuid) -> Result<Value, Denial> {
         avatar_url.as_deref(),
         &avatar,
     );
-    let display_name: Option<String> =
-        sqlx::query_scalar(r#"SELECT "display_name" FROM "users" WHERE "id" = $1"#)
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-actor-name"))?
-            .flatten();
+    let display_name: Option<String> = users::Entity::find_by_id(*user_id)
+        .select_only()
+        .column(users::Column::DisplayName)
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-actor-name"))?;
     let id = user_id.to_string();
     let display_name = display_name.unwrap_or_default();
     let row = pidash_services::v1_projects::ser_collab::UserLiteRow {
@@ -1423,12 +1399,16 @@ async fn expand_actor(pool: &PgPool, user_id: &Uuid) -> Result<Value, Denial> {
 /// Django renders soft-deleted parents (verified live). A hard-missing
 /// row is unreachable (`CASCADE`) and renders `{}` via `None`.
 async fn expand_parent_comment(pool: &PgPool, parent_id: &Uuid) -> Result<Option<Value>, Denial> {
-    let row: Option<(Uuid, Uuid)> =
-        sqlx::query_as(r#"SELECT "id", "project_id" FROM "issue_comments" WHERE "id" = $1"#)
-            .bind(parent_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-parent"))?;
+    let row: Option<(Uuid, Uuid)> = issue_comments::Entity::find_by_id(*parent_id)
+        .select_only()
+        .columns([
+            issue_comments::Column::Id,
+            issue_comments::Column::ProjectId,
+        ])
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-parent"))?;
     match row {
         Some((id, project_id)) => {
             let mut map = Map::with_capacity(2);
@@ -1448,55 +1428,62 @@ async fn expand_parent_comment(pool: &PgPool, parent_id: &Uuid) -> Result<Option
 /// `description`, `is_default`, `cover_image_url` in field order. A
 /// missing row renders null.
 async fn expand_project(pool: &PgPool, project_id: &Uuid) -> Result<Value, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT "id", "identifier", "name", "cover_image", "icon_prop", "emoji", "description", "is_default", "cover_image_asset_id" FROM "projects" WHERE "id" = $1"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-project"))?;
+    /// The `ProjectLiteSerializer` columns, decoded by name.
+    #[derive(FromQueryResult)]
+    struct ProjectLite {
+        id: Uuid,
+        identifier: String,
+        name: String,
+        cover_image: Option<String>,
+        icon_prop: Option<Value>,
+        emoji: Option<String>,
+        description: String,
+        is_default: bool,
+        cover_image_asset_id: Option<Uuid>,
+    }
+    let row = projects::Entity::find_by_id(*project_id)
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::IconProp,
+            projects::Column::Emoji,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+            projects::Column::CoverImageAssetId,
+        ])
+        .into_model::<ProjectLite>()
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-project"))?;
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    let cover_asset: Option<Uuid> = row_uuid_opt(&row, "cover_image_asset_id")?;
-    let cover_text: Option<String> = row_string_opt(&row, "cover_image")?;
+    let cover_text = row.cover_image;
     // `Project.cover_image_url` (`db/models/project.py:176-185`): the
     // asset URL wins, then the stored text, else null.
-    let cover_url = match cover_asset {
+    let cover_url = match row.cover_image_asset_id {
         Some(id) => file_asset_url(pool, &id).await?,
         None => None,
     };
     let cover_url = cover_url.or_else(|| cover_text.clone().filter(|text| !text.is_empty()));
-    let icon_prop: Option<Value> = row.try_get("icon_prop").map_err(|_| Denial::ServerError)?;
     let mut map = Map::with_capacity(9);
-    map.insert(
-        "id".to_owned(),
-        Value::String(row_uuid(&row, "id")?.to_string()),
-    );
-    map.insert(
-        "identifier".to_owned(),
-        Value::String(row_string(&row, "identifier")?),
-    );
-    map.insert("name".to_owned(), Value::String(row_string(&row, "name")?));
+    map.insert("id".to_owned(), Value::String(row.id.to_string()));
+    map.insert("identifier".to_owned(), Value::String(row.identifier));
+    map.insert("name".to_owned(), Value::String(row.name));
     map.insert(
         "cover_image".to_owned(),
         cover_text.map(Value::String).unwrap_or(Value::Null),
     );
-    map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
+    map.insert("icon_prop".to_owned(), row.icon_prop.unwrap_or(Value::Null));
     map.insert(
         "emoji".to_owned(),
-        row_string_opt(&row, "emoji")?
-            .map(Value::String)
-            .unwrap_or(Value::Null),
+        row.emoji.map(Value::String).unwrap_or(Value::Null),
     );
-    map.insert(
-        "description".to_owned(),
-        Value::String(row_string(&row, "description")?),
-    );
-    map.insert(
-        "is_default".to_owned(),
-        Value::Bool(row.try_get("is_default").map_err(|_| Denial::ServerError)?),
-    );
+    map.insert("description".to_owned(), Value::String(row.description));
+    map.insert("is_default".to_owned(), Value::Bool(row.is_default));
     map.insert(
         "cover_image_url".to_owned(),
         cover_url.map(Value::String).unwrap_or(Value::Null),
@@ -1521,73 +1508,62 @@ async fn expand_issue(
     // soft-deletion scope, so a soft-deleted issue still renders (with its
     // `deleted_at`) instead of collapsing to null (PIDASHCONV-789#4,
     // live-probed).
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(r#"SELECT * FROM "issues" WHERE "id" = $1"#)
-            .bind(issue_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-issue"))?;
+    let row = issues::Entity::find_by_id(*issue_id)
+        .one(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-issue"))?;
     let Some(row) = row else {
         return Ok(Value::Null);
     };
-    let id = row_uuid(&row, "id")?.to_string();
-    let created_at = crate::serializer::render_datetime_in(&row_datetime(&row, "created_at")?, tz);
-    let updated_at = crate::serializer::render_datetime_in(&row_datetime(&row, "updated_at")?, tz);
-    let deleted_at = row_datetime_opt(&row, "deleted_at")?
-        .map(|dt| crate::serializer::render_datetime_in(&dt, tz));
-    let completed_at = row_datetime_opt(&row, "completed_at")?
-        .map(|dt| crate::serializer::render_datetime_in(&dt, tz));
-    let archived_at = row_datetime_opt(&row, "archived_at")?
-        .map(|dt| crate::serializer::render_datetime_in(&dt, tz));
-    let point: Option<i32> = row.try_get("point").map_err(|_| Denial::ServerError)?;
-    let name = row_string(&row, "name")?;
-    let description_html: Option<String> = row
-        .try_get("description_html")
-        .map_err(|_| Denial::ServerError)?;
-    let description_binary: Option<Vec<u8>> = row
-        .try_get("description_binary")
-        .map_err(|_| Denial::ServerError)?;
-    let priority = row_string(&row, "priority")?;
-    let complexity_score: i32 = row
-        .try_get("complexity_score")
-        .map_err(|_| Denial::ServerError)?;
-    let start_date: Option<chrono::NaiveDate> =
-        row.try_get("start_date").map_err(|_| Denial::ServerError)?;
-    let target_date: Option<chrono::NaiveDate> = row
-        .try_get("target_date")
-        .map_err(|_| Denial::ServerError)?;
-    let sequence_id: i32 = row
-        .try_get("sequence_id")
-        .map_err(|_| Denial::ServerError)?;
-    let sort_order: f64 = row.try_get("sort_order").map_err(|_| Denial::ServerError)?;
-    let is_draft: bool = row.try_get("is_draft").map_err(|_| Denial::ServerError)?;
-    let external_source = row_string_opt(&row, "external_source")?;
-    let external_id = row_string_opt(&row, "external_id")?;
-    let git_work_branch: Option<String> = row
-        .try_get("git_work_branch")
-        .map_err(|_| Denial::ServerError)?;
-    let created_via = row_string_opt(&row, "created_via")?;
-    let agent_executor = row_string_opt(&row, "agent_executor")?;
-    let created_by = row_uuid_opt(&row, "created_by_id")?.map(|id| id.to_string());
-    let updated_by = row_uuid_opt(&row, "updated_by_id")?.map(|id| id.to_string());
-    let project = row_uuid_opt(&row, "project_id")?.map(|id| id.to_string());
-    let workspace = row_uuid_opt(&row, "workspace_id")?.map(|id| id.to_string());
-    let parent = row_uuid_opt(&row, "parent_id")?.map(|id| id.to_string());
-    let state = row_uuid_opt(&row, "state_id")?.map(|id| id.to_string());
-    let estimate_point = row_uuid_opt(&row, "estimate_point_id")?.map(|id| id.to_string());
-    let assigned_pod = row_uuid_opt(&row, "assigned_pod_id")?.map(|id| id.to_string());
-    let type_id = row_uuid_opt(&row, "type_id")?.map(|id| id.to_string());
+    let id = row.id.to_string();
+    let created_at = render_dt(&row.created_at, tz);
+    let updated_at = render_dt(&row.updated_at, tz);
+    let deleted_at = row.deleted_at.as_ref().map(|dt| render_dt(dt, tz));
+    let completed_at = row.completed_at.as_ref().map(|dt| render_dt(dt, tz));
+    // `archived_at` is a `date` column: rendered `YYYY-MM-DD` like the
+    // shared `read::decode_issue`.
+    let archived_at = row.archived_at.map(|d| d.to_string());
+    let point: Option<i32> = row.point;
+    let name = row.name;
+    let description_html: Option<String> = Some(row.description_html);
+    let description_binary: Option<Vec<u8>> = row.description_binary;
+    let priority = row.priority;
+    let complexity_score: i32 = row.complexity_score;
+    let sequence_id: i32 = row.sequence_id;
+    let sort_order: f64 = row.sort_order;
+    let is_draft: bool = row.is_draft;
+    let external_source = row.external_source;
+    let external_id = row.external_id;
+    let git_work_branch: Option<String> = Some(row.git_work_branch);
+    let created_via = row.created_via;
+    let agent_executor = row.agent_executor;
+    let created_by = row.created_by_id.map(|id| id.to_string());
+    let updated_by = row.updated_by_id.map(|id| id.to_string());
+    let project = Some(row.project_id.to_string());
+    let workspace = Some(row.workspace_id.to_string());
+    let parent = row.parent_id.map(|id| id.to_string());
+    let state = row.state_id.map(|id| id.to_string());
+    let estimate_point = row.estimate_point_id.map(|id| id.to_string());
+    let assigned_pod = row.assigned_pod_id.map(|id| id.to_string());
+    let assigned_runner = row.assigned_runner_id.map(|id| id.to_string());
+    let assigned_runner_detail = crate::app_issues::access::fetch_assigned_runner_detail(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.assigned_runner_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    let type_id = row.type_id.map(|id| id.to_string());
     // `get_url` (`serializers/issue.py:423-434`): present and absolute, or
     // the key is omitted — never null, never relative.
-    let url = match (web_base_url, project.as_deref(), sequence_id) {
-        (Some(base), Some(_), _) => {
-            let identifier: Option<String> =
-                sqlx::query_scalar(r#"SELECT "identifier" FROM "projects" WHERE "id" = $1"#)
-                    .bind(row_uuid_opt(&row, "project_id")?.expect("project"))
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|error| db_error(error, "expand-issue-url"))?
-                    .flatten();
+    let url = match web_base_url {
+        Some(base) => {
+            let identifier: Option<String> = projects::Entity::find_by_id(row.project_id)
+                .select_only()
+                .column(projects::Column::Identifier)
+                .into_tuple()
+                .one(&orm(pool))
+                .await
+                .map_err(|error| db_error(error, "expand-issue-url"))?;
             match identifier {
                 Some(identifier) => shape::issue_url(
                     Some(base),
@@ -1598,10 +1574,10 @@ async fn expand_issue(
                 None => None,
             }
         }
-        _ => None,
+        None => None,
     };
-    let start_date = start_date.map(|d| d.to_string());
-    let target_date = target_date.map(|d| d.to_string());
+    let start_date = row.start_date.map(|d| d.to_string());
+    let target_date = row.target_date.map(|d| d.to_string());
     let issue_row = shape::IssueRow {
         id: &id,
         type_id: type_id.as_deref(),
@@ -1635,6 +1611,9 @@ async fn expand_issue(
         state: state.as_deref(),
         estimate_point: estimate_point.as_deref(),
         assigned_pod: assigned_pod.as_deref(),
+        assigned_runner: assigned_runner.as_deref(),
+        assigned_runner_detail: assigned_runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let assignee_ids = fetch_assignee_ids(pool, issue_id).await?;
     let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();
@@ -1684,32 +1663,182 @@ async fn expand_issue(
 /// `IssueAssignee` ids in queryset (`-created_at`) order
 /// (`serializers/issue.py:453-456`).
 async fn fetch_assignee_ids(pool: &PgPool, issue_id: &Uuid) -> Result<Vec<String>, Denial> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        r#"SELECT "assignee_id" FROM "issue_assignees" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-assignees"))?;
+    let ids: Vec<Uuid> = issue_assignees::Entity::find()
+        .select_only()
+        .column(issue_assignees::Column::AssigneeId)
+        .filter(issue_assignees::Column::IssueId.eq(*issue_id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .order_by_desc(issue_assignees::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-assignees"))?;
     Ok(ids.iter().map(Uuid::to_string).collect())
 }
 
 /// `IssueLabel` ids in queryset (`-created_at`) order
 /// (`serializers/issue.py:466-468`).
 async fn fetch_label_ids(pool: &PgPool, issue_id: &Uuid) -> Result<Vec<String>, Denial> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        r#"SELECT "label_id" FROM "issue_labels" WHERE "issue_id" = $1 AND "deleted_at" IS NULL ORDER BY "created_at" DESC"#,
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-labels"))?;
+    let ids: Vec<Uuid> = issue_labels::Entity::find()
+        .select_only()
+        .column(issue_labels::Column::LabelId)
+        .filter(issue_labels::Column::IssueId.eq(*issue_id))
+        .filter(issue_labels::Column::DeletedAt.is_null())
+        .order_by_desc(issue_labels::Column::CreatedAt)
+        .into_tuple()
+        .all(&orm(pool))
+        .await
+        .map_err(|error| db_error(error, "expand-labels"))?;
     Ok(ids.iter().map(Uuid::to_string).collect())
 }
 
 /// One blocker-target row: id, project identifier, sequence, state name,
-/// state group.
-type BlockerTargetRow = (Uuid, String, i32, Option<String>, Option<String>);
+/// state group, decoded by name from [`blocker_targets_select`].
+#[derive(Debug, FromQueryResult)]
+struct BlockerTargetRow {
+    issue_id: Uuid,
+    project_identifier: String,
+    sequence_id: i32,
+    state_name: Option<String>,
+    state_group: Option<String>,
+}
+
+/// `issue_relations r INNER JOIN issues t ON t."id" = r.<target> INNER JOIN
+/// states s INNER JOIN projects p` plus the live-edge predicates shared by
+/// the summary and the open check: live relation, no self-edge, live
+/// unarchived non-draft target in the relation's workspace, non-triage
+/// state, unarchived project. `target` is the `t` join column (or the
+/// `CASE` the open check joins on).
+fn blocker_edge_select(target: SimpleExpr) -> SelectStatement {
+    let r = || Alias::new("r");
+    let t = || Alias::new("t");
+    let s = || Alias::new("s");
+    let p = || Alias::new("p");
+    let mut select = SeaQuery::select();
+    select
+        .from_as(issue_relations::Entity, r())
+        .join_as(
+            JoinType::InnerJoin,
+            issues::Entity,
+            t(),
+            Expr::col((t(), issues::Column::Id)).eq(target),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            states::Entity,
+            s(),
+            Expr::col((s(), states::Column::Id)).equals((t(), issues::Column::StateId)),
+        )
+        .join_as(
+            JoinType::InnerJoin,
+            projects::Entity,
+            p(),
+            Expr::col((p(), projects::Column::Id)).equals((t(), issues::Column::ProjectId)),
+        )
+        .and_where(Expr::col((r(), issue_relations::Column::DeletedAt)).is_null())
+        .and_where(
+            Expr::col((r(), issue_relations::Column::IssueId))
+                .not_equals((r(), issue_relations::Column::RelatedIssueId)),
+        );
+    select
+}
+
+/// The target-side predicates of [`blocker_edge_select`] (appended after
+/// the anchor predicates so the statement reads in the fixture's order).
+fn blocker_target_predicates(select: &mut SelectStatement) {
+    let r = || Alias::new("r");
+    let t = || Alias::new("t");
+    let s = || Alias::new("s");
+    let p = || Alias::new("p");
+    select
+        .and_where(Expr::col((t(), issues::Column::DeletedAt)).is_null())
+        .and_where(Expr::col((t(), issues::Column::ArchivedAt)).is_null())
+        .and_where(Expr::col((t(), issues::Column::IsDraft)).eq(false))
+        .and_where(
+            Expr::col((t(), issues::Column::WorkspaceId))
+                .equals((r(), issue_relations::Column::WorkspaceId)),
+        )
+        .and_where(Expr::col((s(), states::Column::Group)).ne("triage"))
+        .and_where(Expr::col((p(), projects::Column::ArchivedAt)).is_null());
+}
+
+/// One `relations_summary` leg: the targets of the live `relation_type`
+/// edges whose `anchor` end is `issue_id`, projecting the `target` end
+/// (`issue_id`, `project_identifier`, `sequence_id`, `state_name`,
+/// `state_group`).
+fn blocker_targets_select(
+    issue_id: &Uuid,
+    relation_type: &str,
+    anchor: issue_relations::Column,
+    target: issue_relations::Column,
+) -> SelectStatement {
+    let r = || Alias::new("r");
+    let t = || Alias::new("t");
+    let s = || Alias::new("s");
+    let p = || Alias::new("p");
+    let mut select = blocker_edge_select(Expr::col((r(), target)).into());
+    select
+        .expr_as(Expr::col((t(), issues::Column::Id)), Alias::new("issue_id"))
+        .expr_as(
+            Expr::col((p(), projects::Column::Identifier)),
+            Alias::new("project_identifier"),
+        )
+        .expr_as(
+            Expr::col((t(), issues::Column::SequenceId)),
+            Alias::new("sequence_id"),
+        )
+        .expr_as(
+            Expr::col((s(), states::Column::Name)),
+            Alias::new("state_name"),
+        )
+        .expr_as(
+            Expr::col((s(), states::Column::Group)),
+            Alias::new("state_group"),
+        )
+        .and_where(Expr::col((r(), anchor)).eq(*issue_id))
+        .and_where(Expr::col((r(), issue_relations::Column::RelationType)).eq(relation_type));
+    blocker_target_predicates(&mut select);
+    select
+}
+
+/// `has_open_blockers`: `EXISTS` over the blocked-by edges of either
+/// stored direction (`CASE` on `relation_type` for the target end) whose
+/// target state is not completed/cancelled.
+fn has_open_blockers_select(issue_id: &Uuid) -> SelectStatement {
+    let r = || Alias::new("r");
+    let s = || Alias::new("s");
+    let target = Expr::case(
+        Expr::col((r(), issue_relations::Column::RelationType)).eq("blocked_by"),
+        Expr::col((r(), issue_relations::Column::RelatedIssueId)),
+    )
+    .finally(Expr::col((r(), issue_relations::Column::IssueId)));
+    let mut inner = blocker_edge_select(target.into());
+    inner.expr(Expr::val(1));
+    blocker_target_predicates(&mut inner);
+    inner
+        .cond_where(
+            Cond::any()
+                .add(
+                    Expr::col((r(), issue_relations::Column::IssueId))
+                        .eq(*issue_id)
+                        .and(
+                            Expr::col((r(), issue_relations::Column::RelationType))
+                                .eq("blocked_by"),
+                        ),
+                )
+                .add(
+                    Expr::col((r(), issue_relations::Column::RelatedIssueId))
+                        .eq(*issue_id)
+                        .and(
+                            Expr::col((r(), issue_relations::Column::RelationType)).eq("blocking"),
+                        ),
+                ),
+        )
+        .and_where(Expr::col((s(), states::Column::Group)).is_not_in(["completed", "cancelled"]));
+    let mut select = SeaQuery::select();
+    select.expr_as(Expr::exists(inner), Alias::new("has_open_blockers"));
+    select
+}
 
 /// Sort key per `_summary_list`: resolved flag, identifier, sequence,
 /// then the rendered triple.
@@ -1733,42 +1862,46 @@ async fn fetch_blocker_rows(pool: &PgPool, issue_id: &Uuid) -> Result<BlockerRow
         issue_id: &Uuid,
         blocked_by: bool,
     ) -> Result<Vec<(String, Option<String>, Option<String>)>, Denial> {
+        use issue_relations::Column::{IssueId, RelatedIssueId};
         let mut seen = std::collections::HashSet::new();
         let mut items: Vec<SummarySortKey> = Vec::new();
+        let db = orm(pool);
         for relation_type in ["blocked_by", "blocking"] {
-            let (anchor_col, target_col) = if blocked_by {
+            let (anchor, target) = if blocked_by {
                 match relation_type {
-                    "blocked_by" => ("issue_id", "related_issue_id"),
-                    _ => ("related_issue_id", "issue_id"),
+                    "blocked_by" => (IssueId, RelatedIssueId),
+                    _ => (RelatedIssueId, IssueId),
                 }
             } else {
                 match relation_type {
-                    "blocked_by" => ("related_issue_id", "issue_id"),
-                    _ => ("issue_id", "related_issue_id"),
+                    "blocked_by" => (RelatedIssueId, IssueId),
+                    _ => (IssueId, RelatedIssueId),
                 }
             };
-            let rows: Vec<BlockerTargetRow> = sqlx::query_as(&format!(
-                r#"SELECT t."id", p."identifier", t."sequence_id", s."name", s."group"
-                   FROM "issue_relations" r
-                   INNER JOIN "issues" t ON t."id" = r."{target_col}"
-                   INNER JOIN "states" s ON s."id" = t."state_id"
-                   INNER JOIN "projects" p ON p."id" = t."project_id"
-                   WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
-                     AND r."{anchor_col}" = $1 AND r."relation_type" = $2
-                     AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND t."is_draft" = FALSE
-                     AND t."workspace_id" = r."workspace_id"
-                     AND s."group" <> 'triage' AND p."archived_at" IS NULL"#,
-            ))
-            .bind(issue_id)
-            .bind(relation_type)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| db_error(error, "expand-blockers"))?;
-            for (id, identifier, sequence_id, state, group) in rows {
-                if seen.insert(id) {
-                    let resolved =
-                        i64::from(matches!(group.as_deref(), Some("completed" | "cancelled")));
-                    items.push((resolved, identifier, i64::from(sequence_id), state, group));
+            let rows = db
+                .query_all(DbBackend::Postgres.build(&blocker_targets_select(
+                    issue_id,
+                    relation_type,
+                    anchor,
+                    target,
+                )))
+                .await
+                .map_err(|error| db_error(error, "expand-blockers"))?;
+            for row in &rows {
+                let row = BlockerTargetRow::from_query_result(row, "")
+                    .map_err(|error| db_error(error, "expand-blockers"))?;
+                if seen.insert(row.issue_id) {
+                    let resolved = i64::from(matches!(
+                        row.state_group.as_deref(),
+                        Some("completed" | "cancelled")
+                    ));
+                    items.push((
+                        resolved,
+                        row.project_identifier,
+                        i64::from(row.sequence_id),
+                        row.state_name,
+                        row.state_group,
+                    ));
                 }
             }
         }
@@ -1783,27 +1916,13 @@ async fn fetch_blocker_rows(pool: &PgPool, issue_id: &Uuid) -> Result<BlockerRow
     }
     let blocked_by = direction(pool, issue_id, true).await?;
     let blocking = direction(pool, issue_id, false).await?;
-    let has_open_blockers: bool = sqlx::query_scalar(
-        r#"SELECT EXISTS(
-             SELECT 1 FROM "issue_relations" r
-             INNER JOIN "issues" t ON t."id" = CASE WHEN r."relation_type" = 'blocked_by' THEN r."related_issue_id" ELSE r."issue_id" END
-             INNER JOIN "states" s ON s."id" = t."state_id"
-             INNER JOIN "projects" p ON p."id" = t."project_id"
-             WHERE r."deleted_at" IS NULL AND r."issue_id" <> r."related_issue_id"
-               AND t."deleted_at" IS NULL AND t."archived_at" IS NULL AND t."is_draft" = FALSE
-               AND t."workspace_id" = r."workspace_id"
-               AND s."group" <> 'triage' AND p."archived_at" IS NULL
-               AND (
-                 (r."issue_id" = $1 AND r."relation_type" = 'blocked_by')
-                 OR (r."related_issue_id" = $1 AND r."relation_type" = 'blocking')
-               )
-               AND s."group" NOT IN ('completed', 'cancelled')
-           )"#,
-    )
-    .bind(issue_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| db_error(error, "expand-open-blockers"))?;
+    let has_open_blockers: bool = orm(pool)
+        .query_one(DbBackend::Postgres.build(&has_open_blockers_select(issue_id)))
+        .await
+        .map_err(|error| db_error(error, "expand-open-blockers"))?
+        .ok_or(Denial::ServerError)?
+        .try_get("", "has_open_blockers")
+        .map_err(|error| db_error(error, "expand-open-blockers"))?;
     Ok(BlockerRows {
         blocked_by,
         blocking,
@@ -1989,7 +2108,7 @@ struct WriteBody {
 /// exists here — an unpinned edge; Python would 400 them as non-strings).
 fn parse_write_body(headers: &HeaderMap, body: &[u8]) -> Result<WriteBody, Denial> {
     use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
-    use crate::v1_cycles_modules::json_cpython::{
+    use crate::v1_cycles_modules::json::{
         parse_json_text_spans, to_serde_publish, to_serde_publish_map, JsonFail,
     };
     match negotiate_body(headers, body, &WRITE_BODY_SPEC) {
@@ -2024,36 +2143,6 @@ fn parse_write_body(headers: &HeaderMap, body: &[u8]) -> Result<WriteBody, Denia
                 }
             }
         },
-    }
-}
-
-/// The activity `requested_data` text for a parsed write body
-/// (PIDASHCONV-763): form bodies dump list fields as `QueryDict`
-/// last-wins scalars, while validation keeps the `getlist` arrays. JSON
-/// bodies dump as-is (arrays are real data there) without a copy.
-fn requested_data_text(parsed: &WriteBody) -> String {
-    if parsed.from_form {
-        let mut projected = parsed.value.clone();
-        if let Value::Object(map) = &mut projected {
-            crate::v1_cycles_modules::body::project_list_scalars(map, WRITE_BODY_SPEC.list_fields);
-        }
-        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&projected)
-    } else {
-        pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&parsed.value)
-    }
-}
-
-/// The `model_activity` `requested_data` object for a parsed write body:
-/// the same scalar-last projection as [`requested_data_text`], as a value.
-fn requested_data_value(parsed: &WriteBody) -> Value {
-    if parsed.from_form {
-        let mut projected = parsed.value.clone();
-        if let Value::Object(map) = &mut projected {
-            crate::v1_cycles_modules::body::project_list_scalars(map, WRITE_BODY_SPEC.list_fields);
-        }
-        projected
-    } else {
-        parsed.value.clone()
     }
 }
 
@@ -3098,9 +3187,8 @@ fn field_selection(query: &QueryMap, available: &[&str]) -> Result<FieldSelectio
 // ---------------------------------------------------------------------------
 
 async fn read_body(body: axum::body::Body) -> Result<Vec<u8>, Denial> {
-    axum::body::to_bytes(body, usize::MAX)
+    pidash_compat::http::read_body(body)
         .await
-        .map(|bytes| bytes.to_vec())
         .map_err(|error| db_error(error, "read-body"))
 }
 
@@ -3181,7 +3269,7 @@ async fn link_list_inner(
     );
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
-        let decoded = decode_link(row, &tz)?;
+        let decoded = decode_link(row, &tz);
         let expansions = link_expansions(
             &pre.pool,
             &decoded,
@@ -3258,13 +3346,14 @@ async fn link_post_inner(
         return Err(Denial::FieldErrors(LINK_DUP_BODY.to_owned()));
     }
     // `ProjectBaseModel.save` sets the workspace from the project.
-    let link_workspace: Option<Uuid> =
-        sqlx::query_scalar(r#"SELECT "workspace_id" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|error| db_error(error, "link-post-workspace"))?
-            .flatten();
+    let db = orm(&pre.pool);
+    let link_workspace: Option<Uuid> = projects::Entity::find_by_id(project_id)
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "link-post-workspace"))?;
     let Some(link_workspace) = link_workspace else {
         // Unreachable past the gate (membership implies the project), but
         // Python would `IntegrityError` the create here.
@@ -3275,27 +3364,29 @@ async fn link_post_inner(
     let created_at = now_utc();
     let updated_at = now_utc();
     let title = validated.title.unwrap_or(None);
-    sqlx::query(
-        r#"INSERT INTO "issue_links" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "project_id", "workspace_id", "issue_id", "title", "url", "metadata")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10)"#,
-    )
-    .bind(link_id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(project_id)
-    .bind(link_workspace)
-    .bind(issue_id)
-    .bind(title.as_deref())
-    .bind(&validated.url)
-    .bind(serde_json::json!({}))
-    .execute(&pre.pool)
+    // Bare entity insert (no `ActiveModelBehavior` hooks): the same
+    // columns the old statement listed, `updated_by_id` NULL.
+    issue_links::Entity::insert(issue_links::ActiveModel {
+        id: Set(link_id),
+        created_at: Set(created_at.into()),
+        updated_at: Set(updated_at.into()),
+        created_by_id: Set(Some(pre.actor.id)),
+        updated_by_id: Set(None),
+        project_id: Set(project_id),
+        workspace_id: Set(link_workspace),
+        issue_id: Set(*issue_id),
+        title: Set(title.clone()),
+        url: Set(validated.url.clone()),
+        metadata: Set(serde_json::json!({})),
+        deleted_at: Set(None),
+    })
+    .exec(&db)
     .await
     .map_err(|error| {
         // No issue lookup precedes the create: a bogus `issue_id`
         // violates the FK, and `handle_exception` answers the
         // `IntegrityError` 400 (`api/views/base.py:142-147`).
+        let error = into_sqlx(error);
         if is_fk_violation(&error) {
             Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
         } else {
@@ -3306,12 +3397,12 @@ async fn link_post_inner(
     // user.id)`, saved with `update_fields=["created_by"]` — `updated_at`
     // is NOT re-stamped (Django skips `auto_now` outside `update_fields`).
     let created_by = override_user_id(parsed.value.get("created_by"), &pre.actor.id)?;
-    if let Err(error) =
-        sqlx::query(r#"UPDATE "issue_links" SET "created_by_id" = $1 WHERE "id" = $2"#)
-            .bind(created_by)
-            .bind(link_id)
-            .execute(&pre.pool)
-            .await
+    if let Err(error) = issue_links::Entity::update_many()
+        .col_expr(issue_links::Column::CreatedById, Expr::value(created_by))
+        .filter(issue_links::Column::Id.eq(link_id))
+        .exec(&db)
+        .await
+        .map_err(into_sqlx)
     {
         if is_fk_violation(&error) {
             return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
@@ -3474,7 +3565,7 @@ async fn link_detail_inner(
         state.settings().urls.web_url.as_deref(),
         state.settings().urls.app_base_url.as_deref(),
     );
-    let decoded = decode_link(&row, &tz)?;
+    let decoded = decode_link(&row, &tz);
     let expansions = link_expansions(
         &pre.pool,
         &decoded,
@@ -3544,8 +3635,8 @@ async fn link_patch_inner(
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
     let parsed = parse_write_body(headers, raw_body)?;
-    let requested = requested_data_text(&parsed);
-    let before_decoded = decode_link(&before, &tz)?;
+    let requested = operations::requested_data_text(&parsed.value, parsed.from_form);
+    let before_decoded = decode_link(&before, &tz);
     let current = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&render_link_value(
         &before_decoded,
         None,
@@ -3571,25 +3662,26 @@ async fn link_patch_inner(
         .metadata
         .clone()
         .unwrap_or_else(|| before_decoded.metadata.clone());
-    let new_deleted_at = validated.deleted_at.unwrap_or_else(|| {
-        before
-            .try_get::<Option<DateTime<Utc>>, _>("deleted_at")
-            .unwrap_or(None)
-    });
-    sqlx::query(
-        r#"UPDATE "issue_links" SET "title" = $1, "url" = $2, "metadata" = $3, "deleted_at" = $4,
-            "updated_at" = $5, "updated_by_id" = $6 WHERE "id" = $7"#,
-    )
-    .bind(new_title.as_deref())
-    .bind(&new_url)
-    .bind(&new_metadata)
-    .bind(new_deleted_at)
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "link-patch-update"))?;
+    let new_deleted_at = validated
+        .deleted_at
+        .unwrap_or_else(|| before.deleted_at.map(|dt| dt.with_timezone(&Utc)));
+    issue_links::Entity::update_many()
+        .col_expr(issue_links::Column::Title, Expr::value(new_title.clone()))
+        .col_expr(issue_links::Column::Url, Expr::value(new_url.clone()))
+        .col_expr(
+            issue_links::Column::Metadata,
+            Expr::value(new_metadata.clone()),
+        )
+        .col_expr(issue_links::Column::DeletedAt, Expr::value(new_deleted_at))
+        .col_expr(issue_links::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            issue_links::Column::UpdatedById,
+            Expr::value(Some(pre.actor.id)),
+        )
+        .filter(issue_links::Column::Id.eq(*pk))
+        .exec(&orm(&pre.pool))
+        .await
+        .map_err(|error| db_error(error, "link-patch-update"))?;
     // Crawl uses the post-save `serializer.data` id/url (`:1749`).
     let crawl_args = work_tasks::crawl_link_title_args(&pk.to_string(), &new_url);
     enqueue_best_effort(
@@ -3678,7 +3770,7 @@ async fn link_delete_inner(
     let Some(before) = fetch_link_direct(&pre.pool, slug, &project_id, issue_id, pk).await? else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
-    let before_decoded = decode_link(&before, &tz)?;
+    let before_decoded = decode_link(&before, &tz);
     let current = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&render_link_value(
         &before_decoded,
         None,
@@ -3706,16 +3798,20 @@ async fn link_delete_inner(
     // `updated_at` re-stamps on the `save()`.
     let deleted_at = now_utc();
     let updated_at = now_utc();
-    sqlx::query(
-        r#"UPDATE "issue_links" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
-    )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "link-delete"))?;
+    issue_links::Entity::update_many()
+        .col_expr(
+            issue_links::Column::DeletedAt,
+            Expr::value(Some(deleted_at)),
+        )
+        .col_expr(issue_links::Column::UpdatedAt, Expr::value(updated_at))
+        .col_expr(
+            issue_links::Column::UpdatedById,
+            Expr::value(Some(pre.actor.id)),
+        )
+        .filter(issue_links::Column::Id.eq(*pk))
+        .exec(&orm(&pre.pool))
+        .await
+        .map_err(|error| db_error(error, "link-delete"))?;
     let (sweep_args, sweep_kwargs) = soft_delete_sweep("issuelink", &pk.to_string());
     enqueue_best_effort(&pre.pool, SOFT_DELETE_TASK, sweep_args, sweep_kwargs).await;
     Ok(Response::builder()
@@ -3728,20 +3824,6 @@ async fn link_delete_inner(
 // Comment input helpers
 // ---------------------------------------------------------------------------
 
-/// Python truthiness for a `request.data.get()` value: missing/null are
-/// falsy; `""`/`0`/`0.0`/`false`/`[]`/`{}` are falsy; everything else is
-/// truthy.
-fn is_truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(flag)) => *flag,
-        Some(Value::Number(number)) => number.as_f64().map(|n| n != 0.0).unwrap_or(true),
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Object(map)) => !map.is_empty(),
-    }
-}
-
 /// `base_host(request, is_app=True)` (`utils/host.py:17-60`): the app base
 /// URL when set, else the web origin; a missing pair raises
 /// `ImproperlyConfigured` into the 500.
@@ -3753,123 +3835,6 @@ fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
         return Ok(url.to_owned());
     }
     Err(Denial::ServerError)
-}
-
-/// Python `str()` for a JSON scalar, for the external-dedupe guards:
-/// `CharField.get_prep_value` stringifies filter values (ints stringify,
-/// bools spell `True`/`False`), and the PATCH guard compares
-/// `stored != str(incoming)` (`:2047`). Composites return `None`: their
-/// `repr` can only match a stored repr-string, which no API write can
-/// produce (the serializer 400s them first) — skipping the query is
-/// equivalent to the filter miss. All verified live.
-fn python_scalar_str(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(python_number_str(number)),
-        Value::Bool(flag) => Some(if *flag { "True" } else { "False" }.to_owned()),
-        _ => None,
-    }
-}
-
-/// The comment-PATCH dup-guard input (`:2045-2061`): `None` skips the
-/// query (falsy id, `str()`-equal to stored, or a composite the filter
-/// could never match); otherwise the `(source, id)` filter pair.
-/// `data.get("external_source", stored)` — present-null queries `IS
-/// NULL`; present-but-empty still filters; absent inherits the stored
-/// value, NULL included; composite sources skip like composite ids. All
-/// verified live.
-fn patch_external_guard(
-    map: &Map<String, Value>,
-    stored_id: Option<&str>,
-    stored_source: Option<String>,
-) -> Option<(Option<String>, String)> {
-    if !is_truthy(map.get("external_id")) {
-        return None;
-    }
-    let stored = stored_id.unwrap_or_default();
-    let incoming = match map.get("external_id").and_then(python_scalar_str) {
-        Some(text) if text == stored => return None,
-        Some(text) => text,
-        None => return None,
-    };
-    let source: Option<String> = match map.get("external_source") {
-        None => stored_source,
-        Some(Value::Null) => None,
-        Some(Value::String(text)) => Some(text.clone()),
-        // Other scalars stringify; composites skip (their filter would
-        // miss; the serializer 400s either way).
-        Some(value) => Some(python_scalar_str(value)?),
-    };
-    Some((source, incoming))
-}
-
-/// The comment external-dedupe guard input: both values truthy (Python
-/// `and`), rendered as filter strings via `get_prep_value` (`str()`).
-/// Composites skip (their filter would miss; the serializer 400s).
-fn dedupe_pair(map: &Map<String, Value>, source_default: Option<&str>) -> Option<(String, String)> {
-    let id_raw = map.get("external_id");
-    let source_raw = map.get("external_source");
-    let id_truthy = is_truthy(id_raw);
-    let source_truthy = match source_raw {
-        Some(_) => is_truthy(source_raw),
-        // Patch default: the stored source (NULL counts as missing here —
-        // the `and` needs a truthy stored value too).
-        None => source_default.map(|s| !s.is_empty()).unwrap_or(false),
-    };
-    if !(id_truthy && source_truthy) {
-        return None;
-    }
-    let id = id_raw.and_then(python_scalar_str)?;
-    let source = match source_raw {
-        Some(value) => python_scalar_str(value)?,
-        None => source_default.unwrap_or_default().to_owned(),
-    };
-    Some((source, id))
-}
-
-/// Pre-validate `comment_json` for HTML-form bodies
-/// (`JSONField.get_value` arrives as a JSON string): parse in place, or
-/// answer the field's `invalid` 400. JSON bodies pass through untouched.
-fn form_comment_json(map: &mut Map<String, Value>, from_form: bool) -> Result<(), Denial> {
-    if !from_form {
-        return Ok(());
-    }
-    if let Some(Value::String(text)) = map.get("comment_json").cloned() {
-        match serde_json::from_str(&text) {
-            Ok(value) => {
-                map.insert("comment_json".to_owned(), value);
-            }
-            Err(_) => {
-                return Err(Denial::FieldErrors(
-                    r#"{"comment_json":["Value must be valid JSON."]}"#.to_owned(),
-                ));
-            }
-        }
-    }
-    // `get_value`: blank + not-required + no `allow_blank` → absent (both
-    // are `ChoiceField`s with defaults and no `blank=True`).
-    for key in ["access", "speaker_type"] {
-        if map.get(key) == Some(&Value::String(String::new())) {
-            map.shift_remove(key);
-        }
-    }
-    // `get_value`: blank + `allow_null`, no `allow_blank` → None (the
-    // `UUIDField` takes no `allow_blank` from `blank=True`).
-    if map.get("speaker_agent_run_id") == Some(&Value::String(String::new())) {
-        map.insert("speaker_agent_run_id".to_owned(), Value::Null);
-    }
-    Ok(())
-}
-
-/// The comment-create 409 body: `{"error": ..., "id": ...}` in view order.
-fn comment_dup_body(id: &str) -> String {
-    let mut map = Map::with_capacity(2);
-    map.insert(
-        "error".to_owned(),
-        Value::String(COMMENT_DUP_MESSAGE.to_owned()),
-    );
-    map.insert("id".to_owned(), Value::String(id.to_owned()));
-    serde_json::to_string(&map).expect("dup body")
 }
 
 /// `GET .../comments/` (`views/issue.py:1851-1862`).
@@ -4093,277 +4058,54 @@ async fn comment_post_inner(
         "POST",
     )
     .await?;
+    // `TimezoneMixin.initial` precedes the view body: an unknown stored
+    // zone 400s here, before body parsing below.
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let parsed = parse_write_body(headers, raw_body)?;
-    // The dup guard touches `request.data.get` first (`:1893`) — a
-    // non-object body raises `AttributeError` into the 500.
-    let Some(map) = parsed.value.as_object() else {
-        return Err(Denial::ServerError);
+    let parsed_body = parse_write_body(headers, raw_body)?;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
+        pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
     };
-    if let Some((source, external_id)) = dedupe_pair(map, None) {
-        if comment_external_exists(&pre.pool, &project_id, slug, Some(&source), &external_id)
-            .await?
-        {
-            // The 409 `"id"` is the DUPLICATE's id (`:1902-1907`).
-            let Some(first) =
-                comment_external_first_id(&pre.pool, &project_id, slug, &source, &external_id)
-                    .await?
-            else {
-                return Err(Denial::ServerError);
-            };
-            return Err(Denial::Conflict(comment_dup_body(&first.to_string())));
-        }
-    }
-    let mut shape_map = map.clone();
-    form_comment_json(&mut shape_map, parsed.from_form)?;
-    let shape_value = Value::Object(shape_map);
-    let validated = validate_comment_create(&CommentWriteInput {
-        body: &shape_value,
-        partial: false,
-    })
-    .map_err(|error| Denial::FieldErrors(error.body().to_owned()))?;
-    // `ProjectBaseModel.save` sets the workspace from the project.
-    let comment_workspace: Option<Uuid> =
-        sqlx::query_scalar(r#"SELECT "workspace_id" FROM "projects" WHERE "id" = $1"#)
-            .bind(project_id)
-            .fetch_optional(&pre.pool)
-            .await
-            .map_err(|error| db_error(error, "comment-post-workspace"))?
-            .flatten();
-    let Some(comment_workspace) = comment_workspace else {
-        return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
-    };
-    let comment_id = Uuid::new_v4();
-    let created_at = now_utc();
-    let updated_at = now_utc();
-    let comment_json = validated
-        .comment_json
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let comment_html = validated
-        .comment_html
-        .clone()
-        .unwrap_or_else(|| "<p></p>".to_owned());
-    let stripped = strip_comment_html(&comment_html);
-    let labels = validated.labels.clone().unwrap_or_default();
-    let access = validated
-        .access
-        .clone()
-        .unwrap_or_else(|| "INTERNAL".to_owned());
-    let speaker_type = validated
-        .speaker_type
-        .clone()
-        .unwrap_or_else(|| "human".to_owned());
-    let speaker_label = validated.speaker_label.clone().unwrap_or_default();
-    // Canonical UUID text per the shape contract; the column is `uuid`.
-    let speaker_run_id: Option<Uuid> = validated
-        .speaker_agent_run_id
-        .clone()
-        .unwrap_or(None)
-        .map(|text| text.parse().expect("canonical run uuid"));
-    // `IssueComment.save` runs in one `transaction.atomic()`: the comment
-    // INSERT, the `Description` INSERT, and the `description_id` UPDATE.
-    let mut tx = pre
-        .pool
-        .begin()
-        .await
-        .map_err(|error| db_error(error, "comment-post-tx"))?;
-    sqlx::query(
-        r#"INSERT INTO "issue_comments" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "project_id", "workspace_id", "issue_id", "actor_id", "comment_json", "comment_html",
-            "comment_stripped", "description_id", "attachments", "labels", "access", "external_source",
-            "external_id", "speaker_type", "speaker_label", "speaker_agent_run_id", "edited_at", "parent_id")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $4, $8, $9, $10, NULL, $11, $12, $13, $14, $15, $16, $17, $18, NULL, NULL)"#,
-    )
-    .bind(comment_id)
-    .bind(created_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(project_id)
-    .bind(comment_workspace)
-    .bind(issue_id)
-    .bind(&comment_json)
-    .bind(&comment_html)
-    .bind(&stripped)
-    .bind(Vec::<String>::new())
-    .bind(&labels)
-    .bind(&access)
-    .bind(validated.external_source.clone().unwrap_or(None))
-    .bind(validated.external_id.clone().unwrap_or(None))
-    .bind(&speaker_type)
-    .bind(&speaker_label)
-    .bind(speaker_run_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| {
-        // No issue lookup precedes the create: a bogus `issue_id`
-        // violates the FK, and `handle_exception` answers the
-        // `IntegrityError` 400 (`api/views/base.py:142-147`). The
-        // transaction rolls back on drop, like the failed ORM `save()`.
-        if is_fk_violation(&error) {
-            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-        } else {
-            db_error(error, "comment-post-insert")
-        }
-    })?;
-    let description_id = Uuid::new_v4();
-    let desc_created_at = now_utc();
-    let desc_updated_at = now_utc();
-    let desc_stripped = description_stripped_for_create(&comment_html);
-    sqlx::query(
-        r#"INSERT INTO "descriptions" ("id", "created_at", "updated_at", "created_by_id", "updated_by_id",
-            "workspace_id", "project_id", "description_json", "description_html", "description_binary",
-            "description_stripped")
-           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, NULL, $9)"#,
-    )
-    .bind(description_id)
-    .bind(desc_created_at)
-    .bind(desc_updated_at)
-    .bind(pre.actor.id)
-    .bind(comment_workspace)
-    .bind(project_id)
-    .bind(&comment_json)
-    .bind(&comment_html)
-    .bind(desc_stripped)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| db_error(error, "comment-post-desc"))?;
-    sqlx::query(r#"UPDATE "issue_comments" SET "description_id" = $1 WHERE "id" = $2"#)
-        .bind(description_id)
-        .bind(comment_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| db_error(error, "comment-post-desc-link"))?;
-    tx.commit().await.map_err(|error| {
-        // Every FK here is `DEFERRABLE INITIALLY DEFERRED`, so the bogus
-        // `issue_id` violation fires at COMMIT, not at the INSERT — and
-        // `handle_exception` answers the `IntegrityError` 400
-        // (`api/views/base.py:142-147`). Every other FK in this
-        // transaction references a row verified above to exist.
-        if is_fk_violation(&error) {
-            Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned())
-        } else {
-            db_error(error, "comment-post-commit")
-        }
-    })?;
-    // The overrides (`:1921-1924`): `created_at` (or `now()`), `created_by`
-    // (or the actor), `actor_id` in memory only (BUG-3) — saved with
-    // `update_fields=["created_at","created_by"]`.
-    let (db_created_at, response_created_at) = override_created_at(map.get("created_at"), &tz)?;
-    let created_by = override_user_id(map.get("created_by"), &pre.actor.id)?;
-    if let Err(error) = sqlx::query(
-        r#"UPDATE "issue_comments" SET "created_at" = $1, "created_by_id" = $2 WHERE "id" = $3"#,
-    )
-    .bind(db_created_at)
-    .bind(created_by)
-    .bind(comment_id)
-    .execute(&pre.pool)
-    .await
-    {
-        if is_fk_violation(&error) {
-            return Err(Denial::FieldErrors(PAYLOAD_NOT_VALID_BODY.to_owned()));
-        }
-        return Err(db_error(error, "comment-post-override"));
-    }
-    // Response `actor` is the in-memory override-or-actor (BUG-3 — always
-    // identical to the response `created_by`); the DB row keeps the
-    // requester.
-    let response_actor = created_by;
-    let decoded = DecodedComment {
-        id: comment_id.to_string(),
-        is_member: None,
-        created_at: response_created_at,
-        updated_at: crate::serializer::render_datetime_in(&updated_at, &tz),
-        deleted_at: None,
-        comment_json: comment_json.clone(),
-        comment_html: comment_html.clone(),
-        attachments: Vec::new(),
-        labels: labels.iter().map(|item| Some(item.clone())).collect(),
-        access: access.clone(),
-        external_source: validated.external_source.clone().unwrap_or(None),
-        external_id: validated.external_id.clone().unwrap_or(None),
-        speaker_type: speaker_type.clone(),
-        speaker_label: speaker_label.clone(),
-        speaker_agent_run_id: validated.speaker_agent_run_id.clone().unwrap_or(None),
-        edited_at: None,
-        created_by: created_by.map(|id| id.to_string()),
-        updated_by: Some(pre.actor.id.to_string()),
-        project: project_id.to_string(),
-        workspace: comment_workspace.to_string(),
-        description: Some(description_id.to_string()),
-        issue: issue_id.to_string(),
-        actor: response_actor.map(|id| id.to_string()),
-        parent: None,
-    };
-    // `requested_data` is the 9-field create shape over the saved row; the
-    // activity actor is the post-override `created_by` (`"None"` wart).
-    let requested = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(
-        &render_comment_create_value(&decoded)?,
-    );
-    let actor_text = created_by
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "None".to_owned());
-    let kwargs = work_tasks::issue_activity_kwargs(
-        work_tasks::ACTIVITY_COMMENT_CREATED,
-        Some(&requested),
-        &actor_text,
-        &issue_id.to_string(),
-        &project_id.to_string(),
-        None,
-        Utc::now().timestamp(),
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
-    // The webhook carries the RAW body, the requester, and the app origin.
-    let origin = app_origin(&state.settings().urls)?;
-    let webhook = work_tasks::comment_model_activity_kwargs(
-        &comment_id.to_string(),
-        requested_data_value(&parsed),
-        None,
-        &pre.actor.id.to_string(),
+    let write = operations::comments::CommentWrite {
         slug,
-        &origin,
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook).await;
-    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
-        state.settings().urls.web_url.as_deref(),
-        state.settings().urls.app_base_url.as_deref(),
-    );
-    let url = comment_url(
-        &pre.pool,
-        &comment_workspace,
-        &project_id,
-        issue_id,
-        web_base.as_deref(),
+        project_id,
+        issue_id: *issue_id,
+        body: &parsed_body.value,
+        from_form: parsed_body.from_form,
+        origin: app_origin(&state.settings().urls).ok(),
+        web_base: pidash_services::v1_work_items::shape_issue::web_base_url(
+            state.settings().urls.web_url.as_deref(),
+            state.settings().urls.app_base_url.as_deref(),
+        ),
+    };
+    // The `created_at` override parser stays handler-side (its
+    // `parse_datetime` cascade lives here); the operation calls it after
+    // the save, where the view applies the override.
+    let resolve_created_at = move |raw: Option<&Value>| {
+        override_created_at(raw, &tz).map_err(|denial| match denial {
+            Denial::FieldErrors(body) => operations::Error::FieldErrors(body),
+            _ => operations::Error::ServerError,
+        })
+    };
+    let outcome = operations::comments::create(
+        &deps,
+        &ctx,
+        &write,
+        &resolve_created_at,
+        operations::comments::CommentCreateOptions {
+            emit_activity: true,
+            emit_model_activity: true,
+        },
     )
     .await?;
-    let body = render_comment_value(&decoded, url, None, &[], &[])?;
-    Ok(json_created(
-        serde_json::to_string(&body).map_err(|_| Denial::ServerError)?,
-    ))
-}
-
-/// `strip_tags(self.comment_html) if self.comment_html != "" else ""`
-/// (`db/models/issue.py:606` over `utils/html_processor.py`, MLStripper).
-fn strip_comment_html(html: &str) -> String {
-    if html.is_empty() {
-        String::new()
-    } else {
-        pidash_db::app_pages::strip::ml_strip_tags(html)
-    }
-}
-
-/// The `Description` row's stripped text on comment create:
-/// `Description.save` RECOMPUTES it with Django's own `strip_tags`
-/// (`db/models/description.py:22-29`), which keeps entities verbatim —
-/// unlike the comment column's entity-decoding MLStripper. Empty HTML
-/// stores NULL. (PATCH syncs the decoded form via queryset `update()`,
-/// which runs no `save()` — that path is untouched.)
-fn description_stripped_for_create(comment_html: &str) -> Option<String> {
-    if comment_html.is_empty() {
-        None
-    } else {
-        Some(crate::space::sanitize::strip_tags(comment_html))
-    }
+    op_response(outcome)
 }
 
 /// The `created_at` override (`:1921`): absent → `now()`; a datetime
@@ -4477,231 +4219,61 @@ async fn comment_patch_inner(
         "PATCH",
     )
     .await?;
-    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let Some(before) = fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk).await?
+    // `TimezoneMixin.initial` precedes the view body: an unknown stored
+    // zone 400s here, before the comment fetch 404s below.
+    activate_timezone(pre.actor.timezone.as_deref())?;
+    // The row fetch precedes body parsing (`:2036-2038`), so a missing
+    // comment 404s before a malformed body 400s.
+    let Some(before) = read::fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })?
     else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
-    let parsed = parse_write_body(headers, raw_body)?;
-    let requested = requested_data_text(&parsed);
-    // The before-image renders the direct (un-annotated) row with its real
-    // `get_url`: no `is_member` key.
-    let before_decoded = decode_comment(&before, &tz)?;
-    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
-        state.settings().urls.web_url.as_deref(),
-        state.settings().urls.app_base_url.as_deref(),
-    );
-    let before_url = comment_url(
-        &pre.pool,
-        &workspace_id,
-        &project_id,
-        issue_id,
-        web_base.as_deref(),
-    )
-    .await?;
-    let current = pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(
-        &render_comment_value(&before_decoded, before_url, None, &[], &[])?,
-    );
-    let Some(map) = parsed.value.as_object() else {
-        // `json.dumps` accepts any body, but the guard's `.get` raises
-        // `AttributeError` into the 500 (`:2046`).
-        return Err(Denial::ServerError);
+    let parsed_body = parse_write_body(headers, raw_body)?;
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = domain_write_ctx(&pre, &project_id);
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
+        pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
     };
-    // The dup guard (`:2045-2061`): truthy `external_id`, different from
-    // the stored value (`str()`-compared), and an existing row under the
-    // given-or-stored source. The 409 `"id"` is the CURRENT row's id.
-    if let Some((source, incoming)) = patch_external_guard(
-        map,
-        before_decoded.external_id.as_deref(),
-        before_decoded.external_source.clone(),
-    ) {
-        if comment_external_exists(&pre.pool, &project_id, slug, source.as_deref(), &incoming)
-            .await?
-        {
-            return Err(Denial::Conflict(comment_dup_body(&pk.to_string())));
-        }
-    }
-    let mut shape_map = map.clone();
-    form_comment_json(&mut shape_map, parsed.from_form)?;
-    let shape_value = Value::Object(shape_map);
-    let validated = validate_comment_create(&CommentWriteInput {
-        body: &shape_value,
-        partial: true,
-    })
-    .map_err(|error| Denial::FieldErrors(error.body().to_owned()))?;
-    // Merge validated keys over the before-image (untouched keys keep
-    // their values — equivalent to the ORM's field-wise `save()`).
-    let before_json: Value = before
-        .try_get("comment_json")
-        .map_err(|_| Denial::ServerError)?;
-    let before_html: String = before
-        .try_get("comment_html")
-        .map_err(|_| Denial::ServerError)?;
-    let before_stripped: String = before
-        .try_get("comment_stripped")
-        .map_err(|_| Denial::ServerError)?;
-    let new_json = validated
-        .comment_json
-        .clone()
-        .unwrap_or(before_json.clone());
-    let new_html = validated
-        .comment_html
-        .clone()
-        .unwrap_or(before_html.clone());
-    let new_stripped = if validated.comment_html.is_some() {
-        strip_comment_html(&new_html)
-    } else {
-        before_stripped.clone()
-    };
-    let new_access = validated
-        .access
-        .clone()
-        .unwrap_or(before_decoded.access.clone());
-    let new_source = validated
-        .external_source
-        .clone()
-        .unwrap_or_else(|| before_decoded.external_source.clone());
-    let new_external_id = validated
-        .external_id
-        .clone()
-        .unwrap_or_else(|| before_decoded.external_id.clone());
-    let new_labels = validated.labels.clone().unwrap_or_else(|| {
-        before_decoded
-            .labels
-            .iter()
-            .map(|item| item.clone().unwrap_or_default())
-            .collect()
-    });
-    let new_speaker_type = validated
-        .speaker_type
-        .clone()
-        .unwrap_or(before_decoded.speaker_type.clone());
-    let new_speaker_label = validated
-        .speaker_label
-        .clone()
-        .unwrap_or(before_decoded.speaker_label.clone());
-    let new_run_id = validated
-        .speaker_agent_run_id
-        .clone()
-        .unwrap_or_else(|| before_decoded.speaker_agent_run_id.clone());
-    let now = now_utc();
-    sqlx::query(
-        r#"UPDATE "issue_comments" SET "comment_json" = $1, "comment_html" = $2, "comment_stripped" = $3,
-            "access" = $4, "external_source" = $5, "external_id" = $6, "labels" = $7,
-            "speaker_type" = $8, "speaker_label" = $9, "speaker_agent_run_id" = $10,
-            "updated_at" = $11, "updated_by_id" = $12 WHERE "id" = $13"#,
-    )
-    .bind(&new_json)
-    .bind(&new_html)
-    .bind(&new_stripped)
-    .bind(&new_access)
-    .bind(new_source.as_deref())
-    .bind(new_external_id.as_deref())
-    .bind(&new_labels)
-    .bind(&new_speaker_type)
-    .bind(&new_speaker_label)
-    .bind(new_run_id.as_deref().and_then(|text| text.parse::<Uuid>().ok()))
-    .bind(now)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
-    .await
-    .map_err(|error| db_error(error, "comment-patch-update"))?;
-    // The `Description` sync (`db/models/issue.py:629-647`): only changed
-    // tracked fields, plus `updated_by`/`updated_at` — via queryset
-    // `update()`, so no `save()` override re-strips. `_changes_on_save`
-    // compares VALUES: a present-but-identical key syncs nothing.
-    let html_changed = validated
-        .comment_html
-        .as_ref()
-        .is_some_and(|html| *html != before_html);
-    let json_changed = validated
-        .comment_json
-        .as_ref()
-        .is_some_and(|json| *json != before_json);
-    let stripped_changed = new_stripped != before_stripped;
-    // No `description_id` (legacy rows) skips the sync silently (`:631`).
-    if html_changed || json_changed || stripped_changed {
-        if let Some(description_id) = before_decoded.description.as_deref() {
-            let description_id: Uuid = description_id.parse().map_err(|_| Denial::ServerError)?;
-            let mut sets: Vec<String> = Vec::new();
-            if html_changed {
-                sets.push("description_html".to_owned());
-            }
-            if stripped_changed {
-                sets.push("description_stripped".to_owned());
-            }
-            if json_changed {
-                sets.push("description_json".to_owned());
-            }
-            let set_sql = sets
-                .iter()
-                .enumerate()
-                .map(|(idx, col)| format!("\"{col}\" = ${}", idx + 1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "UPDATE \"descriptions\" SET {set_sql}, \"updated_by_id\" = ${}, \"updated_at\" = ${} WHERE \"id\" = ${}",
-                sets.len() + 1,
-                sets.len() + 2,
-                sets.len() + 3,
-            );
-            let mut query = sqlx::query(&sql);
-            for col in &sets {
-                query = match col.as_str() {
-                    "description_html" => query.bind(&new_html),
-                    "description_stripped" => query.bind(&new_stripped),
-                    _ => query.bind(&new_json),
-                };
-            }
-            query
-                .bind(pre.actor.id)
-                .bind(now)
-                .bind(description_id)
-                .execute(&pre.pool)
-                .await
-                .map_err(|error| db_error(error, "comment-patch-desc"))?;
-        }
-    }
-    let kwargs = work_tasks::issue_activity_kwargs(
-        work_tasks::ACTIVITY_COMMENT_UPDATED,
-        Some(&requested),
-        &pre.actor.id.to_string(),
-        &issue_id.to_string(),
-        &project_id.to_string(),
-        Some(&current),
-        Utc::now().timestamp(),
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::ISSUE_ACTIVITY_TASK, vec![], kwargs).await;
-    let origin = app_origin(&state.settings().urls)?;
-    let webhook = work_tasks::comment_model_activity_kwargs(
-        &pk.to_string(),
-        requested_data_value(&parsed),
-        Some(&current),
-        &pre.actor.id.to_string(),
+    let write = operations::comments::CommentUpdate {
         slug,
-        &origin,
-    );
-    enqueue_best_effort(&pre.pool, work_tasks::MODEL_ACTIVITY_TASK, vec![], webhook).await;
-    // The response refetches by id (`:2086`) and renders un-annotated.
-    let Some(after) = fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk).await?
-    else {
-        return Err(Denial::ServerError);
+        project_id,
+        workspace_id,
+        issue_id: *issue_id,
+        pk: *pk,
+        before: &before,
+        body: &parsed_body.value,
+        from_form: parsed_body.from_form,
+        origin: app_origin(&state.settings().urls).ok(),
+        web_base: pidash_services::v1_work_items::shape_issue::web_base_url(
+            state.settings().urls.web_url.as_deref(),
+            state.settings().urls.app_base_url.as_deref(),
+        ),
     };
-    let decoded = decode_comment(&after, &tz)?;
-    let url = comment_url(
-        &pre.pool,
-        &workspace_id,
-        &project_id,
-        issue_id,
-        web_base.as_deref(),
+    let outcome = operations::comments::update(
+        &deps,
+        &ctx,
+        &write,
+        operations::comments::CommentUpdateOptions {
+            emit_activity: true,
+            emit_model_activity: true,
+        },
     )
     .await?;
-    let body = render_comment_value(&decoded, url, None, &[], &[])?;
-    Ok(json_response(
-        StatusCode::OK,
-        serde_json::to_string(&body).map_err(|_| Denial::ServerError)?,
-    ))
+    op_response(outcome)
 }
 
 /// `DELETE .../comments/<pk>/` (`views/issue.py:2103-2121`).
@@ -4746,7 +4318,15 @@ async fn comment_delete_inner(
     )
     .await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
-    let Some(before) = fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk).await?
+    let Some(before) = read::fetch_comment_direct(&pre.pool, slug, &project_id, issue_id, pk)
+        .await
+        .map_err(|error| match error {
+            read::Error::NotFound | read::Error::Failed(_) => Denial::ServerError,
+            read::Error::Db(err) => {
+                let (site, source) = err.split();
+                db_error(source, site)
+            }
+        })?
     else {
         return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
     };
@@ -4773,14 +4353,13 @@ async fn comment_delete_inner(
     // `updated_at` re-stamps on the `save()`.
     let deleted_at = now_utc();
     let updated_at = now_utc();
-    sqlx::query(
-        r#"UPDATE "issue_comments" SET "deleted_at" = $1, "updated_at" = $2, "updated_by_id" = $3 WHERE "id" = $4"#,
+    comment_domain::soft_delete_v1_comment(
+        &pidash_db::pool::sea_orm_connection(&pre.pool),
+        *pk,
+        pre.actor.id,
+        deleted_at,
+        updated_at,
     )
-    .bind(deleted_at)
-    .bind(updated_at)
-    .bind(pre.actor.id)
-    .bind(pk)
-    .execute(&pre.pool)
     .await
     .map_err(|error| db_error(error, "comment-delete"))?;
     // `delete()` emits the sweep before the view enqueues the activity
@@ -4882,7 +4461,6 @@ mod tests {
             created_at: str_field(body, "created_at"),
             updated_at: str_field(body, "updated_at"),
             deleted_at: opt_str_field(body, "deleted_at"),
-            comment_json: body.get("comment_json").cloned().unwrap_or(Value::Null),
             comment_html: str_field(body, "comment_html"),
             attachments,
             labels,
@@ -5237,7 +4815,7 @@ mod tests {
             (StatusCode::NOT_FOUND, RESOURCE_NOT_FOUND_BODY.to_owned())
         );
         assert_eq!(
-            Denial::Conflict(comment_dup_body("1")).status_and_body().0,
+            Denial::Conflict("dup".to_owned()).status_and_body().0,
             StatusCode::CONFLICT
         );
         assert_eq!(
@@ -5246,14 +4824,6 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned()
             )
-        );
-    }
-
-    #[test]
-    fn comment_dup_body_bytes() {
-        assert_eq!(
-            comment_dup_body("6c6c6c6c-0000-4000-8000-000000000000"),
-            r#"{"error":"Work item comment with the same external id and external source already exists","id":"6c6c6c6c-0000-4000-8000-000000000000"}"#,
         );
     }
 
@@ -6044,98 +5614,6 @@ mod tests {
     }
 
     #[test]
-    fn truthiness_matrix() {
-        assert!(!is_truthy(None));
-        assert!(!is_truthy(Some(&Value::Null)));
-        assert!(!is_truthy(Some(&Value::Bool(false))));
-        assert!(!is_truthy(Some(&Value::String(String::new()))));
-        assert!(!is_truthy(Some(&Value::from(0))));
-        assert!(!is_truthy(Some(&Value::Array(vec![]))));
-        assert!(is_truthy(Some(&Value::Bool(true))));
-        assert!(is_truthy(Some(&Value::String("x".to_owned()))));
-        assert!(is_truthy(Some(&Value::from(7))));
-    }
-
-    #[test]
-    fn dedupe_pair_arms() {
-        // Both truthy strings → the pair.
-        let map = patch_map(&[
-            ("external_source", Value::String("gh".to_owned())),
-            ("external_id", Value::String("1".to_owned())),
-        ]);
-        assert_eq!(
-            dedupe_pair(&map, None),
-            Some(("gh".to_owned(), "1".to_owned()))
-        );
-        // Either falsy → no check.
-        let map = patch_map(&[("external_id", Value::String(String::new()))]);
-        assert_eq!(dedupe_pair(&map, None), None);
-        let map = patch_map(&[("external_id", Value::String("1".to_owned()))]);
-        assert_eq!(dedupe_pair(&map, None), None);
-        // Patch default: the stored source fills an absent key.
-        let map = patch_map(&[("external_id", Value::String("1".to_owned()))]);
-        assert_eq!(
-            dedupe_pair(&map, Some("gh")),
-            Some(("gh".to_owned(), "1".to_owned()))
-        );
-        // Scalars stringify via `get_prep_value` (`str()`); the serializer
-        // then coerces numbers or 400s bools. Corrected from the 500 pin
-        // by live probe in review.
-        let map = patch_map(&[
-            ("external_source", Value::String("gh".to_owned())),
-            ("external_id", Value::from(7)),
-        ]);
-        assert_eq!(
-            dedupe_pair(&map, None),
-            Some(("gh".to_owned(), "7".to_owned()))
-        );
-        let map = patch_map(&[
-            ("external_source", Value::from(true)),
-            ("external_id", Value::String("1".to_owned())),
-        ]);
-        assert_eq!(
-            dedupe_pair(&map, None),
-            Some(("True".to_owned(), "1".to_owned()))
-        );
-        // Composites skip (their filter would miss; the serializer 400s).
-        let map = patch_map(&[
-            ("external_source", Value::String("gh".to_owned())),
-            ("external_id", Value::Array(vec![Value::from(1)])),
-        ]);
-        assert_eq!(dedupe_pair(&map, None), None);
-    }
-
-    #[test]
-    fn form_comment_json_arms() {
-        let mut map = patch_map(&[
-            ("comment_json", Value::String("{\"a\":1}".to_owned())),
-            ("access", Value::String(String::new())),
-            ("speaker_type", Value::String(String::new())),
-            ("comment_html", Value::String(String::new())),
-        ]);
-        form_comment_json(&mut map, true).expect("ok");
-        assert_eq!(map.get("comment_json"), Some(&serde_json::json!({"a": 1})));
-        assert!(map.get("access").is_none());
-        assert!(map.get("speaker_type").is_none());
-        assert_eq!(map.get("comment_html"), Some(&Value::String(String::new())));
-        let mut bad = patch_map(&[("comment_json", Value::String("{oops".to_owned()))]);
-        assert_eq!(
-            form_comment_json(&mut bad, true).expect_err("errors"),
-            Denial::FieldErrors("{\"comment_json\":[\"Value must be valid JSON.\"]}".to_owned())
-        );
-        // JSON bodies pass through untouched.
-        let mut json = patch_map(&[("access", Value::String(String::new()))]);
-        form_comment_json(&mut json, false).expect("ok");
-        assert_eq!(json.get("access"), Some(&Value::String(String::new())));
-    }
-
-    #[test]
-    fn strip_comment_html_arms() {
-        assert_eq!(strip_comment_html(""), "");
-        assert_eq!(strip_comment_html("<p>hi</p>"), "hi");
-    }
-
-    #[test]
     fn query_helpers() {
         let mut query = QueryMap::new();
         query.insert("fields".to_owned(), OneOrMany::One("id,,url".to_owned()));
@@ -6272,85 +5750,6 @@ mod tests {
     }
 
     #[test]
-    fn patch_external_guard_arms() {
-        let stored_id = Some("extA");
-        let stored_source = Some("srcA".to_owned());
-        // Falsy id skips.
-        let map = patch_map(&[("external_id", Value::String(String::new()))]);
-        assert_eq!(
-            patch_external_guard(&map, stored_id, stored_source.clone()),
-            None
-        );
-        // `str()`-equal skips — including int 5 vs stored "5".
-        let map = patch_map(&[("external_id", Value::String("extA".to_owned()))]);
-        assert_eq!(
-            patch_external_guard(&map, stored_id, stored_source.clone()),
-            None
-        );
-        let map = patch_map(&[("external_id", Value::from(5))]);
-        assert_eq!(
-            patch_external_guard(&map, Some("5"), stored_source.clone()),
-            None
-        );
-        let map = patch_map(&[("external_id", Value::from(true))]);
-        assert_eq!(
-            patch_external_guard(&map, Some("True"), stored_source.clone()),
-            None
-        );
-        // Changed id + absent source inherits the stored source.
-        let map = patch_map(&[("external_id", Value::String("extB".to_owned()))]);
-        assert_eq!(
-            patch_external_guard(&map, stored_id, stored_source.clone()),
-            Some((Some("srcA".to_owned()), "extB".to_owned()))
-        );
-        // Explicit-null source queries IS NULL; empty still filters.
-        let map = patch_map(&[
-            ("external_id", Value::String("extB".to_owned())),
-            ("external_source", Value::Null),
-        ]);
-        assert_eq!(
-            patch_external_guard(&map, stored_id, stored_source.clone()),
-            Some((None, "extB".to_owned()))
-        );
-        let map = patch_map(&[
-            ("external_id", Value::String("extB".to_owned())),
-            ("external_source", Value::String(String::new())),
-        ]);
-        assert_eq!(
-            patch_external_guard(&map, stored_id, stored_source.clone()),
-            Some((Some(String::new()), "extB".to_owned()))
-        );
-        // Differing scalars filter via `get_prep_value` (`str()`); the
-        // serializer then coerces numbers or 400s bools (verified live).
-        let map = patch_map(&[("external_id", Value::from(6))]);
-        assert_eq!(
-            patch_external_guard(&map, stored_id, None),
-            Some((None, "6".to_owned()))
-        );
-        let map = patch_map(&[
-            ("external_id", Value::String("extB".to_owned())),
-            ("external_source", Value::from(7)),
-        ]);
-        assert_eq!(
-            patch_external_guard(&map, stored_id, None),
-            Some((Some("7".to_owned()), "extB".to_owned()))
-        );
-        // Composites skip (their filter would miss; the serializer 400s).
-        for raw in [
-            Value::Array(vec![Value::from(1)]),
-            Value::Object(Map::new()),
-        ] {
-            let map = patch_map(&[("external_id", raw.clone())]);
-            assert_eq!(patch_external_guard(&map, stored_id, None), None, "{raw:?}");
-            let map = patch_map(&[
-                ("external_id", Value::String("extB".to_owned())),
-                ("external_source", raw.clone()),
-            ]);
-            assert_eq!(patch_external_guard(&map, stored_id, None), None, "{raw:?}");
-        }
-    }
-
-    #[test]
     fn window_rows_negative_limit_500s() {
         use crate::paginator::Cursor;
         let rows = vec![1];
@@ -6459,7 +5858,6 @@ mod tests {
             created_at: "ts".to_owned(),
             updated_at: "ts".to_owned(),
             deleted_at: None,
-            comment_json: Value::Object(Map::new()),
             comment_html: "<p></p>".to_owned(),
             attachments: Vec::new(),
             labels: Vec::new(),
@@ -6491,35 +5889,6 @@ mod tests {
     }
 
     #[test]
-    fn form_comment_json_blank_speaker_clears() {
-        // `get_value`: blank + `allow_null`, no `allow_blank` → None.
-        let mut map = patch_map(&[("speaker_agent_run_id", Value::String(String::new()))]);
-        form_comment_json(&mut map, true).expect("ok");
-        assert_eq!(map.get("speaker_agent_run_id"), Some(&Value::Null));
-        let mut map = patch_map(&[("speaker_agent_run_id", Value::String(String::new()))]);
-        form_comment_json(&mut map, false).expect("ok");
-        assert_eq!(
-            map.get("speaker_agent_run_id"),
-            Some(&Value::String(String::new()))
-        );
-    }
-
-    #[test]
-    fn description_stripped_for_create_keeps_entities() {
-        // `Description.save` recomputes with Django's `strip_tags`
-        // (verbatim entities), unlike the comment column (verified live).
-        assert_eq!(description_stripped_for_create(""), None);
-        assert_eq!(
-            description_stripped_for_create("<p>R&amp;D</p>").as_deref(),
-            Some("R&amp;D")
-        );
-        assert_eq!(
-            description_stripped_for_create("<p>hi</p>").as_deref(),
-            Some("hi")
-        );
-    }
-
-    #[test]
     fn char_field_float_inputs_use_python_spelling() {
         // `str(1e100)` is `1e+100`: stored values, the 255 check and the
         // guard compares all see the Python spelling (PIDASHCONV-758).
@@ -6528,12 +5897,10 @@ mod tests {
         let float: Value = serde_json::from_str("1e100").expect("parses");
         assert_eq!(char_field_value(&float), "1e+100");
         assert!(char_field_errors(&float, true, true, Some(255)).is_empty());
-        assert_eq!(python_scalar_str(&float).as_deref(), Some("1e+100"));
         let tiny: Value = serde_json::from_str("0.00001").expect("parses");
         assert_eq!(char_field_value(&tiny), "1e-05");
         let sci: Value = serde_json::from_str("1.5e3").expect("parses");
         assert_eq!(char_field_value(&sci), "1500.0");
-        assert_eq!(python_scalar_str(&sci).as_deref(), Some("1500.0"));
         let fixed: Value = serde_json::from_str("100.0").expect("parses");
         assert_eq!(char_field_value(&fixed), "100.0");
         let map = patch_map(&[("title", float)]);
@@ -6597,28 +5964,38 @@ mod tests {
         let parsed = parse(ct, b"labels=a&labels=b");
         assert!(parsed.from_form);
         assert_eq!(parsed.value["labels"], serde_json::json!(["a", "b"]));
-        assert_eq!(requested_data_text(&parsed), r#"{"labels": "b"}"#);
         assert_eq!(
-            requested_data_value(&parsed),
+            operations::requested_data_text(&parsed.value, parsed.from_form),
+            r#"{"labels": "b"}"#
+        );
+        assert_eq!(
+            operations::requested_data_value(&parsed.value, parsed.from_form),
             serde_json::json!({"labels": "b"})
         );
         // A single value is a scalar too, not a one-item array.
         let parsed = parse(ct, b"labels=x");
-        assert_eq!(requested_data_text(&parsed), r#"{"labels": "x"}"#);
+        assert_eq!(
+            operations::requested_data_text(&parsed.value, parsed.from_form),
+            r#"{"labels": "x"}"#
+        );
         // Other keys pass through (order-agnostic: key order itself is
         // PIDASHCONV-757's property, pinned by that issue's own tests).
         let parsed = parse(ct, b"url=u&labels=a&labels=b");
-        let dumped: Value = serde_json::from_str(&requested_data_text(&parsed)).expect("json");
+        let dumped: Value = serde_json::from_str(&operations::requested_data_text(
+            &parsed.value,
+            parsed.from_form,
+        ))
+        .expect("json");
         assert_eq!(dumped, serde_json::json!({"url": "u", "labels": "b"}));
         // JSON bodies dump untouched — arrays are real data there.
         let parsed = parse("application/json", br#"{"labels": ["a", "b"], "url": "u"}"#);
         assert!(!parsed.from_form);
         assert_eq!(
-            requested_data_text(&parsed),
+            operations::requested_data_text(&parsed.value, parsed.from_form),
             r#"{"labels": ["a", "b"], "url": "u"}"#
         );
         assert_eq!(
-            requested_data_value(&parsed),
+            operations::requested_data_value(&parsed.value, parsed.from_form),
             serde_json::json!({"labels": ["a", "b"], "url": "u"})
         );
     }
@@ -6686,5 +6063,484 @@ mod tests {
         ));
         assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+}
+
+#[cfg(test)]
+mod orm_tests {
+    use super::*;
+    use sea_orm::sea_query::{Iden, PostgresQueryBuilder};
+    use sea_orm::QueryTrait;
+
+    fn nil() -> Uuid {
+        Uuid::nil()
+    }
+
+    #[test]
+    fn link_scope_statement_shape() {
+        let sql = link_scope("acme", &nil(), &nil(), &nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with(r#"SELECT DISTINCT "issue_links"."#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#""issue_links"."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "workspaces"."slug" = 'acme')"#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#"EXISTS(SELECT 1 FROM "project_members" AS "pm" WHERE "pm"."project_id" = "issue_links"."project_id" AND "pm"."member_id" = "#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""pm"."is_active" = TRUE"#), "{sql}");
+        assert!(
+            sql.contains(
+                r#"EXISTS(SELECT 1 FROM "projects" AS "p" WHERE "p"."id" = "issue_links"."project_id" AND "p"."archived_at" IS NULL)"#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(r#"ORDER BY "issue_links"."created_at" DESC"#),
+            "{sql}"
+        );
+        assert!(!sql.contains("deleted_at IS NULL AND \"pm\""), "{sql}");
+    }
+
+    #[test]
+    fn comment_detail_statement_shape() {
+        let sql = comment_detail_select("acme", &nil(), &nil(), &nil(), &nil())
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.starts_with(r#"SELECT DISTINCT "issue_comments"."id""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#") AS "is_member" FROM "issue_comments""#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#""pm"."deleted_at" IS NULL AND "pm"."is_active" = TRUE AND "pm"."member_id" = "#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                r#""pm"."workspace_id" = (SELECT "id" FROM "workspaces" WHERE "workspaces"."slug" = 'acme')"#
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""issue_comments"."id" = "#), "{sql}");
+        assert!(
+            sql.ends_with(r#"ORDER BY "issue_comments"."created_at" DESC"#),
+            "{sql}"
+        );
+        // Every output name is selected exactly once: the renderer decodes
+        // by name.
+        let select_list = sql
+            .split(r#" FROM "issue_comments""#)
+            .next()
+            .expect("select");
+        for column in COMMENT_COLUMNS {
+            let name = format!(r#""issue_comments"."{}""#, column.to_string());
+            assert_eq!(select_list.matches(&name).count(), 1, "{name} in {sql}");
+        }
+    }
+
+    #[test]
+    fn blocker_statements_shape() {
+        let sql = blocker_targets_select(
+            &nil(),
+            "blocked_by",
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+        )
+        .to_string(PostgresQueryBuilder);
+        assert!(
+            sql.starts_with(
+                r#"SELECT "t"."id" AS "issue_id", "p"."identifier" AS "project_identifier", "t"."sequence_id" AS "sequence_id", "s"."name" AS "state_name", "s"."group" AS "state_group" FROM "issue_relations" AS "r" INNER JOIN "issues" AS "t" ON "t"."id" = "r"."related_issue_id" INNER JOIN "states" AS "s" ON "s"."id" = "t"."state_id" INNER JOIN "projects" AS "p" ON "p"."id" = "t"."project_id" WHERE "r"."deleted_at" IS NULL AND "r"."issue_id" <> "r"."related_issue_id" AND "r"."issue_id" = "#
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(
+                r#""r"."relation_type" = 'blocked_by' AND "t"."deleted_at" IS NULL AND "t"."archived_at" IS NULL AND "t"."is_draft" = FALSE AND "t"."workspace_id" = "r"."workspace_id" AND "s"."group" <> 'triage' AND "p"."archived_at" IS NULL"#
+            ),
+            "{sql}"
+        );
+        let open = has_open_blockers_select(&nil()).to_string(PostgresQueryBuilder);
+        assert!(
+            open.starts_with(r#"SELECT EXISTS(SELECT 1 FROM "issue_relations" AS "r" INNER JOIN "issues" AS "t" ON "t"."id" = (CASE WHEN ("r"."relation_type" = 'blocked_by') THEN "r"."related_issue_id" ELSE "r"."issue_id" END)"#),
+            "{open}"
+        );
+        assert!(
+            open.contains(r#"AND (("r"."issue_id" = '00000000-0000-0000-0000-000000000000' AND "r"."relation_type" = 'blocked_by') OR ("r"."related_issue_id" = '00000000-0000-0000-0000-000000000000' AND "r"."relation_type" = 'blocking'))"#),
+            "{open}"
+        );
+        assert!(
+            open.ends_with(
+                r#""s"."group" NOT IN ('completed', 'cancelled')) AS "has_open_blockers""#
+            ),
+            "{open}"
+        );
+    }
+
+    /// Every social read and the link writes against constraint-free temp
+    /// copies on one connection.
+    #[tokio::test]
+    async fn live_social_reads_and_link_writes() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "projects",
+            "project_members",
+            "issue_links",
+            "issue_comments",
+            "issues",
+            "states",
+            "issue_relations",
+            "issue_assignees",
+            "issue_labels",
+            "users",
+            "file_assets",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, project, archived_project, user, stranger) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (issue, blocker, done, triage, other_issue) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (state_open, state_done, state_triage) =
+            (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let (link_a, link_b, link_dead, link_other, comment, rel_open, rel_done, rel_triage) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let (label_a, label_b, label_dead) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let t1 = "'2024-01-01T00:00:00Z'";
+        let t2 = "'2024-01-02T00:00:00Z'";
+        for sql in [
+            format!("INSERT INTO workspaces (id, name, slug) VALUES ('{ws}', 'Acme', 'acme')"),
+            format!(
+                "INSERT INTO projects (id, workspace_id, identifier, name, description, is_default, archived_at, cover_image, emoji) VALUES \
+                 ('{project}', '{ws}', 'ACME', 'Acme Project', 'desc', false, NULL, 'https://cover', NULL), \
+                 ('{archived_project}', '{ws}', 'OLD', 'Old', '', false, now(), NULL, NULL)"
+            ),
+            format!(
+                "INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES \
+                 (gen_random_uuid(), '{ws}', '{project}', '{user}', 15, true, NULL), \
+                 (gen_random_uuid(), '{ws}', '{archived_project}', '{user}', 15, true, NULL), \
+                 (gen_random_uuid(), '{ws}', '{project}', '{stranger}', 15, false, NULL)"
+            ),
+            format!(
+                "INSERT INTO issue_links (id, created_at, updated_at, issue_id, project_id, workspace_id, url, title, metadata, deleted_at, created_by_id) VALUES \
+                 ('{link_a}', {t1}, {t1}, '{issue}', '{project}', '{ws}', 'https://a', 'A', '{{}}', NULL, '{user}'), \
+                 ('{link_b}', {t2}, {t2}, '{issue}', '{project}', '{ws}', 'https://b', NULL, '{{\"k\":1}}', NULL, NULL), \
+                 ('{link_dead}', {t1}, {t1}, '{issue}', '{project}', '{ws}', 'https://dead', NULL, '{{}}', now(), NULL), \
+                 ('{link_other}', {t1}, {t1}, '{other_issue}', '{archived_project}', '{ws}', 'https://o', NULL, '{{}}', NULL, NULL)"
+            ),
+            format!(
+                "INSERT INTO issue_comments (id, created_at, updated_at, issue_id, project_id, workspace_id, comment_html, comment_stripped, comment_json, attachments, labels, access, speaker_type, speaker_label, deleted_at) VALUES \
+                 ('{comment}', {t1}, {t1}, '{issue}', '{project}', '{ws}', '<p>hi</p>', 'hi', '{{}}', ARRAY['x']::text[], '{{}}', 'INTERNAL', 'human', 'Me', NULL)"
+            ),
+            format!(
+                "INSERT INTO states (id, name, \"group\") VALUES \
+                 ('{state_open}', 'Todo', 'started'), ('{state_done}', 'Done', 'completed'), ('{state_triage}', 'Triage', 'triage')"
+            ),
+            format!(
+                "INSERT INTO issues (id, sequence_id, state_id, project_id, workspace_id, is_draft, deleted_at, archived_at) VALUES \
+                 ('{issue}', 1, '{state_open}', '{project}', '{ws}', false, NULL, NULL), \
+                 ('{blocker}', 2, '{state_open}', '{project}', '{ws}', false, NULL, NULL), \
+                 ('{done}', 3, '{state_done}', '{project}', '{ws}', false, NULL, NULL), \
+                 ('{triage}', 4, '{state_triage}', '{project}', '{ws}', false, NULL, NULL), \
+                 ('{other_issue}', 5, '{state_open}', '{archived_project}', '{ws}', false, NULL, NULL)"
+            ),
+            format!(
+                "INSERT INTO issue_relations (id, relation_type, issue_id, related_issue_id, workspace_id, deleted_at) VALUES \
+                 ('{rel_open}', 'blocked_by', '{issue}', '{blocker}', '{ws}', NULL), \
+                 ('{rel_done}', 'blocking', '{done}', '{issue}', '{ws}', NULL), \
+                 ('{rel_triage}', 'blocking', '{issue}', '{triage}', '{ws}', NULL), \
+                 (gen_random_uuid(), 'blocked_by', '{issue}', '{issue}', '{ws}', NULL)"
+            ),
+            format!(
+                "INSERT INTO issue_assignees (id, created_at, issue_id, assignee_id, deleted_at) VALUES \
+                 (gen_random_uuid(), {t1}, '{issue}', '{user}', NULL), \
+                 (gen_random_uuid(), {t2}, '{issue}', '{stranger}', NULL), \
+                 (gen_random_uuid(), {t2}, '{issue}', '{blocker}', now())"
+            ),
+            format!(
+                "INSERT INTO issue_labels (id, created_at, issue_id, label_id, deleted_at) VALUES \
+                 (gen_random_uuid(), {t1}, '{issue}', '{label_a}', NULL), \
+                 (gen_random_uuid(), {t2}, '{issue}', '{label_b}', NULL), \
+                 (gen_random_uuid(), {t2}, '{issue}', '{label_dead}', now())"
+            ),
+            format!(
+                "INSERT INTO users (id, first_name, last_name, email, avatar, display_name, avatar_asset_id) VALUES \
+                 ('{user}', 'Ada', 'Lovelace', NULL, NULL, 'ada', NULL)"
+            ),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        let tz = chrono_tz::UTC;
+
+        // Links: member sees the live rows newest first; a non-member none.
+        let rows = fetch_link_rows(&pool, "acme", &project, &issue, &user)
+            .await
+            .expect("links");
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![link_b, link_a]
+        );
+        let decoded = decode_link(&rows[0], &tz);
+        assert_eq!(decoded.created_at, "2024-01-02T00:00:00Z");
+        assert_eq!(decoded.metadata, serde_json::json!({"k": 1}));
+        assert_eq!(decoded.title, None);
+        assert_eq!(decoded.created_by, None);
+        assert!(fetch_link_rows(&pool, "acme", &project, &issue, &stranger)
+            .await
+            .expect("links")
+            .is_empty());
+        assert!(fetch_link_rows(&pool, "nope", &project, &issue, &user)
+            .await
+            .expect("links")
+            .is_empty());
+        // Archived project: the member exists, the project guard denies.
+        assert!(
+            fetch_link_rows(&pool, "acme", &archived_project, &other_issue, &user)
+                .await
+                .expect("links")
+                .is_empty()
+        );
+        assert_eq!(
+            fetch_link_detail(&pool, "acme", &project, &issue, &user, &link_a)
+                .await
+                .expect("detail")
+                .map(|row| row.id),
+            Some(link_a)
+        );
+        assert!(
+            fetch_link_detail(&pool, "acme", &project, &issue, &user, &link_dead)
+                .await
+                .expect("detail")
+                .is_none()
+        );
+        // Direct lookup: no membership / archived guards (BUG-1).
+        assert_eq!(
+            fetch_link_direct(&pool, "acme", &archived_project, &other_issue, &link_other)
+                .await
+                .expect("direct")
+                .map(|row| row.id),
+            Some(link_other)
+        );
+        assert!(
+            fetch_link_direct(&pool, "acme", &project, &issue, &link_dead)
+                .await
+                .expect("direct")
+                .is_none()
+        );
+        assert!(link_url_exists(&pool, "https://a", &issue)
+            .await
+            .expect("dup"));
+        assert!(!link_url_exists(&pool, "https://dead", &issue)
+            .await
+            .expect("dup"));
+        assert!(!link_url_exists(&pool, "https://a", &other_issue)
+            .await
+            .expect("dup"));
+
+        // Comments: the detail annotation and the direct typed decode.
+        let detail = fetch_comment_detail(&pool, "acme", &project, &issue, &user, &comment)
+            .await
+            .expect("comment")
+            .expect("found");
+        assert_eq!((detail.id, detail.is_member), (comment, Some(true)));
+        assert_eq!(detail.attachments, serde_json::json!(["x"]));
+        assert!(detail.labels.as_array().expect("labels").is_empty());
+        let decoded = decode_comment(&detail, &tz).expect("decode");
+        assert_eq!(decoded.attachments, vec![Some("x".to_owned())]);
+        assert_eq!(decoded.speaker_label, "Me");
+        assert!(
+            fetch_comment_detail(&pool, "acme", &project, &issue, &stranger, &comment)
+                .await
+                .expect("comment")
+                .is_none()
+        );
+        let direct = read::fetch_comment_direct(&pool, "acme", &project, &issue, &comment)
+            .await
+            .expect("direct")
+            .expect("found");
+        let decoded = decode_comment(&direct, &tz).expect("decode");
+        assert_eq!(decoded.id, comment.to_string());
+        assert_eq!(decoded.is_member, None);
+        assert_eq!(decoded.created_at, "2024-01-01T00:00:00Z");
+
+        // Blockers: open first, the triage target and the self-edge dropped.
+        let blockers = fetch_blocker_rows(&pool, &issue).await.expect("blockers");
+        assert_eq!(
+            blockers.blocked_by,
+            vec![
+                (
+                    "ACME-2".to_owned(),
+                    Some("Todo".to_owned()),
+                    Some("started".to_owned())
+                ),
+                (
+                    "ACME-3".to_owned(),
+                    Some("Done".to_owned()),
+                    Some("completed".to_owned())
+                ),
+            ]
+        );
+        assert!(blockers.blocking.is_empty());
+        assert!(blockers.has_open_blockers);
+        let blocking = fetch_blocker_rows(&pool, &blocker).await.expect("blockers");
+        assert_eq!(
+            blocking.blocking,
+            vec![(
+                "ACME-1".to_owned(),
+                Some("Todo".to_owned()),
+                Some("started".to_owned())
+            )]
+        );
+        assert!(!blocking.has_open_blockers);
+        sqlx::query(&format!(
+            "UPDATE issue_relations SET deleted_at = now() WHERE id = '{rel_open}'"
+        ))
+        .execute(&pool)
+        .await
+        .expect("soft delete");
+        let blockers = fetch_blocker_rows(&pool, &issue).await.expect("blockers");
+        assert_eq!(blockers.blocked_by.len(), 1);
+        assert!(!blockers.has_open_blockers);
+
+        // Expansion leaves.
+        assert_eq!(
+            expand_workspace(&pool, &ws).await.expect("ws"),
+            serde_json::json!({"name": "Acme", "slug": "acme", "id": ws.to_string()})
+        );
+        assert_eq!(
+            expand_workspace(&pool, &stranger).await.expect("ws"),
+            Value::Null
+        );
+        let project_lite = expand_project(&pool, &project).await.expect("project");
+        assert_eq!(project_lite["identifier"], "ACME");
+        assert_eq!(project_lite["cover_image_url"], "https://cover");
+        assert_eq!(project_lite["icon_prop"], Value::Null);
+        assert_eq!(project_lite["is_default"], false);
+        let actor = expand_actor(&pool, &user).await.expect("actor");
+        assert_eq!(actor["first_name"], "Ada");
+        assert_eq!(actor["display_name"], "ada");
+        assert_eq!(
+            expand_actor(&pool, &stranger).await.expect("actor"),
+            Value::Null
+        );
+        assert_eq!(
+            expand_parent_comment(&pool, &comment)
+                .await
+                .expect("parent"),
+            Some(serde_json::json!({"id": comment.to_string(), "project_id": project.to_string()}))
+        );
+        assert_eq!(
+            fetch_assignee_ids(&pool, &issue).await.expect("assignees"),
+            vec![stranger.to_string(), user.to_string()]
+        );
+        assert_eq!(
+            fetch_label_ids(&pool, &issue).await.expect("labels"),
+            vec![label_b.to_string(), label_a.to_string()]
+        );
+        assert_eq!(file_asset_url(&pool, &stranger).await.expect("asset"), None);
+
+        // Link writes: the POST insert shape, the patch and the soft delete.
+        let db = orm(&pool);
+        let new_link = Uuid::new_v4();
+        let now = now_utc();
+        issue_links::Entity::insert(issue_links::ActiveModel {
+            id: Set(new_link),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+            created_by_id: Set(Some(user)),
+            updated_by_id: Set(None),
+            project_id: Set(project),
+            workspace_id: Set(ws),
+            issue_id: Set(issue),
+            title: Set(None),
+            url: Set("https://new".to_owned()),
+            metadata: Set(serde_json::json!({})),
+            deleted_at: Set(None),
+        })
+        .exec(&db)
+        .await
+        .expect("insert");
+        let inserted = fetch_link_direct(&pool, "acme", &project, &issue, &new_link)
+            .await
+            .expect("direct")
+            .expect("inserted");
+        assert_eq!(
+            (inserted.title.as_deref(), inserted.updated_by_id),
+            (None, None)
+        );
+        assert_eq!(inserted.created_at.with_timezone(&Utc), now);
+        issue_links::Entity::update_many()
+            .col_expr(issue_links::Column::Title, Expr::value(Some("T")))
+            .col_expr(issue_links::Column::UpdatedById, Expr::value(Some(user)))
+            .filter(issue_links::Column::Id.eq(new_link))
+            .exec(&db)
+            .await
+            .expect("patch");
+        let patched = fetch_link_direct(&pool, "acme", &project, &issue, &new_link)
+            .await
+            .expect("direct")
+            .expect("patched");
+        assert_eq!(
+            (patched.title.as_deref(), patched.updated_by_id),
+            (Some("T"), Some(user))
+        );
+        issue_links::Entity::update_many()
+            .col_expr(issue_links::Column::DeletedAt, Expr::value(Some(now_utc())))
+            .filter(issue_links::Column::Id.eq(new_link))
+            .exec(&db)
+            .await
+            .expect("delete");
+        assert!(
+            fetch_link_direct(&pool, "acme", &project, &issue, &new_link)
+                .await
+                .expect("direct")
+                .is_none()
+        );
     }
 }

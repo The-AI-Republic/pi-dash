@@ -571,6 +571,7 @@ pub mod project_identifier {
 pub mod state {
     use sea_query::{Alias, Condition, Expr};
     use serde::{Deserialize, Serialize};
+    use unicode_normalization::UnicodeNormalization;
 
     /// Django table name (`Meta.db_table`).
     pub const TABLE: &str = "states";
@@ -697,16 +698,15 @@ pub mod state {
             .add(Expr::col(Alias::new("group")).eq(TRIAGE_GROUP))
     }
 
-    /// Ports the ASCII behavior of Django's `slugify(name)`
-    /// (`state.py:132`, `django.utils.text.slugify` with
-    /// `allow_unicode=False`): lowercase, drop every character that is not
+    /// Ports Django's `slugify(name)` (`state.py:132`,
+    /// `django.utils.text.slugify` with `allow_unicode=False`): NFKD, drop
+    /// every non-ASCII character, lowercase, drop every character that is not
     /// a word character (`[^\w\s-]` — underscore is kept), collapse each
     /// run of spaces/hyphens to one hyphen, and strip leading/trailing
-    /// hyphens and underscores. Non-ASCII input differs: Django strips
-    /// diacritics via NFKD (`"Café"` -> `"cafe"`) while this keeps the
-    /// characters as-is; no D-19 fixture covers that case.
+    /// hyphens and underscores (`"Café"` -> `"cafe"`).
     pub fn slugify_name(name: &str) -> String {
-        let lowered = name.to_lowercase();
+        let ascii: String = name.nfkd().filter(|c| c.is_ascii()).collect();
+        let lowered = ascii.to_lowercase();
         let mut out = String::with_capacity(lowered.len());
         let mut prev_dash = true;
         for ch in lowered.chars() {
@@ -1570,6 +1570,11 @@ mod tests {
         assert_eq!(slugify_name("_lead"), "lead");
         assert_eq!(slugify_name("trail_"), "trail");
         assert_eq!(slugify_name("a - _ b"), "a-_-b");
+        // NFKD → ASCII fold like Django's slugify (PIDASHCONV-1378).
+        assert_eq!(slugify_name("Café"), "cafe");
+        assert_eq!(slugify_name("Über Größe"), "uber-groe");
+        assert_eq!(slugify_name("进行中"), "");
+        assert_eq!(slugify_name(&"中".repeat(120)), "");
     }
 
     fn timestamp(secs: i64) -> chrono::DateTime<chrono::Utc> {

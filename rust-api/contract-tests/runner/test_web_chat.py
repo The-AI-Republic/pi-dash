@@ -49,6 +49,13 @@ def _go_online(seeder, machine_flow):
     seeder.db.execute("UPDATE runner SET status = 'online' WHERE id = %s", (machine_flow["runner_id"],))
 
 
+def _pause(seeder, machine_flow):
+    seeder.db.execute(
+        "UPDATE runner SET status = 'online', paused_at = now() WHERE id = %s",
+        (machine_flow["runner_id"],),
+    )
+
+
 def test_web_chat_sessions_list_shape(user_client, daemon_world, chat_world):
     response = user_client.get(
         f"{WEB}/chat/sessions/", params={"workspace": daemon_world["workspace"]["id"]}
@@ -120,6 +127,19 @@ def test_web_chat_session_create_offline_runner_is_409(user_client, daemon_world
     assert response.json() == {"error": "runner_unavailable"}
 
 
+def test_web_chat_session_create_paused_runner_is_409(
+    user_client, daemon_world, machine_flow, seeder
+):
+    _pause(seeder, machine_flow)
+    response = web_post(
+        user_client,
+        f"{WEB}/chat/sessions/",
+        {"workspace": daemon_world["workspace"]["id"], "runner": machine_flow["runner_id"]},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"error": "runner_paused"}
+
+
 def test_web_chat_messages_list_shape(user_client, chat_world):
     response = user_client.get(f"{WEB}/chat/sessions/{_sid(chat_world)}/messages/")
     assert response.status_code == 200, response.text
@@ -146,6 +166,17 @@ def test_web_chat_message_offline_runner_is_409(user_client, chat_world):
     assert response.json() == {"error": "runner_unavailable"}
 
 
+def test_web_chat_message_paused_runner_is_409(user_client, chat_world, machine_flow, seeder):
+    _pause(seeder, machine_flow)
+    response = web_post(
+        user_client,
+        f"{WEB}/chat/sessions/{_sid(chat_world)}/messages/",
+        {"content": "hello?"},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"error": "runner_paused"}
+
+
 def test_web_chat_message_shape_online(user_client, chat_world, machine_flow, seeder):
     _go_online(seeder, machine_flow)
     response = web_post(
@@ -163,6 +194,13 @@ def test_web_chat_warm_offline_is_409(user_client, chat_world):
     response = web_post(user_client, f"{WEB}/chat/sessions/{_sid(chat_world)}/warm/", {})
     assert response.status_code == 409
     assert response.json() == {"error": "runner_unavailable"}
+
+
+def test_web_chat_warm_paused_runner_is_409(user_client, chat_world, machine_flow, seeder):
+    _pause(seeder, machine_flow)
+    response = web_post(user_client, f"{WEB}/chat/sessions/{_sid(chat_world)}/warm/", {})
+    assert response.status_code == 409
+    assert response.json() == {"error": "runner_paused"}
 
 
 def test_web_chat_warm_shape_online(user_client, chat_world, machine_flow, seeder):

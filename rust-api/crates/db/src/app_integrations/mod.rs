@@ -211,40 +211,27 @@ pub const ROLE_ADMIN: i16 = 20;
 
 /// `get_object_or_404(Workspace, slug=slug)` read half
 /// (`git.py:53,60,71`; `github.py:448,507,551,576,997`): the live row's id.
-/// Binds `$1 = slug`.
-pub fn workspace_by_slug_sql() -> String {
-    use sea_query::PostgresQueryBuilder;
-    use sea_query::{Alias, Condition, Expr, Order, Query};
-    let mut sel = Query::select();
-    sel.from(Alias::new(WORKSPACE_TABLE.to_owned()));
-    sel.column((Alias::new(WORKSPACE_TABLE), Alias::new("id")));
-    sel.cond_where(
-        Condition::all()
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("deleted_at"))).is_null())
-            .add(Expr::col((Alias::new(WORKSPACE_TABLE), Alias::new("slug"))).eq(Expr::cust("$1"))),
-    )
-    .order_by((Alias::new(WORKSPACE_TABLE), Alias::new("id")), Order::Asc)
-    .limit(1);
-    sel.to_string(PostgresQueryBuilder)
+pub fn workspace_by_slug_query(slug: &str) -> sea_orm::Select<crate::entity::workspaces::Entity> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    crate::entity::workspaces::Entity::find()
+        .select_only()
+        .column(crate::entity::workspaces::Column::Id)
+        .filter(crate::entity::workspaces::Column::DeletedAt.is_null())
+        .filter(crate::entity::workspaces::Column::Slug.eq(slug.to_owned()))
+        .order_by_asc(crate::entity::workspaces::Column::Id)
+        .limit(1)
 }
 
 /// Live workspace id for a slug, or `None` (the view's 404 branch).
-pub async fn fetch_workspace_id_by_slug<'e, E>(
-    ex: E,
+pub async fn fetch_workspace_id_by_slug(
+    db: &impl sea_orm::ConnectionTrait,
     slug: &str,
-) -> Result<Option<uuid::Uuid>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&workspace_by_slug_sql())
-        .bind(slug)
-        .fetch_optional(ex)
+) -> Result<Option<uuid::Uuid>, sea_orm::DbErr> {
+    let row = workspace_by_slug_query(slug)
+        .into_tuple::<uuid::Uuid>()
+        .one(db)
         .await?;
-    row.map(|r| {
-        use sqlx::Row;
-        r.try_get("id")
-    })
-    .transpose()
+    Ok(row)
 }
 
 #[cfg(test)]
@@ -253,10 +240,15 @@ mod tests {
 
     #[test]
     fn workspace_by_slug_shape() {
-        assert_eq!(
-            workspace_by_slug_sql(),
-            r#"SELECT "workspaces"."id" FROM "workspaces" WHERE "workspaces"."deleted_at" IS NULL AND "workspaces"."slug" = ($1) ORDER BY "workspaces"."id" ASC LIMIT 1"#
-        );
+        use sea_orm::QueryTrait;
+        let sql = workspace_by_slug_query("acme")
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains(r#"FROM "workspaces""#), "{sql}");
+        assert!(sql.contains(r#""deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""slug" = 'acme'"#), "{sql}");
+        assert!(sql.contains("ORDER BY"), "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
     }
 
     // -- live scratch-DB tests (env-gated) -------------------------------
@@ -327,21 +319,22 @@ mod tests {
             .await
             .expect("seed workspace");
         }
+        let conn = crate::orm_tx::TxConn::new(&mut tx);
         assert_eq!(
-            fetch_workspace_id_by_slug(&mut *tx, "acme")
+            fetch_workspace_id_by_slug(&conn, "acme")
                 .await
                 .expect("hit"),
             Some(live_uuid(1))
         );
         // Soft-deleted slug reads as absent (the view's 404 branch).
         assert_eq!(
-            fetch_workspace_id_by_slug(&mut *tx, "gone")
+            fetch_workspace_id_by_slug(&conn, "gone")
                 .await
                 .expect("hit"),
             None
         );
         assert_eq!(
-            fetch_workspace_id_by_slug(&mut *tx, "missing")
+            fetch_workspace_id_by_slug(&conn, "missing")
                 .await
                 .expect("hit"),
             None

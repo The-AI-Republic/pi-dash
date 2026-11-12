@@ -92,6 +92,7 @@ pub use crate::tasks_webhooks::activity_dispatch::ISSUE_ACTIVITY_TASK;
 /// (`tasks_webhooks::webhook_fanout::MODEL_ACTIVITY_TASK_NAME`).
 /// Re-exported — never redefined — so the two domains pin one string.
 pub use crate::tasks_webhooks::webhook_fanout::MODEL_ACTIVITY_TASK_NAME;
+use pidash_services::v1_projects::tasks::model_activity_kwargs;
 
 /// `cycle.activity.created` (issue add/move `:990`, transfer `:462`).
 pub const CYCLE_CREATED: &str = "cycle.activity.created";
@@ -126,42 +127,15 @@ fn job_from_message(message: TaskMessage) -> NewJob {
 // `model_activity` (`webhook_task.py:463`)
 // ---------------------------------------------------------------------------
 
-/// Shared kwarg builder for the four `model_activity.delay` sites, in the
-/// exact Python call order — `model_name, model_id, requested_data,
-/// current_instance, actor_id, slug, origin` (`cycle.py:338-346`,
-/// `:549-557`; `module.py:229-237`, `:439-447`). `requested_data` is the
-/// raw `request.data` object and passes through verbatim; `actor_id` is
-/// the wire-form (hyphenated-string) user id — kombu JSON-encodes the
-/// UUID object Python passes; `current_instance` is `None` on create and
-/// the pre-save serializer dump on update.
-fn model_activity_kwargs(
-    model_name: &str,
-    model_id: &str,
-    requested_data: Map<String, Value>,
-    current_instance: Option<&str>,
-    actor_id: &str,
-    slug: &str,
-    origin: &str,
-) -> Map<String, Value> {
-    let mut kwargs = Map::with_capacity(7);
-    kwargs.insert(
-        "model_name".to_owned(),
-        Value::String(model_name.to_owned()),
-    );
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_owned()));
-    // Moved, never cloned: the map can nest ~9900 deep and `Map::clone`
-    // recurses per level (PIDASHCONV-626 stack-overflow fix).
-    kwargs.insert("requested_data".to_owned(), Value::Object(requested_data));
-    kwargs.insert("current_instance".to_owned(), opt_string(current_instance));
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_owned()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    kwargs
-}
-
 /// Cycle create (`cycle.py:338-346`) and module create
 /// (`module.py:229-237`): `current_instance=None`, fired after
 /// `serializer.save()`; `model_id` is `str(serializer.instance.id)`.
+///
+/// Kwargs come from the shared
+/// [`model_activity_kwargs`](pidash_services::v1_projects::tasks::model_activity_kwargs)
+/// kernel (PIDASHCONV-1623): the `requested_data` map moves in as a
+/// `Value::Object` — never cloned, since it can nest ~9900 deep and
+/// `Map::clone` recurses per level (PIDASHCONV-626 stack-overflow fix).
 pub fn model_created_message(
     model_name: &str,
     model_id: &str,
@@ -176,11 +150,11 @@ pub fn model_created_message(
         model_activity_kwargs(
             model_name,
             model_id,
-            requested_data,
+            Value::Object(requested_data),
             None,
             actor_id,
             slug,
-            origin,
+            Some(origin),
         ),
     )
 }
@@ -225,11 +199,11 @@ pub fn model_updated_message(
         model_activity_kwargs(
             model_name,
             model_id,
-            requested_data,
+            Value::Object(requested_data),
             Some(current_instance),
             actor_id,
             slug,
-            origin,
+            Some(origin),
         ),
     )
 }

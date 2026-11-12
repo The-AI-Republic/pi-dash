@@ -19,6 +19,7 @@
 //!
 //! No ported bugs: the `bugs` array of `FIX-render` is empty.
 
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 /// Raised when a prompt template fails to render (`renderer.py:21-22`).
@@ -208,8 +209,22 @@ pub fn render(body: &str, context: &serde_json::Value) -> Result<String, PromptR
     // Convert by hand (see `mini_value`): rendering the JSON value
     // directly would serialize numbers through serde.
     let converted = mini_value(context);
-    ENV.render_str(body, &converted)
+    ENV.render_str(&normalise_newlines(body), &converted)
         .map_err(|err| PromptRenderError::new(err.to_string()))
+}
+
+/// Template-source newlines as `\n` (PIDASHCONV-1233).
+///
+/// Jinja2's lexer splits template data on `\r\n|\r|\n` and rejoins with
+/// `newline_sequence` (`"\n"` here), so CR/CRLF in the template source
+/// never survive a Django render; minijinja keeps them. Normalise before
+/// handing the body to minijinja. Only the template body passes through
+/// here — context values keep their bytes. No `\r` means no allocation.
+fn normalise_newlines(body: &str) -> Cow<'_, str> {
+    if !body.contains('\r') {
+        return Cow::Borrowed(body);
+    }
+    Cow::Owned(body.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 /// Convert one JSON context value into a minijinja value by hand, never
@@ -272,7 +287,9 @@ fn mini_number(number: &serde_json::Number) -> minijinja::value::Value {
 /// context — useful for save-time validation where missing runtime
 /// variables are expected.
 pub fn validate_syntax(body: &str) -> Result<(), PromptSyntaxError> {
-    match ENV.template_from_str(body) {
+    // Same normalisation as `render` so valid/invalid agrees with Jinja2
+    // and reported line numbers count the same lines (PIDASHCONV-1233).
+    match ENV.template_from_str(&normalise_newlines(body)) {
         Ok(_) => Ok(()),
         Err(err) => Err(PromptSyntaxError::new(err.to_string())),
     }
@@ -404,6 +421,26 @@ mod tests {
         // `{{ missing }}` with no context must fail, not render empty.
         let err = render("Hello {{ missing }}!", &json!({})).expect_err("strict undefined");
         assert!(!err.message().is_empty());
+    }
+
+    /// CRLF and bare CR in the template body render as LF, while CRs in
+    /// context values survive (PIDASHCONV-1233 — Jinja2's lexer rewrites
+    /// template-source newlines to `newline_sequence`; minijinja keeps
+    /// them, so the body is normalised before rendering).
+    #[test]
+    fn template_newlines_normalise_but_context_values_do_not() {
+        let text = render("a\r\nb {{ x }}\r\nc\rd\n", &json!({"x": "v\r\nw"})).expect("renders");
+        assert_eq!(text, "a\nb v\r\nw\nc\nd");
+    }
+
+    /// Save-time validation accepts CRLF bodies and still rejects bad
+    /// syntax in them (PIDASHCONV-1233 — same normalisation as `render`,
+    /// so validity and line numbers agree with Jinja2).
+    #[test]
+    fn validate_syntax_normalises_newlines() {
+        validate_syntax("Hello {{ name }}!\r\n{% if flag %}yes{% endif %}\r")
+            .expect("valid CRLF parses");
+        assert!(validate_syntax("{% if %}\r\n").is_err());
     }
 
     #[test]

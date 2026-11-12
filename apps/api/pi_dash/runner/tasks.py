@@ -121,41 +121,43 @@ def mark_offline_runners() -> int:
 # state transition and Run AI all refuse with ``active_run_exists``).
 
 
-@shared_task(name="runner.release_pins_on_offline_runners")
-def release_pins_on_offline_runners() -> int:
-    """Return QUEUED runs pinned to a long-silent runner to the pod queue.
+def _pinned_runner_gone_q(cutoff) -> Q:
+    """Pinned runner that will not take its pinned runs: silent past
+    ``cutoff`` or operator-paused (it keeps heartbeating but takes no work)."""
+    from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning, engine_paused_q
 
-    Pinning is a repo-locality preference, but only the pinned runner may
-    take a pinned run. Managed runs are skipped: their pin is the execution
-    target, and ``managed_runner.expire_waiting_runs`` owns their timeout.
-    ``RUNNER_OFFLINE_PIN_RELEASE_SECS <= 0`` disables the sweep.
-    """
-    grace = int(getattr(settings, "RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))
-    if grace <= 0:
-        return 0
-    cutoff = timezone.now() - timedelta(seconds=grace)
-    stuck = list(
-        AgentRun.objects.filter(
-            status=AgentRunStatus.QUEUED,
-            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
-            pinned_runner__isnull=False,
-            created_at__lt=cutoff,
+    return (
+        Q(pinned_runner__last_heartbeat_at__lt=cutoff)
+        | Q(pinned_runner__last_heartbeat_at__isnull=True)
+        | Q(pinned_runner__paused_at__isnull=False)
+        # An engine whose machine is paused, or whose pod work is off, takes
+        # no locality pins either (built_engine_as_runner §7). Pausing and
+        # turning pod work off release its pins at once; this is the
+        # backstop.
+        | engine_paused_q("pinned_runner__")
+        | Q(
+            pinned_runner__provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
+            pinned_runner__pod_dispatch=RunnerPodDispatch.PINNED_ONLY,
         )
-        .filter(Q(pinned_runner__last_heartbeat_at__lt=cutoff) | Q(pinned_runner__last_heartbeat_at__isnull=True))
-        .values_list("id", flat=True)[:500]
     )
+
+
+def _release_pins(candidates, still_stuck_q: Q) -> int:
+    """Unpin each QUEUED run in ``candidates`` and drain its pod.
+
+    ``still_stuck_q`` is re-checked under the row lock: the runner may have
+    come back (or been resumed) since the candidate list was read.
+    """
     released = 0
     pod_ids = set()
-    for run_id in stuck:
+    for run_id in list(candidates):
         with transaction.atomic():
             run = (
                 AgentRun.objects.select_for_update(of=("self",))
                 .select_related("parent_run")
                 .filter(id=run_id, status=AgentRunStatus.QUEUED, pinned_runner__isnull=False)
-                # Re-checked under the lock: the runner may have come back.
-                .filter(
-                    Q(pinned_runner__last_heartbeat_at__lt=cutoff) | Q(pinned_runner__last_heartbeat_at__isnull=True)
-                )
+                .exclude(pin_kind="dedicated")  # §12.1: locality filter in the re-check too
+                .filter(still_stuck_q)
                 .first()
             )
             if run is None:
@@ -176,10 +178,153 @@ def release_pins_on_offline_runners() -> int:
         try:
             matcher.drain_pod_by_id(pod_id)
         except Exception:
-            logger.exception("release_pins_on_offline_runners: drain failed for pod %s", pod_id)
+            logger.exception("release pins: drain failed for pod %s", pod_id)
+    return released
+
+
+def _releasable_pins():
+    # Managed runs are skipped: their pin is the execution target, and
+    # ``managed_runner.expire_waiting_runs`` owns their timeout. Dedicated
+    # pins are skipped too: the issue owns them, not the queue (§12.1) —
+    # the dedicated-runner sweeps own them. A dedicated pin is therefore
+    # never released by these sweeps, on offline or on pause.
+    return AgentRun.objects.filter(
+        status=AgentRunStatus.QUEUED,
+        executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+        pinned_runner__isnull=False,
+    ).exclude(pin_kind="dedicated")
+
+
+@shared_task(name="runner.pause_engines_with_expired_credentials")
+def pause_engines_with_expired_credentials() -> int:
+    """Pause engines whose 14-day engine credential ran out
+    (``engine_sign_in_required``, built_engine_as_runner §4.3)."""
+    from pi_dash.runner.services.engine_state import pause_engines_with_expired_credentials as _pause
+
+    paused = _pause()
+    if paused:
+        logger.info("pause_engines_with_expired_credentials paused %s machine(s)", paused)
+    return paused
+
+
+@shared_task(name="runner.release_pins_on_offline_runners")
+def release_pins_on_offline_runners() -> int:
+    """Return QUEUED runs pinned to a long-silent or paused runner to the pod queue.
+
+    Pinning is a repo-locality preference, but only the pinned runner may
+    take a pinned run. Pausing releases pins immediately
+    (:func:`release_pins_for_paused_runner`); this sweep is the backstop for
+    a pin that raced the pause. Managed runs are skipped.
+    ``RUNNER_OFFLINE_PIN_RELEASE_SECS <= 0`` disables the sweep.
+    """
+    grace = int(getattr(settings, "RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))
+    if grace <= 0:
+        return 0
+    cutoff = timezone.now() - timedelta(seconds=grace)
+    gone_q = _pinned_runner_gone_q(cutoff)
+    candidates = (
+        _releasable_pins().filter(created_at__lt=cutoff).filter(gone_q).values_list("id", flat=True)[:500]
+    )
+    released = _release_pins(candidates, gone_q)
     if released:
         logger.info("release_pins_on_offline_runners unpinned %s queued run(s)", released)
     return released
+
+
+def release_pins_for_paused_runner(runner_id) -> int:
+    """Send every QUEUED local run pinned to a just-paused runner back to its
+    pod queue, so the paused runner's pending work moves to another runner
+    instead of waiting for a resume."""
+    paused_q = Q(pinned_runner__paused_at__isnull=False)
+    candidates = _releasable_pins().filter(pinned_runner_id=runner_id).values_list("id", flat=True)
+    released = _release_pins(candidates, paused_q)
+    if released:
+        logger.info("release_pins_for_paused_runner runner=%s unpinned %s run(s)", runner_id, released)
+    return released
+
+
+@shared_task(name="runner.fail_dedicated_runs")
+def fail_dedicated_runs() -> int:
+    """Fail dedicated runs whose runner is still unavailable after 12h (§11.3)."""
+    from pi_dash.runner.services.issue_assignment import fail_dedicated_runs as _fail
+
+    failed = _fail()
+    if failed:
+        logger.info("fail_dedicated_runs failed %s dedicated run(s)", failed)
+    return failed
+
+
+@shared_task(name="runner.sweep_stranded_dedicated_runs")
+def sweep_stranded_dedicated_runs() -> int:
+    """Stranded sweep for dedicated pins (§12.1, §9.4).
+
+    When the pinned runner is online, heartbeat-fresh, not paused and
+    idle, the run is older than one sweep interval, and
+    ``filter_runs_usable_by_runner`` excludes it (the owner was
+    un-assigned, the engine opt-in turned off, …), fail the run with
+    ``dedicated_runner_not_permitted``. The runner is there and will
+    never take the run, so waiting cannot help. Runs whose runner is
+    unavailable (offline/paused) are the 12h bound's (§11.3), not this
+    sweep's, and runs behind a busy runner are moving.
+    """
+    from pi_dash.runner.models import PinKind
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+    from pi_dash.runner.services.issue_assignment import (
+        is_busy,
+        runner_is_offline,
+        runner_paused_reason,
+        stranded_queued,
+    )
+
+    grace = int(getattr(settings, "RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))
+    sweep_age = timedelta(seconds=grace if grace > 0 else 300)
+    cutoff = timezone.now() - sweep_age
+    candidates = list(
+        AgentRun.objects.filter(
+            status=AgentRunStatus.QUEUED,
+            pin_kind=PinKind.DEDICATED,
+            pinned_runner__isnull=False,
+            created_at__lt=cutoff,
+        )
+        .select_related("pinned_runner", "work_item")[:500]
+        .values_list("id", flat=True)
+    )
+    handled = 0
+    for run_id in candidates:
+        with transaction.atomic():
+            run = (
+                AgentRun.objects.select_for_update(of=("self",))
+                .select_related("pinned_runner", "work_item")
+                .filter(id=run_id, status=AgentRunStatus.QUEUED, pin_kind=PinKind.DEDICATED)
+                .first()
+            )
+            if run is None:
+                continue
+            runner = run.pinned_runner
+            if runner is None:
+                continue
+            # Gating (§12.1): online, heartbeat-fresh, not paused, idle.
+            runner.refresh_from_db(fields=["status", "paused_at", "last_heartbeat_at"])
+            if runner_paused_reason(runner) is not None or runner_is_offline(runner):
+                continue  # unavailable: the 12h bound owns it (§11.3)
+            if is_busy(runner):
+                continue  # moving: queue depth shows the wait (§10.1)
+            issue = run.work_item
+            if not stranded_queued(run, issue):
+                continue
+            if finalize_agent_run(
+                run_id,
+                AgentRunStatus.FAILED,
+                expected_status=AgentRunStatus.QUEUED,
+                updates={
+                    "error_code": "dedicated_runner_not_permitted",
+                    "error": f"Runner {runner.name} can no longer serve this run: its usage rule excludes it.",
+                },
+            ):
+                handled += 1
+    if handled:
+        logger.info("sweep_stranded_dedicated_runs handled %s run(s)", handled)
+    return handled
 
 
 @shared_task(name="runner.fail_runs_on_offline_runners")
@@ -393,6 +538,11 @@ def reconcile_stalled_runs() -> int:
 
     Runs in ``AWAITING_APPROVAL`` / ``AWAITING_REAUTH`` are excluded so
     operator-driven pauses are never failed by the watchdog.
+
+    Runs whose runner reports ``agent_health`` are excluded too: those
+    runners run the passive-kill activity watchdog themselves (unhealthy at
+    24h, failed at 48h by default) and a quiet agent there may be inside a
+    long tool call. This short backstop only covers older runners.
     Pre-observability runners pass cleanly: their ``last_event_at`` is
     NULL and ``__lt`` excludes NULL.
     """
@@ -428,6 +578,7 @@ def reconcile_stalled_runs() -> int:
             runner__live_state__last_event_at__lt=cutoff,
         )
         .filter(Q(runner__live_state__approvals_pending=0) | Q(runner__live_state__approvals_pending__isnull=True))
+        .filter(runner__live_state__agent_health__isnull=True)
         .select_related("runner")
     )
 
@@ -487,3 +638,7 @@ def reconcile_agent_run_terminal_effects() -> int:
 # Cloud Agent is not a separate Django app/service. Importing its tasks from an
 # installed app makes Celery autodiscovery register them on every normal worker.
 from pi_dash.cloud_agent import tasks as cloud_agent_tasks  # noqa: E402,F401
+
+# Same for managed-runner maintenance: pi_dash.managed_runner is not an
+# installed app, so its beat-published sweep must be imported here to register.
+from pi_dash.managed_runner import tasks as managed_runner_tasks  # noqa: E402,F401

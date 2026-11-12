@@ -18,16 +18,21 @@
 //! ownership after the proxy pass, so until then every name here still
 //! routes to `PythonOwned` (see [`crate::worker::route_for`]).
 
+pub mod engine_pause;
 pub mod offline_recovery;
 pub mod sweeps_chat;
 pub mod sweeps_runs;
 pub mod unsatisfiable_pins;
 
-pub use offline_recovery::{register_offline_recovery_tasks, FAIL_RUNS_TASK, RELEASE_PINS_TASK};
+pub use engine_pause::{register_engine_pause_tasks, PAUSE_ENGINES_TASK};
+pub use offline_recovery::{
+    register_offline_recovery_tasks, FAIL_DEDICATED_TASK, FAIL_RUNS_TASK, RELEASE_PINS_TASK,
+    SWEEP_STRANDED_TASK,
+};
 pub use sweeps_chat::{
-    register_runner_runs_tasks, RECONCILE_STALLED_RUNS_TASK, RECONCILE_TERMINAL_EFFECTS_TASK,
-    SWEEP_AGENT_CHAT_STATE_TASK, SWEEP_CHAT_MESSAGE_DEDUPE_TASK, SWEEP_RUN_MESSAGE_DEDUPE_TASK,
-    TERMINAL_EFFECTS_TASK,
+    emit_terminal_effects, register_runner_runs_tasks, RECONCILE_STALLED_RUNS_TASK,
+    RECONCILE_TERMINAL_EFFECTS_TASK, SWEEP_AGENT_CHAT_STATE_TASK, SWEEP_CHAT_MESSAGE_DEDUPE_TASK,
+    SWEEP_RUN_MESSAGE_DEDUPE_TASK, TERMINAL_EFFECTS_TASK,
 };
 pub use sweeps_runs::{
     register_sweeps_runs_tasks, EXPIRE_TASK, MARK_OFFLINE_TASK, SWEEP_IDLE_TASK, SWEEP_STALE_TASK,
@@ -38,11 +43,13 @@ pub use unsatisfiable_pins::{
 };
 
 /// Every Celery task name this domain owns (L6a + L6b + the `70d684af`
-/// offline-recovery pair + the unsatisfiable-pin task, in `tasks.py`
-/// order).
-pub const TASK_NAMES: [&str; 14] = [
+/// offline-recovery pair + the engine-credential expiry sweep + the
+/// dedicated-runner sweep pair + the unsatisfiable-pin task, in
+/// `tasks.py` order).
+pub const TASK_NAMES: [&str; 17] = [
     EXPIRE_TASK,
     MARK_OFFLINE_TASK,
+    PAUSE_ENGINES_TASK,
     RELEASE_PINS_TASK,
     FAIL_RUNS_TASK,
     SWEEP_IDLE_TASK,
@@ -55,6 +62,8 @@ pub const TASK_NAMES: [&str; 14] = [
     RECONCILE_STALLED_RUNS_TASK,
     TERMINAL_EFFECTS_TASK,
     RECONCILE_TERMINAL_EFFECTS_TASK,
+    FAIL_DEDICATED_TASK,
+    SWEEP_STRANDED_TASK,
 ];
 
 /// True for the task names in [`TASK_NAMES`]. The worker forwards them to

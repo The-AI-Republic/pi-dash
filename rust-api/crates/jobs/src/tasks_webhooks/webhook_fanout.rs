@@ -52,7 +52,13 @@
 //! Evidence: `rust-api/fixtures/tasks_webhooks/fx-web-04-webhook-fanout.json`
 //! (FX-WEB-04).
 
+use sea_orm::{
+    ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select,
+};
 use serde_json::{Map, Value};
+
+use pidash_db::entity::{webhooks, workspaces};
+use pidash_db::orm_tx::into_sqlx;
 
 use crate::task_message::TaskMessage;
 use crate::tasks_webhooks::webhook_send::{webhook_send_task_kwargs, WEBHOOK_SEND_TASK_NAME};
@@ -60,9 +66,8 @@ use crate::tasks_webhooks::webhook_send::{webhook_send_task_kwargs, WEBHOOK_SEND
 /// `webhook_activity` (`:376`): full Celery name. A plain
 /// `@shared_task` — no bind, no autoretry, no backoff.
 pub const WEBHOOK_ACTIVITY_TASK_NAME: &str = "pi_dash.bgtasks.webhook_task.webhook_activity";
-/// `model_activity` (`:462`): full Celery name. A plain
-/// `@shared_task` — no bind, no autoretry, no backoff.
-pub const MODEL_ACTIVITY_TASK_NAME: &str = "pi_dash.bgtasks.webhook_task.model_activity";
+/// Re-export of the canonical [`pidash_services::domain::activity::MODEL_ACTIVITY_TASK`].
+pub use pidash_services::domain::activity::MODEL_ACTIVITY_TASK as MODEL_ACTIVITY_TASK_NAME;
 
 /// Both task names owned by this module.
 pub const WEBHOOK_FANOUT_TASK_NAMES: [&str; 2] =
@@ -634,8 +639,6 @@ pub fn diff_updates(
     Ok(diffs)
 }
 
-use sqlx::Row as _;
-
 /// Live `webhook_activity` + `model_activity` execution (PIDASHCONV-1105).
 /// The pure binders above are `String`-strict; Python is duck-typed, so
 /// the live binders below carry every parameter as a [`Value`] and apply
@@ -938,26 +941,37 @@ async fn fetch_fanout_webhooks(
     slug: &str,
     flag: Option<&str>,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let sql = match flag {
-        Some(column) => format!(
-            "SELECT w.id FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
-             WHERE ws.slug = $1 AND w.is_active = true AND w.deleted_at IS NULL \
-             AND w.{column} = true \
-             ORDER BY w.created_at DESC"
-        ),
-        None => "SELECT w.id FROM webhooks w JOIN workspaces ws ON ws.id = w.workspace_id \
-             WHERE ws.slug = $1 AND w.is_active = true AND w.deleted_at IS NULL \
-             ORDER BY w.created_at DESC"
-            .to_owned(),
+    let query = fanout_webhooks_query(slug, flag);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = query
+        .into_tuple::<uuid::Uuid>()
+        .all(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(rows.iter().map(|id| id.to_string()).collect())
+}
+
+/// The fan-out webhook id list (`:418-433`): `workspace__slug` + active
+/// plus the per-event flag column, INNER JOIN to `workspaces`, newest
+/// first. `flag` names come from [`event_flag_for`]; an unknown name
+/// never reaches here (it is `None`).
+fn fanout_webhooks_query(slug: &str, flag: Option<&str>) -> Select<webhooks::Entity> {
+    let mut query = webhooks::Entity::find()
+        .select_only()
+        .column(webhooks::Column::Id)
+        .join(JoinType::InnerJoin, webhooks::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(webhooks::Column::IsActive.eq(true))
+        .filter(webhooks::Column::DeletedAt.is_null());
+    query = match flag {
+        Some("project") => query.filter(webhooks::Column::Project.eq(true)),
+        Some("issue") => query.filter(webhooks::Column::Issue.eq(true)),
+        Some("module") => query.filter(webhooks::Column::Module.eq(true)),
+        Some("cycle") => query.filter(webhooks::Column::Cycle.eq(true)),
+        Some("issue_comment") => query.filter(webhooks::Column::IssueComment.eq(true)),
+        _ => query,
     };
-    let rows = sqlx::query(&sql).bind(slug).fetch_all(pool).await?;
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let id: uuid::Uuid = row.get("id");
-            id.to_string()
-        })
-        .collect())
+    query.order_by_desc(webhooks::Column::CreatedAt)
 }
 
 /// Live `model_activity` (`:463-505`).
@@ -1368,6 +1382,26 @@ mod tests {
     }
 
     #[test]
+    fn fanout_query_shape_pins_join_filter_and_order() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let flagged = fanout_webhooks_query("ws-slug", Some("issue"))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(flagged.contains("\"webhooks\""), "{flagged}");
+        assert!(flagged.contains("\"workspaces\""), "{flagged}");
+        assert!(flagged.contains("\"slug\""), "{flagged}");
+        assert!(flagged.contains("\"is_active\""), "{flagged}");
+        assert!(flagged.contains("\"deleted_at\" IS NULL"), "{flagged}");
+        assert!(flagged.contains("\"issue\""), "{flagged}");
+        assert!(flagged.contains("\"created_at\" DESC"), "{flagged}");
+        let unfiltered = fanout_webhooks_query("ws-slug", None)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!unfiltered.contains("\"issue\" ="), "{unfiltered}");
+        assert!(unfiltered.contains("\"created_at\" DESC"), "{unfiltered}");
+    }
+
+    #[test]
     fn deleted_verb_sends_id_only_event_data() {
         // Fixture `golden_deleted`: verb deleted → `{"id": event_id}`.
         let fixture = fanout_fixture();
@@ -1558,6 +1592,23 @@ mod tests {
         )
         .expect("origin defaults");
         assert_eq!(created_call(&minimal).current_site, None);
+        // Explicit JSON null — the wire shape the MCP move path queues
+        // (Django `.delay(origin=None)`) — maps the same way, never
+        // `Some("")`.
+        let null_origin = bind_model_activity(
+            &json!([]),
+            &json!({
+                "model_name": "issue",
+                "model_id": "iid-1",
+                "requested_data": {},
+                "current_instance": Value::Null,
+                "actor_id": "uid-9",
+                "slug": "ws-slug",
+                "origin": Value::Null,
+            }),
+        )
+        .expect("null origin binds");
+        assert_eq!(created_call(&null_origin).current_site, None);
     }
 
     #[test]

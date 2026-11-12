@@ -11,4 +11,5 @@
 //! issue's new files); every file under this module is new.
 pub mod guards;
 pub mod queries;
+pub mod sanitize;
 pub mod serializers;

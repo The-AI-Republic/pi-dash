@@ -7,7 +7,7 @@
 //! `matcher.reconcile_unsatisfiable_pins` (PR #541): release wedged-busy
 //! pinned runners, clear pins held past `RUNNER_PIN_AUTO_RELEASE_SECS`,
 //! then drain every affected pod so the recovered runs are assigned in
-//! the same pass. SQL text lives in the services planners
+//! the same pass. The statements live in the services planners
 //! (`pidash_services::runner_sessions::unsatisfiable_pins`); this layer
 //! holds the settings reader, the pool-direct driver (the
 //! `offline_recovery` precedent — no store trait), the worker handler
@@ -33,8 +33,10 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_services::runner_sessions::drain::RELEASE_RUNNER_IF_IDLE_SQL;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
 use pidash_services::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
+use pidash_services::runner_sessions::live_drains::release_runner_if_idle;
 use pidash_services::runner_sessions::unsatisfiable_pins as kernel;
 
 use super::sweeps_chat::{RunnerRunsSeams, SweepError};
@@ -66,17 +68,16 @@ pub fn pin_auto_release_secs() -> i64 {
     pin_auto_release_secs_raw(std::env::var(PIN_AUTO_RELEASE_ENV).ok().as_deref())
 }
 
-fn note_pod(pod_ids: &mut Vec<Uuid>, pod_id: Option<Uuid>) {
-    if let Some(pod_id) = pod_id {
-        if !pod_ids.contains(&pod_id) {
-            pod_ids.push(pod_id);
-        }
+fn note_pod(pod_ids: &mut Vec<Uuid>, pod_id: Uuid) {
+    if !pod_ids.contains(&pod_id) {
+        pod_ids.push(pod_id);
     }
 }
 
 /// `matcher.reconcile_unsatisfiable_pins()` (no pod filter — the beat
 /// task's call): returns the pods whose queue or capacity changed, in
-/// first-seen order.
+/// first-seen order. `agent_run.pod_id` is NOT NULL, so the source's
+/// `if pod_id is not None` gates always pass.
 pub async fn reconcile_unsatisfiable_pins_pods(
     pool: &PgPool,
     now: &DateTime<Utc>,
@@ -86,19 +87,10 @@ pub async fn reconcile_unsatisfiable_pins_pods(
     let mut pod_ids: Vec<Uuid> = Vec::new();
 
     // (1) Wedged-busy pinned runners that are still alive: release them.
-    let wedged: Vec<(Uuid, Option<Uuid>, DateTime<Utc>)> =
-        sqlx::query_as(kernel::wedged_pinned_runners_select())
-            .bind(alive)
-            .fetch_all(pool)
-            .await?;
+    let db = sea_orm_connection(pool);
+    let wedged = kernel::wedged_pinned_runners_select(alive).all(&db).await?;
     for (runner_id, pod_id, _) in wedged {
-        let released = sqlx::query(RELEASE_RUNNER_IF_IDLE_SQL)
-            .bind(runner_id)
-            .execute(pool)
-            .await?
-            .rows_affected()
-            > 0;
-        if released {
+        if release_runner_if_idle(&db, runner_id).await? {
             tracing::info!("reconcile_unsatisfiable_pins: released wedged busy runner {runner_id}");
             note_pod(&mut pod_ids, pod_id);
         }
@@ -108,35 +100,24 @@ pub async fn reconcile_unsatisfiable_pins_pods(
     if bound_secs > 0 {
         let cutoff = offline_cutoff(now, bound_secs);
         let mut tx = pool.begin().await?;
-        let stale: Vec<(Uuid, Option<Uuid>, Option<Uuid>)> =
-            sqlx::query_as(kernel::stale_pins_lock_select())
-                .bind(cutoff)
-                .bind(alive)
-                .fetch_all(&mut *tx)
-                .await?;
+        let conn = TxConn::new(&mut tx);
+        let stale = kernel::stale_pins_lock_select(cutoff, alive)
+            .all(&conn)
+            .await?;
         if !stale.is_empty() {
             let ids: Vec<Uuid> = stale.iter().map(|(id, _, _)| *id).collect();
-            let clear_pins = kernel::clear_pins_sql(ids.len());
-            let mut query = sqlx::query(&clear_pins);
-            for id in &ids {
-                query = query.bind(*id);
-            }
-            query.execute(&mut *tx).await?;
+            kernel::clear_pins_statement(&ids).exec(&conn).await?;
             // Same as the manual release-pin endpoint: whichever runner
             // takes the run next has no session of the parent's to
             // resume against, so drop the resume hint.
-            let clear_parents = kernel::clear_parent_threads_sql(ids.len());
-            let mut query = sqlx::query(&clear_parents);
-            for id in &ids {
-                query = query.bind(*id);
-            }
-            query.execute(&mut *tx).await?;
+            kernel::clear_parent_threads_statement(&ids)
+                .exec(&conn)
+                .await?;
         }
         tx.commit().await?;
         for (run_id, runner_id, pod_id) in stale {
-            let runner = runner_id.map(|id| id.to_string()).unwrap_or_default();
             tracing::info!(
-                "reconcile_unsatisfiable_pins: auto-released pin run={run_id} runner={runner} after {bound_secs}s bound"
+                "reconcile_unsatisfiable_pins: auto-released pin run={run_id} runner={runner_id} after {bound_secs}s bound"
             );
             note_pod(&mut pod_ids, pod_id);
         }

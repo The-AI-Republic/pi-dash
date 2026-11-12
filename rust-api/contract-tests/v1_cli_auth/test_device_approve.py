@@ -22,7 +22,7 @@ def test_approve_shape(api, session_a, tenant_a, db):
     r = approve(api, session_a, codes["user_code"])
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body) == {"ok", "user_email", "workspace_slug"}
+    assert set(body) == {"ok", "user_email", "workspace_slug", "scope", "interactive"}
     assert body["ok"] is True
     assert body["user_email"] == tenant_a["user"]["email"]
     assert body["workspace_slug"] == tenant_a["workspace"]["slug"]

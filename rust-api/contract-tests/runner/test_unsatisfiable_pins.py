@@ -14,8 +14,8 @@ Both workers run with the default ``RUNNER_PIN_AUTO_RELEASE_SECS``
 (600s); the ``<= 0`` disable switch is a per-process setting and stays
 a unit concern on each side.
 
-Local-gated until PR #541 reaches rust-dev (see
-``TASK_ORACLE_IGNORES.txt``): the matrix serves Django from the frozen
+Local-gated until PR #541 reaches main (see
+``TASK_ORACLE_IGNORES.txt``): the matrix serves Django from this
 checkout, whose worker never heard of the reconcile task.
 """
 

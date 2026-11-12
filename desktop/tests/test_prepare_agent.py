@@ -17,30 +17,21 @@ and `tauri build --debug`. tauri-cli 2.10 leaves `TAURI_ENV_DEBUG` unset for a
 release build rather than setting it to `false`, so both spellings are covered.
 The default profile follows that signal.
 
-These run the real script against a synthetic checkout with `cargo`, `rustc`
-and the agent engine stubbed out: the script derives its own paths from its
-location, so nothing is compiled or downloaded.
-
-The same module holds the offline regressions for the engine download's
-scratch space (`PrepareAgentTempDirTests`), which do run the download branch
-against a stubbed `gh`.
+These run the real script against a synthetic checkout with `cargo` and
+`rustc` stubbed out: the script derives its own paths from its location, so
+nothing is compiled. The script stages the CLI only (`pidash` plus its
+licence); the built-in engine ships in the CLI release and is installed by
+`pidash engine install`, so nothing here downloads or stages it.
 """
 
-import hashlib
-import io
-import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import textwrap
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/prepare-agent.sh"
-
-ENGINE_TAG = "rust-v0.0.0-test"
 
 RUSTC_STUB = """#!/usr/bin/env bash
 echo "host: x86_64-unknown-linux-gnu"
@@ -64,10 +55,6 @@ out="$profile"
 if [[ "$profile" == dev ]]; then out=debug; fi
 mkdir -p "$root/target/$out"
 printf 'pidash built into target/%s\\n' "$out" > "$root/target/$out/pidash"
-"""
-
-ENGINE_STUB = """#!/usr/bin/env bash
-echo "stub-engine 0.0.0"
 """
 
 
@@ -95,15 +82,8 @@ class PrepareAgentProfileTests(unittest.TestCase):
         write(self.tmp / "stubs/rustc", RUSTC_STUB, executable=True)
         write(self.tmp / "stubs/cargo", CARGO_STUB, executable=True)
 
-        # An already-staged engine at the requested tag, so the script never
-        # reaches for `gh`.
         self.bin = self.tmp / "desktop/src-tauri/bin"
-        write(self.bin / "engine-version.txt", ENGINE_TAG + "\n")
-        write(self.bin / "pidash-agent-engine", ENGINE_STUB, executable=True)
-
-    # The environment the Tauri CLI hands a before* hook.
-    RELEASE_BUILD = {"TAURI_ENV_PLATFORM": "linux"}
-    DEBUG_BUILD = {"TAURI_ENV_PLATFORM": "linux", "TAURI_ENV_DEBUG": "true"}
+        self.licences = self.tmp / "desktop/src-tauri/licenses"
 
     def prepare(self, **env):
         return subprocess.run(
@@ -112,7 +92,6 @@ class PrepareAgentProfileTests(unittest.TestCase):
             text=True,
             env={
                 "PATH": f"{self.tmp / 'stubs'}:/usr/bin:/bin:/usr/local/bin",
-                "CODEX_BUNDLE_VERSION": ENGINE_TAG,
                 **env,
             },
             check=True,
@@ -167,106 +146,22 @@ class PrepareAgentProfileTests(unittest.TestCase):
 
         self.assertNotIn("WARNING", result.stderr)
 
+    def test_only_the_cli_and_its_licence_are_staged(self):
+        # The engine ships in the CLI release (`pidash engine install`); the
+        # desktop bundle must not gain an engine binary, marker, or licence.
+        # No `gh` stub and no runner/ENGINE_VERSION: reaching for either would
+        # fail this run.
+        self.prepare(**self.RELEASE_BUILD)
 
-TARGET = "x86_64-unknown-linux-gnu"
-ASSET = "codex-x86_64-unknown-linux-musl.tar.gz"
-ENGINE = "#!/bin/sh\necho engine 0.0.0\n"
-
-GH_STUB = textwrap.dedent(
-    """\
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ "$1" == release ]]; then
-      while [[ $# -gt 0 ]]; do
-        if [[ "$1" == --dir ]]; then cp "$FAKE_ARCHIVE" "$2/"; exit 0; fi
-        shift
-      done
-      exit 1
-    fi
-    case "$2" in
-      */releases/tags/*) printf '%s\\n' "$FAKE_DIGEST" ;;
-      *) echo "license text" ;;
-    esac
-    """
-)
+        self.assertEqual({p.name for p in self.bin.iterdir()}, {"pidash"})
+        self.assertEqual(
+            {p.name for p in self.licences.iterdir()}, {"pidash-LICENSE.txt"}
+        )
 
 
-def write_executable(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    path.chmod(0o755)
-
-
-@unittest.skipUnless(
-    os.name == "posix" and shutil.which("bash") and shutil.which("shasum"),
-    "needs bash and shasum",
-)
-class PrepareAgentTempDirTests(unittest.TestCase):
-    def run_script(self, digest=None):
-        """Run a copy of the script against stubbed tools; return (result, leftovers, staged)."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            scripts = root / "oss/desktop/scripts"
-            scripts.mkdir(parents=True)
-            shutil.copy(SCRIPT, scripts / "prepare-agent.sh")
-            (root / "oss/LICENSE.txt").write_text("license\n")
-            write_executable(root / "oss/target/debug/pidash", "#!/bin/sh\n")
-
-            output = io.BytesIO()
-            with tarfile.open(fileobj=output, mode="w:gz") as source:
-                info = tarfile.TarInfo(ASSET.removesuffix(".tar.gz"))
-                info.size = len(ENGINE)
-                info.mode = 0o755
-                source.addfile(info, io.BytesIO(ENGINE.encode()))
-            archive = root / "upstream" / ASSET
-            archive.parent.mkdir()
-            archive.write_bytes(output.getvalue())
-            if digest is None:
-                digest = "sha256:" + hashlib.sha256(output.getvalue()).hexdigest()
-
-            stubs = root / "stubs"
-            write_executable(stubs / "rustc", f"#!/bin/sh\necho 'host: {TARGET}'\n")
-            write_executable(stubs / "cargo", "#!/bin/sh\n")
-            write_executable(stubs / "gh", GH_STUB)
-
-            scratch = root / "tmp"
-            scratch.mkdir()
-            result = subprocess.run(
-                ["bash", str(scripts / "prepare-agent.sh")],
-                env={
-                    **os.environ,
-                    "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
-                    "TMPDIR": str(scratch),
-                    "FAKE_ARCHIVE": str(archive),
-                    "FAKE_DIGEST": digest,
-                },
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            leftovers = sorted(str(p.relative_to(scratch)) for p in scratch.rglob("*"))
-            staged = (root / "oss/desktop/src-tauri/bin/pidash-agent-engine").exists()
-            return result, leftovers, staged
-
-    def test_download_dir_is_removed_after_staging(self):
-        result, leftovers, staged = self.run_script()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(staged)
-        self.assertEqual(leftovers, [])
-
-    def test_download_dir_is_removed_on_checksum_mismatch(self):
-        result, leftovers, staged = self.run_script(digest="sha256:" + "0" * 64)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("checksum mismatch", result.stderr)
-        self.assertFalse(staged)
-        self.assertEqual(leftovers, [])
-
-    def test_download_dir_is_removed_on_missing_checksum(self):
-        result, leftovers, staged = self.run_script(digest="")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Missing upstream checksum", result.stderr)
-        self.assertFalse(staged)
-        self.assertEqual(leftovers, [])
+    # The environment the Tauri CLI hands a before* hook.
+    RELEASE_BUILD = {"TAURI_ENV_PLATFORM": "linux"}
+    DEBUG_BUILD = {"TAURI_ENV_PLATFORM": "linux", "TAURI_ENV_DEBUG": "true"}
 
 
 if __name__ == "__main__":

@@ -60,8 +60,7 @@
 //! `runner.id` (`related_name="sessions"`, `CASCADE`). Not
 //! referenced by D-14 SQL: `name`, `host_label`, `visibility`,
 //! refresh/enrollment token columns, `enrolled_at`,
-//! `protocol_version`, `free_worktrees` (explicitly retired,
-//! `sessions.py` poll ignores the hint), `updated_at`,
+//! `protocol_version`, `updated_at`,
 //! `revoked_at` / `revoked_reason` (revocation is tested via
 //! `status` only).
 //!
@@ -84,7 +83,6 @@
 //! filter/update, resume_ack read), `executor_kind` (varchar;
 //! `MACHINE_EXECUTORS` + managed/local splits), `assigned_at`
 //! (timestamptz null; reaper cutoff, FIFO order, assign update),
-//! `queue_position` (smallint null; cancel-barrier clear),
 //! `created_at` (timestamptz; FIFO order and `Meta.ordering`
 //! `["-created_at"]` for unordered `.first()`), `ended_at`
 //! (timestamptz null; cancel-barrier update). Row-reads from fetched
@@ -107,7 +105,7 @@
 //! ## `runner_live_state` (D-15 model, D-14 writes)
 //!
 //! `runner_id` (UUID pk, OneToOne; `get_or_create`), `observed_run_id`
-//! (UUID null; wipe driver + update), the eight `SNAPSHOT_FIELDS`
+//! (UUID null; wipe driver + update), the ten `SNAPSHOT_FIELDS`
 //! (`last_event_at`, `last_event_kind`, `last_event_summary`,
 //! `agent_pid`, `agent_subprocess_alive`, `approvals_pending`,
 //! `llm_model`, `turn_count`; wipe + conditional updates), `usage`
@@ -132,7 +130,8 @@
 //!
 //! * `close_runner_session`'s active-list select (`pubsub.py:96-99`,
 //!   full-row, default ordering, no `LIMIT`) is PIDASHCONV-553's;
-//!   its per-row revoke reuses [`models::runner_session::REVOKE_SQL`].
+//!   its per-row revoke reuses the domain `revoke_runner_session`
+//!   (`pidash_services::domain::tokens`, PIDASHCONV-1520).
 //! * The `DevMachine.last_seen_at` keyed updates
 //!   (`machine_sessions.py:106-108`, `:201`) execute in the machine
 //!   handlers (PIDASHCONV-559) against the D-13 table.

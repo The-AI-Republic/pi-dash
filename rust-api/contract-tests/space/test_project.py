@@ -145,6 +145,27 @@ def test_issues_list_unknown_anchor_is_404(anon_client):
     assert response.json() == {"error": "Project is not published"}
 
 
+def test_issues_list_name_filter_escapes_like_wildcards(anon_client, world, seeder):
+    # Django name__icontains is a literal substring match (prep_for_like_query
+    # escapes \, % and _); ?name=a_b must not match axb (PIDASHCONV-1257).
+    tag = seeder.tag
+    literal = f"a_b{tag}"
+    decoy = f"axb{tag}"
+    seeder.create_issue(
+        world["workspace"]["id"], world["project"]["id"], world["state"]["id"],
+        name=literal, sequence_id=101,
+    )
+    seeder.create_issue(
+        world["workspace"]["id"], world["project"]["id"], world["state"]["id"],
+        name=decoy, sequence_id=102,
+    )
+    response = anon_client.get(f"{BASE}/anchor/{world['anchor']}/issues/", params={"name": literal})
+    assert response.status_code == 200
+    names = [row["name"] for row in response.json()["results"]]
+    assert literal in names
+    assert decoy not in names
+
+
 def test_issues_group_keys_exclude_soft_deleted_and_triage(anon_client, world, seeder, db):
     workspace_id = world["workspace"]["id"]
     project_id = world["project"]["id"]

@@ -11,12 +11,15 @@
 //!
 //! # Layering: a seam, not direct calls
 //!
-//! This crate carries no database handle, so the move is generic over
-//! the [`MoveStore`] seam (the `PubsubStore` / `CreationSeam`
-//! precedent): one method per underlying effect, each naming the SQL
-//! text the pool implementation executes verbatim. Guards run before
-//! the transaction, the transaction body runs inside it, and the
-//! outcome carries everything after it — in Python order:
+//! The move is generic over the [`MoveStore`] seam (the `PubsubStore` /
+//! `CreationSeam` precedent): one method per underlying effect, each
+//! naming the SQL text the store executes verbatim. The only store
+//! implementation is the SeaORM one behind
+//! [`crate::domain::issues::move_to_project`], which both entry points
+//! (the API-key surface and the web-app surface) call so the two stay
+//! byte-for-byte identical. Guards run before the transaction, the
+//! transaction body runs inside it, and the outcome carries everything
+//! after it — in Python order:
 //!
 //! 1. guards (`:136-171`): blank-ref check → source fetch → resolve →
 //!    same-project no-op → membership → `current_instance` capture →
@@ -106,9 +109,6 @@ use std::fmt::Write as _;
 pub use pidash_db::app_project::models::project::NOT_FOUND_DETAIL;
 use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
 use pidash_db::dispatch::AgentRunStatus;
-/// Re-exported for the pool implementation: the
-/// `Pod.default_for_project_id` lookup.
-pub use pidash_db::runner_enroll::columns::pod::DEFAULT_FOR_PROJECT_ID_SQL;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use serde_json::{Map, Value};
@@ -118,16 +118,10 @@ use super::pr_links::TaskEnqueue;
 use super::serializers_detail::serialize_drf_datetime;
 use crate::app_project::tasks::ISSUE_ACTIVITY_TASK;
 use crate::dispatch::tools::{advisory_lock_key, saved_sequence_id};
-/// Re-exported for the pool implementation: the advisory lock, the
-/// sequence scan, and the default/fallback state lookups the seam
-/// methods execute.
-pub use crate::dispatch::tools::{
-    CREATE_ADVISORY_LOCK_SQL, CREATE_SAVE_DEFAULT_STATE_SQL, CREATE_SAVE_FALLBACK_STATE_SQL,
-    CREATE_SEQ_SCAN_SQL,
-};
+use crate::domain::issues_move::{REPOINT_DESCRIPTION_SQL, REPOINT_ISSUE_COMMENT_SQL};
 use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};
-use crate::v1_projects::tasks::MODEL_ACTIVITY_TASK;
+use crate::v1_projects::tasks::{model_activity_kwargs, MODEL_ACTIVITY_TASK};
 use crate::v1_work_items::shape_issue::{
     issue_url, render_issue, BlockerSummary, IssueRow, RepresentationInput, SummaryItem,
 };
@@ -174,8 +168,15 @@ pub const MULTIPLE_ACTIVE_RUNS_MESSAGE: &str =
 /// Failure modes of [`move_work_item_to_project`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveError {
-    /// A recoverable 400/403/409 with its exact message.
+    /// A recoverable 400/403/409 with its exact message. Every `Issue`
+    /// arm fires before the issue save, so the caller answers it with
+    /// nothing to roll back; the one post-save recoverable arm is
+    /// [`MoveError::IssuePostWrite`] instead.
     Issue(IssueMoveError),
+    /// The multiple-executing-runs 409 (`:264-267`): the only recoverable
+    /// arm past the issue save (`:223`), so the caller must roll the
+    /// span back before answering it (Django's `atomic` exit on raise).
+    IssuePostWrite(IssueMoveError),
     /// The source issue is not visible (`Issue.DoesNotExist` propagates,
     /// `:140`/`:182`) — the handler renders the standard DRF 404 detail
     /// body.
@@ -183,6 +184,13 @@ pub enum MoveError {
     /// `Project.resolve` raised (`:141`) — the handler renders
     /// [`NOT_FOUND_DETAIL`] (`"Project not found"`) as the 404 detail.
     ProjectNotFound,
+    /// No active `role >= MEMBER` membership in the SOURCE project under
+    /// [`MoveGuards::Dual` (the views' pre-kernel permission check,
+    /// `app/views/issue/move.py:28` / `api/views/issue.py:917`, folded
+    /// into the kernel for callers with no view layer). The caller maps
+    /// it to its own 403 shape; the two view drivers never see it (they
+    /// pass `MoveGuards::TargetOnly` — their views already checked).
+    SourceDenied,
     /// Anything the seam reports (connection, mapping, unexpected
     /// constraint) or a render failure — a 500, as Django's uncaught
     /// exception.
@@ -200,43 +208,83 @@ impl From<StoreError> for MoveError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreError(pub String);
 
+/// Which membership probes [`move_work_item_to_project`] enforces
+/// itself (design D6: the Django views check the source project before
+/// the shared kernel checks the target).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoveGuards {
+    /// The kernel probes the target only (`:146-152`); the caller
+    /// checked the source project up front, as both Django views do
+    /// (`app/views/issue/move.py:28`, `api/views/issue.py:917`).
+    #[default]
+    TargetOnly,
+    /// The kernel probes the source project first (same `role >= MEMBER`
+    /// rule as the target probe, `:146-152`), then runs the usual
+    /// target-only flow — for callers with no view layer. A source
+    /// denial answers [`MoveError::SourceDenied`], which the caller maps
+    /// to its own 403 shape.
+    Dual,
+}
+
+/// Caller options for [`move_work_item_to_project`] (design D6). The
+/// default is exactly the Django behavior; each non-default value
+/// parameterizes the cited Python lines for callers the two views do
+/// not serve (downstream overlays).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveOptions {
+    /// Which membership probes the kernel enforces.
+    pub guards: MoveGuards,
+    /// Stamp the actor as `updated_by_id` on the move's save. Django's
+    /// `update_fields` (`:223-235`) never stamps it.
+    pub stamp_updated_by: bool,
+    /// Lock the outstanding runs and run the handoff transitions plus
+    /// the immediate-handoff create (`:189-362`). `false` skips all of
+    /// it: no run is locked, transitioned, or created, and
+    /// `dispatch_immediate` derives true (no runs).
+    pub handoff: bool,
+    /// Override for the orchestration flag. `None` derives it as Django
+    /// does — false exactly when handoff runs exist (`:218-223`, the
+    /// `_orchestration_dispatch_immediate` attribute); `Some` forces the
+    /// value regardless of runs.
+    pub dispatch_immediate: Option<bool>,
+}
+
+impl Default for MoveOptions {
+    /// Exactly the Django behavior.
+    fn default() -> Self {
+        Self::django()
+    }
+}
+
+impl MoveOptions {
+    /// Exactly the Django behavior: target-only guards, no
+    /// `updated_by` stamp, handoff on, derived dispatch flag.
+    pub fn django() -> Self {
+        Self {
+            guards: MoveGuards::TargetOnly,
+            stamp_updated_by: false,
+            handoff: true,
+            dispatch_immediate: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SQL text (Django shape; the pool implementation executes verbatim)
 // ---------------------------------------------------------------------------
 
 /// `issues` columns in `_meta` order (the `SourceIssueRow` projection,
 /// shared by the three issue SELECTs).
-pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\"";
+pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\"";
 
 /// `agent_run` columns in `_meta` order (the `HandoffRunRow` projection).
-pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
+pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
 
-/// Source-issue fetch (`:140`): `Issue.issue_objects.get(workspace__slug,
-/// project_id, pk)`. Full row; `issue_objects` scope (soft-delete +
-/// triage/archived/draft exclusions — the `states` conjunct rides a LEFT
-/// JOIN, so it carries Django's NULL-tolerant `.exclude()` spelling and
-/// stateless rows are kept, verbatim: F18-11 stmt 0) + the `projects` join
-/// for `project__archived_at` + the `workspaces` join for the slug. `$1`
-/// slug, `$2` project id, `$3` pk. (Django's `.get()` `LIMIT 21`
-/// collapses to 1: the pk lookup returns at most one row.)
-pub const SOURCE_ISSUE_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1";
-
-/// Locked re-fetch (`:182-184`): [`SOURCE_ISSUE_SQL`] with
+/// Locked re-fetch (`:182-184`): the source-issue fetch with
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
 /// (a bare `FOR UPDATE` would ask Postgres to lock the nullable side of
 /// the `states` outer join and 500).
-pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
-
-/// `Project.resolve` pk arm (`project.py:197-199`): minimal projection
-/// (`id`, `workspace_id`, `identifier` — the only columns the move
-/// reads); `workspace__slug` join; explicit `deleted_at` guard;
-/// `-created_at` ordering. `$1` pk, `$2` slug.
-pub const PROJECT_RESOLVE_BY_PK_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1 AND \"workspaces\".\"slug\" = $2) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
-
-/// `Project.resolve` identifier arm (`project.py:206-211`): exact
-/// equality on the stripped, upper-cased input (never `iexact`, so the
-/// composite btree is used). `$1` identifier, `$2` slug.
-pub const PROJECT_RESOLVE_BY_IDENTIFIER_SQL: &str = "SELECT \"projects\".\"id\", \"projects\".\"workspace_id\", \"projects\".\"identifier\" FROM \"projects\" INNER JOIN \"workspaces\" ON (\"projects\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"projects\".\"deleted_at\" IS NULL AND \"workspaces\".\"slug\" = $2 AND \"projects\".\"identifier\" = $1) ORDER BY \"projects\".\"created_at\" DESC LIMIT 1";
+pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
 
 /// Target-membership probe (`:146-152`): active `role >= MEMBER`
 /// membership. `$1` slug, `$2` target project id, `$3` actor id.
@@ -258,43 +306,17 @@ pub const ASSIGNEE_IDS_SQL: &str = "SELECT \"issue_assignees\".\"assignee_id\" F
 /// `labels` id list (`issue.py:466-468`). `$1` issue id.
 pub const LABEL_IDS_SQL: &str = "SELECT \"issue_labels\".\"label_id\" FROM \"issue_labels\" WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $1) ORDER BY \"issue_labels\".\"created_at\" DESC";
 
-/// Outstanding-work lock (`:192-199`): full rows, newest first, `FOR
-/// UPDATE` (no `SKIP LOCKED` — the move waits). `AgentRun` extends plain
-/// `models.Model`: no soft-delete scope. `$1` issue id.
-pub const HANDOFF_RUNS_LOCK_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"error_code\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"queue_position\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"work_item_id\" = $1 AND \"agent_run\".\"status\" IN ('queued', 'assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth', 'paused_awaiting_input')) ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE";
+// ---------------------------------------------------------------------------
+// Covered-table SQL (moved to [`crate::domain::issues_move`],
+// PIDASHCONV-1630, per design D7): the literals live in domain/; these
+// aliases keep the pinned overlay/sdk paths (`app_issues::*`) resolving.
+// ---------------------------------------------------------------------------
 
-/// Issue save (`:223-235`): exactly the `update_fields`, in list order.
-/// `$1` project, `$2` workspace, `$3` sequence, `$4` state, `$5`
-/// assigned pod (NULL when no handoff and no default), `$6`-`$8` NULL
-/// parent/estimate/type, `$9` updated stamp, `$10` id.
-pub const ISSUE_MOVE_UPDATE_SQL: &str = "UPDATE \"issues\" SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9 WHERE \"issues\".\"id\" = $10";
-
-/// Inert-run close (`:282-284`): `$1` run id, `$2` end stamp.
-pub const INERT_RUN_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancelled', \"ended_at\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
-
-/// Executing-parent barrier (`:302`): `$1` run id, `$2` run_config with
-/// the handoff marker merged.
-pub const HANDOFF_PARENT_UPDATE_SQL: &str = "UPDATE \"agent_run\" SET \"status\" = 'cancel_requested', \"run_config\" = $2, \"queue_position\" = NULL WHERE \"agent_run\".\"id\" = $1";
-
-/// Old sequence rows detached (`:310`): `issue=NULL` where the project
-/// is not the target. `$1` issue id, `$2` target project id.
-pub const SEQUENCE_DETACH_SQL: &str = "UPDATE \"issue_sequences\" SET \"issue_id\" = NULL WHERE (\"issue_sequences\".\"deleted_at\" IS NULL AND \"issue_sequences\".\"issue_id\" = $1 AND NOT (\"issue_sequences\".\"project_id\" = $2))";
-
-/// Target sequence row (`:311`): full create; `workspace_id` resolves
-/// from the already-fetched target project row (Python pays a lazy
-/// `project.workspace` fetch at `save()` — same value, no extra query
-/// here). `$1` id, `$2`/`$3` created/updated, `$4` created_by (the move
-/// actor), `$5` issue, `$6` sequence, `$7` project, `$8` workspace.
-pub const SEQUENCE_CREATE_SQL: &str = "INSERT INTO \"issue_sequences\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"project_id\", \"workspace_id\", \"issue_id\", \"sequence\", \"deleted\") VALUES ($1, $2, $3, $4, NULL, NULL, $7, $8, $5, $6, FALSE)";
-
-/// Assignee prune (`:313-319`, soft): drop rows whose assignee is not an
-/// active `role >= MEMBER` member of the TARGET (nested subquery,
-/// verbatim). `$1` deleted stamp, `$2` issue, `$3` target project.
-pub const ASSIGNEE_PRUNE_SQL: &str = "UPDATE \"issue_assignees\" SET \"deleted_at\" = $1 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2 AND NOT (\"issue_assignees\".\"assignee_id\" IN (SELECT \"project_members\".\"member_id\" FROM \"project_members\" WHERE (\"project_members\".\"deleted_at\" IS NULL AND \"project_members\".\"project_id\" = $3 AND \"project_members\".\"member_id\" IN (SELECT \"issue_assignees\".\"assignee_id\" FROM \"issue_assignees\" WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $2)) AND \"project_members\".\"role\" >= 15 AND \"project_members\".\"is_active\"))))";
-
-/// Surviving assignees re-pointed (`:320-323`). `$1` target project,
-/// `$2` target workspace, `$3` issue.
-pub const ASSIGNEE_REPOINT_SQL: &str = "UPDATE \"issue_assignees\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_assignees\".\"deleted_at\" IS NULL AND \"issue_assignees\".\"issue_id\" = $3)";
+/// Aliases of the domain-homed move write SQL (moved PIDASHCONV-1630).
+pub use crate::domain::issues_move::{
+    ASSIGNEE_PRUNE_SQL, ASSIGNEE_REPOINT_SQL, CHILDREN_DETACH_SQL, RELATION_DELETE_SQL,
+    SEQUENCE_CREATE_SQL, SEQUENCE_DETACH_SQL,
+};
 
 /// Label wipe (`:325`, soft). `$1` deleted stamp, `$2` issue.
 pub const LABEL_DELETE_SQL: &str = "UPDATE \"issue_labels\" SET \"deleted_at\" = $1 WHERE (\"issue_labels\".\"deleted_at\" IS NULL AND \"issue_labels\".\"issue_id\" = $2)";
@@ -305,14 +327,6 @@ pub const CYCLE_DELETE_SQL: &str = "UPDATE \"cycle_issues\" SET \"deleted_at\" =
 /// Module wipe (`:327`, soft). `$1` deleted stamp, `$2` issue.
 pub const MODULE_DELETE_SQL: &str = "UPDATE \"module_issues\" SET \"deleted_at\" = $1 WHERE (\"module_issues\".\"deleted_at\" IS NULL AND \"module_issues\".\"issue_id\" = $2)";
 
-/// Relation wipe (`:328`, soft): both directions. `$1` deleted stamp, `$2` issue.
-pub const RELATION_DELETE_SQL: &str = "UPDATE \"issue_relations\" SET \"deleted_at\" = $1 WHERE (\"issue_relations\".\"deleted_at\" IS NULL AND (\"issue_relations\".\"issue_id\" = $2 OR \"issue_relations\".\"related_issue_id\" = $2))";
-
-/// Children of other projects detached (`:329`): `Issue.objects`
-/// (plain soft-delete scope — triage/draft children detach too). `$1`
-/// issue, `$2` target project.
-pub const CHILDREN_DETACH_SQL: &str = "UPDATE \"issues\" SET \"parent_id\" = NULL WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"parent_id\" = $1 AND NOT (\"issues\".\"project_id\" = $2))";
-
 /// Moved comment ids (`:331`): `-created_at` order (list order feeds the
 /// `IN` lists below; order is unobservable there). `$1` issue.
 pub const COMMENT_IDS_SQL: &str = "SELECT \"issue_comments\".\"id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1) ORDER BY \"issue_comments\".\"created_at\" DESC";
@@ -320,10 +334,331 @@ pub const COMMENT_IDS_SQL: &str = "SELECT \"issue_comments\".\"id\" FROM \"issue
 /// Moved comment description ids (`:332-334`). `$1` issue.
 pub const DESCRIPTION_IDS_SQL: &str = "SELECT \"issue_comments\".\"description_id\" FROM \"issue_comments\" WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $1 AND \"issue_comments\".\"description_id\" IS NOT NULL) ORDER BY \"issue_comments\".\"created_at\" DESC";
 
-/// Final refetch (`:393`): `issue_objects` scope + `select_related`
-/// joins; minimal projection (full issue row + the url parts the
-/// handler re-renders). `$1` pk.
-pub const MOVED_ISSUE_REFETCH_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"agent_executor\", \"workspaces\".\"slug\", \"projects\".\"identifier\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"issues\".\"id\" = $1) LIMIT 1";
+// ---------------------------------------------------------------------------
+// SeaORM builders (the domain move store runs these; the SQL texts above
+// stay for the other callers until they migrate)
+// ---------------------------------------------------------------------------
+
+/// SeaORM statements for the move store reads and locks, decoded by
+/// name. Each mirrors the constant of the same name.
+pub mod orm {
+    use pidash_db::app_project::models::project::ProjectLookup;
+    use pidash_db::entity::{
+        agent_run, issue_assignees, issue_comments, issue_labels, issues, project_members,
+        projects, states, workspaces,
+    };
+    use sea_orm::sea_query::{Alias, Expr, LockType, Order, Query, SelectStatement};
+    use uuid::Uuid;
+
+    /// The `SourceIssueRow` columns (the full row minus the JSON,
+    /// stripped-text and workpad columns nothing reads).
+    pub const SOURCE_ROW_COLUMNS: [issues::Column; 32] = [
+        issues::Column::Id,
+        issues::Column::CreatedAt,
+        issues::Column::UpdatedAt,
+        issues::Column::CreatedById,
+        issues::Column::UpdatedById,
+        issues::Column::DeletedAt,
+        issues::Column::ProjectId,
+        issues::Column::WorkspaceId,
+        issues::Column::ParentId,
+        issues::Column::StateId,
+        issues::Column::Point,
+        issues::Column::EstimatePointId,
+        issues::Column::Name,
+        issues::Column::DescriptionHtml,
+        issues::Column::DescriptionBinary,
+        issues::Column::Priority,
+        issues::Column::ComplexityScore,
+        issues::Column::StartDate,
+        issues::Column::TargetDate,
+        issues::Column::SequenceId,
+        issues::Column::SortOrder,
+        issues::Column::CompletedAt,
+        issues::Column::ArchivedAt,
+        issues::Column::IsDraft,
+        issues::Column::ExternalSource,
+        issues::Column::ExternalId,
+        issues::Column::TypeId,
+        issues::Column::GitWorkBranch,
+        issues::Column::CreatedVia,
+        issues::Column::AssignedPodId,
+        issues::Column::AssignedRunnerId,
+        issues::Column::AgentExecutor,
+    ];
+
+    /// `Issue.issue_objects` over the source-row columns: INNER
+    /// `projects`, LEFT `states` (the NULL-tolerant triage exclusion),
+    /// INNER `workspaces`; live, unarchived, non-draft rows of
+    /// unarchived projects.
+    fn issue_objects() -> SelectStatement {
+        let group = || Expr::col((states::Entity, states::Column::Group));
+        Query::select()
+            .columns(SOURCE_ROW_COLUMNS.map(|column| (issues::Entity, column)))
+            .from(issues::Entity)
+            .inner_join(
+                projects::Entity,
+                Expr::col((issues::Entity, issues::Column::ProjectId))
+                    .equals((projects::Entity, projects::Column::Id)),
+            )
+            .left_join(
+                states::Entity,
+                Expr::col((issues::Entity, issues::Column::StateId))
+                    .equals((states::Entity, states::Column::Id)),
+            )
+            .inner_join(
+                workspaces::Entity,
+                Expr::col((issues::Entity, issues::Column::WorkspaceId))
+                    .equals((workspaces::Entity, workspaces::Column::Id)),
+            )
+            .and_where(Expr::col((issues::Entity, issues::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((issues::Entity, issues::Column::ArchivedAt)).is_null())
+            .and_where(
+                Expr::col((issues::Entity, issues::Column::IsDraft))
+                    .eq(true)
+                    .not(),
+            )
+            .and_where(group().eq("triage").and(group().is_not_null()).not())
+            .and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
+            .to_owned()
+    }
+
+    /// The source-issue fetch (`:140`, `Issue.issue_objects.get(workspace__slug, project_id, pk)`): the scoped source issue by slug,
+    /// project and pk.
+    pub fn source_issue_select(slug: &str, project_id: Uuid, pk: Uuid) -> SelectStatement {
+        issue_objects()
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+            .and_where(Expr::col((issues::Entity, issues::Column::ProjectId)).eq(project_id))
+            .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(pk))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::SOURCE_ISSUE_LOCK_SQL`]: the same row, `FOR UPDATE OF
+    /// "issues"` (never the nullable `states` side).
+    pub fn source_issue_lock_select(slug: &str, project_id: Uuid, pk: Uuid) -> SelectStatement {
+        source_issue_select(slug, project_id, pk)
+            .lock_with_tables(LockType::Update, [issues::Entity])
+            .to_owned()
+    }
+
+    /// The final refetch (`:393`): the scoped row by pk plus
+    /// `slug` and `identifier` for the url.
+    pub fn moved_issue_refetch_select(pk: Uuid) -> SelectStatement {
+        issue_objects()
+            .column((workspaces::Entity, workspaces::Column::Slug))
+            .column((projects::Entity, projects::Column::Identifier))
+            .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(pk))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// `Project.resolve` (`project.py:197-211`; pk arm or exact
+    /// upper-cased identifier, never `iexact`): `id`,
+    /// `workspace_id`, `identifier` of the live project, newest first.
+    pub fn project_resolve_select(slug: &str, lookup: &ProjectLookup) -> SelectStatement {
+        let mut select = Query::select();
+        select
+            .columns([
+                (projects::Entity, projects::Column::Id),
+                (projects::Entity, projects::Column::WorkspaceId),
+                (projects::Entity, projects::Column::Identifier),
+            ])
+            .from(projects::Entity)
+            .inner_join(
+                workspaces::Entity,
+                Expr::col((projects::Entity, projects::Column::WorkspaceId))
+                    .equals((workspaces::Entity, workspaces::Column::Id)),
+            )
+            .and_where(Expr::col((projects::Entity, projects::Column::DeletedAt)).is_null());
+        match lookup {
+            ProjectLookup::Pk(id) => select
+                .and_where(Expr::col((projects::Entity, projects::Column::Id)).eq(*id))
+                .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug)),
+            ProjectLookup::Identifier(identifier) => select
+                .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+                .and_where(
+                    Expr::col((projects::Entity, projects::Column::Identifier))
+                        .eq(identifier.as_str()),
+                ),
+        };
+        select
+            .order_by((projects::Entity, projects::Column::CreatedAt), Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::MEMBER_EXISTS_SQL`]: an active `role >= MEMBER` live
+    /// membership (`SELECT 1 AS a ... LIMIT 1`).
+    pub fn member_exists_select(slug: &str, project_id: Uuid, member_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(Expr::val(1), Alias::new("a"))
+            .from(project_members::Entity)
+            .inner_join(
+                workspaces::Entity,
+                Expr::col((
+                    project_members::Entity,
+                    project_members::Column::WorkspaceId,
+                ))
+                .equals((workspaces::Entity, workspaces::Column::Id)),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::DeletedAt)).is_null(),
+            )
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::Slug)).eq(slug))
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::ProjectId))
+                    .eq(project_id),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::MemberId))
+                    .eq(member_id),
+            )
+            .and_where(Expr::col((project_members::Entity, project_members::Column::Role)).gte(15))
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::IsActive)).into(),
+            )
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::WORKSPACE_SLUG_SQL`]: the live workspace's slug.
+    pub fn workspace_slug_select(workspace_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((workspaces::Entity, workspaces::Column::Slug))
+            .from(workspaces::Entity)
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((workspaces::Entity, workspaces::Column::Id)).eq(workspace_id))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::PROJECT_IDENTIFIER_SQL`]: the live project's identifier.
+    pub fn project_identifier_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((projects::Entity, projects::Column::Identifier))
+            .from(projects::Entity)
+            .and_where(Expr::col((projects::Entity, projects::Column::DeletedAt)).is_null())
+            .and_where(Expr::col((projects::Entity, projects::Column::Id)).eq(project_id))
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::ASSIGNEE_IDS_SQL`]: live `assignee_id`s, `-created_at`.
+    pub fn assignee_ids_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((issue_assignees::Entity, issue_assignees::Column::AssigneeId))
+            .from(issue_assignees::Entity)
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::DeletedAt)).is_null(),
+            )
+            .and_where(
+                Expr::col((issue_assignees::Entity, issue_assignees::Column::IssueId)).eq(issue_id),
+            )
+            .order_by(
+                (issue_assignees::Entity, issue_assignees::Column::CreatedAt),
+                Order::Desc,
+            )
+            .to_owned()
+    }
+
+    /// [`super::LABEL_IDS_SQL`]: live `label_id`s, `-created_at`.
+    pub fn label_ids_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((issue_labels::Entity, issue_labels::Column::LabelId))
+            .from(issue_labels::Entity)
+            .and_where(Expr::col((issue_labels::Entity, issue_labels::Column::DeletedAt)).is_null())
+            .and_where(
+                Expr::col((issue_labels::Entity, issue_labels::Column::IssueId)).eq(issue_id),
+            )
+            .order_by(
+                (issue_labels::Entity, issue_labels::Column::CreatedAt),
+                Order::Desc,
+            )
+            .to_owned()
+    }
+
+    /// The outstanding statuses the handoff lock takes (`:192-199`).
+    pub const HANDOFF_STATUSES: [&str; 8] = [
+        "queued",
+        "assigned",
+        "waiting_for_worktree",
+        "running",
+        "cancel_requested",
+        "awaiting_approval",
+        "awaiting_reauth",
+        "paused_awaiting_input",
+    ];
+
+    /// The outstanding-work lock (`:192-199`): the outstanding runs,
+    /// newest first, `FOR UPDATE` (no `SKIP LOCKED`: the move waits;
+    /// `AgentRun` has no soft-delete scope). Projects the
+    /// `HandoffRunRow` columns.
+    pub fn handoff_runs_lock_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (agent_run::Entity, agent_run::Column::Id),
+                (agent_run::Entity, agent_run::Column::Status),
+                (agent_run::Entity, agent_run::Column::RunnerId),
+                (agent_run::Entity, agent_run::Column::PodId),
+                (agent_run::Entity, agent_run::Column::CreatedById),
+                (agent_run::Entity, agent_run::Column::RunConfig),
+                (agent_run::Entity, agent_run::Column::Trigger),
+            ])
+            .from(agent_run::Entity)
+            .and_where(Expr::col((agent_run::Entity, agent_run::Column::WorkItemId)).eq(issue_id))
+            .and_where(
+                Expr::col((agent_run::Entity, agent_run::Column::Status)).is_in(HANDOFF_STATUSES),
+            )
+            .order_by(
+                (agent_run::Entity, agent_run::Column::CreatedAt),
+                Order::Desc,
+            )
+            .lock(LockType::Update)
+            .to_owned()
+    }
+
+    /// [`super::COMMENT_IDS_SQL`]: the live comment ids, `-created_at`.
+    pub fn comment_ids_select(issue_id: Uuid) -> SelectStatement {
+        comments_of(issue_id)
+            .column((issue_comments::Entity, issue_comments::Column::Id))
+            .to_owned()
+    }
+
+    /// [`super::DESCRIPTION_IDS_SQL`]: the live comments' non-NULL
+    /// description ids, `-created_at`.
+    pub fn description_ids_select(issue_id: Uuid) -> SelectStatement {
+        comments_of(issue_id)
+            .column((
+                issue_comments::Entity,
+                issue_comments::Column::DescriptionId,
+            ))
+            .and_where(
+                Expr::col((
+                    issue_comments::Entity,
+                    issue_comments::Column::DescriptionId,
+                ))
+                .is_not_null(),
+            )
+            .to_owned()
+    }
+
+    fn comments_of(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .from(issue_comments::Entity)
+            .and_where(
+                Expr::col((issue_comments::Entity, issue_comments::Column::DeletedAt)).is_null(),
+            )
+            .and_where(
+                Expr::col((issue_comments::Entity, issue_comments::Column::IssueId)).eq(issue_id),
+            )
+            .order_by(
+                (issue_comments::Entity, issue_comments::Column::CreatedAt),
+                Order::Desc,
+            )
+            .to_owned()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Project/workspace repoints (`:336-351`)
@@ -379,9 +714,9 @@ pub fn repoint_sql(target: RepointTarget) -> &'static str {
         RepointTarget::IssueVersion => "UPDATE \"issue_versions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_versions\".\"deleted_at\" IS NULL AND \"issue_versions\".\"issue_id\" = $3)",
         RepointTarget::IssueDescriptionVersion => "UPDATE \"issue_description_versions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_description_versions\".\"deleted_at\" IS NULL AND \"issue_description_versions\".\"issue_id\" = $3)",
         RepointTarget::IssueActivity => "UPDATE \"issue_activities\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_activities\".\"deleted_at\" IS NULL AND (\"issue_activities\".\"issue_id\" = $3 OR \"issue_activities\".\"issue_comment_id\" = ANY($4)))",
-        RepointTarget::IssueComment => "UPDATE \"issue_comments\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"issue_comments\".\"deleted_at\" IS NULL AND \"issue_comments\".\"issue_id\" = $3)",
+        RepointTarget::IssueComment => REPOINT_ISSUE_COMMENT_SQL,
         RepointTarget::CommentReaction => "UPDATE \"comment_reactions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"comment_reactions\".\"deleted_at\" IS NULL AND \"comment_reactions\".\"comment_id\" = ANY($4))",
-        RepointTarget::Description => "UPDATE \"descriptions\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"descriptions\".\"deleted_at\" IS NULL AND \"descriptions\".\"id\" = ANY($4))",
+        RepointTarget::Description => REPOINT_DESCRIPTION_SQL,
         RepointTarget::FileAsset => "UPDATE \"file_assets\" SET \"project_id\" = $1, \"workspace_id\" = $2 WHERE (\"file_assets\".\"deleted_at\" IS NULL AND (\"file_assets\".\"issue_id\" = $3 OR \"file_assets\".\"comment_id\" = ANY($4)))",
     }
 }
@@ -404,6 +739,7 @@ pub struct SourceIssueRow {
     pub parent_id: Option<Uuid>,
     pub estimate_point_id: Option<Uuid>,
     pub assigned_pod_id: Option<Uuid>,
+    pub assigned_runner_id: Option<Uuid>,
     pub type_id: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -478,6 +814,13 @@ pub struct MovedIssueFields {
     pub sequence_id: i64,
     pub state_id: Uuid,
     pub assigned_pod_id: Option<Uuid>,
+    /// `Some` exactly under `stamp_updated_by`: the actor the store
+    /// writes to `updated_by_id`
+    /// ([`issue_move_update`](crate::domain::issues_move::issue_move_update)).
+    /// `None` runs
+    /// [`issue_move_update`](crate::domain::issues_move::issue_move_update)
+    /// verbatim.
+    pub updated_by_id: Option<Uuid>,
 }
 
 /// The refreshed issue (`:393`): the post-move row plus the url parts
@@ -506,7 +849,7 @@ pub struct MovedIssueRow {
 /// precedent).
 #[allow(async_fn_in_trait)]
 pub trait MoveStore {
-    /// Source fetch ([`SOURCE_ISSUE_SQL`], `:140`).
+    /// Source fetch ([`orm::source_issue_select`], `:140`).
     async fn source_issue(
         &self,
         slug: &str,
@@ -515,7 +858,7 @@ pub trait MoveStore {
     ) -> Result<Option<SourceIssueRow>, StoreError>;
 
     /// `Project.resolve` (`:141`): the pool picks
-    /// [`PROJECT_RESOLVE_BY_PK_SQL`] / [`PROJECT_RESOLVE_BY_IDENTIFIER_SQL`]
+    /// [`orm::project_resolve_select`]
     /// by the lookup (classified here via `classify_lookup`).
     async fn resolve_project(
         &self,
@@ -528,6 +871,18 @@ pub trait MoveStore {
         &self,
         slug: &str,
         target_project_id: Uuid,
+        actor_id: Uuid,
+    ) -> Result<bool, StoreError>;
+
+    /// Source-membership probe under [`MoveGuards::Dual`]: the same
+    /// [`MEMBER_EXISTS_SQL`] text with the SOURCE project id (the views'
+    /// pre-kernel permission check, `app/views/issue/move.py:28` /
+    /// `api/views/issue.py:917`, folded into the kernel). The kernel
+    /// only calls it under `Dual`, before every other guard.
+    async fn can_move_from_source(
+        &self,
+        slug: &str,
+        source_project_id: Uuid,
         actor_id: Uuid,
     ) -> Result<bool, StoreError>;
 
@@ -562,6 +917,13 @@ pub trait MoveStore {
     /// Uncapped open-blocker flag (`blockers::has_open_blockers_sql`).
     async fn representation_has_open_blockers(&self, issue_id: Uuid) -> Result<bool, StoreError>;
 
+    /// `assigned_runner_detail` for the `current_instance` render
+    /// (design §14.1): `None` when pod-assigned or the runner is gone.
+    async fn representation_assigned_runner_detail(
+        &self,
+        runner_id: Option<Uuid>,
+    ) -> Result<Option<serde_json::Value>, StoreError>;
+
     /// Default non-triage state (`dispatch::tools::CREATE_SAVE_DEFAULT_STATE_SQL`).
     async fn target_default_state(
         &self,
@@ -587,7 +949,7 @@ pub trait MoveStore {
     /// computed here.
     async fn advisory_lock_project(&self, lock_key: i64) -> Result<(), StoreError>;
 
-    /// Outstanding-work lock ([`HANDOFF_RUNS_LOCK_SQL`], `:192-199`).
+    /// Outstanding-work lock ([`orm::handoff_runs_lock_select`], `:192-199`).
     async fn lock_handoff_runs(&self, issue_id: Uuid) -> Result<Vec<HandoffRunRow>, StoreError>;
 
     /// Target sequence max (`dispatch::tools::CREATE_SEQ_SCAN_SQL`,
@@ -602,7 +964,12 @@ pub trait MoveStore {
         target_project_id: Uuid,
     ) -> Result<Option<PodRow>, StoreError>;
 
-    /// Issue save ([`ISSUE_MOVE_UPDATE_SQL`], `:223-235`).
+    /// Issue save
+    /// ([`issue_move_update`](crate::domain::issues_move::issue_move_update),
+    /// `:223-235`; the
+    /// the same builder
+    /// text when
+    /// `fields.updated_by_id` is `Some`).
     async fn save_moved_issue(
         &self,
         issue_id: Uuid,
@@ -610,7 +977,7 @@ pub trait MoveStore {
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StoreError>;
 
-    /// One inert-run close ([`INERT_RUN_UPDATE_SQL`], `:278-286`), in
+    /// One inert-run close ([`inert_run_update`](crate::domain::issues_move::inert_run_update), `:278-286`), in
     /// list order.
     async fn cancel_inert_run(
         &self,
@@ -618,7 +985,7 @@ pub trait MoveStore {
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StoreError>;
 
-    /// Executing-parent barrier ([`HANDOFF_PARENT_UPDATE_SQL`], `:288-306`):
+    /// Executing-parent barrier ([`handoff_parent_update`](crate::domain::issues_move::handoff_parent_update), `:288-306`):
     /// `run_config` arrives with the handoff marker merged here.
     async fn mark_handoff_parent(&self, run_id: Uuid, run_config: &Value)
         -> Result<(), StoreError>;
@@ -726,7 +1093,7 @@ pub trait MoveStore {
         now: &chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StoreError>;
 
-    /// Final refetch ([`MOVED_ISSUE_REFETCH_SQL`], `:393`).
+    /// Final refetch ([`orm::moved_issue_refetch_select`], `:393`).
     async fn moved_issue(&self, pk: Uuid) -> Result<Option<MovedIssueRow>, StoreError>;
 }
 
@@ -909,11 +1276,18 @@ fn dumps_number(n: &serde_json::Number) -> String {
     if let Some(u) = n.as_u64() {
         return u.to_string();
     }
+    // Beyond i64/u64. The workspace build unifies
+    // `serde_json/arbitrary_precision` (from pidash-api), so an integer
+    // literal keeps its exact digits here; Python ints are unbounded, so
+    // `json.dumps` echoes them verbatim — never route them through `f64`.
+    // Only float-syntax literals (`.`, `e`, `E`) take the `repr` path.
+    let token = n.to_string();
+    if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        return token;
+    }
     match n.as_f64() {
         Some(f) => dumps_float(f),
-        // Unreachable without `arbitrary_precision`: every Number is
-        // i64, u64 or f64.
-        None => n.to_string(),
+        None => token,
     }
 }
 
@@ -1113,25 +1487,30 @@ pub fn issue_activity_kwargs(
 /// (vs `str()` in `issue_activity`) — identical hyphenated strings on
 /// the JSON wire. (The fixture annotates this arg "INT, not str"; the
 /// model says `User.id` is a UUID — the wire bytes agree either way.)
+/// `origin` is `None` for callers with no request host (the MCP layer:
+/// `pi_dash_cloud/mcp/tools.py` `_emit_write_activity` passes
+/// `origin=None`) — the key stays present with JSON null, exactly the
+/// `.delay(origin=None)` wire bytes the webhook worker maps to
+/// `current_site=None`.
+///
+/// Built by the shared [`model_activity_kwargs`] kernel (PIDASHCONV-1623).
 pub fn move_model_activity_kwargs(
     model_id: &Uuid,
     requested_data: Value,
     current_instance: &str,
     actor_id: &Uuid,
     slug: &str,
-    origin: &str,
+    origin: Option<&str>,
 ) -> TaskEnqueue {
-    let mut kwargs = Map::with_capacity(7);
-    kwargs.insert("model_name".to_owned(), Value::String("issue".to_owned()));
-    kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
-    kwargs.insert("requested_data".to_owned(), requested_data);
-    kwargs.insert(
-        "current_instance".to_owned(),
-        Value::String(current_instance.to_owned()),
+    let kwargs = model_activity_kwargs(
+        "issue",
+        &model_id.to_string(),
+        requested_data,
+        Some(current_instance),
+        &actor_id.to_string(),
+        slug,
+        origin,
     );
-    kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
-    kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     TaskEnqueue {
         task: MODEL_ACTIVITY_TASK,
         args: Vec::new(),
@@ -1210,6 +1589,10 @@ async fn render_current_instance<S: MoveStore>(
     let state_s = issue.state_id.map(|id| id.to_string());
     let estimate_s = issue.estimate_point_id.map(|id| id.to_string());
     let pod_s = issue.assigned_pod_id.map(|id| id.to_string());
+    let runner_s = issue.assigned_runner_id.map(|id| id.to_string());
+    let runner_detail = store
+        .representation_assigned_runner_detail(issue.assigned_runner_id)
+        .await?;
     let created_by_s = issue.created_by_id.map(|id| id.to_string());
     let updated_by_s = issue.updated_by_id.map(|id| id.to_string());
     let created_at_s = serialize_drf_datetime(issue.created_at);
@@ -1286,6 +1669,9 @@ async fn render_current_instance<S: MoveStore>(
         state: state_s.as_deref(),
         estimate_point: estimate_s.as_deref(),
         assigned_pod: pod_s.as_deref(),
+        assigned_runner: runner_s.as_deref(),
+        assigned_runner_detail: runner_detail.as_ref(),
+        dispatch_wait: None,
     };
     let input = RepresentationInput {
         row: &row,
@@ -1310,10 +1696,12 @@ async fn render_current_instance<S: MoveStore>(
 ///
 /// `target_ref` is the raw JSON value (UUID or workspace-scoped
 /// identifier — coerced per `str(x or "")`); `actor_id` is the acting
-/// user; `origin` is the request host for webhooks; `web_base_url` is
-/// the resolved `WEB_URL`/`APP_BASE_URL` config (`None` when
-/// unconfigured — the `url` key is then omitted); `now` is the frozen
-/// clock (`timezone.now()` — also the `epoch` stamp).
+/// user; `origin` is the request host for webhooks (`None` for callers
+/// with no request host — the MCP layer — rendering JSON null, exactly
+/// Django's `origin=None`); `web_base_url` is the resolved
+/// `WEB_URL`/`APP_BASE_URL` config (`None` when unconfigured — the `url`
+/// key is then omitted); `now` is the frozen clock (`timezone.now()` —
+/// also the `epoch` stamp).
 ///
 /// Returns the refreshed issue. Raises [`MoveError::Issue`] (400/403/409)
 /// for recoverable failures; [`MoveError::IssueNotFound`] /
@@ -1326,10 +1714,21 @@ pub async fn move_work_item_to_project<S: MoveStore>(
     pk: Uuid,
     target_ref: &Value,
     actor_id: Uuid,
-    origin: &str,
+    origin: Option<&str>,
     web_base_url: Option<&str>,
     now: &chrono::DateTime<chrono::Utc>,
+    options: &MoveOptions,
 ) -> Result<MoveResult, MoveError> {
+    if options.guards == MoveGuards::Dual
+        && !store
+            .can_move_from_source(slug, project_id, actor_id)
+            .await?
+    {
+        // The views deny before the kernel runs (the decorator /
+        // permission class wraps the whole view), so the source probe
+        // beats every guard below, including the blank-target 400.
+        return Err(MoveError::SourceDenied);
+    }
     let target_text = target_ref_text(target_ref);
     let target_text = target_text.trim();
     if target_text.is_empty() {
@@ -1390,7 +1789,13 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         .advisory_lock_project(advisory_lock_key(&target_project.id))
         .await?;
 
-    let handoff_runs = store.lock_handoff_runs(issue.id).await?;
+    // Without the handoff the runs are never locked (nor, below,
+    // transitioned or recreated): the move reads them as empty.
+    let handoff_runs = if options.handoff {
+        store.lock_handoff_runs(issue.id).await?
+    } else {
+        Vec::new()
+    };
 
     let last_sequence = store.max_target_sequence(target_project.id).await?;
     let next_sequence = saved_sequence_id(last_sequence);
@@ -1412,6 +1817,7 @@ pub async fn move_work_item_to_project<S: MoveStore>(
                 sequence_id: next_sequence,
                 state_id: target_state.id,
                 assigned_pod_id: target_pod.map(|pod| pod.id),
+                updated_by_id: options.stamp_updated_by.then_some(actor_id),
             },
             now,
         )
@@ -1428,7 +1834,8 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         if executing.len() > 1 {
             // Orchestration's one-active-run rule should prevent this.
             // Refuse rather than declare live duplicates cancelled.
-            return Err(MoveError::Issue(IssueMoveError::new(
+            // Past the save, so the caller must roll back.
+            return Err(MoveError::IssuePostWrite(IssueMoveError::new(
                 MULTIPLE_ACTIVE_RUNS_MESSAGE,
                 409,
             )));
@@ -1557,7 +1964,9 @@ pub async fn move_work_item_to_project<S: MoveStore>(
         issue: moved,
         current_instance,
         requested_data,
-        dispatch_immediate: handoff_runs.is_empty(),
+        dispatch_immediate: options
+            .dispatch_immediate
+            .unwrap_or(handoff_runs.is_empty()),
         post_commit,
         enqueues,
     }))
@@ -1599,6 +2008,7 @@ mod tests {
             parent_id: Some(uuid(0x31)),
             estimate_point_id: Some(uuid(0x32)),
             assigned_pod_id: Some(uuid(0x33)),
+            assigned_runner_id: None,
             type_id: Some("bug".to_owned()),
             created_at: now(),
             updated_at: now(),
@@ -1652,6 +2062,7 @@ mod tests {
         source: Option<SourceIssueRow>,
         resolve: Option<ProjectRow>,
         member: bool,
+        source_member: bool,
         ws_slug: Option<String>,
         proj_ident: Option<String>,
         assignees: Vec<Uuid>,
@@ -1693,6 +2104,7 @@ mod tests {
                 source: Some(source),
                 resolve: Some(target_project()),
                 member: true,
+                source_member: true,
                 ws_slug: Some(SLUG.to_owned()),
                 proj_ident: Some("ACME_SRC".to_owned()),
                 assignees: vec![uuid(0x40)],
@@ -1757,6 +2169,16 @@ mod tests {
             Ok(self.member)
         }
 
+        async fn can_move_from_source(
+            &self,
+            _slug: &str,
+            _source_project_id: Uuid,
+            _actor_id: Uuid,
+        ) -> Result<bool, StoreError> {
+            self.log("can_move_from_source");
+            Ok(self.source_member)
+        }
+
         async fn representation_workspace_slug(
             &self,
             _workspace_id: Uuid,
@@ -1808,6 +2230,14 @@ mod tests {
         ) -> Result<bool, StoreError> {
             self.log("representation_has_open_blockers");
             Ok(self.open_blockers)
+        }
+
+        async fn representation_assigned_runner_detail(
+            &self,
+            _runner_id: Option<Uuid>,
+        ) -> Result<Option<serde_json::Value>, StoreError> {
+            self.log("representation_assigned_runner_detail");
+            Ok(None)
         }
 
         async fn target_default_state(
@@ -2117,6 +2547,14 @@ mod tests {
     }
 
     async fn move_call(store: &FakeStore, target_ref: &Value) -> Result<MoveResult, MoveError> {
+        move_call_with(store, target_ref, &MoveOptions::django()).await
+    }
+
+    async fn move_call_with(
+        store: &FakeStore,
+        target_ref: &Value,
+        options: &MoveOptions,
+    ) -> Result<MoveResult, MoveError> {
         move_work_item_to_project(
             store,
             SLUG,
@@ -2124,9 +2562,10 @@ mod tests {
             uuid(1),
             target_ref,
             uuid(0x40),
-            ORIGIN,
+            Some(ORIGIN),
             Some("https://app.example.test"),
             &now(),
+            options,
         )
         .await
     }
@@ -2248,7 +2687,7 @@ mod tests {
             MoveResult::AlreadyThere(_) => panic!("expected a move"),
         };
         let calls = store.calls.borrow();
-        let head = &calls[..13];
+        let head = &calls[..14];
         assert_eq!(
             head,
             [
@@ -2262,13 +2701,14 @@ mod tests {
                 "representation_blocked_by",
                 "representation_blocking",
                 "representation_has_open_blockers",
+                "representation_assigned_runner_detail",
                 "target_default_state",
                 "lock_source_issue",
                 "advisory_lock_project",
             ]
         );
         assert_eq!(
-            &calls[13..26],
+            &calls[14..27],
             [
                 "lock_handoff_runs",
                 "max_target_sequence",
@@ -2286,12 +2726,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            &calls[26..28],
+            &calls[27..29],
             ["moved_comment_ids", "moved_description_ids"]
         );
-        assert_eq!(calls[28..40], ["repoint_related"; 12]);
-        assert_eq!(&calls[40..], ["moved_issue"]);
-        assert_eq!(calls.len(), 41);
+        assert_eq!(calls[29..41], ["repoint_related"; 12]);
+        assert_eq!(&calls[41..], ["moved_issue"]);
+        assert_eq!(calls.len(), 42);
 
         // Repoint order is Python's call order.
         assert_eq!(*store.repoints.borrow(), REPOINT_ORDER);
@@ -2305,6 +2745,7 @@ mod tests {
                 sequence_id: 8,
                 state_id: uuid(0x70),
                 assigned_pod_id: Some(uuid(0x61)),
+                updated_by_id: None,
             }]
         );
         // Advisory key derives from the TARGET project id.
@@ -2376,6 +2817,61 @@ mod tests {
         let target = uuid(0x50);
         let bytes = py_dumps(&serde_json::json!({"project": target.to_string()}));
         assert_eq!(bytes, format!("{{\"project\": \"{target}\"}}"));
+    }
+
+    #[test]
+    fn model_activity_kwargs_origin_none_renders_null() {
+        // The MCP layer has no request host: Django passes `origin=None`
+        // (`pi_dash_cloud/mcp/tools.py` `_emit_write_activity`), and the
+        // `.delay` wire bytes carry the key with JSON null (which the
+        // webhook worker maps to `current_site=None` — never `""`).
+        let spec = move_model_activity_kwargs(
+            &uuid(1),
+            serde_json::json!({"project": uuid(0x50).to_string()}),
+            "current",
+            &uuid(0x40),
+            SLUG,
+            None,
+        );
+        assert_eq!(spec.task, MODEL_ACTIVITY_TASK);
+        assert!(spec.kwargs.contains_key("origin"));
+        assert_eq!(spec.kwargs["origin"], Value::Null);
+        // `Some` still renders the string (the REST-driver path).
+        let spec = move_model_activity_kwargs(
+            &uuid(1),
+            serde_json::json!({"project": uuid(0x50).to_string()}),
+            "current",
+            &uuid(0x40),
+            SLUG,
+            Some(ORIGIN),
+        );
+        assert_eq!(spec.kwargs["origin"], serde_json::json!(ORIGIN));
+    }
+
+    #[tokio::test]
+    async fn move_with_none_origin_queues_null_origin() {
+        let store = FakeStore::scripted();
+        let out = move_work_item_to_project(
+            &store,
+            SLUG,
+            uuid(0x10),
+            uuid(1),
+            &serde_json::json!("ENG"),
+            uuid(0x40),
+            None,
+            Some("https://app.example.test"),
+            &now(),
+            &MoveOptions::django(),
+        )
+        .await
+        .expect("moves");
+        let outcome = match out {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        assert_eq!(outcome.enqueues.len(), 2);
+        assert_eq!(outcome.enqueues[1].task, MODEL_ACTIVITY_TASK);
+        assert_eq!(outcome.enqueues[1].kwargs["origin"], Value::Null);
     }
 
     // -- handoff branches --------------------------------------------------
@@ -2470,7 +2966,7 @@ mod tests {
         ];
         assert_eq!(
             move_call(&store, &target).await.expect_err("two executing"),
-            MoveError::Issue(IssueMoveError::new(MULTIPLE_ACTIVE_RUNS_MESSAGE, 409))
+            MoveError::IssuePostWrite(IssueMoveError::new(MULTIPLE_ACTIVE_RUNS_MESSAGE, 409))
         );
         // Executing WITHOUT a runner is not "executing" (runnerless rows
         // join the inert set).
@@ -2486,6 +2982,157 @@ mod tests {
         assert_eq!(*store.inert_closed.borrow(), vec![uuid(0x90)]);
         assert_eq!(store.parent_marked.borrow().len(), 1);
         assert_eq!(outcome.post_commit.len(), 2);
+    }
+
+    // -- caller options -----------------------------------------------------
+
+    fn dual() -> MoveOptions {
+        MoveOptions {
+            guards: MoveGuards::Dual,
+            ..MoveOptions::django()
+        }
+    }
+
+    #[tokio::test]
+    async fn dual_guards_probe_source_first_and_allow() {
+        let store = FakeStore::scripted();
+        let target = serde_json::json!("ENG");
+        let options = dual();
+        let out = move_call_with(&store, &target, &options)
+            .await
+            .expect("moves");
+        assert!(matches!(out, MoveResult::Moved(_)));
+        let calls = store.calls.borrow();
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some("can_move_from_source")
+        );
+        assert!(calls.contains(&"can_move_into_target".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn dual_guards_source_denial_beats_every_guard() {
+        let mut store = FakeStore::scripted();
+        store.source_member = false;
+        // Blank target AND denied source: the source probe runs first
+        // (the views deny before the kernel runs).
+        let blank = serde_json::json!("   ");
+        assert_eq!(
+            move_call_with(&store, &blank, &dual())
+                .await
+                .expect_err("denied"),
+            MoveError::SourceDenied
+        );
+        assert_eq!(
+            store.calls.borrow().as_slice(),
+            ["can_move_from_source".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn target_only_never_probes_source() {
+        let store = FakeStore::scripted();
+        let target = serde_json::json!("ENG");
+        move_call(&store, &target).await.expect("moves");
+        assert!(!store
+            .calls
+            .borrow()
+            .contains(&"can_move_from_source".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn stamp_updated_by_records_the_actor() {
+        let store = FakeStore::scripted();
+        let target = serde_json::json!("ENG");
+        let options = MoveOptions {
+            stamp_updated_by: true,
+            ..MoveOptions::django()
+        };
+        match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(_) => {}
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        }
+        assert_eq!(
+            *store.saved.borrow(),
+            vec![MovedIssueFields {
+                project_id: uuid(0x50),
+                workspace_id: uuid(0x20),
+                sequence_id: 8,
+                state_id: uuid(0x70),
+                assigned_pod_id: Some(uuid(0x61)),
+                updated_by_id: Some(uuid(0x40)),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_off_skips_locks_transitions_and_create() {
+        let mut store = FakeStore::scripted();
+        // Runs that would 409 (two executing) under the handoff: without
+        // it the move reads them as empty and sails through.
+        store.handoff = vec![
+            handoff_row(0x90, AgentRunStatus::Running, Some(0x95)),
+            handoff_row(0x91, AgentRunStatus::Assigned, Some(0x96)),
+        ];
+        let target = serde_json::json!("ENG");
+        let options = MoveOptions {
+            handoff: false,
+            ..MoveOptions::django()
+        };
+        let outcome = match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        let calls = store.calls.borrow();
+        assert!(!calls.contains(&"lock_handoff_runs".to_owned()));
+        assert!(!calls.contains(&"cancel_inert_run".to_owned()));
+        assert!(!calls.contains(&"mark_handoff_parent".to_owned()));
+        assert!(!calls.contains(&"create_handoff_run".to_owned()));
+        assert!(store.inert_closed.borrow().is_empty());
+        assert!(store.parent_marked.borrow().is_empty());
+        assert!(store.handoff_created.borrow().is_empty());
+        assert!(outcome.post_commit.is_empty());
+        assert!(outcome.dispatch_immediate);
+    }
+
+    #[tokio::test]
+    async fn dispatch_override_forces_the_flag_either_way() {
+        let target = serde_json::json!("ENG");
+        // Runs present (derived false) forced true.
+        let mut store = FakeStore::scripted();
+        store.handoff = vec![handoff_row(0x90, AgentRunStatus::Queued, None)];
+        let options = MoveOptions {
+            dispatch_immediate: Some(true),
+            ..MoveOptions::django()
+        };
+        let outcome = match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        assert!(outcome.dispatch_immediate);
+        // No runs (derived true) forced false.
+        let store = FakeStore::scripted();
+        let options = MoveOptions {
+            dispatch_immediate: Some(false),
+            ..MoveOptions::django()
+        };
+        let outcome = match move_call_with(&store, &target, &options)
+            .await
+            .expect("moves")
+        {
+            MoveResult::Moved(outcome) => outcome,
+            MoveResult::AlreadyThere(_) => panic!("expected a move"),
+        };
+        assert!(!outcome.dispatch_immediate);
     }
 
     // -- cancel discernment -------------------------------------------------
@@ -2607,9 +3254,10 @@ mod tests {
             uuid(1),
             &serde_json::json!("ENG"),
             uuid(0x40),
-            ORIGIN,
+            Some(ORIGIN),
             None,
             &now(),
+            &MoveOptions::django(),
         )
         .await
         .expect("moves");
@@ -2678,6 +3326,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dumps_big_integers() {
+        // Python ints are unbounded: `json.dumps(IssueSerializer(issue).
+        // data, cls=DjangoJSONEncoder)` (`issue_move.py:159`) echoes the
+        // exact digits past u64/i64. The workspace build unifies
+        // `serde_json/arbitrary_precision` (from pidash-api), so the
+        // literal survives parsing and must echo verbatim
+        // (PIDASHCONV-1733) — never route it through `f64`.
+        let parse = |text: &str| {
+            let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+            py_dumps(&value)
+        };
+        assert_eq!(
+            parse(
+                r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#,
+            ),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#
+        );
+        // Float-syntax literals still take the float path (`repr`).
+        assert_eq!(
+            parse(r#"{"e": 1e19, "f": 100.00}"#),
+            r#"{"e": 1e+19, "f": 100.0}"#
+        );
+        // i64/u64 edges still echo exactly.
+        assert_eq!(
+            parse(
+                r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#,
+            ),
+            r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#
+        );
+    }
+
     // -- SQL shape ----------------------------------------------------------
 
     #[test]
@@ -2688,26 +3368,59 @@ mod tests {
         assert!(MEMBER_EXISTS_SQL.contains("\"role\" >= 15"));
         assert!(ASSIGNEE_PRUNE_SQL.contains("\"role\" >= 15"));
         // Lock forms.
+        let render = |select: sea_orm::sea_query::SelectStatement| {
+            select.to_string(sea_orm::sea_query::PostgresQueryBuilder)
+        };
+        let source = render(orm::source_issue_select("acme", Uuid::nil(), Uuid::nil()));
+        let locked = render(orm::source_issue_lock_select(
+            "acme",
+            Uuid::nil(),
+            Uuid::nil(),
+        ));
+        let handoff = render(orm::handoff_runs_lock_select(Uuid::nil()));
+        // Lock forms.
         assert!(SOURCE_ISSUE_LOCK_SQL.contains("FOR UPDATE OF \"issues\""));
         assert!(
-            HANDOFF_RUNS_LOCK_SQL.contains("ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE")
+            locked.ends_with("LIMIT 1 FOR UPDATE OF \"issues\""),
+            "{locked}"
         );
-        assert!(!HANDOFF_RUNS_LOCK_SQL.contains("SKIP LOCKED"));
+        assert!(!source.contains("FOR UPDATE"), "{source}");
+        assert!(
+            handoff.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC FOR UPDATE"),
+            "{handoff}"
+        );
+        assert!(!handoff.contains("SKIP LOCKED"));
         // The handoff status set matches the module const.
         for status in PROJECT_MOVE_HANDOFF_STATUSES {
-            assert!(HANDOFF_RUNS_LOCK_SQL.contains(status.value()), "{status:?}");
+            assert!(
+                handoff.contains(&format!("'{}'", status.value())),
+                "{status:?}"
+            );
         }
         assert_eq!(PROJECT_MOVE_HANDOFF_STATUSES.len(), 8);
+        assert_eq!(orm::HANDOFF_STATUSES.len(), 8);
         // RESOLVE arms: pk vs exact-identifier equality.
-        assert!(PROJECT_RESOLVE_BY_PK_SQL.contains("\"projects\".\"id\" = $1"));
-        assert!(PROJECT_RESOLVE_BY_IDENTIFIER_SQL.contains("\"projects\".\"identifier\" = $1"));
-        assert!(!PROJECT_RESOLVE_BY_IDENTIFIER_SQL.contains("LOWER("));
-        // The save writes exactly the update_fields, in order.
-        let set = &ISSUE_MOVE_UPDATE_SQL[ISSUE_MOVE_UPDATE_SQL.find("SET ").unwrap()
-            ..ISSUE_MOVE_UPDATE_SQL.find(" WHERE").unwrap()];
-        assert_eq!(
-            set,
-            "SET \"project_id\" = $1, \"workspace_id\" = $2, \"sequence_id\" = $3, \"state_id\" = $4, \"assigned_pod_id\" = $5, \"parent_id\" = $6, \"estimate_point_id\" = $7, \"type_id\" = $8, \"updated_at\" = $9"
+        let by_pk = render(orm::project_resolve_select(
+            "acme",
+            &ProjectLookup::Pk(Uuid::nil()),
+        ));
+        assert!(by_pk.contains("\"projects\".\"id\" = '00000000-0000-0000-0000-000000000000'"));
+        let by_identifier = render(orm::project_resolve_select(
+            "acme",
+            &ProjectLookup::Identifier("ACME".to_owned()),
+        ));
+        assert!(by_identifier.contains("\"projects\".\"identifier\" = 'ACME'"));
+        assert!(!by_identifier.contains("LOWER("));
+        for sql in [&by_pk, &by_identifier] {
+            assert!(sql.contains("\"projects\".\"deleted_at\" IS NULL"), "{sql}");
+            assert!(
+                sql.ends_with("ORDER BY \"projects\".\"created_at\" DESC LIMIT 1"),
+                "{sql}"
+            );
+        }
+        assert!(
+            render(orm::member_exists_select("acme", Uuid::nil(), Uuid::nil()))
+                .contains("\"project_members\".\"role\" >= 15")
         );
         // All 12 repoints set the same pair.
         assert_eq!(REPOINT_ORDER.len(), 12);
@@ -2750,10 +3463,18 @@ mod tests {
         // NULL-tolerant semantics (F18-11 stmt 0); the bare
         // `NOT ("states"."group" = 'triage')` evaluates to NULL on the
         // LEFT OUTER JOIN states and drops stateless issues.
+        let render = |select: sea_orm::sea_query::SelectStatement| {
+            select.to_string(sea_orm::sea_query::PostgresQueryBuilder)
+        };
         for sql in [
-            SOURCE_ISSUE_SQL,
-            SOURCE_ISSUE_LOCK_SQL,
-            MOVED_ISSUE_REFETCH_SQL,
+            render(orm::source_issue_select("acme", Uuid::nil(), Uuid::nil())),
+            render(orm::source_issue_lock_select(
+                "acme",
+                Uuid::nil(),
+                Uuid::nil(),
+            )),
+            render(orm::moved_issue_refetch_select(Uuid::nil())),
+            SOURCE_ISSUE_LOCK_SQL.to_owned(),
         ] {
             assert!(
                 sql.contains(

@@ -8,14 +8,11 @@ import React, { useMemo } from "react";
 import { observer } from "mobx-react";
 // pi dash imports
 import {
-  WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS,
   WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS,
   WORKSPACE_SIDEBAR_STATIC_PINNED_NAVIGATION_ITEMS_LINKS,
 } from "@pi-dash/constants";
 // constants
 import { extendedNavigationItems } from "@/constants/extended-navigation";
-// store hooks
-import { usePersonalNavigationPreferences } from "@/hooks/use-navigation-preferences";
 // pi-dash-web imports
 import { SidebarItem } from "@/pi-dash-web/components/workspace/sidebar/sidebar-item";
 
@@ -44,24 +41,13 @@ const RELOCATED_KEYS = new Set([
 const extendedNavigationKeys = extendedNavigationItems.map((item) => item.key);
 
 export const SidebarMenuItems = observer(function SidebarMenuItems() {
-  // hooks
-  const { preferences: personalPreferences } = usePersonalNavigationPreferences();
-
-  // Personal items (Your work) gated by user preferences, sorted.
-  const filteredStaticNavigationItems = useMemo(() => {
-    const items = [...WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS];
-    const personalItems: Array<(typeof items)[0] & { sort_order: number }> = [];
-
-    if (personalPreferences.items.your_work?.enabled && WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["your-work"]) {
-      personalItems.push({
-        ...WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS["your-work"],
-        sort_order: personalPreferences.items.your_work.sort_order,
-      });
-    }
-    personalItems.sort((a, b) => a.sort_order - b.sort_order);
-
-    return [...items, ...personalItems].filter((item) => !RELOCATED_KEYS.has(item.key));
-  }, [personalPreferences]);
+  // "Your work" used to be appended here as a user-pinnable personal item; it
+  // now lives in the user menu popup (see user-menu-root.tsx), so this section
+  // renders only the always-visible built-in rows.
+  const filteredStaticNavigationItems = useMemo(
+    () => WORKSPACE_SIDEBAR_STATIC_NAVIGATION_ITEMS_LINKS.filter((item) => !RELOCATED_KEYS.has(item.key)),
+    []
+  );
 
   // Workspace-pinned items (all relocated to "More" now, including `runners`;
   // computed via the RELOCATED_KEYS filter so the set of survivors stays in

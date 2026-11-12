@@ -86,6 +86,7 @@
 
 use pidash_auth::permissions::project;
 use pidash_auth::scope::TenantScope;
+pub use pidash_compat::response::SERVER_ERROR_BODY;
 use pidash_types::WorkspaceId;
 
 /// Exact bytes of the anonymous denial on every D-20 route: the class
@@ -106,8 +107,6 @@ pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#
 pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
 /// `handle_exception`'s `KeyError` branch (`base.py:160-164`).
 pub const MISSING_KEY_BODY: &str = r#"{"error":"The required key does not exist."}"#;
-/// `handle_exception`'s generic 500 branch (`base.py:167-170`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// Which permission class guards a D-20 route+method. All 11 view classes
 /// declare `permission_classes = [ProjectEntityPermission]` with no

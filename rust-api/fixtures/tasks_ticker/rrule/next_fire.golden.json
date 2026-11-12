@@ -52,6 +52,58 @@
     {
       "name": "single-shot-aware-exdate-excluded",
       "next": null
+    },
+    {
+      "name": "r1300-weekly-bymonthday",
+      "next": "2026-11-13T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-daily-byyearday",
+      "next": "2026-12-31T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-monthly-byweekno",
+      "next": "2027-05-17T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-interval-wide",
+      "next": "2218-06-15T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-dup-keys-last-wins",
+      "next": "2026-10-20T10:00:00+00:00"
+    },
+    {
+      "name": "r1300-bysetpos-wide",
+      "next": "2026-11-05T03:00:00+00:00"
+    },
+    {
+      "name": "r1300-byeaster-weekly",
+      "next": "2027-03-29T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-byday-nth-weekly",
+      "next": "2026-10-26T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-count-wide",
+      "next": "2026-10-20T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-until-past-rdate",
+      "next": "2026-11-01T09:00:00+00:00"
+    },
+    {
+      "name": "r1300-weekly-byyearday",
+      "next": "2027-04-10T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-monthly-byweekno-wkst",
+      "next": "2027-05-16T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-dtstart-subsecond",
+      "next": "2026-11-13T12:00:00+00:00"
     }
   ]
 }

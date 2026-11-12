@@ -28,6 +28,7 @@
 
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
+pub use pidash_compat::response::{json_response, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // BaseAPIView defaults (base.py:42-51)
@@ -98,8 +99,6 @@ pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}
 pub const NOT_FOUND_BODY: &str = r#"{"error":"The required object does not exist."}"#;
 /// `handle_exception`'s `KeyError` branch (`base.py:85-89`).
 pub const MISSING_KEY_BODY: &str = r#"{"error":"The required key does not exist."}"#;
-/// `handle_exception`'s generic branch (`base.py:91-95`).
-pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
 /// DRF-default permission denial for an authenticated user the
 /// `InstanceAdminPermission` rejects (the class sets no `message`, so
@@ -208,15 +207,6 @@ impl IntoResponse for HandlerError {
             .body(axum::body::Body::from(body))
             .expect("static handler-error response")
     }
-}
-
-/// Render `body` (already exact JSON bytes) as a JSON response.
-pub fn json_response(status: StatusCode, body: String) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(body))
-        .expect("handler json response")
 }
 
 // ---------------------------------------------------------------------------

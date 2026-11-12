@@ -246,11 +246,27 @@ pub async fn run_loop<E: ToolExecutor>(
             continue;
         }
 
+        // The length arm also fires for thinking-only responses
+        // (`_agent_graph.py:1107-1116`); anything else falls through
+        // to the normal handling below, which excludes thinking from
+        // the text and ends at the retry prompt when nothing
+        // recovers (`:1170-1197`).
+        let thinking_only = response
+            .parts
+            .iter()
+            .all(|part| matches!(part, ResponsePart::Thinking { .. }));
+        if thinking_only && response.finish == Some(Finish::Length) {
+            return Err(LoopError::failed(length_message(state.last_max_tokens)));
+        }
+
         let mut texts: Vec<&str> = Vec::new();
         let mut calls: Vec<&ToolCall> = Vec::new();
         for part in &response.parts {
             match part {
                 ResponsePart::Text(text) => texts.push(text.as_str()),
+                // `ThinkingPart` is excluded from the text
+                // (`_agent_graph.py:1197`).
+                ResponsePart::Thinking { .. } => {}
                 ResponsePart::ToolCall(call) => calls.push(call),
             }
         }
@@ -478,6 +494,21 @@ fn response_json(lane: &Lane, state: &LoopState, response: &ParsedResponse) -> V
                 ("provider_details".to_owned(), Value::Null),
                 ("part_kind".to_owned(), Value::String("text".to_owned())),
             ])),
+            // `ThinkingPart` dataclass order (`messages.py:1629+`):
+            // content, id, signature, provider_name, provider_details,
+            // part kind. Unreachable in practice: the filter arm only
+            // runs on empty responses.
+            ResponsePart::Thinking { id, content } => Value::Object(Map::from_iter([
+                ("content".to_owned(), Value::String(content.clone())),
+                ("id".to_owned(), Value::String(id.clone())),
+                ("signature".to_owned(), Value::Null),
+                (
+                    "provider_name".to_owned(),
+                    Value::String(lane.provider_name().to_owned()),
+                ),
+                ("provider_details".to_owned(), Value::Null),
+                ("part_kind".to_owned(), Value::String("thinking".to_owned())),
+            ])),
             ResponsePart::ToolCall(call) => Value::Object(Map::from_iter([
                 ("tool_name".to_owned(), Value::String(call.name.clone())),
                 (
@@ -607,7 +638,7 @@ fn recover_text(history: &[HistoryMessage]) -> Option<String> {
                 .iter()
                 .filter_map(|part| match part {
                     ResponsePart::Text(text) => Some(text.as_str()),
-                    ResponsePart::ToolCall(_) => None,
+                    ResponsePart::Thinking { .. } | ResponsePart::ToolCall(_) => None,
                 })
                 .collect();
             if !text.is_empty() {
@@ -2479,5 +2510,162 @@ mod tests {
             error.contains("while generating a tool call"),
             "got: {error}"
         );
+    }
+
+    fn thinking_reply(reasoning: &str, finish: &str) -> MockReply {
+        chat_reply(
+            serde_json::json!({
+                "role": "assistant", "content": "",
+                "reasoning_content": reasoning,
+            }),
+            finish,
+        )
+    }
+
+    #[tokio::test]
+    async fn thinking_only_length_errors() {
+        // The length arm fires for thinking-only responses too
+        // (`_agent_graph.py:1107-1116`), not just empty ones.
+        let board = harness(
+            vec![thinking_reply("plan", "length")],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let error = failed_message(run_loop(&board.config(), &executor).await.unwrap_err());
+        assert!(
+            error.starts_with(
+                "Model token limit (4096) exceeded before any response was generated."
+            ),
+            "got: {error}"
+        );
+        assert_eq!(board.state.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn thinking_only_retries_with_prompt_then_completes() {
+        // The thinking-only arm (`_agent_graph.py:1107-1170`): no
+        // recoverable text, so the follow-up replays the reasoning
+        // and carries the retry prompt — not an empty resubmit.
+        let board = harness(
+            vec![
+                thinking_reply("let me think", "stop"),
+                text_reply(&done_text("completed", "thought")),
+            ],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let output = run_loop(&board.config(), &executor).await.expect("runs");
+        assert_eq!(output.output.summary(), "thought");
+        let requests = board.state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let second = requests[1]["messages"].as_array().unwrap();
+        let assistant = second
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant replay");
+        assert_eq!(assistant["content"], Value::Null);
+        assert_eq!(
+            assistant["reasoning_content"],
+            Value::String("let me think".to_owned())
+        );
+        assert_eq!(
+            second.last().unwrap(),
+            &serde_json::json!({
+                "role": "user",
+                "content": "Validation feedback:\nPlease return text or include your response in a tool call.\n\nFix the errors and try again.",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn think_tags_in_text_validate() {
+        // Tags split out of the text before output validation (the
+        // issue's case (a)): the run completes in one request.
+        let board = harness(
+            vec![text_reply(&format!(
+                "<think>plan</think>{}",
+                done_text("completed", "tagged")
+            ))],
+            vec![output_wire_tool()],
+            vec![],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![]);
+        let output = run_loop(&board.config(), &executor).await.expect("runs");
+        assert_eq!(output.output.summary(), "tagged");
+        assert_eq!(board.state.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn thinking_beside_tool_call_replays() {
+        // Reasoning beside a tool call replays on the follow-up
+        // request (the issue's case (c)).
+        let board = harness(
+            vec![
+                chat_reply(
+                    serde_json::json!({
+                        "role": "assistant", "content": null,
+                        "reasoning_content": "plan the add",
+                        "tool_calls": [{
+                            "id": "c1", "type": "function",
+                            "function": {"name": "add", "arguments": r#"{"a": 2, "b": 3}"#},
+                        }],
+                    }),
+                    "tool_calls",
+                ),
+                text_reply(&done_text("completed", "added")),
+            ],
+            vec![add_wire_tool(), output_wire_tool()],
+            vec![add_schema()],
+            vec![],
+        )
+        .await;
+        let executor = FakeExecutor::named(vec![("add", Behavior::Add)]);
+        let output = run_loop(&board.config(), &executor).await.expect("runs");
+        assert_eq!(output.output.summary(), "added");
+        let requests = board.state.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let second = requests[1]["messages"].as_array().unwrap();
+        let assistant = second
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant replay");
+        assert_eq!(assistant["content"], Value::Null);
+        assert_eq!(
+            assistant["reasoning_content"],
+            Value::String("plan the add".to_owned())
+        );
+        assert_eq!(
+            assistant["tool_calls"],
+            serde_json::json!([{
+                "id": "c1", "type": "function",
+                "function": {"name": "add", "arguments": r#"{"a": 2, "b": 3}"#},
+            }])
+        );
+    }
+
+    #[test]
+    fn recover_text_skips_thinking() {
+        // `_recover_text_from_message_history` accumulates `TextPart`
+        // only: thinking never recovers as text.
+        let history = vec![HistoryMessage::Response {
+            parts: vec![ResponsePart::Thinking {
+                id: "reasoning_content".to_owned(),
+                content: "plan".to_owned(),
+            }],
+            usage: crate::oss_worker::model_runtime::usage::RequestUsage::zeros(),
+            model_name: String::new(),
+            finish: Some(Finish::Stop),
+            provider_details: None,
+            response_id: None,
+        }];
+        assert_eq!(recover_text(&history), None);
     }
 }

@@ -326,7 +326,6 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("RUNNER_PIN_AUTO_RELEASE_SECS", V::from(600)),
         // Desktop-bundled managed runner.
         ("MANAGED_RUNNER_ENABLED", V::from("false")),
-        ("MANAGED_RUNNER_MAX_PER_USER_PROJECT", V::from(1)),
         ("MANAGED_RUNNER_QUEUED_MAX_AGE_SECS", V::from(43200)),
         ("MANAGED_RUNNER_GRACEFUL_STOP_SECS", V::from(30)),
         ("MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS", V::from(300)),
@@ -369,6 +368,11 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("CLOUD_AGENT_MAX_FINAL_RESULT_BYTES", V::from(65536)),
         ("CLOUD_AGENT_MAX_EVENTS", V::from(500)),
         ("CLOUD_AGENT_BLOCK_PRIVATE_URLS", V::from("true")),
+        ("CLOUD_AGENT_JOB_QUEUE", V::from("celery")),
+        // Infra tunables read at boot (DbConfig, scheduler, worker).
+        ("DATABASE_MAX_CONNECTIONS", V::from(10)),
+        ("PIDASH_BEAT_ONLY", V::Null),
+        ("PIDASH_WORKER_SHUTDOWN_GRACE_SECS", V::from(30)),
         // Sessions / cookies.
         ("SESSION_COOKIE_AGE", V::from(604800)),
         ("SESSION_COOKIE_NAME", V::from("session-id")),

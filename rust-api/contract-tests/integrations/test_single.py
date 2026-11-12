@@ -3,6 +3,11 @@
 Black-box oracle per task (publish in Celery wire format → live Django
 worker executes → diff Postgres):
 
+  * github_app config sourcing — sync_one_binding on an installation
+    credential reads GITHUB_APP_ID/SLUG from instance_configurations
+    (PIDASHCONV-1471): empty DB fails with the exact config-missing
+    message; seeded DB mints (real GitHub answers 404 for the unknown
+    numeric app id, proving the db id reached the wire as the JWT iss);
   * unknown-id no-op — sync_one_binding / sync_one_repo /
     post_completion_comment (both providers) with a random UUID ack without
     touching any row;
@@ -42,6 +47,27 @@ def _publish_and_drain(broker_url: str, task: str, **kwargs) -> str:
         f"worker never consumed {task} (queue never drained back to {before})"
     )
     return task_id
+
+
+def _publish_and_wait_error(
+    database_url: str, broker_url: str, task: str, binding_id: str
+) -> str:
+    """Publish one job, poll the binding until `last_sync_error` is set.
+
+    Plain `_publish_and_drain` cannot work here: unexpected faults requeue
+    with a retry countdown, so the broker never drains back to baseline.
+    A fresh binding (error starts `""`) plus the error transition proves
+    this task executed.
+    """
+    broker.publish_task(broker_url, task, args=[binding_id])
+    row = db.wait_for(
+        database_url,
+        "SELECT last_sync_error FROM git_repository_bindings WHERE id = %s"
+        " AND last_sync_error <> ''",
+        (binding_id,),
+    )
+    assert row is not None, f"{task} never recorded last_sync_error"
+    return row["last_sync_error"]
 
 
 def _counts(database_url) -> dict:
@@ -204,3 +230,63 @@ def test_redelivered_unknown_sync_one_stays_noop(database_url, broker_url):
     _publish_and_drain(broker_url, SYNC_ONE, args=[unknown])
     _publish_and_drain(broker_url, SYNC_ONE, args=[unknown])
     assert _counts(database_url) == before
+
+
+def test_sync_one_github_app_config_db_sourced(
+    database_url, broker_url, anchor, sync_scope
+):
+    """The github_app mint reads ID/slug from instance_configurations.
+
+    Workers must run with GITHUB_APP_ID/SLUG unset and
+    GITHUB_APP_PRIVATE_KEY set to a valid test RSA key. Phase (a) proves
+    that env precondition at runtime: with no DB rows the sync fails with
+    the exact config-missing message (any env values would mint instead).
+    Phase (b) seeds a numeric app id only in the DB: the sync mints, and
+    real GitHub answers 404 for the unknown app — the 404 (not a
+    JWT-decode 401) proves the db id reached the wire as the JWT issuer.
+    last_synced_at stays null on both error paths; each phase deletes its
+    triple right after asserting (one active binding per project, and the
+    pending retry redeliveries then ack on the missing row).
+    """
+    keys = ["GITHUB_APP_ID", "GITHUB_APP_SLUG"]
+    saved = seed.save_instance_config(database_url, keys)
+    try:
+        # Phase (a): nothing configured anywhere.
+        seed.clear_instance_config(database_url, keys)
+        seeded_a = seed.github_app_binding(
+            database_url, anchor, sync_scope, suffix=f"cfg-a-{uuid.uuid4().hex[:8]}"
+        )
+        err_a = _publish_and_wait_error(
+            database_url, broker_url, SYNC_ONE, seeded_a["binding_id"]
+        )
+        assert err_a == "GitHub App config missing: app_id, app_slug", err_a
+        row_a = db.fetchone(
+            database_url,
+            "SELECT last_synced_at FROM git_repository_bindings WHERE id = %s",
+            (seeded_a["binding_id"],),
+        )
+        assert row_a["last_synced_at"] is None
+        seed.delete_binding_triple(database_url, seeded_a)
+
+        # Phase (b): numeric app id lives only in the DB.
+        seed.set_instance_config(
+            database_url,
+            {"GITHUB_APP_ID": "14719999", "GITHUB_APP_SLUG": "ct-1471-app-slug"},
+        )
+        seeded_b = seed.github_app_binding(
+            database_url, anchor, sync_scope, suffix=f"cfg-b-{uuid.uuid4().hex[:8]}"
+        )
+        err_b = _publish_and_wait_error(
+            database_url, broker_url, SYNC_ONE, seeded_b["binding_id"]
+        )
+        assert "GitHub App config missing" not in err_b, err_b
+        assert "404" in err_b and "access_tokens" in err_b, err_b
+        row_b = db.fetchone(
+            database_url,
+            "SELECT last_synced_at FROM git_repository_bindings WHERE id = %s",
+            (seeded_b["binding_id"],),
+        )
+        assert row_b["last_synced_at"] is None
+        seed.delete_binding_triple(database_url, seeded_b)
+    finally:
+        seed.restore_instance_config(database_url, saved)

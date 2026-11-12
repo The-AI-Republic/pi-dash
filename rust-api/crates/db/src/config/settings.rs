@@ -64,6 +64,13 @@ const SMTP_BACKEND: &str = "django.core.mail.backends.smtp.EmailBackend";
 const CONSOLE_BACKEND: &str = "django.core.mail.backends.console.EmailBackend";
 const LOCMEM_BACKEND: &str = "django.core.mail.backends.locmem.EmailBackend";
 
+/// Known desktop bundle origins. See `apps/api/pi_dash/settings/common.py`.
+const DESKTOP_BUNDLE_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+];
+
 /// Boot-time settings for the Rust server and worker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -77,6 +84,13 @@ pub struct Settings {
     pub gitlab_allowed_hosts: Vec<String>,
     pub cors_allowed_origins: Vec<String>,
     pub cors_allow_all_origins: bool,
+    /// `CSRF_TRUSTED_ORIGINS` (`settings/common.py:617`): the CORS
+    /// allowed origins, cloned. The cloud overlay overwrites this with
+    /// the env list plus the desktop origins
+    /// (`pi_dash_cloud/settings/cloud.py:338`, unconditional), while
+    /// `cors_allowed_origins` keeps the CORS-only semantics (empty
+    /// under the allow-all wildcard).
+    pub csrf_trusted_origins: Vec<String>,
     pub database: DatabaseSettings,
     pub redis: RedisSettings,
     pub assistant: AssistantSettings,
@@ -204,7 +218,6 @@ pub struct RunnerSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedRunnerSettings {
     pub enabled: bool,
-    pub max_per_user_project: i64,
     pub queued_max_age_secs: i64,
     pub graceful_stop_secs: i64,
     pub sweep_interval_secs: i64,
@@ -217,6 +230,11 @@ pub struct CloudAgentSettings {
     pub writes_enabled: bool,
     pub github_tools_enabled: bool,
     pub disabled_tools: Vec<String>,
+    /// Queue every `cloud_agent.run_agent_run` job is enqueued on.
+    /// Default `celery`; set to `cloud_agent` after the dedicated
+    /// agent-worker pool is running (Phase 2 rollout). Kept as the
+    /// string queue label `NewJob` carries / workers claim on.
+    pub job_queue: String,
     pub reconcile_interval_secs: i64,
     pub model_request_timeout_secs: i64,
     pub execution_timeout_secs: i64,
@@ -254,7 +272,9 @@ pub struct SessionSettings {
     pub cookie_name: String,
     pub cookie_domain: Option<String>,
     /// `SESSION_COOKIE_SECURE = secure_origins`: true when explicit origins
-    /// exist and none is plain `http:`; false with no origins set.
+    /// exist and none is plain `http:`; false with no origins set. Desktop
+    /// bundle origins are ignored (see common.py DESKTOP_BUNDLE_ORIGINS) so
+    /// that http://tauri.localhost does not downgrade an HTTPS deployment.
     pub cookie_secure: bool,
     pub save_every_request: bool,
     pub admin_cookie_age_secs: i64,
@@ -324,29 +344,28 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn opt_int(&self, key: &str) -> Result<Option<i64>, ConfigError> {
-        match self.raw(key, None)? {
-            ConfigValue::Null => Ok(None),
-            v => v
-                .to_int()
-                .map(Some)
-                .ok_or_else(|| ConfigError::TypeMismatch {
-                    key: key.to_owned(),
-                    expected: "int or null",
-                    actual: self.lookup(key).unwrap_or_default(),
-                }),
-        }
+    /// Lenient float: mirrors `redis.py:22-27` `_float_setting`
+    /// (PIDASHCONV-1316) — empty or unparseable values fall back to the
+    /// default instead of failing boot. Redis tuning only; the other
+    /// numeric keys stay strict (`req_int`).
+    fn float_or_default(&self, key: &str, default: f64) -> Result<f64, ConfigError> {
+        let inline = ConfigValue::from(default);
+        Ok(self.raw(key, Some(&inline))?.to_float().unwrap_or(default))
     }
 
-    fn req_float(&self, key: &str, inline: ConfigValue) -> Result<f64, ConfigError> {
-        match self.raw(key, Some(&inline))?.to_float() {
-            Some(f) => Ok(f),
-            None => Err(ConfigError::TypeMismatch {
-                key: key.to_owned(),
-                expected: "float",
-                actual: self.lookup(key).unwrap_or_default(),
-            }),
-        }
+    /// Lenient int: mirrors `redis.py:30-35` `_int_setting`
+    /// (PIDASHCONV-1316) — empty or unparseable values fall back to the
+    /// default instead of failing boot. Redis tuning only.
+    fn int_or_default(&self, key: &str, default: i64) -> Result<i64, ConfigError> {
+        let inline = ConfigValue::from(default);
+        Ok(self.raw(key, Some(&inline))?.to_int().unwrap_or(default))
+    }
+
+    /// Lenient optional positive int: mirrors `redis.py:38-46`
+    /// `_optional_int_setting` (PIDASHCONV-1316) — unset, `""`,
+    /// unparseable and `<= 0` all mean "no cap" (`None`).
+    fn opt_positive_int(&self, key: &str) -> Result<Option<i64>, ConfigError> {
+        Ok(self.raw(key, None)?.to_int().filter(|v| *v > 0))
     }
 
     /// `value == "1"` (case-sensitive, no lowering): session persistence,
@@ -926,9 +945,16 @@ impl Settings {
         let mut app_base_url = validated_base_url(ctx.opt_string("APP_BASE_URL")?);
 
         let cors_allowed_origins = ctx.csv_stripped("CORS_ALLOWED_ORIGINS", "")?;
-        // secure_origins, ported exactly (substring match on "http:").
+        // secure_origins: true unless any non-desktop origin carries "http:".
+        // Desktop bundle origins (see common.py) are exempt — http://tauri.localhost
+        // is a local webview origin, not a plain-HTTP deployment.
         let cookie_secure = !cors_allowed_origins.is_empty()
-            && !cors_allowed_origins.iter().any(|o| o.contains("http:"));
+            && !cors_allowed_origins.iter().any(|o| {
+                o.contains("http:")
+                    && !DESKTOP_BUNDLE_ORIGINS
+                        .iter()
+                        .any(|d| o.trim_end_matches('/').eq_ignore_ascii_case(d))
+            });
 
         match profile {
             Profile::Common => {}
@@ -980,6 +1006,8 @@ impl Settings {
             gitlab_allowed_hosts: ctx.csv_stripped("GITLAB_ALLOWED_HOSTS", "")?,
             cors_allowed_origins: cors_allowed_origins.clone(),
             cors_allow_all_origins: cors_allowed_origins.is_empty(),
+            // common.py:617: CSRF_TRUSTED_ORIGINS = cors_allowed_origins.
+            csrf_trusted_origins: cors_allowed_origins.clone(),
             database: DatabaseSettings {
                 url: database_url,
                 name: ctx.opt_string("POSTGRES_DB")?,
@@ -992,13 +1020,15 @@ impl Settings {
             redis: RedisSettings {
                 url: redis_url,
                 ssl: redis_ssl,
+                // Lenient like redis.py:22-46 (PIDASHCONV-1316): Django
+                // keeps these as raw strings and falls back at use, so
+                // empty/garbage values must not fail boot.
                 socket_connect_timeout_secs: ctx
-                    .req_float("REDIS_SOCKET_CONNECT_TIMEOUT", ConfigValue::from(2.0))?,
-                socket_timeout_secs: ctx
-                    .req_float("REDIS_SOCKET_TIMEOUT", ConfigValue::from(5.0))?,
+                    .float_or_default("REDIS_SOCKET_CONNECT_TIMEOUT", 2.0)?,
+                socket_timeout_secs: ctx.float_or_default("REDIS_SOCKET_TIMEOUT", 5.0)?,
                 health_check_interval_secs: ctx
-                    .req_int("REDIS_HEALTH_CHECK_INTERVAL", ConfigValue::from(30))?,
-                max_connections: ctx.opt_int("REDIS_MAX_CONNECTIONS")?,
+                    .int_or_default("REDIS_HEALTH_CHECK_INTERVAL", 30)?,
+                max_connections: ctx.opt_positive_int("REDIS_MAX_CONNECTIONS")?,
             },
             assistant: AssistantSettings {
                 crypto_backend: ctx.req_string("ASSISTANT_CRYPTO_BACKEND", "aws-kms")?,
@@ -1097,8 +1127,6 @@ impl Settings {
             },
             managed_runner: ManagedRunnerSettings {
                 enabled: ctx.flag_tri("MANAGED_RUNNER_ENABLED", "false")?,
-                max_per_user_project: ctx
-                    .req_int("MANAGED_RUNNER_MAX_PER_USER_PROJECT", ConfigValue::from(1))?,
                 queued_max_age_secs: ctx.req_int(
                     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
                     ConfigValue::from(43200),
@@ -1117,6 +1145,7 @@ impl Settings {
                 writes_enabled: ctx.flag_tri("CLOUD_AGENT_WRITES_ENABLED", "false")?,
                 github_tools_enabled: ctx.flag_tri("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", "true")?,
                 disabled_tools: ctx.csv_stripped("CLOUD_AGENT_DISABLED_TOOLS", "")?,
+                job_queue: ctx.req_string("CLOUD_AGENT_JOB_QUEUE", "celery")?,
                 reconcile_interval_secs: ctx.req_int(
                     "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
                     ConfigValue::from(30),
@@ -1324,7 +1353,6 @@ impl Settings {
             "RUNNER_AGENT_STALL_THRESHOLD_SECS",
             "RUNNER_AGENT_OBSERVABILITY_STALE_SECS",
             "MANAGED_RUNNER_ENABLED",
-            "MANAGED_RUNNER_MAX_PER_USER_PROJECT",
             "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
             "MANAGED_RUNNER_GRACEFUL_STOP_SECS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
@@ -1419,6 +1447,9 @@ mod tests {
         assert_eq!(s.loop_tuning.max_writes, 10);
         assert_eq!(s.file_size_limit, 5242880);
         assert_eq!(s.email_backend, SMTP_BACKEND);
+        // Phase 2 (2.1): the agent job queue defaults to `celery` until
+        // both workers are running.
+        assert_eq!(s.cloud_agent.job_queue, "celery");
         // Non-Local profiles ignore an EMAIL_BACKEND env override, exactly
         // like common.py's hardcoded assignment.
         let s2 = Settings::from_map_with(
@@ -1463,6 +1494,11 @@ mod tests {
             s.cors_allowed_origins,
             vec!["https://a.example", "https://b.example"]
         );
+        // common.py:617: the CSRF list is the CORS list, cloned.
+        assert_eq!(
+            s.csrf_trusted_origins,
+            vec!["https://a.example", "https://b.example"]
+        );
         assert_eq!(s.database.url.as_deref(), Some("postgresql://db/pidash"));
         assert!(s.redis.ssl);
         assert!(s.loop_tuning.enabled);
@@ -1474,6 +1510,29 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
+    }
+
+    #[test]
+    fn cloud_agent_job_queue_overrides_from_env() {
+        let s = Settings::from_map_with(
+            &vars(&[("CLOUD_AGENT_JOB_QUEUE", "cloud_agent")]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert_eq!(s.cloud_agent.job_queue, "cloud_agent");
+    }
+
+    #[test]
+    fn csrf_trusted_origins_default_to_the_empty_cors_list() {
+        // common.py:150-155,617: an unset CORS env leaves the allow-all
+        // wildcard on and the CSRF list empty (the cloud overlay, not
+        // OSS resolution, adds the desktop origins there).
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert!(s.cors_allow_all_origins);
+        assert!(s.cors_allowed_origins.is_empty());
+        assert!(s.csrf_trusted_origins.is_empty());
     }
 
     #[test]
@@ -1555,6 +1614,70 @@ mod tests {
             matches!(err, ConfigError::TypeMismatch { .. }),
             "unexpected: {err:?}"
         );
+    }
+
+    #[test]
+    fn redis_timeouts_fall_back_to_defaults_on_garbage() {
+        // redis.py:22-35 `_float_setting`/`_int_setting`: unparseable (or
+        // empty) values fall back to the default instead of failing boot
+        // (PIDASHCONV-1316). Valid values keep Python's float()/int() rules.
+        for (key, raw, expected) in [
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", "", 2.0),
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", "abc", 2.0),
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", "3.5", 3.5),
+            ("REDIS_SOCKET_CONNECT_TIMEOUT", " 1e3 ", 1000.0),
+            ("REDIS_SOCKET_TIMEOUT", "", 5.0),
+            ("REDIS_SOCKET_TIMEOUT", "abc", 5.0),
+            ("REDIS_SOCKET_TIMEOUT", "1.5", 1.5),
+        ] {
+            let s = Settings::from_map_with(&vars(&[(key, raw)]), Profile::Common, &NoOverlay)
+                .expect("redis tuning garbage must not fail boot");
+            let actual = if key.contains("CONNECT") {
+                s.redis.socket_connect_timeout_secs
+            } else {
+                s.redis.socket_timeout_secs
+            };
+            assert_eq!(actual, expected, "key={key} raw={raw:?}");
+        }
+        for (raw, expected) in [("", 30), ("abc", 30), ("45", 45), ("1_0", 10)] {
+            let s = Settings::from_map_with(
+                &vars(&[("REDIS_HEALTH_CHECK_INTERVAL", raw)]),
+                Profile::Common,
+                &NoOverlay,
+            )
+            .expect("redis tuning garbage must not fail boot");
+            assert_eq!(s.redis.health_check_interval_secs, expected, "raw={raw:?}");
+        }
+        // Unset keys resolve to the same defaults.
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert_eq!(s.redis.socket_connect_timeout_secs, 2.0);
+        assert_eq!(s.redis.socket_timeout_secs, 5.0);
+        assert_eq!(s.redis.health_check_interval_secs, 30);
+    }
+
+    #[test]
+    fn redis_max_connections_maps_bad_and_nonpositive_to_none() {
+        // redis.py:38-46 `_optional_int_setting`: unset, "", unparseable
+        // and <= 0 all mean "no cap" (PIDASHCONV-1316).
+        for (raw, expected) in [
+            ("", None),
+            ("abc", None),
+            ("0", None),
+            ("-1", None),
+            ("25", Some(25)),
+        ] {
+            let s = Settings::from_map_with(
+                &vars(&[("REDIS_MAX_CONNECTIONS", raw)]),
+                Profile::Common,
+                &NoOverlay,
+            )
+            .expect("redis tuning garbage must not fail boot");
+            assert_eq!(s.redis.max_connections, expected, "raw={raw:?}");
+        }
+        let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
+            .expect("resolves");
+        assert_eq!(s.redis.max_connections, None);
     }
 
     #[test]
@@ -1644,6 +1767,42 @@ mod tests {
         )
         .expect("resolves");
         assert!(s.session.cookie_secure);
+        // HTTPS deployment + Windows desktop origin -> True (desktop exempt).
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "https://a.example, http://tauri.localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(s.session.cookie_secure);
+        assert!(s
+            .csrf_trusted_origins
+            .contains(&"http://tauri.localhost".to_owned()));
+        // tauri://localhost also exempt (no "http:" anyway, but pinned).
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "https://a.example, tauri://localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(s.session.cookie_secure);
+        // Plain http + desktop still False.
+        let s = Settings::from_map_with(
+            &vars(&[(
+                "CORS_ALLOWED_ORIGINS",
+                "http://a.example, http://tauri.localhost",
+            )]),
+            Profile::Common,
+            &NoOverlay,
+        )
+        .expect("resolves");
+        assert!(!s.session.cookie_secure);
     }
 
     #[test]

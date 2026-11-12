@@ -5,7 +5,7 @@
 """Contract tests for the ``pull_request`` branch of the GitHub App webhook.
 
 The webhook refreshes the *display snapshot* of an attached
-``GithubPullRequestLink`` — and only that. It never reads or writes the linked
+``GitCodeReviewLink`` — and only that. It never reads or writes the linked
 issue's state. If no link matches the PR, the delivery is ``skipped``.
 """
 
@@ -18,7 +18,9 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 
-from pi_dash.db.models import GithubPullRequestLink, GithubWebhookDelivery, Issue, Project, ProjectMember
+from pi_dash.db.models import GitCodeReviewLink, GitWebhookDelivery, Issue, Project, ProjectMember
+
+GITHUB_HOST = "https://github.com"
 
 
 pytestmark = [pytest.mark.contract, pytest.mark.django_db]
@@ -34,8 +36,9 @@ def link(workspace, create_user):
     project = Project.objects.create(name="Hook P", identifier="HKP", workspace=workspace, created_by=create_user)
     ProjectMember.objects.create(project=project, member=create_user, role=20, is_active=True)
     issue = Issue.objects.create(name="i", project=project, workspace=workspace, created_by=create_user)
-    return GithubPullRequestLink.objects.create(
-        project=project, issue=issue, repo_owner="acme", repo_name="web", pr_number=42,
+    return GitCodeReviewLink.objects.create(
+        project=project, issue=issue, provider="github", host_url=GITHUB_HOST,
+        namespace="acme", repo_name="web", external_iid="42",
         url="https://github.com/acme/web/pull/42", state="open",
     )
 
@@ -70,13 +73,14 @@ def test_pull_request_refreshes_snapshot(api_client, link):
     response = _post(api_client, _pr_payload())
 
     assert response.status_code == status.HTTP_202_ACCEPTED
-    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
+    assert response.data == {"status": GitWebhookDelivery.Status.PROCESSED}
     link.refresh_from_db()
     # case-insensitive repo match worked (payload owner "Acme" vs stored "acme")
-    assert link.state == "closed"
+    assert link.state == "merged"
     assert link.merged is True
     assert link.title == "Make button blue"
-    assert link.pr_updated_at is not None
+    # Generic snapshot maps a merged PR to state "merged" (see _refresh_pr_links).
+    assert link.remote_updated_at is not None
     # the issue's own state is never touched
     link.issue.refresh_from_db()
     assert link.issue.state_id == issue_state_before
@@ -86,22 +90,22 @@ def test_pull_request_with_no_link_is_skipped(api_client, link):
     response = _post(api_client, _pr_payload(number=999))
 
     assert response.status_code == status.HTTP_202_ACCEPTED
-    assert response.data == {"status": GithubWebhookDelivery.Status.SKIPPED}
+    assert response.data == {"status": GitWebhookDelivery.Status.SKIPPED}
     link.refresh_from_db()
     assert link.state == "open"  # untouched
 
 
 def test_pull_request_ignores_out_of_order_delivery(api_client, link):
-    link.pr_updated_at = timezone.now()
+    link.remote_updated_at = timezone.now()
     link.state = "open"
-    link.save(update_fields=["pr_updated_at", "state"])
+    link.save(update_fields=["remote_updated_at", "state"])
 
     # An older delivery must not regress the snapshot.
     response = _post(api_client, _pr_payload(state="closed", merged=True, updated_at="2020-01-01T00:00:00Z"))
 
     assert response.status_code == status.HTTP_202_ACCEPTED
     # It matched a real link (so it's processed, not skipped) but was not applied.
-    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
+    assert response.data == {"status": GitWebhookDelivery.Status.PROCESSED}
     link.refresh_from_db()
     assert link.state == "open"  # stale delivery ignored
 
@@ -109,7 +113,7 @@ def test_pull_request_ignores_out_of_order_delivery(api_client, link):
 def test_pull_request_draft_reflected(api_client, link):
     response = _post(api_client, _pr_payload(action="opened", state="open", merged=False, draft=True))
 
-    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
+    assert response.data == {"status": GitWebhookDelivery.Status.PROCESSED}
     link.refresh_from_db()
     assert link.draft is True
     assert link.merged is False
@@ -118,7 +122,7 @@ def test_pull_request_draft_reflected(api_client, link):
 
 @pytest.mark.parametrize(
     "prior_status",
-    [GithubWebhookDelivery.Status.RECEIVED, GithubWebhookDelivery.Status.FAILED],
+    [GitWebhookDelivery.Status.RECEIVED, GitWebhookDelivery.Status.FAILED],
 )
 def test_redelivery_reprocesses_non_terminal_delivery(api_client, link, prior_status):
     """A delivery that never terminally succeeded — left RECEIVED (the request was
@@ -126,38 +130,40 @@ def test_redelivery_reprocesses_non_terminal_delivery(api_client, link, prior_st
     re-applied when GitHub redelivers the same X-GitHub-Delivery GUID. Otherwise a
     single dropped merge event leaves the PR stuck showing "open"."""
     delivery_id = uuid4()
-    GithubWebhookDelivery.objects.create(
-        delivery_id=delivery_id,
+    GitWebhookDelivery.objects.create(
+        provider="github", host_url=GITHUB_HOST, delivery_id=str(delivery_id),
         event="pull_request",
         action="closed",
         status=prior_status,
-        error="boom" if prior_status == GithubWebhookDelivery.Status.FAILED else "",
+        error="boom" if prior_status == GitWebhookDelivery.Status.FAILED else "",
     )
 
     response = _post(api_client, _pr_payload(), delivery_id=delivery_id)
 
     assert response.status_code == status.HTTP_202_ACCEPTED
-    assert response.data == {"status": GithubWebhookDelivery.Status.PROCESSED}
+    assert response.data == {"status": GitWebhookDelivery.Status.PROCESSED}
     link.refresh_from_db()
-    assert link.state == "closed"
+    assert link.state == "merged"
     assert link.merged is True
     # a successful reprocess clears any stale error from the prior failed attempt
-    delivery = GithubWebhookDelivery.objects.get(delivery_id=delivery_id)
-    assert delivery.status == GithubWebhookDelivery.Status.PROCESSED
+    delivery = GitWebhookDelivery.objects.get(
+        provider="github", host_url=GITHUB_HOST, delivery_id=str(delivery_id)
+    )
+    assert delivery.status == GitWebhookDelivery.Status.PROCESSED
     assert delivery.error == ""
 
 
 @pytest.mark.parametrize(
     "prior_status",
-    [GithubWebhookDelivery.Status.PROCESSED, GithubWebhookDelivery.Status.SKIPPED],
+    [GitWebhookDelivery.Status.PROCESSED, GitWebhookDelivery.Status.SKIPPED],
 )
 def test_redelivery_of_terminal_delivery_is_not_reprocessed(api_client, link, prior_status):
     """A delivery that already reached a terminal-success outcome fast-returns and
     does not touch the snapshot again — preserving idempotency for GitHub's normal
     at-least-once duplicate deliveries."""
     delivery_id = uuid4()
-    GithubWebhookDelivery.objects.create(
-        delivery_id=delivery_id,
+    GitWebhookDelivery.objects.create(
+        provider="github", host_url=GITHUB_HOST, delivery_id=str(delivery_id),
         event="pull_request",
         action="closed",
         status=prior_status,
