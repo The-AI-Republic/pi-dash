@@ -97,7 +97,7 @@ fn now_micros() -> DateTime<Utc> {
 
 /// The acting user id for audit stamps: a nil actor (system paths with no
 /// request) stamps `None`, Django's missing-crum default.
-fn actor_or_none(ctx: &WriteCtx) -> Option<Uuid> {
+pub(crate) fn actor_or_none(ctx: &WriteCtx) -> Option<Uuid> {
     if ctx.actor.user_id.is_nil() {
         None
     } else {
@@ -247,7 +247,10 @@ impl IssueFieldSet {
     /// `update_fields`), so every non-pk column is `Set`; the pk stays
     /// `Unchanged` (the `WHERE`, not the `SET`). `updated_by` is stamped
     /// from the actor; `created_by` rides the fetched row untouched.
-    fn into_full_save_active_model(self, updated_by: Option<Uuid>) -> issues::ActiveModel {
+    pub(crate) fn into_full_save_active_model(
+        self,
+        updated_by: Option<Uuid>,
+    ) -> issues::ActiveModel {
         issues::ActiveModel {
             id: sea_orm::Unchanged(self.id),
             created_at: Set(self.created_at.into()),
@@ -353,12 +356,12 @@ impl M2mTable {
 
 /// The audit and scope columns every row of one m2m write shares.
 #[derive(Debug, Clone, Copy)]
-struct M2mScope {
-    issue_id: Uuid,
-    project_id: Uuid,
-    workspace_id: Uuid,
-    created_by_id: Option<Uuid>,
-    updated_by_id: Option<Uuid>,
+pub(crate) struct M2mScope {
+    pub(crate) issue_id: Uuid,
+    pub(crate) project_id: Uuid,
+    pub(crate) workspace_id: Uuid,
+    pub(crate) created_by_id: Option<Uuid>,
+    pub(crate) updated_by_id: Option<Uuid>,
 }
 
 /// One multi-row m2m `INSERT` (one `bulk_create` chunk): per row a fresh
@@ -526,7 +529,7 @@ async fn clear_m2m_links(
 /// One update m2m leg (`serializers/issue.py:477-511`): present keys
 /// soft-delete the live links, then re-insert the effective ids with
 /// `ON CONFLICT DO NOTHING`; audit ids come from the PRE-SAVE instance.
-async fn update_m2m_leg(
+pub(crate) async fn update_m2m_leg(
     db: &impl ConnectionTrait,
     table: M2mTable,
     effective: &[Uuid],
