@@ -295,8 +295,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 35917,
-          "body_sha256": "13697e9b728f8d4d3cefc66af6606ce6c70fdb932861dfaba55a3ed4fa6e0b4e",
+          "body_len": 36502,
+          "body_sha256": "184bd9c8122a23a2c9096913313a8bb3301a1eb9ab6f1137d5c35f8cb2380bb1",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -496,7 +496,7 @@
     }
   },
   "fixture_id": "FIX-registry",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PIDASHCONV-1667 re-sync: pidash-cli body_len/body_sha256 regenerated from origin/main@7d64d46ad via s7/fx1667_gen.py (registry.py loaded by path; stdlib-only, no Django). NEWPIDASH-177: ported_from bumped to f92fe3c072cb57dee09aa7348a0bd3dc549d7881 — PDASHOSS01-350 added 14 lines to Django pidash-cli.md (#3067) and the mirror+hashes were synced in #3068; only pidash-cli.md differs between 7d64d46ad and f92fe3c07 in prompting/.",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PIDASHCONV-1534 re-sync: pidash-cli body_len/body_sha256 + fragments assembled_len/assembled_sha256 regenerated from origin/main@0a6fb8eca via /tmp/fx1534_gen.py (registry.py + fragments/__init__.py loaded by path; stdlib-only, no Django). PIDASHCONV-1667 re-sync: pidash-cli body_len/body_sha256 regenerated from origin/main@7d64d46ad via s7/fx1667_gen.py (registry.py loaded by path; stdlib-only, no Django). NEWPIDASH-177: ported_from bumped to f92fe3c072cb57dee09aa7348a0bd3dc549d7881 — PDASHOSS01-350 added 14 lines to Django pidash-cli.md (#3067) and the mirror+hashes were synced in #3068; only pidash-cli.md differs between 7d64d46ad and f92fe3c07 in prompting/. PDASHOSS01-276: pidash-cli body_len/body_sha256 recomputed over the Rust mirror with the 4-line scheduled-run yield block added (the same block the Django half, #943, adds to apps/api pidash-cli.md); ported_from is unchanged until that half lands.",
   "notes": [],
   "ported_from": "1567f8bc5cab9f840c0b645dce1edc819bc4b553",
   "trace": [
