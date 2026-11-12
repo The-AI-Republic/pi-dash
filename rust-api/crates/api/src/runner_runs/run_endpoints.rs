@@ -1074,11 +1074,9 @@ async fn post_failure_comment(
         // Route on the stored canonical reason (PDASHOSS01-183): a free-retry
         // failure below the backstop is retried silently.
         let streak = match lifecycle_kernel::failure_comment_streak_reason(&reason) {
-            Some(streak_reason) => {
-                failure_effects::failure_streak(&conn, work_item, streak_reason)
-                    .await
-                    .map_err(orm_err)?
-            }
+            Some(streak_reason) => failure_effects::failure_streak(&conn, work_item, streak_reason)
+                .await
+                .map_err(orm_err)?,
             None => 0,
         };
         let clock_stopped = match lifecycle_kernel::failure_comment_gate(&reason, streak) {
@@ -1129,7 +1127,7 @@ async fn post_failure_comment(
         // notification failure is logged and never drops the comment.
         // An sqlx nested transaction (savepoint): a notify database
         // failure aborts only it, leaving the hooks transaction valid.
-        let mut savepoint = hooks.inner().begin().await.map_err(db)?;
+        let mut savepoint = hooks.begin().await.map_err(db)?;
         let notified = failure_effects::notify_clock_stopped(
             &TxConn::new(&mut savepoint),
             run_id,

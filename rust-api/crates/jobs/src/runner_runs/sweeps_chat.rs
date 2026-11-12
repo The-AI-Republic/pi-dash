@@ -1917,7 +1917,7 @@ mod tests {
             .filter(|e| e.starts_with("\"runner\""))
             .copied()
             .collect();
-        assert_eq!(agent_entries.len(), 40, "agent_run columns");
+        assert_eq!(agent_entries.len(), 41, "agent_run columns");
         assert_eq!(
             runner_entries.len(),
             32,
@@ -1995,6 +1995,7 @@ mod tests {
             issue_id: Some(Uuid::nil()),
             issue_project_id: Some(Uuid::nil()),
             issue_workspace_id: Some(Uuid::nil()),
+            failure_reason: String::new(),
         };
         assert!(map_failure_comment_ids(&full).is_ok());
         let dangling = lifecycle::FailureRereadRow {

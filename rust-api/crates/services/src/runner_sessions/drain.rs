@@ -862,7 +862,7 @@ mod tests {
         );
         let (cols, rest) = run_projection(&sql);
         assert_eq!(cols, AGENT_RUN_COLUMNS);
-        assert_eq!(cols.len(), 40);
+        assert_eq!(cols.len(), 41);
         assert_eq!(rest.len(), 3);
         assert!(sql.contains("_is_mine"));
         assert!(sql.ends_with(

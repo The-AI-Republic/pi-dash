@@ -416,7 +416,7 @@ mod tests {
     fn run_query_has_one_name_per_output_column() {
         for active_only in [false, true] {
             let mut names = unique_output_names(&built(active_only));
-            assert_eq!(names.len(), 32, "{names:?}");
+            assert_eq!(names.len(), 33, "{names:?}");
             names.sort();
             let total = names.len();
             names.dedup();

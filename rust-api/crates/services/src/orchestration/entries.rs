@@ -280,7 +280,6 @@ pub const SCHEDULER_RUN_INSERT_SQL: &str =
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $9, \
     NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, $8, '', '', '{}', $10, \
     NULL, NULL, NULL)";
->>>>>>> origin/main
 
 /// The scheduler INSERT as executed: [`SCHEDULER_RUN_INSERT_SQL`] plus
 /// `RETURNING` the [`RUN_VIEW_COLUMNS`] projection, like `objects.create`.

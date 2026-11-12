@@ -790,6 +790,7 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         // The generated column `COALESCE`s to `""`: never NULL on the
         // real table.
         refusal_category: model.refusal_category.unwrap_or_default(),
+        failure_reason: model.failure_reason,
         llm_model: model.llm_model,
         usage: model.usage,
         input_tokens: model.input_tokens,

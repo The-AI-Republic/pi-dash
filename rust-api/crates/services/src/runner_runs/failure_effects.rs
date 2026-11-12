@@ -119,7 +119,11 @@ pub async fn notify_clock_stopped(
         .await?
         .map(|project| project.identifier)
         .unwrap_or_default();
-    let runner_owner = match agent_run::Entity::find_by_id(run_id).one(db).await?.and_then(|run| run.runner_id) {
+    let runner_owner = match agent_run::Entity::find_by_id(run_id)
+        .one(db)
+        .await?
+        .and_then(|run| run.runner_id)
+    {
         Some(runner_id) => runner::Entity::find_by_id(runner_id)
             .one(db)
             .await?

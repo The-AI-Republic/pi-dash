@@ -3,7 +3,14 @@
   "list": {
     "default": {
       "status": 200,
-      "envelope_keys": ["results", "count", "total_count", "total_pages", "page", "per_page"],
+      "envelope_keys": [
+        "results",
+        "count",
+        "total_count",
+        "total_pages",
+        "page",
+        "per_page"
+      ],
       "count": 3,
       "total_count": 3,
       "total_pages": 1,
@@ -54,6 +61,7 @@
       "done_payload": null,
       "error": "",
       "error_code": "",
+      "failure_reason": "",
       "error_diagnostic": null,
       "refusal_category": "",
       "llm_model": "",
@@ -67,7 +75,9 @@
     "page2_per1": {
       "status": 200,
       "body": {
-        "results": ["0cdfd679-573e-46b5-b797-6997fe38d82d"],
+        "results": [
+          "0cdfd679-573e-46b5-b797-6997fe38d82d"
+        ],
         "count": 1,
         "total_count": 3,
         "total_pages": 3,
@@ -122,7 +132,9 @@
       "0cdfd679-573e-46b5-b797-6997fe38d82d",
       "bda2552e-238d-4f53-ba9f-79ebb8247cc6"
     ],
-    "project_scope": ["0cdfd679-573e-46b5-b797-6997fe38d82d"],
+    "project_scope": [
+      "0cdfd679-573e-46b5-b797-6997fe38d82d"
+    ],
     "scheduler_binding_malformed": {
       "status": 400,
       "body": {
@@ -223,7 +235,9 @@
       "tool_plan",
       "tool_calls"
     ],
-    "ok_on_commit": ["dispatch_after_commit.<locals>.<lambda>"],
+    "ok_on_commit": [
+      "dispatch_after_commit.<locals>.<lambda>"
+    ],
     "dup_active": {
       "status": 409,
       "body": {
@@ -437,6 +451,7 @@
         "done_payload": null,
         "error": "boom x",
         "error_code": "",
+        "failure_reason": "",
         "error_diagnostic": {
           "source": "unknown",
           "source_label": "Unknown",
@@ -460,8 +475,17 @@
     },
     "events": {
       "status": 200,
-      "event_seqs": [1, 2],
-      "event_keys": ["id", "seq", "kind", "payload", "created_at"]
+      "event_seqs": [
+        1,
+        2
+      ],
+      "event_keys": [
+        "id",
+        "seq",
+        "kind",
+        "payload",
+        "created_at"
+      ]
     },
     "events_0": {
       "has_events_key": false
@@ -504,7 +528,9 @@
       "run_status": "cancel_requested",
       "reason_len": 512,
       "requested_set": true,
-      "on_commit": ["AgentRunCancelEndpoint.post.<locals>.<lambda>"],
+      "on_commit": [
+        "AgentRunCancelEndpoint.post.<locals>.<lambda>"
+      ],
       "sent": [
         {
           "runner_id": "e39ef475-5212-4de8-a5d0-e5fe8fd01f7b",
@@ -579,7 +605,9 @@
       "pinned": null,
       "status_still": "queued",
       "parent_thread": "''",
-      "on_commit": ["AgentRunReleasePinEndpoint.post.<locals>.<lambda>"]
+      "on_commit": [
+        "AgentRunReleasePinEndpoint.post.<locals>.<lambda>"
+      ]
     }
   },
   "release_pin_rule": "cloud -> 409 executor_not_local; non-QUEUED/unpinned -> 409; ok: pinned=None + parent thread_id='' (when set) + on_commit drain pod",
@@ -587,7 +615,9 @@
     "ok": {
       "status": 200,
       "count": 1,
-      "ids": ["f4968397-a401-4b0e-b57c-bb64552c466b"],
+      "ids": [
+        "f4968397-a401-4b0e-b57c-bb64552c466b"
+      ],
       "keys": [
         "id",
         "agent_run",
@@ -618,13 +648,17 @@
     "bad_choice": {
       "status": 400,
       "body": {
-        "decision": ["\"maybe\" is not a valid choice."]
+        "decision": [
+          "\"maybe\" is not a valid choice."
+        ]
       }
     },
     "missing_field": {
       "status": 400,
       "body": {
-        "decision": ["This field is required."]
+        "decision": [
+          "This field is required."
+        ]
       }
     },
     "others": {
@@ -650,9 +684,11 @@
   "metrics": {
     "status": 200,
     "content_type": "text/plain; version=0.0.4",
-    "body": "# HELP pi_dash_runner_online Runners online and accepting work (excludes paused).\n# TYPE pi_dash_runner_online gauge\npi_dash_runner_online 1\n# HELP pi_dash_runner_busy Runners currently executing a run.\n# TYPE pi_dash_runner_busy gauge\npi_dash_runner_busy 1\n# HELP pi_dash_runner_offline Runners that have dropped their heartbeat (excludes revoked).\n# TYPE pi_dash_runner_offline gauge\npi_dash_runner_offline 2\n# HELP pi_dash_runner_paused Non-revoked runners paused by an operator, in any connectivity state.\n# TYPE pi_dash_runner_paused gauge\npi_dash_runner_paused 0\n# HELP pi_dash_runs_active AgentRuns in an in-flight status.\n# TYPE pi_dash_runs_active gauge\npi_dash_runs_active 8\n# HELP pi_dash_approvals_pending ApprovalRequests waiting for a decision.\n# TYPE pi_dash_approvals_pending gauge\npi_dash_approvals_pending 2\n",
+    "body": "# HELP pi_dash_runner_online Runners online and accepting work (excludes paused).\n# TYPE pi_dash_runner_online gauge\npi_dash_runner_online 1\n# HELP pi_dash_runner_busy Runners currently executing a run.\n# TYPE pi_dash_runner_busy gauge\npi_dash_runner_busy 1\n# HELP pi_dash_runner_offline Runners that have dropped their heartbeat (excludes revoked).\n# TYPE pi_dash_runner_offline gauge\npi_dash_runner_offline 2\n# HELP pi_dash_runner_paused Non-revoked runners paused by an operator, in any connectivity state.\n# TYPE pi_dash_runner_paused gauge\npi_dash_runner_paused 0\n# HELP pi_dash_runs_active AgentRuns in an in-flight status.\n# TYPE pi_dash_runs_active gauge\npi_dash_runs_active 8\n# HELP pi_dash_approvals_pending ApprovalRequests waiting for a decision.\n# TYPE pi_dash_approvals_pending gauge\npi_dash_approvals_pending 2\n# HELP pi_dash_runs_failed_by_reason FAILED AgentRuns per canonical failure_reason.\n# TYPE pi_dash_runs_failed_by_reason gauge\n",
     "auth_classes": [],
-    "perm_classes": ["AllowAny"]
+    "perm_classes": [
+      "AllowAny"
+    ]
   },
   "metrics_rule": "AllowAny + no authN; HttpResponse text/plain; version=0.0.4; 5 gauges (online/busy/offline-excl-revoked counts; active=assigned+running+cancel_requested+awaiting_approval+awaiting_reauth; pending approvals)",
   "signals": {
@@ -679,7 +715,9 @@
     },
     "swallow": {
       "raised": false,
-      "log": ["runner.signals: failed to auto-create default pod for project 840be3be-1e30-4e87-97e3-da099680a478"]
+      "log": [
+        "runner.signals: failed to auto-create default pod for project 840be3be-1e30-4e87-97e3-da099680a478"
+      ]
     }
   },
   "signals_rule": "create_default_pod_for_new_project (signals.py:32): created=False -> no-op; any active pod exists -> no-op; else create {identifier}_pod_1 {is_default, description verbatim, created_by=project_lead or default_assignee}; ANY exception swallowed + logged 'runner.signals: failed to auto-create default pod for project %s'"

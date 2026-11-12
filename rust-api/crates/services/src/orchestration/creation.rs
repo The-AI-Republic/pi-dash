@@ -353,7 +353,6 @@ pub const RUN_INSERT_SQL: &str =
 /// thread. `$1` is the run id.
 pub const THREAD_CLEAR_SQL: &str =
     "UPDATE agent_run SET thread_id = '' WHERE id = $1 AND thread_id <> ''";
->>>>>>> origin/main
 
 /// `run.save(update_fields=["prompt", "prompt_manifest"])`
 /// (`service.py:522,639,824`). `$1`/`$2` are prompt/manifest, `$3` the

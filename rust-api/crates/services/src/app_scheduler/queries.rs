@@ -326,6 +326,7 @@ pub const AGENT_RUN_COLUMNS: &[&str] = &[
     "done_payload",
     "error_details",
     "refusal_category",
+    "failure_reason",
     "llm_model",
     "usage",
     "input_tokens",

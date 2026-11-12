@@ -2892,6 +2892,7 @@ mod tests {
                 issue_id: Some(issue),
                 issue_project_id: Some(project),
                 issue_workspace_id: Some(workspace),
+                failure_reason: String::new(),
             }
         );
         assert_eq!(

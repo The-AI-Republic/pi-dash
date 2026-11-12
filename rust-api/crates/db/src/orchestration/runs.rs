@@ -300,15 +300,14 @@ pub fn plan_ingest(
                 AgentRunStatus::Failed
             };
             let error = format!("done-signal parse error: {err}");
-            let failure_reason = if status == AgentRunStatus::Failed
-                && current_failure_reason.is_empty()
-            {
-                pidash_types::runner_runs::classify_failure(&error, "", "")
-                    .value()
-                    .to_owned()
-            } else {
-                current_failure_reason.to_owned()
-            };
+            let failure_reason =
+                if status == AgentRunStatus::Failed && current_failure_reason.is_empty() {
+                    pidash_types::runner_runs::classify_failure(&error, "", "")
+                        .value()
+                        .to_owned()
+                } else {
+                    current_failure_reason.to_owned()
+                };
             return IngestPlan {
                 signal: None,
                 status,
@@ -403,7 +402,10 @@ pub async fn ingest_into_run(
             Expr::value(plan.ended_at.map(|at| at.fixed_offset())),
         );
     if let Some(reason) = &plan.failure_reason {
-        update = update.col_expr(agent_run::Column::FailureReason, Expr::value(reason.clone()));
+        update = update.col_expr(
+            agent_run::Column::FailureReason,
+            Expr::value(reason.clone()),
+        );
     }
     update
         .filter(agent_run::Column::Id.eq(run_id))
@@ -624,10 +626,11 @@ mod tests {
                 plan.error_details, case["after"]["error_details"],
                 "{name}: error_details"
             );
-            // PDASHOSS01-183: `Some` exactly on the parse-error path.
+            // PDASHOSS01-183: `Some` exactly on the parse-error path
+            // (the classified reason, or the kept current value when
+            // the status was already terminal).
             if plan.signal.is_none() {
-                let reason = plan.failure_reason.expect("{name}: failure_reason");
-                assert!(!reason.is_empty(), "{name}: failure_reason non-empty");
+                assert!(plan.failure_reason.is_some(), "{name}: failure_reason");
             } else {
                 assert_eq!(plan.failure_reason, None, "{name}: no failure_reason");
             }

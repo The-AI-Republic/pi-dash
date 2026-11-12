@@ -508,24 +508,39 @@ pub enum DisarmError {
 /// the planner's `(false, None)` shape.
 pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bool, DisarmError> {
     let conn = sea_orm_connection(pool);
-    let run: Option<(Option<Uuid>, String, String, Option<Value>, String, Value, String)> =
-        agent_run::Entity::find_by_id(run_id)
-            .select_only()
-            .columns([
-                agent_run::Column::WorkItemId,
-                agent_run::Column::Status,
-                agent_run::Column::PhaseKind,
-                agent_run::Column::DonePayload,
-                agent_run::Column::FailureReason,
-                agent_run::Column::ErrorDetails,
-                agent_run::Column::ThreadId,
-            ])
-            .into_tuple()
-            .one(&conn)
-            .await
-            .map_err(into_sqlx)?;
-    let Some((work_item_id, status, phase_kind, done_payload, failure_reason, error_details, thread_id)) =
-        run
+    #[allow(clippy::type_complexity)]
+    let run: Option<(
+        Option<Uuid>,
+        String,
+        String,
+        Option<Value>,
+        String,
+        Value,
+        String,
+    )> = agent_run::Entity::find_by_id(run_id)
+        .select_only()
+        .columns([
+            agent_run::Column::WorkItemId,
+            agent_run::Column::Status,
+            agent_run::Column::PhaseKind,
+            agent_run::Column::DonePayload,
+            agent_run::Column::FailureReason,
+            agent_run::Column::ErrorDetails,
+            agent_run::Column::ThreadId,
+        ])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
+    let Some((
+        work_item_id,
+        status,
+        phase_kind,
+        done_payload,
+        failure_reason,
+        error_details,
+        thread_id,
+    )) = run
     else {
         return Ok(false);
     };
@@ -678,7 +693,10 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             // resuming the session that will fail again.
             let conn = TxConn::new(tx.inner());
             agent_run::Entity::update_many()
-                .col_expr(agent_run::Column::ThreadId, sea_orm::sea_query::Expr::value(""))
+                .col_expr(
+                    agent_run::Column::ThreadId,
+                    sea_orm::sea_query::Expr::value(""),
+                )
                 .filter(agent_run::Column::Id.eq(run_id))
                 .exec(&conn)
                 .await
