@@ -869,6 +869,7 @@ surface_snapshot! {
 
 surface_snapshot! {
     operations::core::comments,
+    operations::core::issues,
     operations::core::relations,
     operations::core::workpad,
 }

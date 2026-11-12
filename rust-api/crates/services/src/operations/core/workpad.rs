@@ -122,5 +122,8 @@ pub fn core_to_domain_error(error: super::CoreError) -> crate::domain::DomainErr
         super::CoreError::Request(message) => {
             crate::domain::DomainError::Work(format!("request refused: {message}"))
         }
+        super::CoreError::Missing(model) => {
+            crate::domain::DomainError::Db(sea_orm::DbErr::RecordNotFound(model.to_owned()))
+        }
     }
 }

@@ -110,9 +110,8 @@ use pidash_services::orchestration::creation::{
     PinOutcome, PodView, ProjectView, RenderBundle, RenderedTurn, RunView, RunnerView, StateView,
 };
 use pidash_services::orchestration::entries::{
-    fire_state_transition, handle_issue_state_transition, BindingView, EntriesSeam, FireOutcome,
-    FireRequest, NewSchedulerRun, PreflightSeam, ProjectRoleFacts, SchedulerView,
-    TransitionRequest, WorkspaceView,
+    fire_state_transition, BindingView, EntriesSeam, FireOutcome, FireRequest, NewSchedulerRun,
+    PreflightSeam, ProjectRoleFacts, SchedulerView, WorkspaceView,
 };
 use pidash_services::orchestration::relations as rel;
 use pidash_services::prompting::composer::{OverrideIndex, OverrideRow};
@@ -1042,6 +1041,9 @@ async fn op_add_current_issue_comment(
         pidash_services::operations::core::CoreError::Request(message) => {
             ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
         }
+        pidash_services::operations::core::CoreError::Missing(model) => {
+            ToolExecError::Missing { model }
+        }
         pidash_services::operations::core::CoreError::Db(domain_error) => {
             ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
         }
@@ -1153,6 +1155,9 @@ async fn op_update_current_issue_workpad(
             pidash_services::operations::core::CoreError::Request(message) => {
                 ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
             }
+            pidash_services::operations::core::CoreError::Missing(model) => {
+                ToolExecError::Missing { model }
+            }
             pidash_services::operations::core::CoreError::Db(domain_error) => {
                 ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
             }
@@ -1198,13 +1203,6 @@ struct IssueStateView {
     id: Uuid,
     name: String,
     group: String,
-}
-
-/// One `TRANSITION_ISSUE_LOCK_SQL` row.
-#[derive(Clone, Debug, PartialEq, FromQueryResult)]
-struct IssueStateLockRow {
-    id: Uuid,
-    state_id: Option<Uuid>,
 }
 
 /// The create-path deferred project lock (`CREATE_PROJECT_LOCK_SQL`):
@@ -2132,40 +2130,6 @@ async fn fire_create_transition(
 // Transition (`pidash_transition_current_issue`, `tools.py:309-343`)
 // ---------------------------------------------------------------------------
 
-/// Preflight for the tool's transition: unreachable. Agent moves
-/// (`moved_by_run` set, always on this path) never set `dispatch_now`
-/// (`scheduling.py:412-436`, ported `clock.rs:488`), so the driver
-/// returns before the builder — queue, park, or a non-trigger reason.
-/// If the clock contract ever changes, this fails the tool closed
-/// (loud, audit-rolled-back) instead of mis-dispatching. Pinned by
-/// `agent_moves_never_dispatch_now`.
-struct BinPreflight;
-
-impl PreflightSeam for BinPreflight {
-    async fn preflight_eligibility_or_bounce(
-        &mut self,
-        _issue_id: Uuid,
-        _creator_id: Uuid,
-        _pod_id: Uuid,
-        _triggered_by: &str,
-    ) -> Result<bool, pidash_services::orchestration::creation::CreationError> {
-        Err(pidash_services::orchestration::creation::CreationError::Db(
-            "tool transition reached preflight: agent moves never dispatch_now".to_owned(),
-        ))
-    }
-
-    async fn pod_once_preflight(
-        &mut self,
-        _issue_id: Uuid,
-        _creator_id: Uuid,
-        _pod_id: Uuid,
-    ) -> Result<Option<String>, pidash_services::orchestration::creation::CreationError> {
-        Err(pidash_services::orchestration::creation::CreationError::Db(
-            "tool transition reached preflight: agent moves never dispatch_now".to_owned(),
-        ))
-    }
-}
-
 /// What a state-changing transition hands its caller for the
 /// post-commit completion comment-back (`github_signals.py:44-75`):
 /// the moved issue, its locked pre-save state (Django's
@@ -2228,7 +2192,6 @@ async fn op_transition_current_issue(
             value: state_id.to_owned(),
         });
     };
-    use pidash_db::entity::issues as issue_entity;
     let target = transition_state_query(target_id, scope.project_id)
         .into_model::<IssueStateView>()
         .one(&txn.connection())
@@ -2239,65 +2202,45 @@ async fn op_transition_current_issue(
     };
     let target_id = target.id;
     let target_name = target.name;
-    // `FOR UPDATE OF issues`: SeaORM's exclusive lock with `of` omitted
-    // takes the joined state row too, which the SQL forbids; here the
-    // lock is on the bare issue row (no join), equal to
-    // `FOR UPDATE OF issues` on the issues row.
-    let locked = issue_entity::Entity::find()
-        .filter(issue_entity::Column::Id.eq(scope.work_item_id))
-        .filter(issue_entity::Column::DeletedAt.is_null())
-        .lock_exclusive()
-        .select_only()
-        .column(issue_entity::Column::Id)
-        .column(issue_entity::Column::StateId)
-        .into_model::<IssueStateLockRow>()
-        .one(&txn.connection())
-        .await
-        .map_err(orm_error)?;
-    let Some(locked) = locked else {
-        return Err(ToolExecError::Missing { model: "Issue" });
+    // The shared core (NEWPIDASH-190 §4.3): lock + same-state no-op +
+    // bare three-column write + inline never-dispatch drive on the
+    // audit transaction; the project-scoped target lookup above and
+    // the completion enqueue below stay with this wrapper.
+    let write_ctx = pidash_services::domain::WriteCtx::new(pidash_services::domain::WriteActor {
+        user_id: scope.creator_id,
+        timezone: None,
+    });
+    let change = pidash_services::operations::core::issues::StateChange {
+        issue_id: scope.work_item_id.expect("bound issue checked above"),
+        state_id: target_id,
+        moved_by_run: Some(scope.run_id),
+        dispatch: pidash_services::operations::core::issues::Dispatch::NeverDispatch,
     };
-    let issue_id = locked.id;
-    let from_state_id = locked.state_id;
-    if plan::transition_same_state(from_state_id, target_id) {
+    let moved =
+        pidash_services::operations::core::issues::set_state(txn, &write_ctx, &ctx.pool, &change)
+            .await
+            .map_err(|error| match error {
+                pidash_services::operations::core::CoreError::Request(message) => {
+                    ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
+                }
+                pidash_services::operations::core::CoreError::Missing(model) => {
+                    ToolExecError::Missing { model }
+                }
+                pidash_services::operations::core::CoreError::Db(domain_error) => {
+                    ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
+                }
+                pidash_services::operations::core::CoreError::Sqlx(sqlx_error) => {
+                    ToolExecError::Db(sqlx_error)
+                }
+            })?;
+    if !moved.changed {
         let result = plan::transition_result(false, &target_name, &target_id.to_string());
         let value = serde_json::to_value(result).map_err(|error| {
             ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string()))
         })?;
         return Ok(value);
     }
-    let now = Utc::now();
-    // The `save(update_fields=["state", "updated_at", "updated_by"])`
-    // equivalent: three bare columns, no hook-recompute writes, no chain
-    // — completion, fire and the orchestration drive stay driver-side, as
-    // today. Inside the audit transaction, under the row lock above.
-    domain_issues::update_issue_state(
-        &txn.connection(),
-        issue_id,
-        target_id,
-        now,
-        scope.creator_id,
-    )
-    .await?;
-    // The orchestration states: `None` when stateless (or on a dangling
-    // from-pointer, the `select_related` miss). The target group comes
-    // from a second read — the ported target lookup projects id+name+group
-    // (decoding `IssueStateView`), and this re-read supplies the fresh
-    // orchestration view plus the TOCTOU existence check below.
-    let from_state = match from_state_id {
-        Some(id) => state_view_tx(&txn.connection(), id).await?,
-        None => None,
-    };
-    let to_state = match state_view_tx(&txn.connection(), target_id).await? {
-        Some(view) => view,
-        None => {
-            // TOCTOU: the target vanished between the lookup and the
-            // group read (Python holds the object and would proceed).
-            // Fail closed; the audit rolls back.
-            return Err(ToolExecError::Missing { model: "State" });
-        }
-    };
-    drive_transition(ctx, txn, scope, issue_id, from_state, to_state, now).await?;
+    let from_state_id = moved.from_state_id;
     // `github_signals.trigger_completion_comment`
     // (`bgtasks/github_signals.py:44-75`): a save moving a mirrored issue
     // into a completed-group state enqueues the provider's
@@ -2309,6 +2252,7 @@ async fn op_transition_current_issue(
     // already-commented guard). Best-effort like the relation enqueues:
     // the edit already committed, so a lookup or queue failure must not
     // fail the tool.
+    let issue_id = scope.work_item_id.expect("bound issue checked above");
     let pool = ctx.pool.clone();
     txn.on_commit(move || {
         let p = pool.clone();
@@ -2320,484 +2264,6 @@ async fn op_transition_current_issue(
     let result = plan::transition_result(true, &target_name, &target_id.to_string());
     let value = serde_json::to_value(result).expect("transition result serializes");
     Ok(value)
-}
-
-/// The `sea_orm::DbErr` -> `CreationError` map for the audit seam
-/// (mirrors `creation_jobs::sea_db`: via the sqlx error text).
-fn audit_sea_db(error: sea_orm::DbErr) -> CreationError {
-    CreationError::Db(pidash_db::orm_tx::into_sqlx(error).to_string())
-}
-
-/// The `DbErr` -> `CreationError` map for this seam's paths (mirrors
-/// `scheduler_dispatch::db_err`).
-fn audit_db_err(error: sea_orm::DbErr) -> CreationError {
-    CreationError::Db(error.to_string())
-}
-
-fn audit_db(error: sqlx::Error) -> CreationError {
-    CreationError::Db(error.to_string())
-}
-
-/// The moved_by_run transition seam over the audit [`WriteTxn`]
-/// (NEWPIDASH-190 Part 1b): the agent-move reach of
-/// `handle_issue_state_transition` only (issue reads, clock policy,
-/// ticker lock, active/prior run reads, clock writes — agent moves
-/// never dispatch, so every creation method is unreachable). The
-/// clock methods run on the same `WriteTxn` the op writes, keeping
-/// ticker rows ledger-atomic; the clock reads/writes copy the
-/// `LiveCreationStore` query shapes exactly (same columns, same
-/// selection), so outcomes are identical. The other creation methods
-/// fail closed instead of silently succeeding.
-use crate::orchestration::creation_jobs::{
-    issue_columns, map_run_row, row_missing, run_columns, IssueRow, RunRow,
-};
-use pidash_db::orchestration::runs::ACTIVE_STATUSES;
-use pidash_services::domain::TxnConn;
-
-struct AuditTransitionSeam<'c> {
-    conn: TxnConn<'c>,
-    creator: Uuid,
-    has_key: bool,
-    dispatches: Vec<Uuid>,
-    deferred: Vec<DeferredConsume>,
-    terminal_effects: Vec<Uuid>,
-    rollback: bool,
-}
-
-impl<'c> AuditTransitionSeam<'c> {
-    fn unreachable<T>(&self, method: &'static str) -> Result<T, CreationError> {
-        let _ = method;
-        Err(CreationError::Db(
-            "agent transition seam reached a creation method".to_owned(),
-        ))
-    }
-
-    /// Recover the (always empty) outboxes for the driver's drain
-    /// shape.
-    fn take_outboxes(&mut self) -> (Vec<Uuid>, Vec<DeferredConsume>, Vec<Uuid>) {
-        (
-            std::mem::take(&mut self.dispatches),
-            std::mem::take(&mut self.deferred),
-            std::mem::take(&mut self.terminal_effects),
-        )
-    }
-}
-
-impl<'c> CreationSeam for AuditTransitionSeam<'c> {
-    async fn issue(&mut self, issue_id: Uuid) -> Result<IssueView, CreationError> {
-        use pidash_db::entity::issues;
-        let conn = self.conn;
-        let row = issues::Entity::find()
-            .select_only()
-            .columns(issue_columns())
-            .filter(issues::Column::Id.eq(issue_id))
-            .into_model::<IssueRow>()
-            .one(&conn)
-            .await
-            .map_err(audit_sea_db)?;
-        row.map(IssueView::from).ok_or_else(row_missing)
-    }
-
-    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
-        self.unreachable("project")
-    }
-
-    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
-        let Some(state_id) = state_id else {
-            return Ok(None);
-        };
-        state_view_tx(&self.conn, state_id)
-            .await
-            .map_err(|error| match error {
-                ToolExecError::Missing { .. } => CreationError::MissingRow("no state".to_owned()),
-                other => CreationError::Db(other.to_string()),
-            })
-    }
-
-    async fn latest_prior_run(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        use pidash_db::entity::agent_run;
-        let conn = self.conn;
-        let row = agent_run::Entity::find()
-            .select_only()
-            .columns(run_columns())
-            .filter(agent_run::Column::WorkItemId.eq(issue_id))
-            .order_by_desc(agent_run::Column::CreatedAt)
-            .limit(1)
-            .into_model::<RunRow>()
-            .one(&conn)
-            .await
-            .map_err(audit_sea_db)?;
-        row.map(map_run_row).transpose()
-    }
-
-    async fn active_run_for(&mut self, issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        use pidash_db::entity::agent_run;
-        let statuses: Vec<&str> = ACTIVE_STATUSES.iter().map(|s| s.value()).collect();
-        let conn = self.conn;
-        let row = agent_run::Entity::find()
-            .select_only()
-            .columns(run_columns())
-            .filter(agent_run::Column::WorkItemId.eq(issue_id))
-            .filter(agent_run::Column::Status.is_in(statuses))
-            .order_by_desc(agent_run::Column::CreatedAt)
-            .limit(1)
-            .into_model::<RunRow>()
-            .one(&conn)
-            .await
-            .map_err(audit_sea_db)?;
-        row.map(map_run_row).transpose()
-    }
-
-    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        self.unreachable("run")
-    }
-
-    async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        self.unreachable("runner")
-    }
-
-    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        self.unreachable("assigned_pod")
-    }
-
-    async fn default_pod_for_project(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        self.unreachable("default_pod_for_project")
-    }
-
-    async fn resume_parent_run_id(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<Uuid>, CreationError> {
-        self.unreachable("resume_parent_run_id")
-    }
-
-    async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        self.unreachable("work_item_id_for_run")
-    }
-
-    async fn lock_issue_for_handoff(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<LockedIssue>, CreationError> {
-        self.unreachable("lock_issue_for_handoff")
-    }
-
-    async fn lock_run_for_handoff(
-        &mut self,
-        _run_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        self.unreachable("lock_run_for_handoff")
-    }
-
-    async fn user_flags(&mut self, _user_id: Uuid) -> Result<UserFlags, CreationError> {
-        self.unreachable("user_flags")
-    }
-
-    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
-        self.unreachable("insert_run")
-    }
-
-    async fn save_prompt(&mut self, _: Uuid, _: &str, _: &Value) -> Result<(), CreationError> {
-        self.unreachable("save_prompt")
-    }
-
-    async fn save_run_config(&mut self, _: Uuid, _: &Value) -> Result<(), CreationError> {
-        self.unreachable("save_run_config")
-    }
-
-    async fn execution_fields(
-        &mut self,
-        _request: &ExecutionRequest,
-    ) -> Result<ExecutionFields, ExecutionError> {
-        match self.unreachable::<()>("execution_fields").unwrap_err() {
-            CreationError::Db(message) => Err(ExecutionError::Store(CreationError::Db(message))),
-            other => Err(ExecutionError::Store(other)),
-        }
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        _workspace_id: Uuid,
-        _executor_kind: AgentExecutorKind,
-        _automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        self.unreachable("lock_cloud_creation_capacity")
-    }
-
-    fn dispatch_after_commit(&mut self, _run_id: Uuid) {}
-
-    async fn render_bundle(
-        &mut self,
-        _issue_id: Uuid,
-        _run_id: Uuid,
-        _parent_run_id: Option<Uuid>,
-        _trigger: &str,
-        _created_by_id: Uuid,
-    ) -> Result<RenderBundle, CreationError> {
-        self.unreachable("render_bundle")
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        String::new()
-    }
-
-    async fn dedicated_pin(
-        &mut self,
-        _: &DedicatedPinArgs<'_>,
-    ) -> Result<PinOutcome, CreationError> {
-        self.unreachable("dedicated_pin")
-    }
-
-    async fn insert_system_comment(
-        &mut self,
-        _comment: &NewSystemComment,
-    ) -> Result<(), CreationError> {
-        self.unreachable("insert_system_comment")
-    }
-
-    async fn clear_parent_thread(&mut self, _run_id: Uuid) -> Result<(), CreationError> {
-        self.unreachable("clear_parent_thread")
-    }
-
-    async fn pod_once_started_comment(
-        &mut self,
-        _: Uuid,
-        _: Uuid,
-        _: Uuid,
-        _: DateTime<Utc>,
-    ) -> Result<NewSystemComment, CreationError> {
-        self.unreachable("pod_once_started_comment")
-    }
-}
-
-impl<'c> FinalizeAgentRunSeam for AuditTransitionSeam<'c> {
-    async fn finalize_failed_run(
-        &mut self,
-        _run_id: Uuid,
-        _error_code: &str,
-        _error: &str,
-        _now: DateTime<Utc>,
-    ) -> Result<RunView, CreationError> {
-        self.unreachable("finalize_failed_run")
-    }
-}
-
-impl<'c> EntriesSeam for AuditTransitionSeam<'c> {
-    async fn prior_state_id(&mut self, _issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        self.unreachable("prior_state_id")
-    }
-
-    async fn queued_follow_up(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        self.unreachable("queued_follow_up")
-    }
-
-    async fn lock_ticker(
-        &mut self,
-        issue_id: Uuid,
-    ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        use pidash_db::entity::issue_agent_ticker;
-        let conn = self.conn;
-        let model = issue_agent_ticker::Entity::find()
-            .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
-            .filter(issue_agent_ticker::Column::DeletedAt.is_null())
-            .order_by_asc(issue_agent_ticker::Column::Id)
-            .lock_exclusive()
-            .one(&conn)
-            .await
-            .map_err(audit_db_err)?;
-        Ok(model.map(IssueAgentTicker::from))
-    }
-
-    async fn save_ticker(
-        &mut self,
-        row: &IssueAgentTicker,
-        write: ClockWrite,
-    ) -> Result<(), CreationError> {
-        apply_clock_write(&self.conn, &write, row, Utc::now())
-            .await
-            .map_err(audit_db)
-    }
-
-    fn set_rollback(&mut self) {
-        self.rollback = true;
-    }
-
-    async fn clock_policy(
-        &mut self,
-        project_id: Uuid,
-    ) -> Result<ProjectClockPolicy, CreationError> {
-        let row = pidash_services::orchestration::entries::clock_policy(&self.conn, project_id)
-            .await
-            .map_err(audit_db_err)?;
-        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
-        else {
-            return Err(CreationError::MissingRow(format!(
-                "no clock policy {project_id}"
-            )));
-        };
-        Ok(ProjectClockPolicy {
-            agent_ticking_enabled: Some(ticking_enabled),
-            agent_default_max_ticks: Some(max_ticks),
-            agent_default_interval_seconds: Some(i64::from(interval)),
-            agent_review_default_interval_seconds: Some(i64::from(interval_review)),
-            agent_test_default_interval_seconds: Some(i64::from(interval_test)),
-        })
-    }
-
-    async fn binding(&mut self, _binding_id: Uuid) -> Result<BindingView, CreationError> {
-        self.unreachable("binding")
-    }
-
-    async fn scheduler_override_pod(
-        &mut self,
-        _pod_id: Uuid,
-        _project_id: Option<Uuid>,
-    ) -> Result<Option<PodView>, CreationError> {
-        self.unreachable("scheduler_override_pod")
-    }
-
-    async fn workspace(&mut self, _workspace_id: Uuid) -> Result<WorkspaceView, CreationError> {
-        self.unreachable("workspace")
-    }
-
-    async fn scheduler_row(&mut self, _scheduler_id: Uuid) -> Result<SchedulerView, CreationError> {
-        self.unreachable("scheduler_row")
-    }
-
-    async fn scheduler_override_rows(
-        &mut self,
-        _workspace_id: Uuid,
-    ) -> Result<Vec<OverrideRow>, CreationError> {
-        self.unreachable("scheduler_override_rows")
-    }
-
-    async fn project_role_facts(
-        &mut self,
-        _user_id: Uuid,
-        _workspace_slug: &str,
-        _project_id: Uuid,
-    ) -> Result<ProjectRoleFacts, CreationError> {
-        self.unreachable("project_role_facts")
-    }
-
-    async fn has_usable_llm_config(&mut self, user_id: Uuid) -> Result<bool, CreationError> {
-        Ok(user_id == self.creator && self.has_key)
-    }
-
-    async fn agent_system_user(
-        &mut self,
-    ) -> Result<Result<Uuid, AgentUserCollisionError>, CreationError> {
-        self.unreachable("agent_system_user")
-    }
-
-    async fn insert_scheduler_run(
-        &mut self,
-        _run: &NewSchedulerRun,
-    ) -> Result<RunView, CreationError> {
-        self.unreachable("insert_scheduler_run")
-    }
-
-    fn compose_scheduler_turn(
-        &mut self,
-        _ctx: &Value,
-        _index: &OverrideIndex,
-        _workspace_id: Option<&str>,
-        _executor_kind: Option<&str>,
-        _tool_catalog_version: i64,
-    ) -> Result<RenderedTurn, String> {
-        Err("unreachable on agent transition seam".to_owned())
-    }
-}
-
-/// Drive `handle_issue_state_transition` over the audit [`WriteTxn`]:
-/// build the live store over it (creator presence prefetched; the
-/// actor is always the run creator on this path, so the fallback chain
-/// never consults), run the driver, and drain the outboxes. No
-/// creation is reachable (agent moves never dispatch), so the outboxes
-/// are always empty — the drain loops are the documented driver
-/// shape, kept for exactness.
-async fn drive_transition(
-    ctx: &ToolCtx,
-    txn: &WriteTxn,
-    scope: &ToolScope,
-    issue_id: Uuid,
-    from_state: Option<pidash_services::orchestration::creation::StateView>,
-    to_state: pidash_services::orchestration::creation::StateView,
-    now: DateTime<Utc>,
-) -> Result<(), ToolExecError> {
-    let creator = scope.creator_id;
-    let has_key =
-        match crate::oss_worker::execute_seams::LiveExecuteSeams::llm_row(&ctx.pool, creator).await
-        {
-            Ok(row) => row.as_ref().is_some_and(|row| row.has_api_key()),
-            Err(error) => return Err(ToolExecError::Db(error)),
-        };
-    // `jitter_secs: 0.0` is exact: Python draws jitter only inside the
-    // retime paths (`scheduling.py:222,813`), which agent moves never
-    // reach. `created_by: None`: `impersonate` wraps the save only —
-    // orchestration runs outside it, as in Python.
-    let request = TransitionRequest {
-        issue_id,
-        from_state,
-        to_state: Some(to_state),
-        actor: Some(creator),
-        dispatch_immediate: true,
-        moved_by_run: Some(scope.run_id),
-        now,
-        jitter_secs: 0.0,
-        created_by: None,
-        pod_once: false,
-    };
-    let cache = RedisAdmissionCache::from_env();
-    let mut seam = AuditTransitionSeam {
-        conn: txn.connection(),
-        creator,
-        has_key,
-        dispatches: Vec::new(),
-        deferred: Vec::new(),
-        terminal_effects: Vec::new(),
-        rollback: false,
-    };
-    let mut preflight = BinPreflight;
-    let outcome = handle_issue_state_transition(&mut seam, &mut preflight, &request).await;
-    let pool = &ctx.pool;
-    let (dispatches, deferred, terminal_effects) = seam.take_outboxes();
-    match outcome {
-        Err(error) => {
-            let creation = match error {
-                pidash_services::orchestration::entries::EntriesError::Store(store) => store,
-                other => {
-                    pidash_services::orchestration::creation::CreationError::Db(other.to_string())
-                }
-            };
-            Err(ToolExecError::Creation(creation))
-        }
-        Ok(_) => {
-            for run_id in dispatches {
-                if let Err(error) = dispatch_agent_run(pool, &ctx.cloud, run_id, now).await {
-                    return Err(ToolExecError::Db(error));
-                }
-            }
-            for consume in &deferred {
-                consume_admission_token(&cache, consume);
-            }
-            if !terminal_effects.is_empty() {
-                return Err(ToolExecError::Creation(
-                    pidash_services::orchestration::creation::CreationError::Db(
-                        "tool transition finalized a run: unreachable, no creation on this path"
-                            .to_owned(),
-                    ),
-                ));
-            }
-            Ok(())
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3062,6 +2528,9 @@ async fn op_relate_issues(
         pidash_services::operations::core::CoreError::Request(message) => {
             ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
         }
+        pidash_services::operations::core::CoreError::Missing(model) => {
+            ToolExecError::Missing { model }
+        }
         pidash_services::operations::core::CoreError::Db(domain_error) => {
             ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
         }
@@ -3156,6 +2625,9 @@ async fn op_unrelate_issues(
     .map_err(|error| match error {
         pidash_services::operations::core::CoreError::Request(message) => {
             ToolExecError::Failure(plan::ToolCallFailure::InvalidArg(message))
+        }
+        pidash_services::operations::core::CoreError::Missing(model) => {
+            ToolExecError::Missing { model }
         }
         pidash_services::operations::core::CoreError::Db(domain_error) => {
             ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
