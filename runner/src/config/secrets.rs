@@ -1,0 +1,1400 @@
+//! Where the daemon and engine credentials are kept (design §4.3,
+//! `[auth] credentials_store`).
+//!
+//! The secrets are the `[cli]` tokens: the default workspace's `mt_` token,
+//! every `[[cli.workspaces]]` token and the engine credential (`ec_`).
+//! Per-runner refresh tokens stay in their own 0600 files.
+//!
+//! | `credentials_store` | Where the secrets go                                                         |
+//! | ------------------- | ---------------------------------------------------------------------------- |
+//! | `auto` (default)    | The OS keychain once a sign-in moved them there and while it answers, else `config.toml` (0600) |
+//! | `keyring`           | The OS keychain only; a write fails when it does not answer                   |
+//! | `file`              | `config.toml` (0600), as before                                              |
+//!
+//! The rest of the runner never sees the difference: [`hydrate`] fills the
+//! secrets into the in-memory [`Config`] when `config.toml` is loaded, and
+//! [`plan_write`] takes them out again when it is written. While they are in
+//! the keychain the file records that (`[auth] secrets_in = "keyring"`) and
+//! which items it holds (`keyring_items`), and keeps every non-secret field
+//! (workspace slugs, the engine credential's expiry).
+//!
+//! **Migration.** Under `auto`, plaintext tokens move into the keychain at
+//! the next sign-in ([`super::file::migrate_credentials_store`], called by
+//! `pidash auth login`), never as a side effect of another command.
+//!
+//! **Fallback.** A keychain that does not answer (a headless Linux server
+//! with no Secret Service, a locked keyring under a systemd user service) is
+//! detected by a probe with a timeout; `auto` then keeps the file, and
+//! `pidash doctor` says so. Secrets already in a keychain that stopped
+//! answering are never overwritten with blanks: the write fails instead.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use super::schema::{
+    AuthSection, Config, CredentialsStoreMode, EngineCredential, SECRETS_IN_KEYRING,
+    WorkspaceCredential,
+};
+use crate::util::paths::Paths;
+
+/// Keychain service name of every item.
+pub const KEYRING_SERVICE: &str = "pidash";
+/// Item of the default workspace's daemon credential.
+pub const ITEM_DEFAULT_MACHINE_TOKEN: &str = "machine-token";
+/// Prefix of the items of the other workspaces' daemon credentials.
+pub const ITEM_WORKSPACE_PREFIX: &str = "machine-token:";
+/// Item of the engine credential.
+pub const ITEM_ENGINE_CREDENTIAL: &str = "engine-credential";
+/// Item read to find out whether the keychain answers.
+const PROBE_ITEM: &str = "probe";
+/// `PIDASH_KEYRING=off` makes the keychain report itself unavailable (CI,
+/// containers, a user who wants the file without editing the config).
+pub const KEYRING_ENV: &str = "PIDASH_KEYRING";
+/// How long one keychain call may take before it counts as not answering.
+const KEYRING_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+#[error("the OS keychain is not available: {message}")]
+pub struct SecretError {
+    pub message: String,
+    /// The keychain answers, but this item can never be read back as it
+    /// is: duplicate items (`Ambiguous`) or a value that is not UTF-8
+    /// (`BadEncoding`). Waiting or unlocking does not help; only removing
+    /// or replacing the item does.
+    pub permanent: bool,
+}
+
+impl SecretError {
+    /// A keychain that does not answer now (locked, no session, timed out).
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            permanent: false,
+        }
+    }
+
+    /// An item the keychain answers for but can never return.
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            permanent: true,
+        }
+    }
+}
+
+/// A `keyring` error as a [`SecretError`], permanent for the item-level
+/// failures that no unlock fixes.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn keyring_error(e: keyring::Error) -> SecretError {
+    match e {
+        keyring::Error::Ambiguous(_) => {
+            SecretError::permanent("the keychain holds more than one Pi Dash item with this name")
+        }
+        keyring::Error::BadEncoding(_) => {
+            SecretError::permanent("the keychain item is not valid text")
+        }
+        other => SecretError::new(other.to_string()),
+    }
+}
+
+/// One OS credential store (or a stand-in for tests).
+pub trait SecretBackend: Send + Sync {
+    /// Human name, for `pidash doctor`.
+    fn name(&self) -> &'static str;
+    /// `Ok(None)` when the store answers but holds no such item.
+    fn get(&self, item: &str) -> Result<Option<String>, SecretError>;
+    fn set(&self, item: &str, value: &str) -> Result<(), SecretError>;
+    /// Deleting a missing item is not an error.
+    fn delete(&self, item: &str) -> Result<(), SecretError>;
+    /// Every value stored under `item`, duplicates included: what [`get`]
+    /// cannot return for an `Ambiguous` item can still be read one by one,
+    /// so a sign-out can revoke those tokens before it forgets them.
+    /// Values that cannot be read at all are left out.
+    ///
+    /// [`get`]: SecretBackend::get
+    fn get_all(&self, item: &str) -> Vec<String> {
+        self.get(item).ok().flatten().into_iter().collect()
+    }
+    /// Whether the store answers at all.
+    fn probe(&self) -> Result<(), SecretError> {
+        self.get(PROBE_ITEM).map(|_| ())
+    }
+}
+
+/// The real OS keychain through the `keyring` crate. Items are scoped by the
+/// config directory, so two isolated installs never share a credential.
+struct OsKeyring {
+    scope: String,
+}
+
+impl OsKeyring {
+    fn user(&self, item: &str) -> String {
+        format!("{item}@{}", self.scope)
+    }
+}
+
+/// Run one keychain call on its own thread with a timeout: a Secret Service
+/// that is present but stuck must not hang a CLI command or the daemon.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn bounded<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, SecretError> + Send + 'static,
+) -> Result<T, SecretError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(KEYRING_TIMEOUT)
+        .unwrap_or_else(|_| Err(SecretError::new("the keychain did not answer in time")))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl SecretBackend for OsKeyring {
+    fn name(&self) -> &'static str {
+        if cfg!(target_os = "macos") {
+            "macOS Keychain"
+        } else if cfg!(target_os = "windows") {
+            "Windows Credential Manager"
+        } else {
+            "Secret Service"
+        }
+    }
+
+    fn get(&self, item: &str) -> Result<Option<String>, SecretError> {
+        let user = self.user(item);
+        bounded(move || {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &user).map_err(keyring_error)?;
+            match entry.get_password() {
+                Ok(v) => Ok(Some(v)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(keyring_error(e)),
+            }
+        })
+    }
+
+    fn set(&self, item: &str, value: &str) -> Result<(), SecretError> {
+        let user = self.user(item);
+        let value = value.to_string();
+        bounded(move || {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &user).map_err(keyring_error)?;
+            match entry.set_password(&value) {
+                // Duplicates make the item unwritable: remove them all,
+                // then store the one value.
+                Err(keyring::Error::Ambiguous(dups)) => {
+                    for d in dups {
+                        d.delete_credential().map_err(keyring_error)?;
+                    }
+                    entry.set_password(&value).map_err(keyring_error)
+                }
+                other => other.map_err(keyring_error),
+            }
+        })
+    }
+
+    fn get_all(&self, item: &str) -> Vec<String> {
+        let user = self.user(item);
+        bounded(move || {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &user).map_err(keyring_error)?;
+            Ok(match entry.get_password() {
+                Ok(v) => vec![v],
+                Err(keyring::Error::Ambiguous(dups)) => {
+                    dups.iter().filter_map(|d| d.get_password().ok()).collect()
+                }
+                Err(_) => Vec::new(),
+            })
+        })
+        .unwrap_or_default()
+    }
+
+    fn delete(&self, item: &str) -> Result<(), SecretError> {
+        let user = self.user(item);
+        bounded(move || {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, &user).map_err(keyring_error)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                // Duplicates: delete every one of them.
+                Err(keyring::Error::Ambiguous(dups)) => {
+                    for d in dups {
+                        match d.delete_credential() {
+                            Ok(()) | Err(keyring::Error::NoEntry) => {}
+                            Err(e) => return Err(keyring_error(e)),
+                        }
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(keyring_error(e)),
+            }
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+impl SecretBackend for OsKeyring {
+    fn name(&self) -> &'static str {
+        "OS keychain"
+    }
+    fn get(&self, _item: &str) -> Result<Option<String>, SecretError> {
+        Err(SecretError::new("no keychain support on this platform"))
+    }
+    fn set(&self, _item: &str, _value: &str) -> Result<(), SecretError> {
+        Err(SecretError::new("no keychain support on this platform"))
+    }
+    fn delete(&self, _item: &str) -> Result<(), SecretError> {
+        Err(SecretError::new("no keychain support on this platform"))
+    }
+}
+
+/// A keychain that never answers (`PIDASH_KEYRING=off`).
+struct Disabled;
+
+impl SecretBackend for Disabled {
+    fn name(&self) -> &'static str {
+        "disabled"
+    }
+    fn get(&self, _item: &str) -> Result<Option<String>, SecretError> {
+        Err(SecretError::new(format!("{KEYRING_ENV}=off")))
+    }
+    fn set(&self, _item: &str, _value: &str) -> Result<(), SecretError> {
+        Err(SecretError::new(format!("{KEYRING_ENV}=off")))
+    }
+    fn delete(&self, _item: &str) -> Result<(), SecretError> {
+        Err(SecretError::new(format!("{KEYRING_ENV}=off")))
+    }
+}
+
+/// In-memory keychain for tests. `set_available(false)` makes it behave
+/// like a headless Linux box with no Secret Service.
+#[derive(Default)]
+pub struct MemoryKeyring {
+    items: Mutex<HashMap<String, String>>,
+    unavailable: std::sync::atomic::AtomicBool,
+    failing_gets: Mutex<std::collections::HashSet<String>>,
+    broken: Mutex<std::collections::HashSet<String>>,
+}
+
+impl MemoryKeyring {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn unavailable() -> Arc<Self> {
+        let k = Self::default();
+        k.set_available(false);
+        Arc::new(k)
+    }
+
+    pub fn set_available(&self, available: bool) {
+        self.unavailable
+            .store(!available, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make reads of `item` fail (or succeed again) while every other call,
+    /// the probe included, keeps answering: a keychain that times out on
+    /// some items only.
+    pub fn fail_get_of(&self, item: &str, fail: bool) {
+        let mut f = self.failing_gets.lock().expect("memory keyring poisoned");
+        if fail {
+            f.insert(item.to_string());
+        } else {
+            f.remove(item);
+        }
+    }
+
+    /// Make `item` permanently unreadable, like duplicate Secret Service
+    /// items: reads fail with a permanent error until the item is set or
+    /// deleted (which, like the OS backend, clears the duplicates).
+    pub fn break_item(&self, item: &str) {
+        self.broken
+            .lock()
+            .expect("memory keyring poisoned")
+            .insert(item.to_string());
+    }
+
+    /// Snapshot of the stored items.
+    pub fn items(&self) -> HashMap<String, String> {
+        self.items.lock().expect("memory keyring poisoned").clone()
+    }
+
+    fn check(&self) -> Result<(), SecretError> {
+        if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(SecretError::new("no Secret Service on this test host"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl SecretBackend for MemoryKeyring {
+    fn name(&self) -> &'static str {
+        "in-memory test keyring"
+    }
+    fn get(&self, item: &str) -> Result<Option<String>, SecretError> {
+        self.check()?;
+        if self
+            .failing_gets
+            .lock()
+            .expect("memory keyring poisoned")
+            .contains(item)
+        {
+            return Err(SecretError::new(format!("reading {item} timed out")));
+        }
+        if self
+            .broken
+            .lock()
+            .expect("memory keyring poisoned")
+            .contains(item)
+        {
+            return Err(SecretError::permanent(format!("{item} is ambiguous")));
+        }
+        Ok(self
+            .items
+            .lock()
+            .expect("memory keyring poisoned")
+            .get(item)
+            .cloned())
+    }
+    fn get_all(&self, item: &str) -> Vec<String> {
+        if self.check().is_err() {
+            return Vec::new();
+        }
+        self.items
+            .lock()
+            .expect("memory keyring poisoned")
+            .get(item)
+            .cloned()
+            .into_iter()
+            .collect()
+    }
+    fn set(&self, item: &str, value: &str) -> Result<(), SecretError> {
+        self.check()?;
+        self.broken
+            .lock()
+            .expect("memory keyring poisoned")
+            .remove(item);
+        self.items
+            .lock()
+            .expect("memory keyring poisoned")
+            .insert(item.to_string(), value.to_string());
+        Ok(())
+    }
+    fn delete(&self, item: &str) -> Result<(), SecretError> {
+        self.check()?;
+        self.broken
+            .lock()
+            .expect("memory keyring poisoned")
+            .remove(item);
+        self.items
+            .lock()
+            .expect("memory keyring poisoned")
+            .remove(item);
+        Ok(())
+    }
+}
+
+type Overrides = Mutex<HashMap<PathBuf, Arc<dyn SecretBackend>>>;
+
+fn overrides() -> &'static Overrides {
+    static O: OnceLock<Overrides> = OnceLock::new();
+    O.get_or_init(Default::default)
+}
+
+/// Use `backend` for the install whose config directory is `config_dir`
+/// (tests: each test's temp dir gets its own keychain, and the real one is
+/// never touched).
+pub fn use_backend_for(config_dir: &Path, backend: Arc<dyn SecretBackend>) {
+    overrides()
+        .lock()
+        .expect("keyring overrides poisoned")
+        .insert(config_dir.to_path_buf(), backend);
+}
+
+/// The keychain for this install.
+pub fn backend_for(paths: &Paths) -> Arc<dyn SecretBackend> {
+    if let Some(b) = overrides()
+        .lock()
+        .expect("keyring overrides poisoned")
+        .get(&paths.config_dir)
+    {
+        return b.clone();
+    }
+    // Unit tests never reach the developer's real keychain.
+    if cfg!(test) || std::env::var(KEYRING_ENV).is_ok_and(|v| v.eq_ignore_ascii_case("off")) {
+        return Arc::new(Disabled);
+    }
+    Arc::new(OsKeyring {
+        scope: paths.config_dir.display().to_string(),
+    })
+}
+
+/// Which keychain items the command holding a [`ForgetUnreadable`] owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetScope {
+    /// Every item: a full `pidash auth logout`.
+    All,
+    /// Only these items. Broken items outside the list are kept as they
+    /// are (still listed, never deleted), so signing in or out of one
+    /// workspace or the engine never drops another credential's item.
+    Items(Vec<String>),
+}
+
+impl ForgetScope {
+    /// The items of workspace `slug`: its own item, and the default item
+    /// when `slug` is the default workspace.
+    pub fn workspace(slug: &str, is_default: bool) -> Vec<String> {
+        let mut items = vec![format!("{ITEM_WORKSPACE_PREFIX}{slug}")];
+        if is_default {
+            items.push(ITEM_DEFAULT_MACHINE_TOKEN.to_string());
+        }
+        items
+    }
+
+    fn covers(&self, item: &str) -> bool {
+        match self {
+            ForgetScope::All => true,
+            ForgetScope::Items(items) => items.iter().any(|i| i == item),
+        }
+    }
+}
+
+type ForgetRegistry = Mutex<HashMap<PathBuf, Vec<(u64, ForgetScope)>>>;
+
+fn forgetting() -> &'static ForgetRegistry {
+    static F: OnceLock<ForgetRegistry> = OnceLock::new();
+    F.get_or_init(Default::default)
+}
+
+/// While held, config writes of the install at `paths` may forget keychain
+/// items the keychain can never return ([`SecretError::permanent`]) that
+/// fall in `scope`: they are dropped from the file and deleted from the
+/// keychain (which also removes duplicates). Broken items outside `scope`
+/// are kept as they are, so the write goes ahead without touching them.
+/// Held by `pidash auth login` and `pidash auth logout`, the way out for
+/// such an item; every other write keeps refusing. Items that are only
+/// unreadable for now (a locked keychain) are never forgotten.
+#[must_use]
+pub struct ForgetUnreadable(PathBuf, u64);
+
+pub fn forget_unreadable(paths: &Paths, scope: ForgetScope) -> ForgetUnreadable {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let key = paths.config_dir.clone();
+    forgetting()
+        .lock()
+        .expect("forget registry poisoned")
+        .entry(key.clone())
+        .or_default()
+        .push((id, scope));
+    ForgetUnreadable(key, id)
+}
+
+impl ForgetUnreadable {
+    /// Widen this guard to `items` too (a command that learns which
+    /// workspace it signs out only after it read the config).
+    pub fn add(&self, items: Vec<String>) {
+        let mut f = forgetting().lock().expect("forget registry poisoned");
+        if let Some((_, scope)) = f
+            .get_mut(&self.0)
+            .and_then(|v| v.iter_mut().find(|(id, _)| *id == self.1))
+            && let ForgetScope::Items(mine) = scope
+        {
+            mine.extend(items);
+        }
+    }
+}
+
+impl Drop for ForgetUnreadable {
+    fn drop(&mut self) {
+        let mut f = forgetting().lock().expect("forget registry poisoned");
+        if let Some(v) = f.get_mut(&self.0) {
+            v.retain(|(id, _)| *id != self.1);
+            if v.is_empty() {
+                f.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// The scopes held for the install at `paths`; `None` when no sign-in or
+/// sign-out is running.
+fn forget_scopes(paths: &Paths) -> Option<Vec<ForgetScope>> {
+    forgetting()
+        .lock()
+        .expect("forget registry poisoned")
+        .get(&paths.config_dir)
+        .map(|v| v.iter().map(|(_, s)| s.clone()).collect())
+}
+
+/// Every value the keychain still holds for the broken items of `cfg` that
+/// `scope` covers, read one duplicate at a time. A sign-out revokes these
+/// tokens on the server before it forgets the items, so an item that could
+/// not be read never leaves a live token behind.
+pub fn recover_broken_values(paths: &Paths, cfg: &Config, scope: &ForgetScope) -> Vec<String> {
+    if cfg.auth.broken_keyring_items.is_empty() {
+        return Vec::new();
+    }
+    let backend = backend_for(paths);
+    let mut out: Vec<String> = Vec::new();
+    for item in cfg
+        .auth
+        .broken_keyring_items
+        .iter()
+        .filter(|i| scope.covers(i))
+    {
+        for v in backend.get_all(item) {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// Every secret in `cfg`, as `(item, value)`.
+fn collect(cfg: &Config) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(cli) = cfg.cli.as_ref() else {
+        return out;
+    };
+    if let Some(t) = cli.token.as_deref().filter(|t| !t.is_empty()) {
+        out.push((ITEM_DEFAULT_MACHINE_TOKEN.to_string(), t.to_string()));
+    }
+    for w in &cli.workspaces {
+        if !w.token.is_empty() && !w.slug.is_empty() {
+            out.push((
+                format!("{ITEM_WORKSPACE_PREFIX}{}", w.slug),
+                w.token.clone(),
+            ));
+        }
+    }
+    if let Some(ec) = cli
+        .engine_credential
+        .as_ref()
+        .filter(|c| !c.token.is_empty())
+    {
+        out.push((ITEM_ENGINE_CREDENTIAL.to_string(), ec.token.clone()));
+    }
+    out
+}
+
+/// Take every secret out of `cfg` (the copy that is written to the file).
+fn blank(cfg: &mut Config) {
+    if let Some(cli) = cfg.cli.as_mut() {
+        if cli.token.as_deref().is_some_and(|t| !t.is_empty()) {
+            cli.token = None;
+        }
+        for w in &mut cli.workspaces {
+            w.token.clear();
+        }
+        if let Some(ec) = cli.engine_credential.as_mut() {
+            ec.token.clear();
+        }
+    }
+}
+
+/// Put `value` back where `item` belongs in `cfg`.
+fn assign(cfg: &mut Config, item: &str, value: String) {
+    let cli = cfg.cli.get_or_insert_with(Default::default);
+    if item == ITEM_DEFAULT_MACHINE_TOKEN {
+        cli.token = Some(value);
+    } else if item == ITEM_ENGINE_CREDENTIAL {
+        cli.engine_credential
+            .get_or_insert_with(EngineCredential::default)
+            .token = value;
+    } else if let Some(slug) = item.strip_prefix(ITEM_WORKSPACE_PREFIX) {
+        match cli.workspaces.iter_mut().find(|w| w.slug == slug) {
+            Some(w) => w.token = value,
+            None => cli.workspaces.push(WorkspaceCredential {
+                slug: slug.to_string(),
+                token: value,
+            }),
+        }
+    }
+}
+
+/// The keychain items [`hydrate`] could not read.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+#[error("{} of {total} keychain item(s) could not be read ({}): {first}", unread.len(), unread.join(", "))]
+pub struct PartialRead {
+    /// Items whose read failed; their secrets are missing from the config.
+    pub unread: Vec<String>,
+    /// How many items the file says the keychain holds.
+    pub total: usize,
+    /// The first error, for the message.
+    pub first: SecretError,
+}
+
+/// Fill the secrets of a freshly parsed `cfg` in from the keychain, when the
+/// file says they are there. Every item is tried, so one item that does not
+/// answer does not hide the others. Items that could not be read are left
+/// empty (the daemon then runs without them) and recorded in
+/// `cfg.auth.unread_keyring_items`, which makes [`plan_write`] refuse to
+/// write this config: it would otherwise drop or delete them.
+pub fn hydrate(paths: &Paths, cfg: &mut Config) -> Result<(), PartialRead> {
+    cfg.auth.unread_keyring_items.clear();
+    cfg.auth.broken_keyring_items.clear();
+    if !cfg.auth.secrets_in_keyring() {
+        return Ok(());
+    }
+    let backend = backend_for(paths);
+    let items = cfg.auth.keyring_items.clone();
+    let mut unread = Vec::new();
+    let mut broken = Vec::new();
+    let mut first = None;
+    for item in &items {
+        match backend.get(item) {
+            Ok(Some(value)) => assign(cfg, item, value),
+            Ok(None) => {}
+            Err(e) => {
+                unread.push(item.clone());
+                if e.permanent {
+                    broken.push(item.clone());
+                }
+                first.get_or_insert(e);
+            }
+        }
+    }
+    match first {
+        None => Ok(()),
+        Some(first) => {
+            cfg.auth.unread_keyring_items = unread.clone();
+            cfg.auth.broken_keyring_items = broken;
+            Err(PartialRead {
+                unread,
+                total: items.len(),
+                first,
+            })
+        }
+    }
+}
+
+/// What [`super::file::write_config`] writes, and what to clean up after.
+pub struct WritePlan {
+    /// The config to serialise: secrets blanked when they are in the
+    /// keychain, and `[auth]` describing where they are.
+    pub config: Config,
+    /// Keychain items to delete once the file is written.
+    pub delete_after: Vec<String>,
+}
+
+/// Decide where `cfg`'s secrets go and store them there.
+///
+/// `on_disk` is the `[auth]` table of the file being replaced (the truth
+/// about where the secrets are now). `migrate` is set by a sign-in: under
+/// `auto` it moves plaintext tokens into a keychain that answers.
+pub fn plan_write(
+    paths: &Paths,
+    cfg: &Config,
+    on_disk: &AuthSection,
+    migrate: bool,
+) -> anyhow::Result<WritePlan> {
+    let mode = cfg.auth.credentials_store;
+    let now_in_keyring = on_disk.secrets_in_keyring();
+    let secrets = collect(cfg);
+    let backend = backend_for(paths);
+    let needs_keyring = now_in_keyring
+        || mode == CredentialsStoreMode::Keyring
+        || (mode == CredentialsStoreMode::Auto && migrate && !secrets.is_empty());
+    let keyring_ok = if needs_keyring {
+        backend.probe()
+    } else {
+        Err(SecretError::new("not probed"))
+    };
+    if now_in_keyring && let Err(e) = &keyring_ok {
+        // The secrets are in a keychain that no longer answers: they were
+        // not loaded, so writing the file now would replace them with
+        // nothing.
+        anyhow::bail!(
+            "the credentials are stored in the {} and it is not answering ({e}); \
+             unlock it (or sign in to the desktop session) and try again",
+            backend.name()
+        );
+    }
+    let waiting: Vec<&String> = cfg
+        .auth
+        .unread_keyring_items
+        .iter()
+        .filter(|i| !cfg.auth.broken_keyring_items.contains(i))
+        .collect();
+    if now_in_keyring && !waiting.is_empty() {
+        // Some secrets were not read when this config was loaded (a locked
+        // keychain, a prompt nobody answered). Writing it would store only
+        // the ones that were read and delete the rest.
+        anyhow::bail!(
+            "the {} did not return every Pi Dash credential when the config was loaded \
+             (unread: {}); unlock it (or sign in to the desktop session) and try again",
+            backend.name(),
+            cfg.auth.unread_keyring_items.join(", ")
+        );
+    }
+    let scopes = forget_scopes(paths);
+    if now_in_keyring && !cfg.auth.broken_keyring_items.is_empty() && scopes.is_none() {
+        // The keychain answers but can never return these items (duplicate
+        // items, a value that is not text). Waiting does not help; signing
+        // in or out again replaces or forgets them.
+        anyhow::bail!(
+            "the {} holds Pi Dash credential(s) it cannot return ({}): duplicate or \
+             damaged items. Run `pidash auth logout` (add --local-only if the server \
+             is unreachable) or `pidash auth login` to forget and replace them, or \
+             remove the duplicates with your keychain tool",
+            backend.name(),
+            cfg.auth.broken_keyring_items.join(", ")
+        );
+    }
+    // Under a sign-in or sign-out: a broken item is forgotten when the
+    // command owns it (its scope) or this write stores a new value for it
+    // (the set replaces the duplicates). Any other broken item belongs to
+    // another credential and is kept exactly as it is.
+    let secret_items: Vec<&str> = secrets.iter().map(|(i, _)| i.as_str()).collect();
+    let kept_broken: Vec<String> = if now_in_keyring {
+        cfg.auth
+            .broken_keyring_items
+            .iter()
+            .filter(|i| !secret_items.contains(&i.as_str()))
+            .filter(|i| {
+                !scopes
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|s| s.covers(i))
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let forgotten: Vec<&String> = cfg
+        .auth
+        .broken_keyring_items
+        .iter()
+        .filter(|i| now_in_keyring && !kept_broken.contains(i))
+        .collect();
+    if !forgotten.is_empty() {
+        tracing::warn!(
+            items = %forgotten.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+            "forgetting keychain items that cannot be read back"
+        );
+    }
+    let to_keyring = match mode {
+        CredentialsStoreMode::File => false,
+        CredentialsStoreMode::Keyring => {
+            if let Err(e) = &keyring_ok {
+                anyhow::bail!(
+                    "[auth] credentials_store = \"keyring\" but the {} is not available ({e}); \
+                     set credentials_store = \"auto\" or \"file\" to use config.toml",
+                    backend.name()
+                );
+            }
+            true
+        }
+        CredentialsStoreMode::Auto => (now_in_keyring || migrate) && keyring_ok.is_ok(),
+    };
+    if !to_keyring && !kept_broken.is_empty() {
+        // Moving the secrets to the file would have to drop these items,
+        // which belong to credentials this command does not own.
+        anyhow::bail!(
+            "the {} holds Pi Dash credential(s) it cannot return ({}); sign them out \
+             (`pidash auth logout`) before moving the credentials to config.toml",
+            backend.name(),
+            kept_broken.join(", ")
+        );
+    }
+
+    let mut out = cfg.clone();
+    if to_keyring {
+        let mut items = Vec::with_capacity(secrets.len());
+        for (item, value) in &secrets {
+            backend
+                .set(item, value)
+                .map_err(|e| anyhow::anyhow!("storing {item} in the {}: {e}", backend.name()))?;
+            items.push(item.clone());
+        }
+        // Broken items of other credentials stay listed, so the next load
+        // still reports them and nothing deletes them.
+        items.extend(kept_broken.iter().cloned());
+        items.sort();
+        items.dedup();
+        let delete_after = on_disk
+            .keyring_items
+            .iter()
+            .filter(|i| !items.contains(i))
+            .cloned()
+            .collect();
+        blank(&mut out);
+        out.auth.secrets_in = (!items.is_empty()).then(|| SECRETS_IN_KEYRING.to_string());
+        out.auth.keyring_items = items;
+        Ok(WritePlan {
+            config: out,
+            delete_after,
+        })
+    } else {
+        out.auth.secrets_in = None;
+        out.auth.keyring_items.clear();
+        let delete_after = if now_in_keyring {
+            on_disk.keyring_items.clone()
+        } else {
+            Vec::new()
+        };
+        Ok(WritePlan {
+            config: out,
+            delete_after,
+        })
+    }
+}
+
+/// Delete the keychain items a write left behind. Best-effort.
+pub fn finish_write(paths: &Paths, plan: &WritePlan) {
+    if plan.delete_after.is_empty() {
+        return;
+    }
+    let backend = backend_for(paths);
+    for item in &plan.delete_after {
+        if let Err(e) = backend.delete(item) {
+            tracing::warn!(item, "deleting a stale keychain item failed: {e}");
+        }
+    }
+}
+
+/// What `pidash doctor` reports about the credential store.
+pub struct StoreReport {
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// Which store holds the credentials of `cfg`, and whether that matches
+/// `[auth] credentials_store`.
+pub fn describe(paths: &Paths, cfg: &Config) -> StoreReport {
+    let mode = cfg.auth.credentials_store;
+    let backend = backend_for(paths);
+    if cfg.auth.secrets_in_keyring() {
+        if !cfg.auth.broken_keyring_items.is_empty()
+            && cfg.auth.broken_keyring_items.len() == cfg.auth.unread_keyring_items.len()
+        {
+            return StoreReport {
+                ok: false,
+                detail: format!(
+                    "credentials_store = {}: in the {}, which holds {} item(s) it cannot \
+                     return ({}: duplicate or damaged); config writes are refused. Run \
+                     `pidash auth logout` or `pidash auth login` to forget and replace them, \
+                     or remove the duplicates with your keychain tool",
+                    mode.as_str(),
+                    backend.name(),
+                    cfg.auth.broken_keyring_items.len(),
+                    cfg.auth.broken_keyring_items.join(", ")
+                ),
+            };
+        }
+        if !cfg.auth.unread_keyring_items.is_empty() {
+            return StoreReport {
+                ok: false,
+                detail: format!(
+                    "credentials_store = {}: in the {}, which did not return {} of {} item(s) \
+                     ({}); config writes are refused until it does",
+                    mode.as_str(),
+                    backend.name(),
+                    cfg.auth.unread_keyring_items.len(),
+                    cfg.auth.keyring_items.len(),
+                    cfg.auth.unread_keyring_items.join(", ")
+                ),
+            };
+        }
+        return match backend.probe() {
+            Ok(()) => StoreReport {
+                ok: true,
+                detail: format!(
+                    "credentials_store = {}: in the {} ({} item(s))",
+                    mode.as_str(),
+                    backend.name(),
+                    cfg.auth.keyring_items.len()
+                ),
+            },
+            Err(e) => StoreReport {
+                ok: false,
+                detail: format!(
+                    "credentials_store = {}: in the {}, which is not answering ({e})",
+                    mode.as_str(),
+                    backend.name()
+                ),
+            },
+        };
+    }
+    let file = paths.config_path().display().to_string();
+    match mode {
+        CredentialsStoreMode::File => StoreReport {
+            ok: true,
+            detail: format!("credentials_store = file: in {file} (0600)"),
+        },
+        CredentialsStoreMode::Keyring => StoreReport {
+            ok: collect(cfg).is_empty(),
+            detail: match backend.probe() {
+                Ok(()) => format!(
+                    "credentials_store = keyring: the {} answers; credentials move there at the next `pidash auth login`",
+                    backend.name()
+                ),
+                Err(e) => format!(
+                    "credentials_store = keyring but the {} is not available ({e})",
+                    backend.name()
+                ),
+            },
+        },
+        CredentialsStoreMode::Auto => match backend.probe() {
+            Ok(()) => StoreReport {
+                ok: true,
+                detail: format!(
+                    "credentials_store = auto: in {file} (0600); the {} answers, so the next \
+                     `pidash auth login` moves them there",
+                    backend.name()
+                ),
+            },
+            Err(e) => StoreReport {
+                ok: true,
+                detail: format!(
+                    "credentials_store = auto: in {file} (0600) — fallback, no keychain answered ({e})"
+                ),
+            },
+        },
+    }
+}
+
+/// Short name of where the secrets of `cfg` are: `"keychain"` or `"file"`.
+pub fn location(cfg: &Config) -> &'static str {
+    if cfg.auth.secrets_in_keyring() {
+        "keychain"
+    } else {
+        "file"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::file::{
+        load_config, migrate_credentials_store, mutate_config, write_config,
+    };
+    use crate::config::schema::{CliSection, DaemonConfig};
+
+    fn paths(root: &Path) -> Paths {
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
+        }
+    }
+
+    fn signed_in(mode: CredentialsStoreMode) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://cloud.example".into(),
+                ..DaemonConfig::default()
+            },
+            runners: vec![],
+            cli: Some(CliSection {
+                token: Some("mt_acme".into()),
+                workspace_slug: Some("acme".into()),
+                workspaces: vec![WorkspaceCredential {
+                    slug: "beta".into(),
+                    token: "mt_beta".into(),
+                }],
+                engine_credential: Some(EngineCredential {
+                    token: "ec_secret".into(),
+                    expires_at: Some(chrono::Utc::now() + chrono::Duration::days(14)),
+                }),
+                ..Default::default()
+            }),
+            engine: Default::default(),
+            auth: AuthSection {
+                credentials_store: mode,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn file_text(p: &Paths) -> String {
+        std::fs::read_to_string(p.config_path()).unwrap()
+    }
+
+    fn setup(
+        mode: CredentialsStoreMode,
+        keyring: Arc<MemoryKeyring>,
+    ) -> (tempfile::TempDir, Paths) {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        use_backend_for(&p.config_dir, keyring);
+        write_config(&p, &signed_in(mode)).unwrap();
+        (tmp, p)
+    }
+
+    type Tokens = (Option<String>, Option<String>, Option<String>);
+
+    fn tokens(cfg: &Config) -> Tokens {
+        let cli = cfg.cli.clone().unwrap();
+        (
+            cli.token,
+            cli.workspaces.first().map(|w| w.token.clone()),
+            cli.engine_credential.map(|c| c.token),
+        )
+    }
+
+    #[test]
+    fn file_mode_keeps_the_tokens_in_the_0600_file() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::File, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        assert!(file_text(&p).contains("ec_secret"));
+        assert!(
+            keyring.items().is_empty(),
+            "file mode never uses the keychain"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(p.config_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn auto_moves_plaintext_into_the_keychain_at_the_next_sign_in_only() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        // An ordinary write (e.g. `runner add`) does not migrate.
+        mutate_config(&p, |_| Ok(())).unwrap();
+        assert!(file_text(&p).contains("mt_acme"));
+        assert!(keyring.items().is_empty());
+
+        // The next sign-in does.
+        let (_, location) = migrate_credentials_store(&p).unwrap();
+        assert_eq!(location, "keychain");
+        let text = file_text(&p);
+        for secret in ["mt_acme", "mt_beta", "ec_secret"] {
+            assert!(!text.contains(secret), "{secret} left in the file:\n{text}");
+        }
+        assert!(text.contains("expires_at"), "non-secret fields stay");
+        assert!(text.contains("slug = \"beta\""));
+        let items = keyring.items();
+        assert_eq!(
+            items.get(ITEM_DEFAULT_MACHINE_TOKEN).map(String::as_str),
+            Some("mt_acme")
+        );
+        assert_eq!(
+            items.get("machine-token:beta").map(String::as_str),
+            Some("mt_beta")
+        );
+        assert_eq!(
+            items.get(ITEM_ENGINE_CREDENTIAL).map(String::as_str),
+            Some("ec_secret")
+        );
+
+        // Every reader sees the tokens as before.
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(
+            tokens(&cfg),
+            (
+                Some("mt_acme".into()),
+                Some("mt_beta".into()),
+                Some("ec_secret".into())
+            )
+        );
+        assert_eq!(
+            cfg.cli.as_ref().unwrap().token_for_workspace(Some("beta")),
+            Some("mt_beta")
+        );
+
+        // Later ordinary writes keep them in the keychain, and a signed-out
+        // workspace's item is deleted.
+        mutate_config(&p, |cfg| {
+            cfg.cli.as_mut().unwrap().remove_workspace_token("beta");
+            Ok(())
+        })
+        .unwrap();
+        assert!(!file_text(&p).contains("mt_acme"));
+        assert!(!keyring.items().contains_key("machine-token:beta"));
+        assert!(keyring.items().contains_key(ITEM_DEFAULT_MACHINE_TOKEN));
+    }
+
+    #[test]
+    fn auto_falls_back_cleanly_to_the_file_without_a_keychain() {
+        // A headless Linux server: no Secret Service.
+        let keyring = MemoryKeyring::unavailable();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring);
+        let (_, location) = migrate_credentials_store(&p).unwrap();
+        assert_eq!(location, "file");
+        assert!(file_text(&p).contains("ec_secret"));
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(tokens(&cfg).0.as_deref(), Some("mt_acme"));
+        let report = describe(&p, &cfg);
+        assert!(report.ok);
+        assert!(report.detail.contains("fallback"), "{}", report.detail);
+    }
+
+    #[test]
+    fn keyring_mode_refuses_to_fall_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        use_backend_for(&p.config_dir, MemoryKeyring::unavailable());
+        let err = write_config(&p, &signed_in(CredentialsStoreMode::Keyring)).unwrap_err();
+        assert!(
+            err.to_string().contains("credentials_store = \"keyring\""),
+            "{err}"
+        );
+        assert!(!p.config_path().exists(), "nothing written in plaintext");
+
+        // With a keychain, `keyring` stores there on any write.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let keyring = MemoryKeyring::new();
+        use_backend_for(&p.config_dir, keyring.clone());
+        write_config(&p, &signed_in(CredentialsStoreMode::Keyring)).unwrap();
+        assert!(!file_text(&p).contains("ec_secret"));
+        assert_eq!(keyring.items().len(), 3);
+        assert!(
+            describe(&p, &load_config(&p).unwrap())
+                .detail
+                .contains("in the in-memory test keyring")
+        );
+    }
+
+    #[test]
+    fn a_keychain_that_stops_answering_is_never_overwritten_with_blanks() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        keyring.set_available(false);
+        // Loading continues, signed out.
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(tokens(&cfg).0, None);
+        // Writing refuses rather than dropping the secrets.
+        let err = mutate_config(&p, |_| Ok(())).unwrap_err();
+        assert!(format!("{err:#}").contains("not answering"), "{err:#}");
+        keyring.set_available(true);
+        assert_eq!(
+            tokens(&load_config(&p).unwrap()).2.as_deref(),
+            Some("ec_secret")
+        );
+    }
+
+    #[test]
+    fn a_keychain_that_answers_some_reads_only_is_never_partly_overwritten() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        let before = keyring.items();
+        assert_eq!(before.len(), 3);
+        // The probe and the other items answer; the engine credential does not.
+        keyring.fail_get_of(ITEM_ENGINE_CREDENTIAL, true);
+        assert!(keyring.probe().is_ok());
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(
+            tokens(&cfg),
+            (
+                Some("mt_acme".into()),
+                Some("mt_beta".into()),
+                Some(String::new())
+            ),
+        );
+        assert_eq!(cfg.auth.unread_keyring_items, vec![ITEM_ENGINE_CREDENTIAL]);
+        let report = describe(&p, &cfg);
+        assert!(!report.ok);
+        assert!(
+            report.detail.contains("did not return 1 of 3"),
+            "{}",
+            report.detail
+        );
+        // Every kind of write is refused.
+        let err = mutate_config(&p, |_| Ok(())).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("did not return every"),
+            "{err:#}"
+        );
+        let err = write_config(&p, &cfg).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(ITEM_ENGINE_CREDENTIAL),
+            "{err:#}"
+        );
+        let err = migrate_credentials_store(&p).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("did not return every"),
+            "{err:#}"
+        );
+        // Nothing was deleted or changed, and the file still says keyring.
+        assert_eq!(keyring.items(), before);
+        assert!(file_text(&p).contains("secrets_in = \"keyring\""));
+        // Once the keychain answers again, everything is back.
+        keyring.fail_get_of(ITEM_ENGINE_CREDENTIAL, false);
+        let cfg = load_config(&p).unwrap();
+        assert!(cfg.auth.unread_keyring_items.is_empty());
+        assert_eq!(tokens(&cfg).2.as_deref(), Some("ec_secret"));
+        mutate_config(&p, |_| Ok(())).unwrap();
+        assert_eq!(keyring.items(), before);
+    }
+
+    #[test]
+    fn an_item_that_can_never_be_read_is_forgotten_only_by_sign_in_or_out() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        keyring.break_item(ITEM_ENGINE_CREDENTIAL);
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(cfg.auth.broken_keyring_items, vec![ITEM_ENGINE_CREDENTIAL]);
+        let report = describe(&p, &cfg);
+        assert!(!report.ok);
+        assert!(
+            report.detail.contains("pidash auth logout"),
+            "{}",
+            report.detail
+        );
+        // An ordinary write is refused and names the way out.
+        let err = mutate_config(&p, |_| Ok(())).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("cannot return") && msg.contains("pidash auth login"),
+            "{msg}"
+        );
+        assert!(file_text(&p).contains(ITEM_ENGINE_CREDENTIAL));
+
+        // An item that is only locked is never forgotten, even by logout.
+        let other = format!("{ITEM_WORKSPACE_PREFIX}beta");
+        keyring.fail_get_of(&other, true);
+        {
+            let _forget = forget_unreadable(&p, ForgetScope::All);
+            let err = mutate_config(&p, |_| Ok(())).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("did not return every"),
+                "{err:#}"
+            );
+        }
+        keyring.fail_get_of(&other, false);
+
+        // Under sign-in/out the broken item is dropped and deleted; the
+        // others stay in the keychain.
+        {
+            let _forget = forget_unreadable(&p, ForgetScope::All);
+            mutate_config(&p, |_| Ok(())).unwrap();
+        }
+        let after = load_config(&p).unwrap();
+        assert!(after.auth.unread_keyring_items.is_empty());
+        assert!(
+            !after
+                .auth
+                .keyring_items
+                .iter()
+                .any(|i| i == ITEM_ENGINE_CREDENTIAL)
+        );
+        assert!(!keyring.items().contains_key(ITEM_ENGINE_CREDENTIAL));
+        assert_eq!(tokens(&after).0.as_deref(), Some("mt_acme"));
+        // And ordinary writes work again.
+        mutate_config(&p, |_| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn a_scoped_sign_out_never_forgets_another_credentials_broken_item() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        let beta = format!("{ITEM_WORKSPACE_PREFIX}beta");
+        keyring.break_item(&beta);
+        // `pidash auth logout --engine`: forgets the engine credential only.
+        {
+            let _forget =
+                forget_unreadable(&p, ForgetScope::Items(vec![ITEM_ENGINE_CREDENTIAL.into()]));
+            mutate_config(&p, |cfg| {
+                cfg.cli.as_mut().unwrap().engine_credential = None;
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(!keyring.items().contains_key(ITEM_ENGINE_CREDENTIAL));
+        // beta's item is still listed and still in the keychain.
+        assert!(keyring.items().contains_key(&beta));
+        let after = load_config(&p).unwrap();
+        assert_eq!(after.auth.broken_keyring_items, vec![beta.clone()]);
+        assert_eq!(tokens(&after).0.as_deref(), Some("mt_acme"));
+        // So ordinary writes are still refused until beta is dealt with.
+        assert!(mutate_config(&p, |_| Ok(())).is_err());
+
+        // Moving to the file would drop beta's item: refused.
+        {
+            let _forget = forget_unreadable(&p, ForgetScope::Items(Vec::new()));
+            let err = mutate_config(&p, |cfg| {
+                cfg.auth.credentials_store = CredentialsStoreMode::File;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(format!("{err:#}").contains(&beta), "{err:#}");
+        }
+
+        // A sign-out of beta reads its token for the revoke, then forgets it.
+        let cfg = load_config(&p).unwrap();
+        let scope = ForgetScope::Items(ForgetScope::workspace("beta", false));
+        assert_eq!(recover_broken_values(&p, &cfg, &scope), vec!["mt_beta"]);
+        assert!(
+            recover_broken_values(
+                &p,
+                &cfg,
+                &ForgetScope::Items(vec![ITEM_ENGINE_CREDENTIAL.into()])
+            )
+            .is_empty()
+        );
+        {
+            let _forget = forget_unreadable(&p, scope);
+            mutate_config(&p, |cfg| {
+                cfg.cli.as_mut().unwrap().remove_workspace_token("beta");
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert!(!keyring.items().contains_key(&beta));
+        let after = load_config(&p).unwrap();
+        assert!(after.auth.broken_keyring_items.is_empty());
+        mutate_config(&p, |_| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn switching_to_file_moves_the_secrets_back_and_clears_the_keychain() {
+        let keyring = MemoryKeyring::new();
+        let (_tmp, p) = setup(CredentialsStoreMode::Auto, keyring.clone());
+        migrate_credentials_store(&p).unwrap();
+        mutate_config(&p, |cfg| {
+            cfg.auth.credentials_store = CredentialsStoreMode::File;
+            Ok(())
+        })
+        .unwrap();
+        assert!(file_text(&p).contains("ec_secret"));
+        assert!(keyring.items().is_empty());
+        assert_eq!(location(&load_config(&p).unwrap()), "file");
+    }
+
+    #[test]
+    fn keychain_off_reports_unavailable() {
+        assert!(Disabled.probe().is_err());
+    }
+
+    /// Round trip through the real OS keychain. Ignored by default (CI has
+    /// none, and tests must not write to a developer's keychain); run with
+    /// `cargo test os_keychain_round_trip -- --ignored` on a desktop
+    /// session. Cleans up after itself.
+    #[test]
+    #[ignore]
+    fn os_keychain_round_trip() {
+        let backend = OsKeyring {
+            scope: format!("pidash-test-{}", uuid::Uuid::new_v4()),
+        };
+        backend
+            .probe()
+            .expect("no OS keychain answers on this host");
+        assert_eq!(backend.get("item").unwrap(), None);
+        backend.set("item", "secret-value").unwrap();
+        assert_eq!(
+            backend.get("item").unwrap().as_deref(),
+            Some("secret-value")
+        );
+        backend.delete("item").unwrap();
+        assert_eq!(backend.get("item").unwrap(), None);
+        backend.delete("item").unwrap();
+    }
+}

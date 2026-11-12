@@ -1,0 +1,584 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Platform contract (Platform and editions page). Features program against
+// this interface; web.ts and tauri.ts implement it. No feature checks the
+// build target directly.
+
+/** Remove a subscription or listener. */
+export type Unsubscribe = () => void;
+
+/**
+ * Small async key/value surface. The query cache persistence layer and UI
+ * preferences share it; neither knows which backing store is underneath.
+ */
+export interface KeyValueStore {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string): Promise<void>;
+  remove(key: string): Promise<void>;
+  clear(): Promise<void>;
+}
+
+/** Options for opening a server-sent event stream. */
+export interface StreamInit {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+}
+
+/** One parsed server-sent event. */
+export interface StreamMessage {
+  event: string;
+  data: string;
+}
+
+/** A live event stream. Closed explicitly or via the init AbortSignal. */
+export interface EventStream {
+  messages(): AsyncIterable<StreamMessage>;
+  close(): void;
+  /**
+   * Why the stream stopped for good, when it did: a non-success status or a
+   * response that is not an event stream. Endings a reconnect can recover
+   * from (end of body, transport drop) never set it.
+   */
+  readonly error: Error | undefined;
+}
+
+/** Custom title bar (desktop only). */
+export interface TitleBarApi {
+  /** Mirror the in-app location in the native window title. */
+  setTitle(title: string): void;
+  /**
+   * True when the shell draws macOS traffic lights over the page, so the
+   * title bar must indent its leading content. The shell keeps the standard
+   * native title bar, so this is false on every platform today; the web
+   * platform exposes no window capability at all.
+   */
+  readonly trafficLightInset: boolean;
+}
+
+/** One native menu entry wired to the command registry. */
+export interface MenuCommand {
+  id: string;
+  label: string;
+  shortcut?: string;
+}
+
+/** Native menu bar (desktop only). */
+export interface MenuApi {
+  setCommands(commands: MenuCommand[]): void;
+}
+
+/** pidash:// deep links (desktop only). */
+export interface DeepLinkApi {
+  onOpenUrl(callback: (url: string) => void): Unsubscribe;
+}
+
+/**
+ * The app's signed-in account, as the shell classifies the daemon for it
+ * (`daemon.rs` `AppIdentity`, camelCase on the wire).
+ */
+export interface AgentAppIdentity {
+  userId: string;
+  email?: string | undefined;
+  /** The cloud the app is signed in to (its API origin). */
+  cloudUrl: string;
+}
+
+/** The engine's state as the daemon reports it (`pidash-ipc`, snake_case). */
+export type DaemonEngineState = "available" | "signed_out" | "expiring" | "unavailable";
+
+/** The engine's sign-in state, mirrored from the server per machine. */
+export type DaemonEngineSignInState = "never" | "active" | "expiring" | "expired" | "signed_out" | "revoked";
+
+export interface DaemonEngineStatus {
+  state: DaemonEngineState;
+  reason_code?: string | undefined;
+  sign_in_state: DaemonEngineSignInState;
+  credential_expires_at?: string | undefined;
+  model?: string | undefined;
+}
+
+/** The daemon's `Hello`, as the shell relays it. */
+export interface DaemonHello {
+  daemon_version: string;
+  ipc_version: number;
+  cloud_url: string;
+  account?: { user_id?: string | undefined; email?: string | undefined; cloud_url: string } | undefined;
+  workspaces: Array<{ slug: string; signed_in: boolean; runners: number }>;
+  machine_id?: string | undefined;
+  engine: DaemonEngineState;
+  engine_detail?: DaemonEngineStatus | undefined;
+}
+
+/** The installed command-line tool, as discovery reports it. */
+export interface DaemonCliInfo {
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+  updatable: boolean;
+  update_hint?: string | undefined;
+}
+
+/**
+ * What the shell found at the daemon's standard control socket, classified
+ * for the app's account (`daemon.rs` `Discovery`). Only `compatible` lets
+ * the app use the daemon; `no_daemon` and `signed_out` offer set-up.
+ */
+export type DaemonDiscovery =
+  | { kind: "no_daemon"; cli: DaemonCliInfo }
+  | { kind: "too_old"; daemon_version?: string | undefined; ipc_version?: number | undefined; cli: DaemonCliInfo }
+  | { kind: "app_too_old"; daemon_version: string; ipc_version: number }
+  | { kind: "not_answering"; reason: string }
+  | { kind: "signed_out"; hello: DaemonHello }
+  | { kind: "account_mismatch"; daemon_account: string; daemon_cloud_url: string; hosts_runners: boolean }
+  | { kind: "compatible"; hello: DaemonHello };
+
+/** One `[[runner]]` block of the daemon, without anything secret. */
+export interface DaemonLocalRunner {
+  name: string;
+  runner_id: string;
+  workspace_slug: string | null;
+  project_slug: string | null;
+  working_dir: string;
+  /** `agent.kind` of the block: `engine` for the built-in engine. */
+  agent: string;
+}
+
+/** What `EngineRunnerAdd` answers: the engine runner now set up for a project. */
+export interface DaemonEngineRunner {
+  runner: string;
+  runner_id: string;
+  workspace: string;
+  project: string;
+  working_dir: string;
+}
+
+/** One engine runner block of a legacy per-workspace tree still on disk. */
+export interface LegacyEngineRunner {
+  name: string;
+  runner_id: string | null;
+  project: string;
+  working_dir: string;
+}
+
+/** A legacy private-daemon tree still to migrate (shell `LegacyTree`). */
+export interface LegacyTree {
+  workspace: string;
+  dir: string;
+  cloud_url: string | null;
+  dev_machine_id: string | null;
+  engine_runners: LegacyEngineRunner[];
+}
+
+/** A legacy task folder the migration left unused (design §13, "Collision"). */
+export interface LegacyFolderNotice {
+  workspace: string;
+  project: string;
+  path: string;
+}
+
+/** A project whose engine became a pod member on upgrade (PO-11). */
+export interface PodMemberNotice {
+  runner_id: string;
+  workspace: string;
+  project: string;
+}
+
+/** The one-time notices still to show (shell `Notices`). */
+export interface DesktopNotices {
+  legacy_folders: LegacyFolderNotice[];
+  pod_member_projects: PodMemberNotice[];
+}
+
+/** What the host reads: pending notices and dismissed keys (shell `NoticesView`). */
+export interface NoticesView {
+  notices: DesktopNotices;
+  dismissed: string[];
+}
+
+/**
+ * The app as a client of this computer's Pi Dash daemon (desktop only).
+ * The daemon is the command-line tool's, run as a user service: the app
+ * finds it, never starts, stops or re-roots it, and sets it up only on
+ * the user's say-so (`.ai_design/built_engine_as_runner/design.md` §4).
+ */
+export interface AgentRuntimeApi {
+  /** Find the daemon and classify it for the app's account. */
+  discover(identity: AgentAppIdentity): Promise<DaemonDiscovery>;
+  /** The daemon's runners (engine and own-agent). */
+  localRunners(): Promise<DaemonLocalRunner[]>;
+  /** Turn the built-in engine on for a project on this computer (enrol on use). */
+  addEngineRunner(input: {
+    workspace: string;
+    project: string;
+    workingDir?: string | undefined;
+  }): Promise<DaemonEngineRunner>;
+  /** Install and start the daemon's user service through the CLI (`pidash install` + `pidash start`). */
+  installService(): Promise<void>;
+  /** Install the built-in engine through the CLI when it is not there. */
+  ensureEngine(): Promise<void>;
+  /** Hand an engine-only device grant the app approved to the CLI (stdin, never argv). */
+  engineLogin(deviceCode: string): Promise<void>;
+  /** Have the daemon re-read its workspace tokens after a CLI sign-in. */
+  reloadCredentials(): Promise<void>;
+  /** Hand approval modes to the host so they survive the webview wipe. */
+  saveApprovalModes(account: string, modes: Record<string, string>): Promise<void>;
+  /** Read back the modes stashed for an account (empty when there are none). */
+  loadApprovalModes(account: string): Promise<Record<string, string>>;
+  /** Legacy trees still holding a config (design §13, step 1). */
+  scanLegacyTrees(): Promise<LegacyTree[]>;
+  /** Move one tree's engine home and delete its config (steps 4–5). */
+  finishLegacyTree(input: { dir: string; account: string; daemonAccount: string | null }): Promise<void>;
+  /** Point a re-added engine runner back at its legacy folder. */
+  restoreLegacyFolder(input: { runner: string; workingDir: string }): Promise<void>;
+  /** Pending one-time notices and dismissed keys for an account. */
+  loadNotices(account: string): Promise<NoticesView>;
+  /** Record new notices; pending or dismissed ones are dropped by the host. */
+  recordNotices(account: string, notices: DesktopNotices): Promise<NoticesView>;
+  /** Dismiss notices (or decline a replace prompt) for good. */
+  dismissNotices(account: string, keys: string[]): Promise<NoticesView>;
+  /** Sign the computer's Pi Dash daemon out (`pidash auth logout`). */
+  signOutComputer(): Promise<void>;
+}
+
+/**
+ * Local chat over the bundled daemon (RUN-033-036). The engine runs on
+ * this machine and is reached through native IPC, never a cloud relay;
+ * the store below is the per-account local transcript the chat page
+ * renders. Sessions always read back open and carry the working
+ * directory, engine thread and last-write time the page needs.
+ */
+export interface LocalChatSessionRecord {
+  id: string;
+  title: string;
+  /** Workspace the conversation belongs to. */
+  workspace: string;
+  /** Runner id rides here; the store has no dedicated runner column. */
+  project: string;
+  working_dir: string;
+  engine_version: string;
+  /** Engine thread the session resumes into, null before the first turn. */
+  engine_thread_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One transcript row as the local store keeps it (unix milliseconds). */
+export interface LocalChatEventRecord {
+  id: string;
+  session_id: string;
+  seq: number;
+  role: string;
+  content: string;
+  tool_calls: string | null;
+  approval_decision: string | null;
+  created_at: number;
+}
+
+/** Fields the store takes when opening a conversation. */
+export interface LocalChatNewSession {
+  workspace: string;
+  /** Runner id, stored in the record's `project` column. */
+  runner: string;
+}
+
+/** One streamed engine frame, already narrowed by the native side. */
+export type LocalChatFrame =
+  | {
+      result: "chat_started";
+      data: { chat_session_id: string; local_thread_id: string; local_session_id?: string; started_at: string };
+    }
+  | { result: "chat_message_started"; data: { chat_session_id: string; message_id: string; turn_id?: string } }
+  | {
+      result: "chat_event";
+      data: { chat_session_id: string; kind: string; payload: Record<string, unknown> };
+    }
+  | {
+      result: "chat_approval_request";
+      data: {
+        chat_session_id: string;
+        local_approval_id: string;
+        kind: string;
+        payload: Record<string, unknown>;
+        reason?: string;
+        expires_at?: string;
+      };
+    }
+  | {
+      result: "chat_message_completed";
+      data: {
+        chat_session_id: string;
+        message_id: string;
+        turn_id?: string;
+        assistant_message?: string;
+        status: string;
+      };
+    }
+  | { result: "chat_failed"; data: { chat_session_id: string; code: string; detail?: string } }
+  | { result: "chat_closed"; data: { chat_session_id: string } };
+
+/** Which inline decision the user made (RUN-034). */
+export type LocalChatDecision = "accept" | "decline" | "accept_for_session";
+
+/**
+ * The bundled daemon's chat surface (RUN-033-036). Every turn is scoped
+ * to one workspace; `mode` is the approval mode captured when the
+ * engine thread spawns, and `localThreadId` resumes an existing one.
+ */
+export interface LocalChatApi {
+  listSessions(account: string): Promise<LocalChatSessionRecord[]>;
+  createSession(account: string, input: LocalChatNewSession): Promise<LocalChatSessionRecord>;
+  getSession(account: string, sessionId: string): Promise<LocalChatSessionRecord | null>;
+  listEvents(account: string, sessionId: string): Promise<LocalChatEventRecord[]>;
+  appendEvent(
+    account: string,
+    sessionId: string,
+    event: { role: string; content: string }
+  ): Promise<LocalChatEventRecord>;
+  setThreadId(account: string, sessionId: string, engineThreadId: string): Promise<void>;
+  /**
+   * Replace a session's title. Rejects when the account's store holds no
+   * such session, so a stale row surfaces instead of silently vanishing.
+   */
+  renameSession(account: string, sessionId: string, title: string): Promise<void>;
+  /**
+   * Delete a session together with its messages. Idempotent: a session
+   * that is already gone resolves rather than failing, so a repeated
+   * click is harmless.
+   */
+  deleteSession(account: string, sessionId: string): Promise<void>;
+  /** Wipe every session and message this account keeps on the machine. */
+  clearHistory(account: string): Promise<void>;
+  /**
+   * Resolve the working copy a chat runs in for this account, workspace
+   * and project, creating it when absent. Deliberately separate from the
+   * managed-run tree.
+   */
+  workingDir(account: string, workspace: string, project: string): Promise<string>;
+  warm(input: {
+    workspaceSlug: string;
+    sessionId: string;
+    cwd: string | undefined;
+    mode: string;
+    localThreadId: string | undefined;
+  }): Promise<void>;
+  send(input: {
+    workspaceSlug: string;
+    sessionId: string;
+    messageId: string;
+    content: string;
+    cwd: string | undefined;
+    mode: string;
+    localThreadId: string | undefined;
+  }): Promise<void>;
+  cancel(input: { workspaceSlug: string; sessionId: string; reason: string | undefined }): Promise<void>;
+  close(input: { workspaceSlug: string; sessionId: string }): Promise<void>;
+  decide(input: {
+    workspaceSlug: string;
+    sessionId: string;
+    localApprovalId: string;
+    decision: LocalChatDecision;
+  }): Promise<void>;
+  /**
+   * Follow the engine's frames and transport failures. Returns the
+   * unsubscribe; calling it twice is safe.
+   */
+  subscribe(handlers: {
+    onFrame: (frame: LocalChatFrame) => void;
+    onError: (event: { chat_session_id: string; message: string }) => void;
+  }): Unsubscribe;
+}
+
+/**
+ * Local session teardown (desktop only). The auth area calls this after the
+ * sign-out POST (AUTH-017): the daemon stop, credential destroy and server
+ * enrollment removal run before the POST through the runners disposal
+ * (RUN-047 — revocation needs a live session), and this hook wipes the
+ * webview store the POST no longer needs. Callers swallow failures:
+ * landing on sign-in stays right.
+ */
+export interface SessionTeardownApi {
+  /** Wipe local session artifacts. Rejects when the wipe fails. */
+  clearLocalSession(): Promise<void>;
+}
+
+/**
+ * Desktop shell sign-in support (CLOUD-017/CLOUD-018, from
+ * parity/specs/cloud.md §4). The web platform leaves this absent, which
+ * is also how features detect the shell without touching native globals
+ * themselves. The desktop platform reads both facts off the bridge.
+ */
+export interface ShellSignInApi {
+  /**
+   * API origin the shell advertised for this bundle, or undefined when it
+   * advertised none. Unlike Platform.apiOrigin this never falls back to
+   * the page origin: without an advertisement the provider handoff cannot
+   * be built and must refuse loudly instead of navigating the webview.
+   */
+  readonly bakedOrigin: string | undefined;
+  /**
+   * Open a URL in the system browser. Rejects when the bridge cannot —
+   * with no webview fallback, so the caller surfaces the failure instead
+   * of starting an embedded provider flow the desktop sign-in could not
+   * complete.
+   */
+  openSystemBrowser(url: string): Promise<void>;
+}
+
+/**
+ * An update the shell is holding for the sidebar control (DESK-018): either
+ * deferred at launch or found by the daily check. The native side owns both
+ * facts, including whether a download is under way, so a control that
+ * mounts mid-install reads its busy state from here, not from memory.
+ */
+export interface PendingUpdate {
+  /** The release waiting to be installed. */
+  version: string;
+  /** The release the app is running right now. */
+  currentVersion: string;
+  /** The release notes from the update manifest, when the release carried any. */
+  notes?: string;
+  /** True while the shell downloads and installs this release. */
+  installing: boolean;
+}
+
+/** What the bundled command-line tool reports about itself. */
+export interface CliStatus {
+  installed: boolean;
+  /** Absolute path of the binary when found. */
+  path: string | null;
+  /** Version the binary reported; null when the probe failed. */
+  version: string | null;
+}
+
+/** One plain-text line of the installer's output. */
+export interface CliInstallProgress {
+  /** Raw line as the installer wrote it; render as text, never as HTML. */
+  line: string;
+}
+
+/**
+ * The bundled command-line tool (desktop only). Detection and installation
+ * run natively; login completes through the same device-grant exchange the
+ * tool owns, so the credential never passes through the page.
+ */
+export interface CliSetupApi {
+  /** Probe for the tool without touching the machine. */
+  detect(): Promise<CliStatus>;
+  /**
+   * Install from the app's bundle (or the pinned installer). Rejects when
+   * another install is already running. Progress arrives on `onInstallLog`.
+   */
+  install(): Promise<CliStatus>;
+  /** Subscribe to installer output; render each line verbatim, in order. */
+  onInstallLog(callback: (progress: CliInstallProgress) => void): Unsubscribe;
+  /** Hand an approved device code to the tool, which owns the credential. */
+  login(input: { deviceCode: string; cloudUrl: string; workspace: string }): Promise<void>;
+}
+
+/**
+ * Desktop auto-updater (desktop only). The launch prompt and the daily
+ * check live in the shell; the page asks what waits, installs it on
+ * request, and follows later announcements (DESK-016/017/018).
+ */
+export interface UpdaterApi {
+  /** The release waiting for the user, or null when the app is current. */
+  pending(): Promise<PendingUpdate | null>;
+  /**
+   * Download and install the waiting release. It resolves only when the
+   * install failed; a successful install restarts the app instead.
+   */
+  install(): Promise<void>;
+  /**
+   * Follow announcements of updates found while the app runs, including
+   * the re-announcement after a failed install and a `null` announcement
+   * when the shell confirms the pending update was withdrawn. Returns the
+   * unsubscribe.
+   */
+  onAvailable(callback: (update: PendingUpdate | null) => void): Unsubscribe;
+}
+
+/**
+ * One licence or notice text the desktop build bundles (DESK-028). The
+ * shell lists every file its build scripts stage, so a file this build did
+ * not include still appears, with `text` null, rather than vanishing.
+ */
+export interface BundledNotice {
+  /** File name inside the bundle's licence directory. */
+  file: string;
+  /** What the text covers, as the dialog heads it. */
+  component: string;
+  /** SPDX identifier of the licence. */
+  license: string;
+  /** The text verbatim, or null when this build did not stage the file. */
+  text: string | null;
+}
+
+/** What the About dialog shows: the running version and every bundled notice. */
+export interface AboutInfo {
+  version: string;
+  notices: BundledNotice[];
+}
+
+/**
+ * The desktop About surface (DESK-028). This is how the app shows the
+ * licence and notice texts it ships with; the web platform leaves it
+ * absent and renders no entry.
+ */
+export interface AboutApi {
+  /** Read the version and notice texts. Rejects when the shell cannot. */
+  load(): Promise<AboutInfo>;
+}
+
+/**
+ * Request init for the platform transport. The desktop layer enforces
+ * `timeoutMs` itself; browser fetch ignores what it does not know, so a
+ * caller that sets only the deadline behaves the same on both platforms.
+ */
+export interface FetchInit extends RequestInit {
+  timeoutMs?: number | undefined;
+}
+
+/** Fetch-compatible function; the desktop implementation adds the deadline. */
+export type PlatformFetch = (input: RequestInfo | URL, init?: FetchInit) => Promise<Response>;
+
+export interface Platform {
+  kind: "web" | "desktop";
+  /**
+   * Origin the API answers on. The web bundle serves app and API from one
+   * origin, so this is the page origin; the desktop bundle advertises the
+   * API origin through the shell, because its own origin is private.
+   */
+  readonly apiOrigin: string | undefined;
+  /** HTTP transport. Desktop routes API calls through the Rust layer. */
+  fetch: PlatformFetch;
+  /** Server-sent events. Desktop relays through its streaming command. */
+  stream(url: string, init?: StreamInit): EventStream;
+  /** Open a URL in the system browser (OAuth, downloads, external docs). */
+  openExternal(url: string): Promise<void>;
+  /**
+   * Absolute address a copied in-app link should carry (DESK-019). The
+   * desktop bundle runs on a private origin, so its platform resolves
+   * paths against the configured hosted app instead and refuses when
+   * there is none; the web platform keeps the page origin.
+   */
+  shareableUrl(path: string): string;
+  /** Query cache persistence and UI preferences. */
+  storage: KeyValueStore;
+  /** Window focus, for refetch timing and presence. */
+  onFocusChange(callback: (focused: boolean) => void): Unsubscribe;
+  window?: TitleBarApi;
+  menu?: MenuApi;
+  deepLinks?: DeepLinkApi;
+  agentRuntime?: AgentRuntimeApi;
+  localChat?: LocalChatApi;
+  cliSetup?: CliSetupApi;
+  updates?: UpdaterApi;
+  /** Version and bundled licence texts; absent on the web platform. */
+  about?: AboutApi;
+  sessionTeardown?: SessionTeardownApi;
+  /** Desktop shell sign-in support; absent on the web platform. */
+  shellSignIn?: ShellSignInApi;
+}
