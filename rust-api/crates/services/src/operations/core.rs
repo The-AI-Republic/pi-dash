@@ -6,6 +6,7 @@
 //! privately, so wire-protocol and result-kind behavior is
 //! structurally unchanged.
 
+pub mod comments;
 pub mod workpad;
 
 use std::fmt;

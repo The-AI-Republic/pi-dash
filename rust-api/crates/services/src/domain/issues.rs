@@ -337,7 +337,7 @@ impl From<&issues::Model> for IssueFieldSet {
 /// The two m2m bridge tables the issue legs write (`IssueAssignee` /
 /// `IssueLabel`): same columns, a different member column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum M2mTable {
+pub enum M2mTable {
     Assignees,
     Labels,
 }
@@ -758,7 +758,7 @@ pub struct ModelActivitySpec {
 /// One post-commit effect, in handler order. The chain runs as a single
 /// queued step (see the module docs): fallible legs record a [`ChainStop`]
 /// and skip every later leg.
-pub(crate) enum ChainEffect {
+pub enum ChainEffect {
     CompletionIfChanged {
         issue_id: Uuid,
         prev_state: Option<Uuid>,

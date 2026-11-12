@@ -66,9 +66,7 @@ use crate::orchestration::{
 use crate::queue::{enqueue, enqueue_in_write_txn, NewJob};
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
 use crate::tasks_cleanup::deletion::SOFT_DELETE_TASK;
-use pidash_db::app_pages::strip::ml_strip_tags;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
-use pidash_db::entity::comment_hooks::description_stripped_for;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
 use sea_orm::{
@@ -97,7 +95,6 @@ use pidash_services::dispatch::{
 };
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::clock::apply_clock_write;
-use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::identity::AgentUserCollisionError;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet;
@@ -105,6 +102,7 @@ use pidash_services::domain::relations as relation_domain;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteOptions, WriteScope, WriteTxn};
 use pidash_services::extensions::CloudAgentToolsetsSeam;
+use pidash_services::operations::core::comments as core_comments;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
 use pidash_services::orchestration::creation::{
     AdmissionError, CreationError, CreationSeam, DedicatedPinArgs, ExecutionError, ExecutionFields,
@@ -1012,54 +1010,43 @@ async fn op_add_current_issue_comment(
         });
     };
     let html = to_safe_html(Some(body));
-    let stripped = if html.is_empty() {
-        String::new()
-    } else {
-        ml_strip_tags(&html)
-    };
-    // Domain executor twins, in Django order. One `now()` read feeds
-    // all four stamps; the description stripped value is the
-    // `Description.save` recompute (Django's own `strip_tags`,
-    // entities verbatim, `None`-when-empty — `description.py:23-29`),
-    // not the comment's ML text (PIDASHCONV-1581 item 1).
-    let now = Utc::now();
-    let empty_json = Value::Object(Default::default());
-    let empty_list: Vec<String> = Vec::new();
-    let desc_stripped = description_stripped_for(Some(html.as_str()));
-    let rows = comment_domain::CommentRows {
-        id: Uuid::new_v4(),
-        description_id: Uuid::new_v4(),
-        created_at: now,
-        updated_at: now,
-        desc_created_at: now,
-        desc_updated_at: now,
-        workspace_id: scope.workspace_id,
-        project_id: issue.project_id,
-        issue_id: issue.id,
-        actor_id: Some(scope.creator_id),
-        created_by: Some(scope.creator_id),
-        updated_by: None,
-        deleted_at: None,
-        html: html.as_str(),
-        json: &empty_json,
-        stripped: stripped.as_str(),
-        desc_stripped: desc_stripped.as_deref(),
-        access: "INTERNAL",
-        speaker_type: "agent",
-        speaker_label: "Pi Dash Cloud Agent",
-        speaker_agent_run_id: Some(scope.run_id),
-        external_id: None,
-        external_source: None,
-        parent_id: None,
-        attachments: &empty_list,
-        labels: &empty_list,
-        edited_at: None,
-    };
-    comment_domain::insert_comment_row(&txn.connection(), &rows).await?;
-    comment_domain::insert_description_row(&txn.connection(), &rows).await?;
-    comment_domain::link_comment_description(&txn.connection(), rows.id, rows.description_id)
-        .await?;
-    let comment_id = rows.id;
+    // The shared core (NEWPIDASH-190 §4.3): the same three domain row
+    // writes with the per-writer fields riding as the input.
+    // `desc_stripped` is the `Description.save` recompute (Django's
+    // own `strip_tags`, entities verbatim, `None`-when-empty —
+    // `description.py:23-29`), not the comment's ML text
+    // (PIDASHCONV-1581 item 1).
+    let write_ctx = write_ctx(scope, issue.project_id);
+    let saved = pidash_services::operations::core::comments::create(
+        txn,
+        &write_ctx,
+        core_comments::CommentCreate {
+            issue_id: issue.id,
+            project_id: issue.project_id,
+            workspace_id: scope.workspace_id,
+            html,
+            speaker: pidash_services::operations::core::comments::Speaker::Agent {
+                run_id: scope.run_id,
+            },
+            access: None,
+            external: core_comments::CommentExternal::default(),
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            json: None,
+            labels: None,
+        },
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        pidash_services::operations::core::CoreError::Db(domain_error) => {
+            ToolExecError::Db(sqlx::Error::Protocol(domain_error.to_string()))
+        }
+        pidash_services::operations::core::CoreError::Sqlx(sqlx_error) => {
+            ToolExecError::Db(sqlx_error)
+        }
+    })?;
+    let comment_id = saved.id;
     let created = plan::comment_created(&comment_id.to_string());
     serde_json::to_value(created)
         .map_err(|error| ToolExecError::Failure(plan::ToolCallFailure::Failed(error.to_string())))

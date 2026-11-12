@@ -494,6 +494,7 @@ surface_snapshot! {
     operations::Outcome,
     operations::comments,
     operations::core,
+    operations::core::comments,
     operations::core::workpad,
     operations::issues,
     operations::pull_requests,
