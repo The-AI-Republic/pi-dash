@@ -106,7 +106,7 @@ EXPECTED_LEAVES = [
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0040_pod_pin_wait_budget_secs"),
+    ("runner", "0039_issue_assigned_runner"),
     ("sessions", "0001_initial"),
 ]
 REPO_LEAVES = [leaf for leaf in EXPECTED_LEAVES if leaf[0] in {"assistant", "db", "license", "prompting", "runner"}]
